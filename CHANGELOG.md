@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.0.0
+
+- 项目更名：glm-advisor → **glm-conductor**（系统角色已从"给主模型建议"演化为完整的编排层：route → assign → execute → verify → review → resume）
+- Tagline：Selective orchestration for GLM coding agents in ZCode.
+- 本地数据目录同步更名：`.glm-conductor/`（checkpoint 与视觉证据）
+
 ## 0.3.0
 
 - 新增长任务连续性技能（continuity）：foreground / resumable / idle 三种模式，与路由正交

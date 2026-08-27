@@ -35,13 +35,13 @@ continuity 字段随 SELECTIVE ROUTE 声明携带（见 orchestration 技能）�
 
 ## Checkpoint
 
-resumable / idle 任务在实质性里程碑后（不是每次工具调用后）写入 CONTINUITY CHECKPOINT 到用户工作区根的 `.glm-advisor/checkpoint.md`；完整模板见 references/long-horizon.md。
+resumable / idle 任务在实质性里程碑后（不是每次工具调用后）写入 CONTINUITY CHECKPOINT 到用户工作区根的 `.glm-conductor/checkpoint.md`；完整模板见 references/long-horizon.md。
 
 原则：
 
 - checkpoint 是导航状态，不是仓库真相源——不复制完整 diff、不复制大量代码、不声称未验证内容
 - repository 状态始终优先：checkpoint 与仓库冲突时以仓库为准
-- 建议用户将 `.glm-advisor/` 加入项目 .gitignore
+- 建议用户将 `.glm-conductor/` 加入项目 .gitignore
 
 ## Resume Procedure
 

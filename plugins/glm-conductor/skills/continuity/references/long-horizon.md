@@ -27,7 +27,7 @@
 
 ## CONTINUITY CHECKPOINT 模板
 
-resumable / idle 任务在每个实质性里程碑后（不是每次工具调用后）写入用户工作区根的 `.glm-advisor/checkpoint.md`；同一文件覆盖写，保证任意时刻只有一个最新 checkpoint。模板可直接复制：
+resumable / idle 任务在每个实质性里程碑后（不是每次工具调用后）写入用户工作区根的 `.glm-conductor/checkpoint.md`；同一文件覆盖写，保证任意时刻只有一个最新 checkpoint。模板可直接复制：
 
 ```
 CONTINUITY CHECKPOINT
@@ -79,7 +79,7 @@ checkpoint 原则清单：
 每次重新激活后必须依次执行：
 
 1. **检查当前 Goal**：确认当前会话目标是否仍是同一目标
-2. **读最新 checkpoint**：读取 `.glm-advisor/checkpoint.md`；不存在时按无 checkpoint 处理，只能从目标与仓库现状重建认知
+2. **读最新 checkpoint**：读取 `.glm-conductor/checkpoint.md`；不存在时按无 checkpoint 处理，只能从目标与仓库现状重建认知
 3. **检查仓库状态**：仓库真实状态优先于 checkpoint（repository > checkpoint）
 4. **检查当前 diff**：确认工作区当前实际有哪些改动
 5. **判断先前变更是否仍在**：checkpoint 声称已完成的改动，是否能在 diff 与仓库中观察到
@@ -146,14 +146,14 @@ ZCode 闲时任务支持配置了自定义模型的子智能体。无人值守�
 
 目标完成并验收后的动作清单：
 
-1. 删除 `.glm-advisor/checkpoint.md`
+1. 删除 `.glm-conductor/checkpoint.md`
 2. 移除相关定时任务
 3. 终止闲时任务排队
 4. 向用户报告最终状态
 
 ## Failure Cases
 
-- **automation 不可用**（定时/闲时能力均不可用）：不得声称已启用连续性；保留 checkpoint，向用户报告手动可恢复，并附恢复方法——新建会话输入"读取 .glm-advisor/checkpoint.md 并按八步恢复流程继续"
+- **automation 不可用**（定时/闲时能力均不可用）：不得声称已启用连续性；保留 checkpoint，向用户报告手动可恢复，并附恢复方法——新建会话输入"读取 .glm-conductor/checkpoint.md 并按八步恢复流程继续"
 - **executor 缺失**（如 visual-implementer）：fail-closed，不自动换成其他执行者，交回用户处理
 - **唤醒后 checkpoint 与仓库严重不一致**：以仓库为准，向用户报告差异后继续；不得回滚仓库新改动
 

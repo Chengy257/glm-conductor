@@ -1,10 +1,10 @@
 {
-  "name": "glm-advisor",
+  "name": "glm-conductor",
   "description": "GLM 双模型风险分级编排插件市场",
   "plugins": [
     {
-      "name": "glm-advisor",
-      "source": "./plugins/glm-advisor",
+      "name": "glm-conductor",
+      "source": "./plugins/glm-conductor",
       "description": "GLM-5.3 主会话任架构师的选择性路由编排：GLM-5.3-Flash 常规实施 + GLM-5.3 只读终审"
     }
   ]

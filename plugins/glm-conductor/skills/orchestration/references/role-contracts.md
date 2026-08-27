@@ -1,6 +1,6 @@
 # 角色契约
 
-本文件是 glm-advisor 编排体系的完整角色契约，SKILL.md 引用本文件获取判据与模板细节。
+本文件是 glm-conductor 编排体系的完整角色契约，SKILL.md 引用本文件获取判据与模板细节。
 
 ## 双轴路由契约
 
@@ -221,7 +221,7 @@ GAPS:
 - **用途**：仅限声明为 delegate/full 的有界、规格完备工作——有界代码实现、测试、fixture、重构、配置、CLI、确定性转换、已知 bug 修复、机械迁移
 - **行为约束**：在既有架构内实施；歧义浮出上报而非自行重构；遵守并行编辑纪律（只在自有文件集内改动，不回退他人无关改动）
 - **升级信号**：结果显示任务判断密集、高风险或被误分类时，立即停止并返回升级信号（供主会话做 ROUTE REASSESSMENT），无需先重试；规格有误时指出精确修正项，允许一次修正后重试，且该重试不是重估的前提
-- **生成方式**：`subagent_type: glm-advisor:flash-implementer`
+- **生成方式**：`subagent_type: glm-conductor:flash-implementer`
 
 ## visual-implementer 契约（视觉任务实施者）
 
@@ -231,7 +231,7 @@ GAPS:
 - **视觉反馈环**：主会话采集（Browser/Computer Use 为主会话专用，本角色不驱动浏览器/桌面）→ 实施者用 Read 亲自读取截图判定 → 不符合则修正并再次请求采集 → 每个 VISUAL ACCEPTANCE 验收点最多 3 轮修正，禁止无限视觉打磨
 - **升级信号**：验收标准不清、规格有歧义或视觉证据不可得时返回 blocked，交回主会话处理；不得以文字推测替代视觉验证
 - **报告**：使用含 FUNCTIONAL VERIFIED 与 VISUAL VERIFIED 两节的 IMPLEMENTATION REPORT 模板（模板见 agents/visual-implementer.md）
-- **生成方式**：`subagent_type: glm-advisor:visual-implementer`
+- **生成方式**：`subagent_type: glm-conductor:visual-implementer`
 
 ## visual-reviewer 契约（视觉任务审查者）
 
@@ -258,7 +258,7 @@ GAPS:
   ```
 
 - **裁决失效规则**：任何修复之后原裁决作废，必须换全新审查者复审
-- **生成方式**：`subagent_type: glm-advisor:visual-reviewer`
+- **生成方式**：`subagent_type: glm-conductor:visual-reviewer`
 
 ## glm-reviewer 契约（文本任务审查者）
 

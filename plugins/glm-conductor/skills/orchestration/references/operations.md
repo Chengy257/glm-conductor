@@ -1,14 +1,14 @@
 # 运行细节
 
-本文件是 glm-advisor 编排体系的运行细节文档，SKILL.md 与 role-contracts.md 之外的执行机制在此说明。
+本文件是 glm-conductor 编排体系的运行细节文档，SKILL.md 与 role-contracts.md 之外的执行机制在此说明。
 
 ## 预检与生成
 
 - 按声明的 executor 与审查者核对角色是否存在于 Agent 工具的可用类型列表：
-  - delegate/full（标准任务）需要 `glm-advisor:flash-implementer`
-  - delegate/full（视觉任务）需要 `glm-advisor:visual-implementer`
-  - assurance:high（文本任务）需要 `glm-advisor:glm-reviewer`
-  - assurance:high（视觉任务）需要 `glm-advisor:visual-reviewer`
+  - delegate/full（标准任务）需要 `glm-conductor:flash-implementer`
+  - delegate/full（视觉任务）需要 `glm-conductor:visual-implementer`
+  - assurance:high（文本任务）需要 `glm-conductor:glm-reviewer`
+  - assurance:high（视觉任务）需要 `glm-conductor:visual-reviewer`
 - solo + assurance:standard 无需任何子智能体预检
 - 缺失时的 fail-closed 处理：停止该通道，告知用户检查插件安装（Settings → Plugin Management），不得静默替换为其他子智能体类型
 - 调用时不得附加模型/思考档位覆盖：各角色定义已固定（GLM-5.3-Flash/high、GLM-5.3/max），任何运行时覆盖都会破坏本体系的双轴假设
@@ -33,7 +33,7 @@
 
 ## 视觉通道运行细节
 
-- **采集分工**：主会话用其专属的 Browser/Computer Use 能力启动应用、执行交互、截图落盘。建议证据目录：`<工作区>/.glm-advisor/visual-evidence/`（任务结束由用户决定保留或删除）。主会话只采集不判定（纯文本模型）
+- **采集分工**：主会话用其专属的 Browser/Computer Use 能力启动应用、执行交互、截图落盘。建议证据目录：`<工作区>/.glm-conductor/visual-evidence/`（任务结束由用户决定保留或删除）。主会话只采集不判定（纯文本模型）
 - **判定分工**：visual-implementer 与 visual-reviewer 用 Read 亲自读取截图后判定；采集而不查看不算观察
 - **修正轮次**：每个 VISUAL ACCEPTANCE 验收点最多 3 轮实施-采集-判定循环；超出即 blocked 交回主会话做 ROUTE REASSESSMENT
 - **fail-closed**：主会话无法采集（无浏览器/桌面能力或应用无法启动）时，视觉通道停止，不得改为纯文本验证交付

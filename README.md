@@ -1,10 +1,10 @@
-# glm-advisor
+# glm-conductor
 
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
 ![ZCode Plugin](https://img.shields.io/badge/ZCode-plugin-green.svg)
 ![Models](https://img.shields.io/badge/models-GLM--5.3%20%2F%20GLM--5.3--Flash-orange.svg)
 
-> ZCode 的 GLM 双模型编排插件 —— GLM-5.3 指挥，GLM-5.3-Flash 实施，独立只读终审。
+> **Selective orchestration for GLM coding agents in ZCode.** —— GLM-5.3 指挥，GLM-5.3-Flash 实施，独立只读终审。
 
 ## 功能特性
 
@@ -41,28 +41,28 @@ GLM-5.3 与 GLM-5.3-Flash 的智力差距很小（AA 智能指数 60 vs 57），
 3. 选择 GitHub 仓库来源，输入本仓库地址：
 
    ```
-   https://github.com/Chengy257/glm-advisor
+   https://github.com/Chengy257/glm-conductor
    ```
 
-4. 校验通过后，插件会以市场名分组出现在 **个人** 分段，点击安装 glm-advisor
+4. 校验通过后，插件会以市场名分组出现在 **个人** 分段，点击安装 glm-conductor
 
 ### 方式二：从本地目录安装（开发/测试）
 
 1. 克隆本仓库：
 
    ```bash
-   git clone https://github.com/Chengy257/glm-advisor.git
+   git clone https://github.com/Chengy257/glm-conductor.git
    ```
 
 2. 打开 **Settings → 插件**，点右上角 **创建 → 添加插件市场**
-3. 选择"本地清单文件或目录"，指向克隆得到的 `glm-advisor` 仓库根目录（根目录下的 `marketplace.json` 是市场清单；直接选择该文件也可以），或直接把文件夹拖入
-4. 在 **个人** 分段中找到 glm-advisor，点击安装
+3. 选择"本地清单文件或目录"，指向克隆得到的 `glm-conductor` 仓库根目录（根目录下的 `marketplace.json` 是市场清单；直接选择该文件也可以），或直接把文件夹拖入
+4. 在 **个人** 分段中找到 glm-conductor，点击安装
 
-> ⚠️ 常见错误：不要选择 `plugins/glm-advisor/.zcode-plugin/plugin.json`——那是**插件清单**，不是**市场清单**。把它当市场添加会得到一个收录 0 个插件的空市场，Discover 中不会出现可安装的卡片。
+> ⚠️ 常见错误：不要选择 `plugins/glm-conductor/.zcode-plugin/plugin.json`——那是**插件清单**，不是**市场清单**。把它当市场添加会得到一个收录 0 个插件的空市场，Discover 中不会出现可安装的卡片。
 
 ### 验证安装
 
-1. 添加市场成功后，**市场源**面板（插件页搜索框上方齿轮图标）中 glm-advisor 应显示收录 1 个插件；若显示 0 个，说明选错了清单文件，移除该市场后重新添加
+1. 添加市场成功后，**市场源**面板（插件页搜索框上方齿轮图标）中 glm-conductor 应显示收录 1 个插件；若显示 0 个，说明选错了清单文件，移除该市场后重新添加
 2. 安装并新建会话后确认：
    - Settings → Subagents 中出现各角色子智能体
    - `/orchestration` 技能可用（`/` 菜单中可见）
@@ -70,7 +70,7 @@ GLM-5.3 与 GLM-5.3-Flash 的智力差距很小（AA 智能指数 60 vs 57），
 
 ### 更新与卸载
 
-- 更新：在 **市场源** 面板中单独刷新 glm-advisor 市场，再更新插件；更新后需新建会话生效
+- 更新：在 **市场源** 面板中单独刷新 glm-conductor 市场，再更新插件；更新后需新建会话生效
 - 卸载：插件详情页卸载；如需移除整个市场，在 **市场源** 面板中移除
 
 ## 快速开始
@@ -78,7 +78,7 @@ GLM-5.3 与 GLM-5.3-Flash 的智力差距很小（AA 智能指数 60 vs 57），
 新建会话后，在输入框输入：
 
 ```
-用 glm-advisor:orchestration 规划并实现这个功能，声明路由并完成验证
+用 glm-conductor:orchestration 规划并实现这个功能，声明路由并完成验证
 ```
 
 或直接输入 `/orchestration`。
@@ -175,6 +175,6 @@ ROUTE REASSESSMENT（任何阶段，凭新证据双向重估）
 
 ## 许可
 
-[MIT](./LICENSE) © 2026 glm-advisor contributors
+[MIT](./LICENSE) © 2026 glm-conductor contributors
 
 本项目的设计受 [sol-advisor](https://github.com/DannyMac180/sol-advisor)（MIT）启发，特此致谢。
