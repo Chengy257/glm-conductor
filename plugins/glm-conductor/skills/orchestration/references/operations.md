@@ -55,7 +55,7 @@ rethink 裁决：修订架构后重新走对应路由（必要时先做 ROUTE RE
 
 从 checkpoint 恢复的任务不得沿用旧声明盲目执行，必须依次：
 
-1. 读取最新 CONTINUITY CHECKPOINT（若有）
+1. 读取本任务 CONTINUITY CHECKPOINT（按 CONTINUITY_ID 定位，若有）
 2. 检查当前仓库状态与 diff，确认先前变更是否仍在（repository > checkpoint）
 3. 检查验证状态与目标完成度
 4. 重新输出 SELECTIVE ROUTE 声明（沿用或基于新证据重估），再继续执行

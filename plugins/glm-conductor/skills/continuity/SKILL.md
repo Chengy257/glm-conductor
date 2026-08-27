@@ -31,23 +31,34 @@ continuity 是与路由正交的生命周期维度，不是第五种 route。
 - 预计会中断但需要延续当前目标 → resumable
 - 不紧急且无人值守可行 → idle
 
+推荐优先级：普通任务用 foreground；长交互任务用 resumable（定位是安全的前台会话连续性，不是额度绕过）；无人值守可接受的长任务优先 idle。
+
 continuity 字段随 SELECTIVE ROUTE 声明携带（见 orchestration 技能），可随任务进展变更；变更同样需要证据（例如观察到额度窗口耗尽），不得凭直觉切换。
 
 ## Checkpoint
 
-resumable / idle 任务在实质性里程碑后（不是每次工具调用后）写入 CONTINUITY CHECKPOINT 到用户工作区根的 `.glm-conductor/checkpoint.md`；完整模板见 references/long-horizon.md。
+resumable / idle 任务在实质性里程碑后（不是每次工具调用后）写入 CONTINUITY CHECKPOINT 到任务专属路径 `.glm-conductor/tasks/<continuity-id>/checkpoint.md`；CONTINUITY_ID 规则与完整模板见 references/long-horizon.md。
 
 原则：
 
 - checkpoint 是导航状态，不是仓库真相源——不复制完整 diff、不复制大量代码、不声称未验证内容
 - repository 状态始终优先：checkpoint 与仓库冲突时以仓库为准
-- 建议用户将 `.glm-conductor/` 加入项目 .gitignore
+- 每个长任务一个独立的 CONTINUITY_ID 与专属目录；并行长任务互不覆盖、互不删除
+
+## Runtime State 与 Git
+
+`.glm-conductor/` 是本地运行时状态，不得侵入用户受版本控制的仓库内容：
+
+1. 不为运行时状态自动修改 tracked `.gitignore`
+2. 在 Git 仓库中优先将 `.glm-conductor/` 写入本地排除文件 `.git/info/exclude`
+3. 无安全排除机制可用时（如非 Git 工作区），明确告知用户该目录的存在与位置
+4. 运行时文件不得静默污染 `git diff`
 
 ## Resume Procedure
 
 每次重新激活后必须依次执行八步：
 
-检查目标 → 读最新 checkpoint → 检查仓库状态 → 检查当前 diff → 判断先前变更是否仍在 → 判断目标是否已完成 → 检查验证状态 → 从 NEXT ACTION 恢复
+检查目标 → 按 CONTINUITY_ID 读取 checkpoint → 检查仓库状态 → 检查当前 diff → 判断先前变更是否仍在 → 判断目标是否已完成 → 检查验证状态 → 从 NEXT ACTION 恢复
 
 禁止盲目重播旧指令。若 checkpoint 与仓库不一致：repository > checkpoint——分析变化来源后更新认知，不得为恢复 checkpoint 而回滚仓库新改动。恢复执行前必须重新输出 SELECTIVE ROUTE 声明（沿用或基于新证据重估）。
 
@@ -59,7 +70,9 @@ resumable 模式的唤醒不用 sleep 直到固定时间，而用安全周期性
 
 唤醒 → 检查目标是否已完成（完成即停止并清理）→ 检查执行是否可用（可用则恢复；不可用则不触碰仓库，等下次触发）
 
-安排定时任务时使用 references/long-horizon.md 中的结构化 resume prompt（自包含，不依赖会话上下文）。
+调度触发本身就是存活探针：唤醒成功启动即说明模型执行当前可用；唤醒失败或未启动则不会产生任何仓库改动，自然等待下次触发。不需要、也不引入独立的额度检查器。
+
+安排定时任务时使用 references/long-horizon.md 中的结构化 resume prompt（自包含，不依赖会话上下文，且必须携带 CONTINUITY_ID 与精确 checkpoint 路径）。若希望结果回到当前会话，续作必须从当前聊天内创建绑定本会话的定时任务。
 
 ## Idle Execution
 
@@ -91,10 +104,10 @@ continuity 不重新实现 Goal 模式。职责分工：
 
 ## Completion Cleanup
 
-目标完成并验收后：
+目标完成并验收后，只清理本任务的状态：
 
-1. 删除 checkpoint 文件
-2. 停止并移除相关定时任务
-3. 终止闲时任务排队
+1. 删除本任务目录 `.glm-conductor/tasks/<continuity-id>/`（仅此目录，不得触碰其他任务的 checkpoint 或视觉证据）
+2. 停止并移除与该 CONTINUITY_ID 关联的定时任务
+3. 终止该任务的闲时任务排队
 
-避免幽灵唤醒重复执行。
+避免幽灵唤醒重复执行；并行任务下删除全局或他人状态是禁止操作。
