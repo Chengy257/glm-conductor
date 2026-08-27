@@ -25,20 +25,21 @@ GLM-5.3 与 GLM-5.3-Flash 的智力差距很小（AA 智能指数 60 vs 57），
 
 ## 安装
 
-以下三种方式任选其一。安装完成后**必须新建会话**，子智能体与技能才会被发现和加载。
+安装前先确认已在 ZCode 中打开一个工作区（插件管理页需要工作区处于打开状态）。以下方式任选其一，安装完成后**必须新建会话**，子智能体与技能才会被加载。
 
 ### 方式一：从 GitHub 仓库安装（推荐）
 
-1. 打开 ZCode：Settings → Plugin Management → Discover
-2. 点击 `+`，选择 GitHub 仓库，输入本仓库地址：
+1. 打开 ZCode：**Settings → 插件**（Plugin Management）
+2. 点右上角 **创建 → 添加插件市场**
+3. 选择 GitHub 仓库来源，输入本仓库地址：
 
    ```
    https://github.com/<OWNER>/glm-advisor
    ```
 
-3. 点击安装 glm-advisor
+4. 校验通过后，插件会以市场名分组出现在 **个人** 分段，点击安装 glm-advisor
 
-### 方式二：从本地目录安装
+### 方式二：从本地目录安装（开发/测试）
 
 1. 克隆本仓库：
 
@@ -46,22 +47,24 @@ GLM-5.3 与 GLM-5.3-Flash 的智力差距很小（AA 智能指数 60 vs 57），
    git clone https://github.com/<OWNER>/glm-advisor.git
    ```
 
-2. 打开 Settings → Plugin Management → Discover → `+`，选择克隆得到的 `glm-advisor` 目录
-3. 点击安装
+2. 打开 **Settings → 插件**，点右上角 **创建 → 添加插件市场**
+3. 选择"本地清单文件或目录"，指向克隆得到的 `glm-advisor` 仓库根目录（根目录下的 `marketplace.json` 是市场清单；直接选择该文件也可以），或直接把文件夹拖入
+4. 在 **个人** 分段中找到 glm-advisor，点击安装
 
-### 方式三：从 marketplace 清单文件安装
-
-1. 按方式二克隆本仓库
-2. 打开 Settings → Plugin Management → Discover → `+`，选择仓库内的 `.agents/plugins/marketplace.json`
-3. 按提示完成安装
+> ⚠️ 常见错误：不要选择 `plugins/glm-advisor/.zcode-plugin/plugin.json`——那是**插件清单**，不是**市场清单**。把它当市场添加会得到一个收录 0 个插件的空市场，Discover 中不会出现可安装的卡片。
 
 ### 验证安装
 
-新建会话后确认三处：
+1. 添加市场成功后，**市场源**面板（插件页搜索框上方齿轮图标）中 glm-advisor 应显示收录 1 个插件；若显示 0 个，说明选错了清单文件，移除该市场后重新添加
+2. 安装并新建会话后确认：
+   - Settings → Subagents 中出现 `flash-implementer` 与 `glm-reviewer`
+   - `/orchestration` 技能可用（`/` 菜单中可见）
+   - 提示词中提及编排时，主会话会先输出 `SELECTIVE ROUTE` 声明
 
-- Settings → Subagents 中出现 `flash-implementer` 与 `glm-reviewer`
-- `/orchestration` 技能可用（`/` 菜单中可见）
-- 提示词中提及编排时，主会话会先输出 `SELECTIVE ROUTE` 声明
+### 更新与卸载
+
+- 更新：在 **市场源** 面板中单独刷新 glm-advisor 市场，再更新插件；更新后需新建会话生效
+- 卸载：插件详情页卸载；如需移除整个市场，在 **市场源** 面板中移除（官方市场只能刷新、不能移除，个人市场可移除）
 
 ## 快速开始
 
