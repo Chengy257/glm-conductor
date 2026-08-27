@@ -134,6 +134,49 @@ A completion claim without evidence is invalid / 无证据的完成声明无效
 - **VERIFICATION**——精确命令与期望的具体结果/证据
 - **RETURN**——附在规格末尾的返回要求："A completion claim without evidence is invalid / 无证据的完成声明无效"
 
+## 视觉任务与 VISUAL ACCEPTANCE 扩展
+
+视觉任务在五段式规格之上追加 VISUAL ACCEPTANCE 节（附在 VERIFICATION 之后，其余五节保持不变）。
+
+**适用视觉通道的任务**：
+
+- React/Vue/Svelte 前端、CSS/布局、响应式设计
+- dashboard、浏览器工作流、表单交互
+- GUI、Canvas/WebGL、游戏 UI
+- 视觉回归、基于截图的验收、用户可见页面改版
+
+**不适用（走 flash-implementer）**：
+
+- 普通后端函数、CLI、解析器、纯数据转换、无视觉验收的服务端代码
+
+VISUAL ACCEPTANCE 模板（可直接复制）：
+
+```
+VISUAL ACCEPTANCE:
+- target page / component: <目标页面或组件>
+- viewport: <桌面 1440×900 / 移动 390×844 等>
+- required interaction: <须执行的交互>
+- expected visible state: <期望的可见状态>
+- responsive behavior: <响应式要求>
+- clipping / overflow constraints: <裁切与溢出约束>
+- important user-visible content: <重要用户可见内容>
+```
+
+示例：
+
+```
+VISUAL ACCEPTANCE:
+- target page / component: 设置页的 API Key 表单
+- viewport: 桌面 1440×900
+- required interaction: 输入非法 Key 并点击保存
+- expected visible state: 输入框下方出现红色错误提示，页面不跳动
+- responsive behavior: 390×844 下表单单列堆叠，按钮保持可点击
+- clipping / overflow constraints: 错误提示完整可见，无横向滚动条
+- important user-visible content: 错误文案说明原因与修复方式
+```
+
+视觉任务是 executor 维度的能力选择，不是第五种 route。
+
 ## IMPLEMENTATION REPORT 模板
 
 工作者返回时必须遵循：
@@ -180,7 +223,46 @@ GAPS:
 - **升级信号**：结果显示任务判断密集、高风险或被误分类时，立即停止并返回升级信号（供主会话做 ROUTE REASSESSMENT），无需先重试；规格有误时指出精确修正项，允许一次修正后重试，且该重试不是重估的前提
 - **生成方式**：`subagent_type: glm-advisor:flash-implementer`
 
+## visual-implementer 契约（视觉任务实施者）
+
+- **定位**：视觉/交互任务的有界实施执行者（visual bounded implementation executor）
+- **模型**：GLM-5.3-Flash（多模态），思考档位 high（已固定，不附加覆盖）
+- **用途**：仅限声明为 delegate/full 的视觉/交互任务实施——执行含 VISUAL ACCEPTANCE 扩展的五段式规格
+- **视觉反馈环**：主会话采集（Browser/Computer Use 为主会话专用，本角色不驱动浏览器/桌面）→ 实施者用 Read 亲自读取截图判定 → 不符合则修正并再次请求采集 → 每个 VISUAL ACCEPTANCE 验收点最多 3 轮修正，禁止无限视觉打磨
+- **升级信号**：验收标准不清、规格有歧义或视觉证据不可得时返回 blocked，交回主会话处理；不得以文字推测替代视觉验证
+- **报告**：使用含 FUNCTIONAL VERIFIED 与 VISUAL VERIFIED 两节的 IMPLEMENTATION REPORT 模板（模板见 agents/visual-implementer.md）
+- **生成方式**：`subagent_type: glm-advisor:visual-implementer`
+
+## visual-reviewer 契约（视觉任务审查者）
+
+- **定位**：全新上下文、与实施隔离的只读审查者（fresh-context, implementation-isolated reviewer）；与实施者同为 GLM-5.3-Flash，独立性来自干净上下文与只读工具白名单，不宣称跨模型独立
+- **模型**：GLM-5.3-Flash（多模态），思考档位 max（已固定）
+- **用途**：仅限视觉任务的 audit/full 路由，且必须在主会话验证之后调用；同时审查代码 diff 与截图证据
+- **输入六要素**（由主会话提供，缺项要求补齐而非猜测）：
+  - ROLE：声明本次为只读审查
+  - STATED GOAL：用户的原始目标原文
+  - ACCUMULATED CHANGE SET：允许文件清单 + 完整 diff，或基准/目标修订
+  - INTERFACES AND CONSTRAINTS：须保持兼容的接口与约束
+  - VERIFICATION EVIDENCE：验证命令映射到主会话实际输出的证据
+  - VISUAL EVIDENCE：截图文件路径清单 + 对应的 VISUAL ACCEPTANCE 标准
+- **审查范围**：正确性、完整性、回归风险、范围纪律、接口保留、测试充分性、实质风险七项，外加视觉符合度——必须亲自 Read 每一张截图，对照 VISUAL ACCEPTANCE 判定实施者的视觉结论是否成立
+- **GLM REVIEW 输出格式**：
+
+  ```
+  GLM REVIEW
+  VERDICT: ship | fix-first | rethink
+  REASON: <基于证据的决定性理由>
+  FINDINGS:
+  - <文件:行号 或 截图:路径> <发现>（无则写"无"）
+  RESIDUAL RISK: <最重要的剩余风险>（无则写"无"）
+  ```
+
+- **裁决失效规则**：任何修复之后原裁决作废，必须换全新审查者复审
+- **生成方式**：`subagent_type: glm-advisor:visual-reviewer`
+
 ## glm-reviewer 契约（文本任务审查者）
+
+审查者按任务模态选择——文本任务用本角色，视觉任务用 visual-reviewer（见上文）。
 
 - **定位**：全新上下文、与实施隔离的只读审查者（fresh-context, implementation-isolated reviewer）——不宣称跨模型独立
 - **模型**：GLM-5.3，思考档位 max（已固定）

@@ -1,6 +1,6 @@
 {
   "name": "glm-advisor",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "GLM 风险分级选择性路由编排：GLM-5.3 主会话任架构师，声明 solo/delegate/audit/full 路由；GLM-5.3-Flash 执行常规实施，GLM-5.3 只读审查者独立终审。",
   "license": "MIT",
   "keywords": ["zcode", "orchestration", "multi-agent", "glm-5.3", "glm-5.3-flash"],

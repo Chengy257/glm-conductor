@@ -11,6 +11,7 @@
 - **双轴选择性路由**：主会话（GLM-5.3 架构师）按 Delegability（可委派性）× Assurance（保障等级）两个独立维度判断，在首次任务委派前声明机器可审计的 `SELECTIVE ROUTE`（solo / delegate / audit / full）
 - **成本优化分工**：判断密集工作（规划、验证、验收、架构未定的实施）留在 GLM-5.3 主会话；有界、规格完备的高吞吐实施委派给价格约为旗舰 1/10 的 GLM-5.3-Flash
 - **独立只读终审**：assurance:high 的任务由全新上下文的只读审查者给出 `ship` / `fix-first` / `rethink` 裁决，任何修复使裁决失效
+- **视觉通道**：前端/界面任务由 visual-implementer（GLM-5.3-Flash 多模态）实施，主会话负责驱动采集截图、Flash 角色负责视觉判定——GLM-5.3 纯文本的边界被显式分工补齐
 - **基于证据的路由重估**：路由可双向变化（ROUTE REASSESSMENT），但必须附新观察到的证据
 - **fail-closed 纪律**：所需子智能体或证据路径缺失时停止通道并提示，绝不静默降级或替换角色
 - **结构化契约**：五段式实施规格 + IMPLEMENTATION REPORT——无证据的完成声明无效
@@ -94,6 +95,18 @@ continuity: foreground
 reason: implementation is bounded by explicit interfaces, owned files, and deterministic verification
 ```
 
+视觉任务（前端/界面改版）的声明示例：
+
+```
+SELECTIVE ROUTE
+mode: full
+delegability: high
+assurance: high
+executor: visual-implementer
+continuity: foreground
+reason: bounded UI implementation with broad user-facing impact requires independent visual review
+```
+
 ## 路由矩阵
 
 | Delegability | Assurance | 路由 | 实施 | 独立审查 |
@@ -116,9 +129,11 @@ reason: implementation is bounded by explicit interfaces, owned files, and deter
 | --- | --- | --- | --- | --- |
 | 主会话（架构师） | GLM-5.3 | — | 全部 | 需求歧义解决、架构与路由、任务分解、五段式规格、diff 检查与验证重跑、路由重估、验收 |
 | flash-implementer | GLM-5.3-Flash | high | 读写全套 | 执行有界的五段式实施规格，返回 IMPLEMENTATION REPORT |
+| visual-implementer | GLM-5.3-Flash | high | 读写全套 + 读图 | 视觉任务实施：含 VISUAL ACCEPTANCE 的规格执行，读截图自查并有限次修正 |
+| visual-reviewer | GLM-5.3-Flash | max | 只读白名单 + 读图 | 视觉任务独立终审：同时审 diff 与截图证据，输出裁决 |
 | glm-reviewer | GLM-5.3 | max | 只读白名单 | 文本任务独立终审，输出 ship / fix-first / rethink 裁决与证据 |
 
-> v2 将增加视觉通道角色（visual-implementer / visual-reviewer，基于 GLM-5.3-Flash 的多模态能力）与长任务连续性技能（continuity），架构规范见 [docs/](./docs/)。
+> 视觉任务的分工：主会话（纯文本）只做驱动与采集，视觉判定全部由 Flash 多模态角色完成；长任务连续性（continuity）见 `/continuity` 技能。
 
 ## 工作流
 
