@@ -86,7 +86,7 @@ route 决定"是否委派、是否审查"；executor 决定"谁来实施、需�
 按任务模态选择全新上下文的只读审查者：
 
 - 文本任务 → `glm-reviewer`（GLM-5.3，审代码 diff）
-- 视觉任务 → `visual-reviewer`（GLM-5.3-Flash 多模态，同时审 diff 与截图证据）
+- 视觉任务 → `visual-reviewer`（GLM-5.3-Flash 多模态，主职独立视觉验收：亲自读截图对照 VISUAL ACCEPTANCE、检查用户可见回归；diff 仅作上下文）
 
 GLM-5.3 主会话与 glm-reviewer 均为纯文本模型：**主会话在视觉链路中只能驱动采集（截图落盘），不得声称自己做了视觉判定**；视觉判定由 Flash 系角色完成。
 
