@@ -12,6 +12,7 @@
 - **成本优化分工**：判断密集工作（规划、验证、验收、架构未定的实施）留在 GLM-5.3 主会话；有界、规格完备的高吞吐实施委派给价格约为旗舰 1/10 的 GLM-5.3-Flash
 - **独立只读终审**：assurance:high 的任务由全新上下文的只读审查者给出 `ship` / `fix-first` / `rethink` 裁决，任何修复使裁决失效
 - **视觉通道**：前端/界面任务由 visual-implementer（GLM-5.3-Flash 多模态）实施，主会话负责驱动采集截图、Flash 角色负责视觉判定——GLM-5.3 纯文本的边界被显式分工补齐
+- **长任务连续性**：continuity 作为与路由正交的生命周期层（foreground / resumable / idle），checkpoint 检查点 + 结构化恢复流程，让长任务可以跨会话中断、跨额度窗口安全续跑（见下文[长任务连续性](#长任务连续性)）
 - **基于证据的路由重估**：路由可双向变化（ROUTE REASSESSMENT），但必须附新观察到的证据
 - **fail-closed 纪律**：所需子智能体或证据路径缺失时停止通道并提示，绝不静默降级或替换角色
 - **结构化契约**：五段式实施规格 + IMPLEMENTATION REPORT——无证据的完成声明无效
@@ -65,7 +66,7 @@ GLM-5.3 与 GLM-5.3-Flash 的智力差距很小（AA 智能指数 60 vs 57），
 1. 添加市场成功后，**市场源**面板（插件页搜索框上方齿轮图标）中 glm-conductor 应显示收录 1 个插件；若显示 0 个，说明选错了清单文件，移除该市场后重新添加
 2. 安装并新建会话后确认：
    - Settings → Subagents 中出现各角色子智能体
-   - `/orchestration` 技能可用（`/` 菜单中可见）
+   - `/orchestration` 与 `/continuity` 技能可用（`/` 菜单中可见）
    - 提示词中提及编排时，主会话会先输出 `SELECTIVE ROUTE` 声明
 
 ### 更新与卸载
@@ -107,6 +108,18 @@ continuity: foreground
 reason: bounded UI implementation with broad user-facing impact requires independent visual review
 ```
 
+预计跨额度窗口的长任务声明示例：
+
+```
+SELECTIVE ROUTE
+mode: delegate
+delegability: high
+assurance: standard
+executor: flash-implementer
+continuity: resumable
+reason: multi-hour migration may be interrupted by availability windows; checkpoint enables safe resume
+```
+
 ## 路由矩阵
 
 | Delegability | Assurance | 路由 | 实施 | 独立审查 |
@@ -122,6 +135,24 @@ reason: bounded UI implementation with broad user-facing impact requires indepen
 - `audit` = 主会话实施 + 独立终审，适合判断密集、敏感、架构重的工作
 - `full` = 委派实施 + 独立终审，适合大规模但有界的工作（机械迁移、清晰规格的改版）
 - 路由可基于新证据双向重估（ROUTE REASSESSMENT），不设单向阶梯
+
+## 长任务连续性
+
+continuity 是与路由**正交**的生命周期维度——回答"任务如果很长，如何持续执行"，不是第五种 route。由 `/continuity` 技能实现：
+
+| 模式 | 适用 | 行为 |
+| --- | --- | --- |
+| `foreground`（默认） | 当前会话内可完成、需实时互动 | 正常执行，不创建任何 continuation |
+| `resumable` | 长任务、可能跨额度窗口或因可用性中断 | 里程碑后写 checkpoint + 定时唤醒；唤醒后先检查再恢复 |
+| `idle` | 非紧急、可无人值守 | 优先交给 ZCode 原生闲时任务执行（支持自定义模型的子智能体） |
+
+核心机制：
+
+- **CONTINUITY CHECKPOINT**：实质性里程碑后写入用户工作区 `.glm-conductor/checkpoint.md`（建议加入 .gitignore），记录目标、路由、已完成项、下一步与验证状态——是导航状态，不是仓库真相源
+- **repository > checkpoint**：恢复时八步检查（目标 → checkpoint → 仓库状态 → diff → 变更是否仍在 → 目标是否已完成 → 验证状态 → 从 NEXT ACTION 继续），仓库真实状态始终优先；禁止盲目重播旧指令，禁止为恢复 checkpoint 回滚仓库新改动
+- **安全周期性再激活**：定时唤醒做"检查-恢复或等待"，而非 sleep 到固定时间；恢复前重新声明 SELECTIVE ROUTE
+- **明确的边界**：不虚构 quota API、不硬编码 5 小时重置；额度观察只来自用户或 UI，定时/闲时能力不可用时如实报告"手动可恢复"
+- **完成即清理**：目标验收后删除 checkpoint、移除定时任务，避免幽灵唤醒
 
 ## 角色
 
@@ -159,6 +190,11 @@ ROUTE REASSESSMENT（任何阶段，凭新证据双向重估）
    |
    v
 主会话验收 → ship
+
+──── CONTINUITY LAYER（与路由正交，贯穿全程）────
+  foreground：会话内完成（默认）
+  resumable：checkpoint + 定时唤醒 → 八步恢复检查 → 续跑
+  idle：ZCode 原生闲时任务无人值守执行
 ```
 
 ## 与 sol-advisor 的关系
