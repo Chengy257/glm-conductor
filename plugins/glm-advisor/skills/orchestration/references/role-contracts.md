@@ -1,24 +1,108 @@
 # 角色契约
 
-本文件是 glm-advisor 编排体系的完整角色契约，SKILL.md 引用本文件获取模板与规则细节。
+本文件是 glm-advisor 编排体系的完整角色契约，SKILL.md 引用本文件获取判据与模板细节。
 
-## 路由声明与总则
+## 双轴路由契约
 
-SELECTIVE ROUTE 块格式（主会话在任何 Agent 工具调用之前输出一次）：
+### 轴 A — Delegability（可委派性）
+
+判断问题：剩余的实施工作是否足够有界、规格足够完备，可以委派出去？
+
+**delegability: high** —— 通常满足：
+
+- objective 与 observable outcome 明确
+- 目标文件与 ownership 边界明确
+- interface 明确
+- constraints 明确
+- verification 明确
+- 架构已决定，剩余任务主要是实施
+- 实施过程中不需要频繁重新设计
+
+典型任务：已确定接口的函数实现、测试/fixture 补充、重复性重构、CLI 接线、配置管道、序列化、已知 root cause 的 bug fix、明确规则的大量代码迁移。
+
+**delegability: low** —— 出现以下情况时优先判断为 low：
+
+- 架构尚未确定
+- root cause 未知
+- 需求存在实质歧义
+- 大量跨模块判断
+- 实施本身就是主要的推理问题
+- 并发/分布式状态等隐藏复杂度
+- 敏感决策尚未解决
+- 实施过程中可能频繁改变设计
+
+delegability: low 时由 GLM-5.3 主会话实施。
+
+### 轴 B — Assurance（保障等级）
+
+判断问题：实施完成并通过主会话验证后，一次全新上下文的独立终审是否有实质价值？
+
+**assurance: standard** —— 适用于：影响面有限、验证足够明确、回归风险可控的普通实施。
+
+**assurance: high** —— 以下情况优先使用：
+
+- 宽影响面（wide blast radius）
+- 高回归风险
+- 认证 / 权限
+- 破坏性行为
+- 数据迁移
+- 跨模块语义变更
+- 验证难以覆盖所有重要失败模式
+- 大规模用户可见变更
+- 用户明确要求严格审查
+
+### 路由矩阵
+
+| Delegability | Assurance | Route | 实施 | 独立审查 |
+| --- | --- | --- | --- | --- |
+| low | standard | solo | GLM-5.3 主会话 | 否 |
+| high | standard | delegate | 实施者子智能体 | 否 |
+| low | high | audit | GLM-5.3 主会话 | 是 |
+| high | high | full | 实施者子智能体 | 是 |
+
+语义要点：
+
+- delegate 不是 solo 的风险升级：solo = GLM-5.3 实施，delegate = GLM-5.3-Flash 实施，delegate 只表达"该实施已足够有界"
+- audit = 主会话实施 + 审查者终审（适合判断密集、敏感、架构重的工作）
+- full = 委派实施 + 审查者终审（适合大规模但有界：机械 API 迁移、清晰规格的 UI 改版、重复性多文件转换）
+
+### SELECTIVE ROUTE 声明
+
+主会话在任何 Agent 工具调用之前输出一次：
 
 ```
 SELECTIVE ROUTE
 mode: solo | delegate | audit | full
-risk: <简明的任务级风险理由>
+delegability: low | high
+assurance: standard | high
+executor: main | flash-implementer | visual-implementer
+continuity: foreground | resumable | idle
+reason: <简明的、基于证据的理由>
 ```
 
-- **默认上限**：最多一个辅助代理（一个辅助实现者；audit/full 时外加一个审查者）
-- **只升不降**：仅允许沿 solo → delegate → full 或 solo → audit → full 方向升级；禁止静默降级
-- **fail-closed**：所需角色缺失、不可用或名称不符时停止该通道并告知用户，不得静默替换为其他子智能体类型
+### ROUTE REASSESSMENT
+
+路由变化必须来自新观察到的证据，可双向重估，不得凭直觉或为省事变更：
+
+```
+ROUTE REASSESSMENT
+
+delegability: <old> -> <new>
+assurance: <old> -> <new>
+mode: <old> -> <new>
+
+evidence:
+<新观察到的证据>
+```
+
+- 下调示例：delegate 执行中暴露隐藏的跨模块状态耦合、架构歧义或范围超出 FILES AND OWNERSHIP → delegability high→low、assurance standard→high、mode delegate→audit，主会话接管实施
+- 上调示例：solo 调查后 root cause、架构、文件与验证均已确定且剩余工作完全机械 → delegability low→high、mode solo→delegate（前提：主会话尚未重复完成同一实施）
+- 实施者返回升级信号属于有效证据
+- 审查者给出 rethink 或多项 fix-first 属于有效证据
 
 ## 五段式实施规格模板
 
-委派（delegate/full）给 flash-implementer 时必须使用以下模板，可直接复制：
+委派（delegate/full）给实施者时必须使用以下模板，可直接复制：
 
 ```
 OBJECTIVE:
@@ -70,18 +154,38 @@ GAPS:
 
 - STATUS 取值：complete / partial / blocked
 - VERIFIED 必须是命令与实际输出的配对，不接受空泛描述
+- 报告只是声明（implementation claim）；证据只存在于主会话亲自观察到的 diff 与命令输出中
+
+## 主会话（架构师）契约
+
+主会话（GLM-5.3）保留以下职责，不外派：
+
+- 需求与歧义解决
+- 架构与路由判断
+- 五段式规格编写
+- 亲自检查完整 diff 并重跑验证命令
+- 路由重估判断
+- 验收
+
+辅助工作是替代而非重复主会话的工作：委派实施后主会话不再重复写实现，只做验证与验收。
+
+**能力边界**：GLM-5.3 是纯文本模型。在视觉链路中主会话只能承担驱动与采集（启动应用、驱动浏览器/桌面、截图落盘），不得声称自己做了视觉判定；视觉判定由 Flash 系多模态角色（visual-implementer / visual-reviewer）完成。
 
 ## flash-implementer 契约
 
-- **用途**：仅限声明为 delegate/full 的有界、规格完备工作
+- **定位**：标准的有界实施执行者（standard bounded implementation executor）
+- **模型**：GLM-5.3-Flash，思考档位 high（已固定，不附加覆盖）
+- **用途**：仅限声明为 delegate/full 的有界、规格完备工作——有界代码实现、测试、fixture、重构、配置、CLI、确定性转换、已知 bug 修复、机械迁移
 - **行为约束**：在既有架构内实施；歧义浮出上报而非自行重构；遵守并行编辑纪律（只在自有文件集内改动，不回退他人无关改动）
-- **升级规则**：结果显示任务判断密集、高风险或被误分类时，立即停止并返回升级信号，无需先重试；规格有误时，允许一次修正后重试，且该重试不是升级的前提
-- **生成方式**：`subagent_type: glm-advisor:flash-implementer`；模型 GLM-5.3-Flash、思考档位 high 已在子智能体定义中固定，调用时不附加任何模型或思考档位覆盖
+- **升级信号**：结果显示任务判断密集、高风险或被误分类时，立即停止并返回升级信号（供主会话做 ROUTE REASSESSMENT），无需先重试；规格有误时指出精确修正项，允许一次修正后重试，且该重试不是重估的前提
+- **生成方式**：`subagent_type: glm-advisor:flash-implementer`
 
-## glm-reviewer 契约
+## glm-reviewer 契约（文本任务审查者）
 
-- **用途**：仅限 audit/full 路由，且必须在主会话验证之后调用；全新上下文 = 新鲜审查者
-- **输入五要素**（由主会话提供，每项内容要求如下）：
+- **定位**：全新上下文、与实施隔离的只读审查者（fresh-context, implementation-isolated reviewer）——不宣称跨模型独立
+- **模型**：GLM-5.3，思考档位 max（已固定）
+- **用途**：仅限文本任务的 audit/full 路由，且必须在主会话验证之后调用；全新上下文 = 新鲜审查者
+- **输入五要素**（由主会话提供）：
   - ROLE：声明本次为只读审查
   - STATED GOAL：用户的原始目标原文，不得转写篡改
   - ACCUMULATED CHANGE SET：允许文件清单 + 完整 diff，或基准/目标修订
@@ -100,18 +204,4 @@ GAPS:
   ```
 
 - **裁决失效规则**：任何修复之后原裁决作废，必须换全新审查者复审
-- **独立性说明**：主会话 GLM-5.3 审查自己体系的产物属于上下文干净（context-clean），并非跨模型家族独立
 - **隔离判定按观察而非按请求**：审查者工具为只读白名单即视为隔离已强制；若观察到任何写入尝试或越权行为，终止该通道
-
-## 主会话（架构师）契约
-
-主会话（GLM-5.3）保留以下职责，不外派：
-
-- 需求与歧义解决
-- 架构与路由选择
-- 五段式规格编写
-- 亲自检查完整 diff 并重跑验证命令
-- 升级判断
-- 验收
-
-辅助工作是替代而非重复主会话的工作：委派实施后主会话不再重复写实现，只做验证与验收；但报告、推理与最终判断始终由主会话负责。
