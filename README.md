@@ -1,44 +1,71 @@
 # glm-advisor
 
-ZCode 的 GLM 双模型风险分级编排插件——GLM-5.3 指挥，GLM-5.3-Flash 实施，独立只读终审。
+![License](https://img.shields.io/badge/license-MIT-blue.svg)
+![ZCode Plugin](https://img.shields.io/badge/ZCode-plugin-green.svg)
+![Models](https://img.shields.io/badge/models-GLM--5.3%20%2F%20GLM--5.3--Flash-orange.svg)
+
+> ZCode 的 GLM 双模型风险分级编排插件 —— GLM-5.3 指挥，GLM-5.3-Flash 实施，独立只读终审。
+
+## 功能特性
+
+- **风险分级选择性路由**：主会话（GLM-5.3 架构师）在任何任务委派之前声明机器可审计的 `SELECTIVE ROUTE`（solo / delegate / audit / full）与风险理由
+- **成本优化分工**：判断密集工作（规划、验证、验收、高风险实施）留在 GLM-5.3 主会话；边界清晰的高吞吐实施委派给价格约为旗舰 1/10 的 GLM-5.3-Flash
+- **独立只读终审**：audit / full 路由下，由全新上下文的 GLM-5.3 只读审查者给出 `ship` / `fix-first` / `rethink` 裁决，任何修复使裁决失效
+- **fail-closed 纪律**：所需子智能体缺失时停止通道并提示检查安装，绝不静默降级或替换角色
+- **结构化契约**：五段式实施规格（OBJECTIVE / FILES AND OWNERSHIP / INTERFACES / CONSTRAINTS / VERIFICATION）+ IMPLEMENTATION REPORT 返回模板——无证据的完成声明无效
 
 ## 为什么
 
-GLM-5.3 与 GLM-5.3-Flash 的智力差距很小（AA 指数 60 vs 57），但价格相差 10-20 倍，Coding Plan 额度消耗约为旗舰的 1/3。合理的分工是：让旗舰（GLM-5.3）负责规划、验证与验收等判断密集工作，让 GLM-5.3-Flash 承担高吞吐的常规实施，再用全新上下文的只读审查者为高风险交付加一道独立终审。glm-advisor 把这套风险分级选择性路由固化为 ZCode 插件。
+GLM-5.3 与 GLM-5.3-Flash 的智力差距很小（AA 智能指数 60 vs 57），但 API 价格相差 10-20 倍，GLM Coding Plan 中 Flash 的额度消耗约为旗舰的 1/3。与其所有工作都用旗舰模型，不如按风险分级路由：让旗舰负责规划、验证与验收，让 Flash 承担高吞吐的常规实施，再用全新上下文的只读审查者为高风险交付加一道独立终审。glm-advisor 把这套选择性路由固化为 ZCode 插件，开箱即用。
 
-## 要求
+## 前置要求
 
-- ZCode 客户端
+- [ZCode](https://zcode.z.ai) 客户端
 - GLM Coding Plan（或 Z.ai 账号），已连接 GLM-5.3 与 GLM-5.3-Flash
 
 ## 安装
 
-三种方式任选其一：
+以下三种方式任选其一。安装完成后**必须新建会话**，子智能体与技能才会被发现和加载。
 
-### 方式一：本地目录
+### 方式一：从 GitHub 仓库安装（推荐）
 
-1. 打开 ZCode 的 Settings → Plugin Management
-2. 进入 Discover，点击 `+`
-3. 选择本插件项目根目录（glm-advisor 目录）
-4. 点击安装
+1. 打开 ZCode：Settings → Plugin Management → Discover
+2. 点击 `+`，选择 GitHub 仓库，输入本仓库地址：
 
-### 方式二：marketplace 文件
+   ```
+   https://github.com/<OWNER>/glm-advisor
+   ```
 
-1. 打开 Settings → Plugin Management → Discover，点击 `+`
-2. 选择本仓库中的 `.agents/plugins/marketplace.json`
+3. 点击安装 glm-advisor
+
+### 方式二：从本地目录安装
+
+1. 克隆本仓库：
+
+   ```bash
+   git clone https://github.com/<OWNER>/glm-advisor.git
+   ```
+
+2. 打开 Settings → Plugin Management → Discover → `+`，选择克隆得到的 `glm-advisor` 目录
+3. 点击安装
+
+### 方式三：从 marketplace 清单文件安装
+
+1. 按方式二克隆本仓库
+2. 打开 Settings → Plugin Management → Discover → `+`，选择仓库内的 `.agents/plugins/marketplace.json`
 3. 按提示完成安装
 
-### 方式三：GitHub
+### 验证安装
 
-1. 将本仓库推送到 GitHub
-2. 在 Settings → Plugin Management → Discover 中点击 `+`
-3. 输入仓库地址完成添加与安装
+新建会话后确认三处：
 
-安装后**必须新建会话**，子智能体与技能才会被发现和加载。
+- Settings → Subagents 中出现 `flash-implementer` 与 `glm-reviewer`
+- `/orchestration` 技能可用（`/` 菜单中可见）
+- 提示词中提及编排时，主会话会先输出 `SELECTIVE ROUTE` 声明
 
 ## 快速开始
 
-新建会话后，在提示词中输入：
+新建会话后，在输入框输入：
 
 ```
 用 glm-advisor:orchestration 规划并实现这个功能，声明路由并完成验证
@@ -46,7 +73,7 @@ GLM-5.3 与 GLM-5.3-Flash 的智力差距很小（AA 指数 60 vs 57），但价
 
 或直接输入 `/orchestration`。
 
-主会话会先输出 SELECTIVE ROUTE 声明（模式 + 风险理由），再按所选路由执行。
+主会话会先输出 `SELECTIVE ROUTE` 声明（模式 + 风险理由），再按所选路由执行。
 
 ## 四种路由
 
@@ -98,6 +125,12 @@ SELECTIVE ROUTE 声明（mode + risk）── 必须在首次 Agent 调用之前
 2. **TOML + 安装脚本改为 Markdown 目录约定**：子智能体与技能均以带 YAML frontmatter 的 Markdown 文件定义，由 ZCode 按目录约定自动发现，无需安装脚本
 3. **子智能体天然新上下文**：ZCode 子智能体每次调用都是全新上下文，无需原项目的 fork 参数即可保证"新鲜审查者"语义
 
-## 致谢与许可
+## 贡献
 
-本项目以 [MIT](./LICENSE) 许可发布，致敬原项目 [sol-advisor](https://github.com/DannyMac180/sol-advisor) 的设计。
+欢迎通过 Issue 与 Pull Request 参与。开发时注意：修改插件文件（子智能体定义、技能、清单）后需新建会话才能看到效果；提交前请确认 `plugin.json` 与 `marketplace.json` 仍为合法 JSON、agents 的 frontmatter 字段完整。
+
+## 许可
+
+[MIT](./LICENSE) © 2026 glm-advisor contributors
+
+本项目的设计受 [sol-advisor](https://github.com/DannyMac180/sol-advisor)（MIT）启发，特此致谢。
