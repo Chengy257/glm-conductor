@@ -97,7 +97,7 @@ evidence:
 
 - 下调示例：delegate 执行中暴露隐藏的跨模块状态耦合、架构歧义或范围超出 FILES AND OWNERSHIP → delegability high→low、assurance standard→high、mode delegate→audit，主会话接管实施
 - 上调示例：solo 调查后 root cause、架构、文件与验证均已确定且剩余工作完全机械 → delegability low→high、mode solo→delegate（前提：主会话尚未重复完成同一实施）
-- 实施者返回升级信号属于有效证据
+- 实施者返回重估信号属于有效证据
 - 审查者给出 rethink 或多项 fix-first 属于有效证据
 
 ## 五段式实施规格模板
@@ -220,7 +220,7 @@ GAPS:
 - **模型**：GLM-5.3-Flash，思考档位 high（已固定，不附加覆盖）
 - **用途**：仅限声明为 delegate/full 的有界、规格完备工作——有界代码实现、测试、fixture、重构、配置、CLI、确定性转换、已知 bug 修复、机械迁移
 - **行为约束**：在既有架构内实施；歧义浮出上报而非自行重构；遵守并行编辑纪律（只在自有文件集内改动，不回退他人无关改动）
-- **升级信号**：结果显示任务判断密集、高风险或被误分类时，立即停止并返回升级信号（供主会话做 ROUTE REASSESSMENT），无需先重试；规格有误时指出精确修正项，允许一次修正后重试，且该重试不是重估的前提
+- **重估信号**：结果显示任务判断密集、高风险或被误分类时，立即停止并返回明确的重估信号（ROUTE REASSESSMENT 请求），无需先重试；规格有误时指出精确修正项，允许一次修正后重试，且该重试不是重估的前提
 - **生成方式**：`subagent_type: glm-conductor:flash-implementer`
 
 ## visual-implementer 契约（视觉任务实施者）
@@ -229,7 +229,7 @@ GAPS:
 - **模型**：GLM-5.3-Flash（多模态），思考档位 high（已固定，不附加覆盖）
 - **用途**：仅限声明为 delegate/full 的视觉/交互任务实施——执行含 VISUAL ACCEPTANCE 扩展的五段式规格
 - **视觉反馈环（跨调用拓扑）**：实施者需要证据时返回 `VISUAL_CAPTURE_REQUEST` 并结束本次调用（不等待、不虚构）→ 主会话用其专属 Browser/Computer Use 采集截图落盘（主会话专用，子代理在 ZCode 策略层被禁止使用）→ 主会话恢复实施者（resume 保留上下文）或发起携带规格、当前 diff 与截图路径的新调用 → 实施者用 Read 亲自读取截图判定 → 不符合则修正并再次返回 `VISUAL_CAPTURE_REQUEST` → 每个 VISUAL ACCEPTANCE 验收点最多 3 轮采集-判定循环，禁止无限视觉打磨。协议格式见 agents/visual-implementer.md 的 VISUAL_CAPTURE_REQUEST 节
-- **升级信号**：验收标准不清、规格有歧义或视觉证据不可得时返回 blocked，交回主会话处理；不得以文字推测替代视觉验证
+- **重估信号**：验收标准不清、规格有歧义或视觉证据不可得时返回 blocked，交回主会话处理；不得以文字推测替代视觉验证
 - **报告**：使用含 FUNCTIONAL VERIFIED 与 VISUAL VERIFIED 两节的 IMPLEMENTATION REPORT 模板（模板见 agents/visual-implementer.md）
 - **生成方式**：`subagent_type: glm-conductor:visual-implementer`
 
@@ -237,7 +237,8 @@ GAPS:
 
 - **定位**：全新上下文、与实施隔离的只读审查者（fresh-context, implementation-isolated reviewer）；与实施者同为 GLM-5.3-Flash，独立性来自干净上下文与只读工具白名单，不宣称跨模型独立
 - **模型**：GLM-5.3-Flash（多模态），思考档位 max（已固定）
-- **用途**：仅限视觉任务的 audit/full 路由，且必须在主会话验证之后调用；同时审查代码 diff 与截图证据
+- **用途**：仅限视觉任务的 audit/full 路由，且必须在主会话验证之后调用；主职是独立视觉验收（截图证据 + VISUAL ACCEPTANCE + 用户可见回归），代码 diff 作为上下文读取，不替代主会话的代码审查
+- **职责分工**：主会话负责完整 diff、代码正确性、功能验证与范围/接口核验；visual-reviewer 负责视觉验收、交互证据、截图证据与用户可见回归
 - **输入六要素**（由主会话提供，缺项要求补齐而非猜测）：
   - ROLE：声明本次为只读审查
   - STATED GOAL：用户的原始目标原文
@@ -245,16 +246,16 @@ GAPS:
   - INTERFACES AND CONSTRAINTS：须保持兼容的接口与约束
   - VERIFICATION EVIDENCE：验证命令映射到主会话实际输出的证据
   - VISUAL EVIDENCE：截图文件路径清单 + 对应的 VISUAL ACCEPTANCE 标准
-- **审查范围**：正确性、完整性、回归风险、范围纪律、接口保留、测试充分性、实质风险七项，外加视觉符合度——必须亲自 Read 每一张截图，对照 VISUAL ACCEPTANCE 判定实施者的视觉结论是否成立
-- **GLM REVIEW 输出格式**：
+- **审查范围**：以视觉符合度为主线（必须亲自 Read 每一张截图，对照 VISUAL ACCEPTANCE 判定实施者的视觉结论是否成立），外加用户可见回归与证据链完整性；正确性、完整性、回归风险、范围纪律、接口保留、测试充分性为附带核对（可报告，不替代主会话代码审查）
+- **VISUAL REVIEW 输出格式**：
 
   ```
-  GLM REVIEW
+  VISUAL REVIEW
   VERDICT: ship | fix-first | rethink
-  REASON: <基于证据的决定性理由>
+  REASON: <基于视觉证据的决定性理由>
   FINDINGS:
-  - <文件:行号 或 截图:路径> <发现>（无则写"无"）
-  RESIDUAL RISK: <最重要的剩余风险>（无则写"无"）
+  - <截图路径 / VISUAL ACCEPTANCE 验收项>: <发现>（无则写"无"）
+  RESIDUAL VISUAL RISK: <最重要的剩余视觉风险>（无则写"无"）
   ```
 
 - **裁决失效规则**：任何修复之后原裁决作废，必须换全新审查者复审

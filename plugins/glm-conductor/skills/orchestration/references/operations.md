@@ -17,7 +17,7 @@
 
 - 先独立判断 Delegability 与 Assurance，再查路由矩阵；不得从一轴推导另一轴
 - 声明后不得无证据变更路由；变更必须走 ROUTE REASSESSMENT 块并附新观察到的证据
-- 实施者返回升级信号、审查者给出 rethink 或多项 fix-first，均构成有效重估证据
+- 实施者返回重估信号、审查者给出 rethink 或多项 fix-first，均构成有效重估证据
 
 ## 验证证据
 

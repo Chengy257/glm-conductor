@@ -105,7 +105,7 @@ GLM-5.3 主会话与 glm-reviewer 均为纯文本模型：**主会话在视觉�
 
 ## 9. 评审与裁决（仅 assurance: high）
 
-- 审查者保持只读，返回 `ship` / `fix-first` / `rethink` 三种裁决之一（GLM REVIEW 格式）
+- 审查者保持只读，返回 `ship` / `fix-first` / `rethink` 三种裁决之一（文本任务用 GLM REVIEW 格式，视觉任务用 VISUAL REVIEW 格式，见 role-contracts.md）
 - fix-first：audit 路由由主会话修正，full 路由由原实施者修正；修正后主会话重验，再换用全新审查者
 - rethink：修订架构，不得报告完成
 - 任何修复使先前裁决失效；审查者与实施者/主会话同模型家族，独立性来自全新上下文与只读隔离，不宣称跨模型独立

@@ -9,7 +9,7 @@
 ## 功能特性
 
 - **双轴选择性路由**：主会话（GLM-5.3 架构师）按 Delegability（可委派性）× Assurance（保障等级）两个独立维度判断，在首次任务委派前声明机器可审计的 `SELECTIVE ROUTE`（solo / delegate / audit / full）
-- **成本优化分工**：判断密集工作（规划、验证、验收、架构未定的实施）留在 GLM-5.3 主会话；有界、规格完备的高吞吐实施委派给价格约为旗舰 1/10 的 GLM-5.3-Flash
+- **分层执行能力**：判断密集工作（规划、验证、验收、架构未定的实施）留在 GLM-5.3 主会话；有界、规格完备的高吞吐实施委派给 GLM-5.3-Flash（标准 / 视觉两通道）——这一异构分工同时带来额度与成本优势：Flash 的 API 价格约为旗舰 1/10，GLM Coding Plan 中额度消耗约为旗舰 1/3
 - **独立只读终审**：assurance:high 的任务由全新上下文的只读审查者给出 `ship` / `fix-first` / `rethink` 裁决，任何修复使裁决失效
 - **视觉通道**：前端/界面任务由 visual-implementer（GLM-5.3-Flash 多模态）实施，主会话负责驱动采集截图、Flash 角色负责视觉判定——GLM-5.3 纯文本的边界被显式分工补齐
 - **长任务连续性**：continuity 作为与路由正交的生命周期层（foreground / resumable / idle），checkpoint 检查点 + 结构化恢复流程，让长任务可以跨会话中断、跨额度窗口安全续跑（见下文[长任务连续性](#长任务连续性)）
@@ -28,7 +28,7 @@ GLM-5.3 与 GLM-5.3-Flash 的智力差距很小（AA 智能指数 60 vs 57），
 
 ## 前置要求
 
-- [ZCode](https://zcode.z.ai) 客户端
+- [ZCode](https://zcode.z.ai) 客户端。Tested with ZCode 3.9.2——更早版本可能缺少多模态、定时任务、闲时执行或自定义子智能体所需的行为
 - GLM Coding Plan（或 Z.ai 账号），已连接 GLM-5.3 与 GLM-5.3-Flash
 
 ## 安装
@@ -148,11 +148,11 @@ continuity 是与路由**正交**的生命周期维度——回答"任务如果�
 
 核心机制：
 
-- **CONTINUITY CHECKPOINT**：实质性里程碑后写入用户工作区 `.glm-conductor/checkpoint.md`（建议加入 .gitignore），记录目标、路由、已完成项、下一步与验证状态——是导航状态，不是仓库真相源
+- **CONTINUITY CHECKPOINT**：实质性里程碑后写入任务专属路径 `.glm-conductor/tasks/<continuity-id>/checkpoint.md`——每个长任务一个稳定的 CONTINUITY_ID，并行任务互不覆盖、互不删除（建议将 `.glm-conductor/` 加入 `.git/info/exclude` 本地排除，而非修改 tracked `.gitignore`）；checkpoint 记录目标、路由、已完成项、下一步与验证状态，是导航状态，不是仓库真相源
 - **repository > checkpoint**：恢复时八步检查（目标 → checkpoint → 仓库状态 → diff → 变更是否仍在 → 目标是否已完成 → 验证状态 → 从 NEXT ACTION 继续），仓库真实状态始终优先；禁止盲目重播旧指令，禁止为恢复 checkpoint 回滚仓库新改动
 - **安全周期性再激活**：定时唤醒做"检查-恢复或等待"，而非 sleep 到固定时间；恢复前重新声明 SELECTIVE ROUTE
 - **明确的边界**：不虚构 quota API、不硬编码 5 小时重置；额度观察只来自用户或 UI，定时/闲时能力不可用时如实报告"手动可恢复"
-- **完成即清理**：目标验收后删除 checkpoint、移除定时任务，避免幽灵唤醒
+- **完成即清理**：目标验收后只删除本任务目录（`.glm-conductor/tasks/<id>/`）与其关联的定时任务，避免幽灵唤醒，也不影响并行任务
 
 ## 角色
 
@@ -160,8 +160,8 @@ continuity 是与路由**正交**的生命周期维度——回答"任务如果�
 | --- | --- | --- | --- | --- |
 | 主会话（架构师） | GLM-5.3 | — | 全部 | 需求歧义解决、架构与路由、任务分解、五段式规格、diff 检查与验证重跑、路由重估、验收 |
 | flash-implementer | GLM-5.3-Flash | high | 读写全套 | 执行有界的五段式实施规格，返回 IMPLEMENTATION REPORT |
-| visual-implementer | GLM-5.3-Flash | high | 读写全套 + 读图 | 视觉任务实施：含 VISUAL ACCEPTANCE 的规格执行，读截图自查并有限次修正 |
-| visual-reviewer | GLM-5.3-Flash | max | 只读白名单 + 读图 | 视觉任务独立终审：同时审 diff 与截图证据，输出裁决 |
+| visual-implementer | GLM-5.3-Flash | high | 读写全套 + 读图 | 视觉任务实施：含 VISUAL ACCEPTANCE 的规格执行；需截图时返回 `VISUAL_CAPTURE_REQUEST` 结束本次调用，读图判定并有限次修正 |
+| visual-reviewer | GLM-5.3-Flash | max | 只读白名单 + 读图 | 视觉任务独立视觉终审（`VISUAL REVIEW`）：亲自读截图对照验收标准，检查用户可见回归 |
 | glm-reviewer | GLM-5.3 | max | 只读白名单 | 文本任务独立终审，输出 ship / fix-first / rethink 裁决与证据 |
 
 > 视觉任务的分工：主会话（纯文本）只做驱动与采集，视觉判定全部由 Flash 多模态角色完成；长任务连续性（continuity）见 `/continuity` 技能。
@@ -204,6 +204,17 @@ ROUTE REASSESSMENT（任何阶段，凭新证据双向重估）
 1. **双轴路由替代一维风险阶梯**：GLM 体系只有两档模型，v1 的"高风险通道并入 solo"在 v2 中被形式化为 Delegability × Assurance 双轴——判断密集/高风险实施即 delegability:low，由旗舰亲自完成（详见 [v2 架构规范](./docs/)）
 2. **TOML + 安装脚本改为 Markdown 目录约定**：子智能体与技能均以带 YAML frontmatter 的 Markdown 文件定义，由 ZCode 按目录约定自动发现，无需安装脚本
 3. **子智能体天然新上下文**：ZCode 子智能体每次调用都是全新上下文，无需原项目的 fork 参数即可保证"新鲜审查者"语义
+
+## 运行时限制
+
+GLM Conductor 的连续性编排基于 ZCode 原生的本地会话生命周期机制，**不是独立的云调度器或后台守护进程**。已知限制：
+
+- **依赖本地桌面环境**：ZCode 桌面客户端需保持运行，机器需保持唤醒；远程/无头工作区的行为未验证
+- **视觉拓扑**：Browser Use 与 Computer Use 为 ZCode 主会话专用（策略层禁止子代理使用）——视觉证据由主会话采集、Flash 系角色读图判定，反馈环跨多次调用完成（`VISUAL_CAPTURE_REQUEST`）
+- **定时任务**：数量与频率受 ZCode automation 机制约束；只有从当前聊天创建的续作才能把结果送回当前会话，通用入口创建的分离 automation 不等价
+- **闲时任务**：可用性与创建上限取决于 ZCode 版本与账号能力
+- **子智能体**：不能再派生子智能体（结构天然扁平）；只能看到会话启动时已连接的 MCP 服务，跨会话恢复后需重新确认所需服务可用
+- **额度观察**：无 quota API；调度触发本身即存活探针，额度相关的观察只来自用户告知或 UI
 
 ## 贡献
 

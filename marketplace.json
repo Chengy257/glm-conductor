@@ -5,7 +5,7 @@
     {
       "name": "glm-conductor",
       "source": "./plugins/glm-conductor",
-      "description": "GLM-5.3 主会话任架构师的选择性路由编排：GLM-5.3-Flash 常规实施 + GLM-5.3 只读终审"
+      "description": "GLM-5.3 架构师双轴选择性路由（Delegability × Assurance）：GLM-5.3-Flash 常规/视觉实施 + 全新上下文只读终审 + 长任务连续性"
     }
   ]
 }
