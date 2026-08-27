@@ -34,7 +34,7 @@ GLM-5.3 与 GLM-5.3-Flash 的智力差距很小（AA 智能指数 60 vs 57），
 3. 选择 GitHub 仓库来源，输入本仓库地址：
 
    ```
-   https://github.com/<OWNER>/glm-advisor
+   https://github.com/Chengy257/glm-advisor
    ```
 
 4. 校验通过后，插件会以市场名分组出现在 **个人** 分段，点击安装 glm-advisor
@@ -44,7 +44,7 @@ GLM-5.3 与 GLM-5.3-Flash 的智力差距很小（AA 智能指数 60 vs 57），
 1. 克隆本仓库：
 
    ```bash
-   git clone https://github.com/<OWNER>/glm-advisor.git
+   git clone https://github.com/Chengy257/glm-advisor.git
    ```
 
 2. 打开 **Settings → 插件**，点右上角 **创建 → 添加插件市场**
