@@ -1,0 +1,23 @@
+# GLM Conductor 插件静态校验（整改规范 §25/§26）。
+# 唯一实质步骤是运行本地静态校验脚本：无 benchmark、无模型调用、无外部 API。
+name: validate-plugin
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  validate:
+    name: Static plugin validation
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3"
+
+      - name: Run validate_plugin.py
+        run: python3 scripts/validate_plugin.py
