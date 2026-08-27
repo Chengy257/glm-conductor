@@ -1,6 +1,6 @@
 {
   "name": "glm-conductor",
-  "description": "GLM 双模型风险分级编排插件市场",
+  "description": "GLM 双模型编排插件市场：双轴路由、委派实施、独立审查与长任务连续性",
   "plugins": [
     {
       "name": "glm-conductor",
