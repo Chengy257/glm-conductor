@@ -1,0 +1,6 @@
+{
+  "name": "glm-advisor",
+  "plugins": [
+    { "name": "glm-advisor", "source": "./plugins/glm-advisor" }
+  ]
+}
