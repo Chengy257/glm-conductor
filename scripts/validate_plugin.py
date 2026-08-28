@@ -51,7 +51,25 @@
          `同一调用内等待` 只允许出现在含否定词（不 / 禁止）的行
          （在上述四个文件范围内检查）；
      12. 版本一致性：plugins/glm-conductor/.zcode-plugin/plugin.json 的
-         version 字段必须等于 CHANGELOG.md 第一个 `## ` 标题行中的版本记号。
+         version 字段必须等于 CHANGELOG.md 第一个 `## ` 标题行中的版本记号；
+     13. 钩子清单完整性：plugins/glm-conductor/hooks/hooks.json 存在、合法
+         JSON、顶层为对象且含非空 `hooks` 对象；事件键限于 SessionStart /
+         UserPromptSubmit / PreToolUse / PostToolUse / PermissionRequest /
+         Stop，且必须含 Stop 事件键（v2 完成门要求声明 Stop 钩子，缺失即
+         FAIL）；每个事件值为数组，数组每项为对象且含 `hooks` 数组；内层
+         hook 对象 type 限于 process / command，type=process 时 command
+         必须为 python3，timeoutMs 若存在必须为 >0 的整数，matcher 若存在
+         必须为字符串，args 中以 ${ZCODE_PLUGIN_ROOT}/ 开头的路径替换为
+         插件根 plugins/glm-conductor 后必须实际存在；
+     14. runtime 状态层与技能契约标记：plugins/glm-conductor/runtime/ 下的
+         __init__.py / state.py / journal.py 与 tests/ 下的 test_state.py /
+         test_journal.py 均存在且非空；runtime/state.py 必含 TASK_ID_KEYS /
+         CONTINUITY_ID（legacy 归一证据）/ TERMINAL_STATUSES，
+         runtime/journal.py 必含 RECOMMENDED_EVENTS / events.jsonl；
+         skills/continuity/SKILL.md 必含 state.json / events.jsonl /
+         task_created，skills/continuity/references/long-horizon.md 必含
+         state.json / events.jsonl，skills/orchestration/SKILL.md 必含
+         state.json / route_selected。
 
     扫描范围说明：检查 5/6/7/8（及 8 内的旧名负向检查）的扫描范围是显式
     列表——plugins/ 全部文件 + marketplace.json + README.md +
@@ -155,6 +173,36 @@ VISUAL_WAIT_NEGATIONS = ("不", "禁止")
 
 # —— 检查 12：CHANGELOG 版本标题（第一个 `^## ` 行） ——
 CHANGELOG_HEADING_RE = re.compile(r"^##\s+(.+?)\s*$")
+
+# —— 检查 13：钩子清单完整性（hooks/hooks.json） ——
+HOOKS_MANIFEST = os.path.join(
+    REPO_ROOT, "plugins", "glm-conductor", "hooks", "hooks.json")
+PLUGIN_ROOT_REL = "plugins/glm-conductor"  # ${ZCODE_PLUGIN_ROOT} 对应的插件根
+PLUGIN_ROOT_PREFIX = "${ZCODE_PLUGIN_ROOT}/"
+ALLOWED_HOOK_EVENTS = (
+    "SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse",
+    "PermissionRequest", "Stop")
+ALLOWED_HOOK_TYPES = ("process", "command")
+HOOK_COMMAND = "python3"
+
+# —— 检查 14：runtime 状态层与技能契约标记 ——
+RUNTIME_DIR = os.path.join(REPO_ROOT, "plugins", "glm-conductor", "runtime")
+RUNTIME_INIT = os.path.join(RUNTIME_DIR, "__init__.py")
+STATE_PY = os.path.join(RUNTIME_DIR, "state.py")
+JOURNAL_PY = os.path.join(RUNTIME_DIR, "journal.py")
+TESTS_DIR = os.path.join(REPO_ROOT, "tests")
+TEST_STATE = os.path.join(TESTS_DIR, "test_state.py")
+TEST_JOURNAL = os.path.join(TESTS_DIR, "test_journal.py")
+ORCHESTRATION_SKILL = os.path.join(SKILLS_DIR, "orchestration", "SKILL.md")
+RUNTIME_REQUIRED_FILES = (RUNTIME_INIT, STATE_PY, JOURNAL_PY)
+TEST_REQUIRED_FILES = (TEST_STATE, TEST_JOURNAL)
+STATE_REQUIRED_MARKERS = ("TASK_ID_KEYS", "CONTINUITY_ID", "TERMINAL_STATUSES")
+JOURNAL_REQUIRED_MARKERS = ("RECOMMENDED_EVENTS", "events.jsonl")
+SKILL_CONTRACT_MARKERS = (
+    (CONTINUITY_SKILL, ("state.json", "events.jsonl", "task_created")),
+    (LONG_HORIZON, ("state.json", "events.jsonl")),
+    (ORCHESTRATION_SKILL, ("state.json", "route_selected")),
+)
 
 
 def rel_display(path):
@@ -649,6 +697,192 @@ def check_12_version_consistency(results):
     results.append((12, title, ok, details))
 
 
+def check_13_hooks_manifest(results):
+    """检查 13：钩子清单完整性（hooks/hooks.json）。"""
+    title = "钩子清单完整性（hooks/hooks.json）"
+    details = []
+    ok = True
+    shown = rel_display(HOOKS_MANIFEST)
+
+    # 13.1 存在、合法 JSON、顶层为对象且含非空 `hooks` 对象（任一不满足即 FAIL 并终止）
+    if not os.path.isfile(HOOKS_MANIFEST):
+        details.append("FAIL: %s 不存在" % shown)
+        results.append((13, title, False, details))
+        return
+    try:
+        with io.open(HOOKS_MANIFEST, "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (ValueError, OSError) as exc:
+        details.append("FAIL: %s 不是合法 JSON: %s" % (shown, exc))
+        results.append((13, title, False, details))
+        return
+    if not isinstance(data, dict):
+        details.append("FAIL: %s 顶层不是 JSON 对象" % shown)
+        results.append((13, title, False, details))
+        return
+    hooks = data.get("hooks")
+    if not isinstance(hooks, dict) or not hooks:
+        details.append("FAIL: %s 缺少非空的 `hooks` 对象" % shown)
+        results.append((13, title, False, details))
+        return
+    details.append("PASS: %s 为合法 JSON 对象且含非空 `hooks` 对象" % shown)
+
+    # 13.2 事件键 ⊆ 允许事件集合
+    unknown_events = sorted(set(hooks) - set(ALLOWED_HOOK_EVENTS))
+    if unknown_events:
+        details.append(
+            "FAIL: 未知事件键: %s（允许: %s）"
+            % (", ".join(unknown_events), ", ".join(ALLOWED_HOOK_EVENTS)))
+        ok = False
+    else:
+        details.append("PASS: 事件键均在允许集合内（%s）" % ", ".join(sorted(hooks)))
+
+    # 13.2.1 必须声明 Stop 事件键（v2 完成门的最低声明要求）
+    if "Stop" not in hooks:
+        details.append(
+            "FAIL: 缺少 `Stop` 事件键（v2 完成门要求声明 Stop 钩子）")
+        ok = False
+    else:
+        details.append("PASS: 已声明 `Stop` 事件键（v2 完成门）")
+
+    # 13.3 逐事件 → 逐项 → 逐 hook 校验
+    for event_name in sorted(hooks):
+        entries = hooks[event_name]
+        if not isinstance(entries, list):
+            details.append("FAIL: 事件 %s 的值不是数组" % event_name)
+            ok = False
+            continue
+        for entry_idx, entry in enumerate(entries, 1):
+            where = "事件 %s 第 %d 项" % (event_name, entry_idx)
+            if not isinstance(entry, dict):
+                details.append("FAIL: %s 不是对象" % where)
+                ok = False
+                continue
+            # matcher 若存在必须是字符串（顶层项与内层 hook 两级都做类型检查）
+            if "matcher" in entry and not isinstance(entry["matcher"], str):
+                details.append("FAIL: %s matcher 不是字符串" % where)
+                ok = False
+            inner_hooks = entry.get("hooks")
+            if not isinstance(inner_hooks, list):
+                details.append("FAIL: %s 缺少 `hooks` 数组" % where)
+                ok = False
+                continue
+            for hook_idx, hook in enumerate(inner_hooks, 1):
+                hook_where = "%s hooks[%d]" % (where, hook_idx)
+                hook_ok = True
+                if not isinstance(hook, dict):
+                    details.append("FAIL: %s 不是对象" % hook_where)
+                    ok = False
+                    continue
+
+                # type 限于 process / command；type=process 时 command 必须为 python3
+                hook_type = hook.get("type")
+                if hook_type not in ALLOWED_HOOK_TYPES:
+                    details.append(
+                        "FAIL: %s type=%r 不在允许集合（%s）"
+                        % (hook_where, hook_type, " / ".join(ALLOWED_HOOK_TYPES)))
+                    hook_ok = False
+                elif hook_type == "process" and hook.get("command") != HOOK_COMMAND:
+                    details.append(
+                        "FAIL: %s type=process 但 command=%r（必须为 %s）"
+                        % (hook_where, hook.get("command"), HOOK_COMMAND))
+                    hook_ok = False
+
+                # timeoutMs 若存在必须是 >0 的整数（JSON true 不是整数）
+                if "timeoutMs" in hook:
+                    timeout = hook["timeoutMs"]
+                    if (isinstance(timeout, bool) or not isinstance(timeout, int)
+                            or timeout <= 0):
+                        details.append(
+                            "FAIL: %s timeoutMs=%r 不是 >0 的整数"
+                            % (hook_where, timeout))
+                        hook_ok = False
+
+                # matcher 若存在必须是字符串
+                if "matcher" in hook and not isinstance(hook["matcher"], str):
+                    details.append("FAIL: %s matcher 不是字符串" % hook_where)
+                    hook_ok = False
+
+                # args 中以 ${ZCODE_PLUGIN_ROOT}/ 开头的字符串：
+                # 替换为插件根 plugins/glm-conductor 后必须实际存在
+                script_note = ""
+                args = hook.get("args")
+                if "args" in hook and not isinstance(args, list):
+                    details.append("FAIL: %s args 不是数组" % hook_where)
+                    hook_ok = False
+                elif isinstance(args, list):
+                    for arg in args:
+                        if not (isinstance(arg, str)
+                                and arg.startswith(PLUGIN_ROOT_PREFIX)):
+                            continue
+                        rel_path = "%s/%s" % (
+                            PLUGIN_ROOT_REL, arg[len(PLUGIN_ROOT_PREFIX):])
+                        abs_path = os.path.join(REPO_ROOT, *rel_path.split("/"))
+                        if os.path.isfile(abs_path):
+                            script_note = rel_path
+                        else:
+                            details.append(
+                                "FAIL: %s args 脚本不存在: `%s`（解析为 %s）"
+                                % (hook_where, arg, rel_path))
+                            hook_ok = False
+
+                if not hook_ok:
+                    ok = False
+                else:
+                    # PASS 明细逐 hook 列出：事件名、command、脚本存在确认
+                    exist_note = ("，脚本存在: %s" % script_note) if script_note else ""
+                    details.append(
+                        "PASS: %s → command=%s%s"
+                        % (hook_where, hook.get("command"), exist_note))
+
+    results.append((13, title, ok, details))
+
+
+def check_14_runtime_state(results):
+    """检查 14：runtime 状态层与技能契约标记。"""
+    title = "runtime 状态层与技能契约标记"
+    details = []
+    ok = True
+
+    # 14.1 / 14.2 存在且非空（>0 字节）
+    for group_name, paths in (
+            ("runtime 状态层", RUNTIME_REQUIRED_FILES),
+            ("单元测试", TEST_REQUIRED_FILES)):
+        for path in paths:
+            shown = rel_display(path)
+            if not os.path.isfile(path):
+                details.append("FAIL: %s 不存在（%s）" % (shown, group_name))
+                ok = False
+                continue
+            size = os.path.getsize(path)
+            if size <= 0:
+                details.append("FAIL: %s 为空文件（0 字节，%s）" % (shown, group_name))
+                ok = False
+            else:
+                details.append("PASS: %s 存在且非空（%d 字节）" % (shown, size))
+
+    # 14.3 / 14.4 文本标记：runtime 层与技能契约
+    marker_plans = (
+        (STATE_PY, STATE_REQUIRED_MARKERS),
+        (JOURNAL_PY, JOURNAL_REQUIRED_MARKERS),
+    ) + SKILL_CONTRACT_MARKERS
+    for path, markers in marker_plans:
+        shown = rel_display(path)
+        text = read_text(path)
+        if text is None or not os.path.isfile(path):
+            details.append("FAIL: %s 不存在或无法读取，无法确认标记" % shown)
+            ok = False
+            continue
+        for marker in markers:
+            if marker in text:
+                details.append("PASS: %s 含 `%s`" % (shown, marker))
+            else:
+                details.append("FAIL: %s 缺少 `%s`" % (shown, marker))
+                ok = False
+
+    results.append((14, title, ok, details))
+
+
 CHECKS = (
     check_1_json,
     check_2_agent_frontmatter,
@@ -662,6 +896,8 @@ CHECKS = (
     check_10_continuity_id,
     check_11_visual_topology,
     check_12_version_consistency,
+    check_13_hooks_manifest,
+    check_14_runtime_state,
 )
 
 
