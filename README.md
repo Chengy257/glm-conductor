@@ -14,7 +14,7 @@
 - **视觉通道**：前端/界面任务由 visual-implementer（GLM-5.3-Flash 多模态）实施，主会话负责驱动采集截图、Flash 角色负责视觉判定——GLM-5.3 纯文本的边界被显式分工补齐
 - **长任务连续性**：continuity 作为与路由正交的生命周期层（foreground / resumable / idle），checkpoint 检查点 + 结构化恢复流程，让长任务可以跨会话中断、跨额度窗口安全续跑（见下文[长任务连续性](#长任务连续性)）
 - **额度感知连续性（v2 alpha3）**：resumable 任务可查询 Coding Plan 用量（已验证的 provider-api 监控端点，凭证零落盘）——四态评估（充足/高压/耗尽/未知）、EXHAUSTED 时按最晚窗口 reset 时间精确规划唤醒、PRESSURE 提前 checkpoint；凭证不可得或端点失败时 fail-open 回退周期性存活探针；`/glm-conductor:quota` 诊断命令随时查看用量与评估
-- **强制层（v2 alpha2）**：完成契约由插件钩子确定性执行——Stop 完成门四重检查（① ownership：实际改动文件 ⊆ 声明范围，越界改动无法静默通过；② 验证：required 命令全部由主会话亲自跑过；③ 审查：high-assurance 任务须有 ship 裁决；④ 证据新鲜度：验证/审查证据经 `task_fingerprint`（基线修订 + 相关文件集归一化 sha256）绑定到记录时的仓库状态，任何后续编辑使证据过期并拦截完成）+ Layer B 派发注入（每次子代理派发前注入 ownership 提醒）+ Bash 策略门控（v2 beta1：表驱动 allow/ask/deny——破坏性命令恒拒，高保障任务的推送/迁移/发布/权限变更升级为 ask）；任务状态层（`state.json`）与 append-only 执行日志（`events.jsonl`）本地落盘；钩子失效按降级可见处理（`ENFORCEMENT DEGRADED`），绝不因强制层故障卡死会话（详见 [架构文档](./docs/architecture.md) §8）
+- **强制层（v2 alpha2）**：完成契约由插件钩子确定性执行——Stop 完成门四重检查（① ownership：实际改动文件 ⊆ 声明范围，越界改动无法静默通过；② 验证：required 命令全部由主会话亲自跑过；③ 审查：high-assurance 任务须有 ship 裁决；④ 证据新鲜度：验证/审查证据经 `task_fingerprint`（基线修订 + 相关文件集归一化 sha256）绑定到记录时的仓库状态，任何后续编辑使证据过期并拦截完成）+ Layer B 派发注入（每次子代理派发前注入 ownership 提醒）+ Bash 策略门控（v2 beta1：表驱动 allow/ask/deny——破坏性命令恒拒，高保障任务的推送/迁移/发布/权限变更升级为 ask）；任务状态层（`state.json`）与 append-only 执行日志（`events.jsonl`）本地落盘；钩子失效按降级可见处理（`ENFORCEMENT DEGRADED`），绝不因强制层故障卡死会话（详见 [架构文档](./docs/architecture.md) §9）
 - **基于证据的路由重估**：路由可双向变化（ROUTE REASSESSMENT），但必须附新观察到的证据
 - **fail-closed 纪律**：所需子智能体或证据路径缺失时停止通道并提示，绝不静默降级或替换角色
 - **结构化契约**：五段式实施规格 + IMPLEMENTATION REPORT——无证据的完成声明无效
