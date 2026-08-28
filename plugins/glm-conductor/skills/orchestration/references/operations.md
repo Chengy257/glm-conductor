@@ -33,10 +33,10 @@
 
 ## 视觉通道运行细节
 
-- **采集分工**：主会话用其专属的 Browser/Computer Use 能力启动应用、执行交互、截图落盘。证据目录按任务隔离：`<工作区>/.glm-conductor/tasks/<continuity-id>/visual-evidence/`（continuity-id 由主会话按 continuity 技能的 CONTINUITY_ID 规则确定；foreground 一次性任务也要分配临时 id，保证目录不混用；任务结束由用户决定保留或删除）。主会话只采集不判定（纯文本模型）
+- **采集分工**：主会话用其专属的 Browser/Computer Use 能力启动应用、执行交互、截图落盘。证据目录按任务隔离：`<工作区>/.glm-conductor/tasks/<continuity-id>/visual-evidence/`（continuity-id 由主会话按 continuity 技能的 CONTINUITY_ID 规则生成——语义前缀+随机后缀；foreground 一次性任务也分配同格式的临时 ID，CONTINUITY_ID 即通用运行时任务标识，保证目录不混用；任务结束由用户决定保留或删除）。主会话只采集不判定（纯文本模型）
 - **判定分工**：visual-implementer 与 visual-reviewer 用 Read 亲自读取截图后判定；采集而不查看不算观察
-- **跨调用握手**：实施者以 `VISUAL_CAPTURE_REQUEST` 结束本次调用来索取证据，主会话采集后 resume 该实施者或发起新调用；不存在子代理在单次调用内等待父会话的通道（协议格式见 agents/visual-implementer.md）
-- **修正轮次**：每个 VISUAL ACCEPTANCE 验收点最多 3 轮实施-采集-判定循环；超出即 blocked 交回主会话做 ROUTE REASSESSMENT
+- **跨调用握手**：实施者以 `VISUAL_CAPTURE_REQUEST` 结束本次调用来索取证据，主会话采集后发起**新的 visual-implementer 调用**（规范路径）——新调用携带完整状态：五段式规格（含 VISUAL ACCEPTANCE）、当前 diff / 改动状态、上一轮的 VISUAL_CAPTURE_REQUEST、截图路径清单、VISUAL_ROUND 轮次号。仅当 ZCode 运行时已验证稳定的子代理 resume 机制时，才可作为可选优化 resume 原实施者，协议正确性不依赖 resume。不存在子代理在单次调用内等待父会话的通道（协议格式见 agents/visual-implementer.md）
+- **修正轮次**：每个 VISUAL ACCEPTANCE 验收点以 VISUAL_ROUND（1|2|3）跟踪，最多 3 轮实施-采集-判定循环；超出即 blocked 交回主会话做 ROUTE REASSESSMENT
 - **fail-closed**：主会话无法采集（无浏览器/桌面能力或应用无法启动）时，视觉通道停止，不得改为纯文本验证交付
 
 ## 修复与裁决失效流程

@@ -33,7 +33,7 @@ resumable / idle 任务在每个实质性里程碑后（不是每次工具调用
 CONTINUITY CHECKPOINT
 
 CONTINUITY_ID:
-<稳定且工作区内唯一的任务标识>
+<语义前缀>-<随机十六进制后缀>（如 redesign-settings-page-7f3a2c；生成契约见下）
 
 GOAL:
 <原始目标>
@@ -84,12 +84,28 @@ IDLE_TASK_ID:
 
 ### CONTINUITY_ID 规则
 
-- 生成后跨恢复保持稳定（写入 checkpoint 后不得再变）
-- 在当前工作区内唯一——并行长任务各持不同 ID
-- 定时/闲时的 resume 指令必须携带它
+格式——生成即机械唯一，不依赖命名约定：
+
+```text
+<语义前缀>-<6~8 位随机十六进制后缀>
+```
+
+示例：`redesign-settings-page-7f3a2c`、`parser-refactor-a92c1d`、`migrate-auth-20260828-231502`（时间戳后缀可接受，随机后缀优先——并行同时创建的任务也不碰撞）。
+
+生成契约：
+
+1. 任务首次进入 resumable / idle 时生成一次
+2. 随 checkpoint 持久化
+3. 恢复期间绝不重新生成
+4. checkpoint 路径、视觉证据路径、定时 resume prompt、automation 关联、完成清理，全部使用同一精确 ID
+5. 在当前工作区内必须唯一——语义前缀人类可读是可选收益，唯一性是强制要求
+6. 生成后跨恢复保持稳定（写入 checkpoint 后不得再变）
+
+查找与隔离纪律：
+
+- 定时/闲时的 resume 指令必须携带精确 ID
 - 恢复与清理都按它定位 `.glm-conductor/tasks/<id>/` 目录
 - 视觉证据目录也按它隔离（见 orchestration 技能的视觉通道运行细节）
-- 推荐格式：短横线连接的语义化短语，如 `migrate-auth-endpoints`、`redesign-settings-page`；或目标关键词加日期，如 `refactor-parser-20260828`
 - 不以"最新 checkpoint"作为查找策略——并行任务下"最新"是歧义的
 
 checkpoint 原则清单：

@@ -228,7 +228,7 @@ GAPS:
 - **定位**：视觉/交互任务的有界实施执行者（visual bounded implementation executor）
 - **模型**：GLM-5.3-Flash（多模态），思考档位 high（已固定，不附加覆盖）
 - **用途**：仅限声明为 delegate/full 的视觉/交互任务实施——执行含 VISUAL ACCEPTANCE 扩展的五段式规格
-- **视觉反馈环（跨调用拓扑）**：实施者需要证据时返回 `VISUAL_CAPTURE_REQUEST` 并结束本次调用（不等待、不虚构）→ 主会话用其专属 Browser/Computer Use 采集截图落盘（主会话专用，子代理在 ZCode 策略层被禁止使用）→ 主会话恢复实施者（resume 保留上下文）或发起携带规格、当前 diff 与截图路径的新调用 → 实施者用 Read 亲自读取截图判定 → 不符合则修正并再次返回 `VISUAL_CAPTURE_REQUEST` → 每个 VISUAL ACCEPTANCE 验收点最多 3 轮采集-判定循环，禁止无限视觉打磨。协议格式见 agents/visual-implementer.md 的 VISUAL_CAPTURE_REQUEST 节
+- **视觉反馈环（跨调用拓扑）**：实施者需要证据时返回 `VISUAL_CAPTURE_REQUEST` 并结束本次调用（不等待、不虚构）→ 主会话用其专属 Browser/Computer Use 采集截图落盘（主会话专用，子代理在 ZCode 策略层被禁止使用）→ 主会话发起携带完整状态的新调用（规范路径：五段式规格含 VISUAL ACCEPTANCE、当前 diff / 改动状态、上一轮 VISUAL_CAPTURE_REQUEST、截图路径、VISUAL_ROUND 轮次号；仅当运行时已验证稳定 resume 机制时才可作为可选优化，协议正确性不依赖 resume） → 实施者用 Read 亲自读取截图判定 → 不符合则修正并再次返回 `VISUAL_CAPTURE_REQUEST` → 每个 VISUAL ACCEPTANCE 验收点以 VISUAL_ROUND（1|2|3）跟踪，最多 3 轮采集-判定循环，禁止无限视觉打磨。协议格式见 agents/visual-implementer.md 的 VISUAL_CAPTURE_REQUEST 节
 - **重估信号**：验收标准不清、规格有歧义或视觉证据不可得时返回 blocked，交回主会话处理；不得以文字推测替代视觉验证
 - **报告**：使用含 FUNCTIONAL VERIFIED 与 VISUAL VERIFIED 两节的 IMPLEMENTATION REPORT 模板（模板见 agents/visual-implementer.md）
 - **生成方式**：`subagent_type: glm-conductor:visual-implementer`

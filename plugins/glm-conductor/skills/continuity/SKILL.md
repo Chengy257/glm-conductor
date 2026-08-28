@@ -43,7 +43,7 @@ resumable / idle 任务在实质性里程碑后（不是每次工具调用后）
 
 - checkpoint 是导航状态，不是仓库真相源——不复制完整 diff、不复制大量代码、不声称未验证内容
 - repository 状态始终优先：checkpoint 与仓库冲突时以仓库为准
-- 每个长任务一个独立的 CONTINUITY_ID 与专属目录；并行长任务互不覆盖、互不删除
+- 每个长任务一个机械唯一（语义前缀+随机后缀）的 CONTINUITY_ID 与专属目录；并行长任务互不覆盖、互不删除
 
 ## Runtime State 与 Git
 
