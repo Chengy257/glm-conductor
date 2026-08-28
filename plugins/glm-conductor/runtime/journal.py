@@ -49,7 +49,9 @@ RECOMMENDED_EVENTS = (
     "review",              # 审查者裁决（含 verdict）
     "checkpoint_written",  # checkpoint 落盘
     "gate_blocked",        # Stop 完成门拦截
+    "gate_passed",         # 完成门校验通过放行（断链 + 审计）
     "gate_exhausted",      # 完成门连续 block 达运行时上限后放行
+    "gate_degraded",       # git 不可用等降级跳过校验
     "completed",
     "cancelled",
     "failed",
