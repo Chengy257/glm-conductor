@@ -62,14 +62,20 @@
          必须为字符串，args 中以 ${ZCODE_PLUGIN_ROOT}/ 开头的路径替换为
          插件根 plugins/glm-conductor 后必须实际存在；
      14. runtime 状态层与技能契约标记：plugins/glm-conductor/runtime/ 下的
-         __init__.py / state.py / journal.py 与 tests/ 下的 test_state.py /
-         test_journal.py 均存在且非空；runtime/state.py 必含 TASK_ID_KEYS /
-         CONTINUITY_ID（legacy 归一证据）/ TERMINAL_STATUSES，
-         runtime/journal.py 必含 RECOMMENDED_EVENTS / events.jsonl；
+         __init__.py / state.py / journal.py / ownership.py、hooks/ 下的
+         stop_gate.py / pre_tool_use.py、tests/ 下的 test_state.py /
+         test_journal.py / test_ownership.py 均存在且非空；runtime/state.py
+         必含 TASK_ID_KEYS / CONTINUITY_ID（legacy 归一证据）/
+         TERMINAL_STATUSES，runtime/journal.py 必含 RECOMMENDED_EVENTS /
+         events.jsonl，runtime/ownership.py 必含 classify_paths /
+         git_touched_files，hooks/stop_gate.py 必含 gate_blocked /
+         gate_passed / gate_exhausted（Layer A 记账词汇），
+         hooks/pre_tool_use.py 必含 additionalContext（Layer B 注入）；
          skills/continuity/SKILL.md 必含 state.json / events.jsonl /
          task_created，skills/continuity/references/long-horizon.md 必含
          state.json / events.jsonl，skills/orchestration/SKILL.md 必含
-         state.json / route_selected。
+         state.json / route_selected，skills/enforcement/SKILL.md 必含
+         ENFORCEMENT DEGRADED / gate_exhausted / Layer A / Layer B。
 
     扫描范围说明：检查 5/6/7/8（及 8 内的旧名负向检查）的扫描范围是显式
     列表——plugins/ 全部文件 + marketplace.json + README.md +
@@ -190,18 +196,31 @@ RUNTIME_DIR = os.path.join(REPO_ROOT, "plugins", "glm-conductor", "runtime")
 RUNTIME_INIT = os.path.join(RUNTIME_DIR, "__init__.py")
 STATE_PY = os.path.join(RUNTIME_DIR, "state.py")
 JOURNAL_PY = os.path.join(RUNTIME_DIR, "journal.py")
+OWNERSHIP_PY = os.path.join(RUNTIME_DIR, "ownership.py")
+HOOKS_DIR = os.path.join(REPO_ROOT, "plugins", "glm-conductor", "hooks")
+STOP_GATE_PY = os.path.join(HOOKS_DIR, "stop_gate.py")
+PRE_TOOL_USE_PY = os.path.join(HOOKS_DIR, "pre_tool_use.py")
+ENFORCEMENT_SKILL = os.path.join(SKILLS_DIR, "enforcement", "SKILL.md")
 TESTS_DIR = os.path.join(REPO_ROOT, "tests")
 TEST_STATE = os.path.join(TESTS_DIR, "test_state.py")
 TEST_JOURNAL = os.path.join(TESTS_DIR, "test_journal.py")
+TEST_OWNERSHIP = os.path.join(TESTS_DIR, "test_ownership.py")
 ORCHESTRATION_SKILL = os.path.join(SKILLS_DIR, "orchestration", "SKILL.md")
-RUNTIME_REQUIRED_FILES = (RUNTIME_INIT, STATE_PY, JOURNAL_PY)
-TEST_REQUIRED_FILES = (TEST_STATE, TEST_JOURNAL)
+RUNTIME_REQUIRED_FILES = (
+    RUNTIME_INIT, STATE_PY, JOURNAL_PY, OWNERSHIP_PY)
+LAYER_REQUIRED_FILES = (STOP_GATE_PY, PRE_TOOL_USE_PY)
+TEST_REQUIRED_FILES = (TEST_STATE, TEST_JOURNAL, TEST_OWNERSHIP)
 STATE_REQUIRED_MARKERS = ("TASK_ID_KEYS", "CONTINUITY_ID", "TERMINAL_STATUSES")
 JOURNAL_REQUIRED_MARKERS = ("RECOMMENDED_EVENTS", "events.jsonl")
+OWNERSHIP_REQUIRED_MARKERS = ("classify_paths", "git_touched_files")
+STOP_GATE_REQUIRED_MARKERS = ("gate_blocked", "gate_passed", "gate_exhausted")
+PRE_TOOL_USE_REQUIRED_MARKERS = ("additionalContext",)
 SKILL_CONTRACT_MARKERS = (
     (CONTINUITY_SKILL, ("state.json", "events.jsonl", "task_created")),
     (LONG_HORIZON, ("state.json", "events.jsonl")),
     (ORCHESTRATION_SKILL, ("state.json", "route_selected")),
+    (ENFORCEMENT_SKILL,
+     ("ENFORCEMENT DEGRADED", "gate_exhausted", "Layer A", "Layer B")),
 )
 
 
@@ -847,6 +866,7 @@ def check_14_runtime_state(results):
     # 14.1 / 14.2 存在且非空（>0 字节）
     for group_name, paths in (
             ("runtime 状态层", RUNTIME_REQUIRED_FILES),
+            ("强制层钩子", LAYER_REQUIRED_FILES),
             ("单元测试", TEST_REQUIRED_FILES)):
         for path in paths:
             shown = rel_display(path)
@@ -865,6 +885,9 @@ def check_14_runtime_state(results):
     marker_plans = (
         (STATE_PY, STATE_REQUIRED_MARKERS),
         (JOURNAL_PY, JOURNAL_REQUIRED_MARKERS),
+        (OWNERSHIP_PY, OWNERSHIP_REQUIRED_MARKERS),
+        (STOP_GATE_PY, STOP_GATE_REQUIRED_MARKERS),
+        (PRE_TOOL_USE_PY, PRE_TOOL_USE_REQUIRED_MARKERS),
     ) + SKILL_CONTRACT_MARKERS
     for path, markers in marker_plans:
         shown = rel_display(path)
