@@ -1,6 +1,6 @@
 # GLM Conductor 架构（权威文档）
 
-> 本文档是 GLM Conductor 的**唯一架构真相源**，描述 v2.0.0-alpha2（v2-dev 开发线）的实际运行时行为。
+> 本文档是 GLM Conductor 的**唯一架构真相源**，描述 v2.0.0-alpha3（v2-dev 开发线）的实际运行时行为。
 > 契约细节以插件目录为准（`plugins/glm-conductor/` 下的 agents 与 skills）；本文档与其保持一致，冲突时以修复到一致为准，不得偏离开源文档单独演化。
 > 历史提案存于 `docs/history/`，仅作参考，不构成当前实现依据。
 
@@ -197,7 +197,18 @@ checkpoint 是导航状态，不是仓库真相源：不复制完整 diff、不�
 - 完成清理只作用于本任务：删除 `.glm-conductor/tasks/<task-id>/` 单个目录、停止关联的定时任务、终止闲时排队，避免幽灵唤醒
 - `.glm-conductor/` 是本地运行时状态：优先写入 `.git/info/exclude` 本地排除，不自动修改 tracked `.gitignore`
 
-## 8. 强制层（v2 alpha2）
+### 7.4 Quota-Aware Continuity（alpha3）
+
+额度感知是连续性层的增强（`runtime/quota/`），**不是路由轴**——额度决定"何时能继续工作"，不决定"谁来做"，不据此自动换模型：
+
+- **provider 抽象与解析**（§24-§27）：`provider.py` 定抽象边界（QuotaProvider / QuotaProviderError 五类错误），`parser.py` 把监控端点响应解析为标准化快照——按语义字段判窗（unit=3/number=5 → five_hour；unit=6/number=1 → weekly；与 type 无关），周窗可选（lite 套餐实测无周窗），容忍加性未知字段；`zai.py` / `bigmodel.py` 两个适配器走 `_http.py` 共享硬化层
+- **安全条款**（§37 全部代码级落地并有测试锚定）：HTTPS only、严格 host allowlist（api.z.ai / open.bigmodel.cn，构造期拦截、绝不向清单外转发凭证）、短超时（5s）、限长响应（64KiB）、重定向禁用、原始响应不落盘、凭证零落盘（Authorization 头只存在于请求构造处，错误消息模板不含 key）
+- **凭证链**（§36 provider-api 模式）：环境变量 `GLM_CONDUCTOR_QUOTA_API_KEY` 优先，已登录 ZCode 的 `~/.zcode/v2/config.json` provider 配置为文档化回退；两者皆不可得 → unavailable → 周期性探针回退
+- **评估与规划**（§28-§33）：`scheduler.py` 纯函数四态评估（AVAILABLE / PRESSURE / EXHAUSTED / UNKNOWN，fail-open）与恢复规划——PRESSURE 在安全里程碑落 checkpoint；EXHAUSTED 取全部阻塞窗 max(reset)+grace 精确唤醒且唤醒后强制刷新；reset 未知或数据不可得 → 周期性回退，绝不虚构 reset 时间
+- **诊断面**（§43）：`/glm-conductor:quota` 命令驱动 `report.py`（文本 + `--json` 双输出，zai→bigmodel 有界探测，退出码恒 0，零凭证输出）
+- **查询时机**（§34）：只在刷新点查询（任务开始 / 路由选定后 / 大段派发前 / 里程碑后 / 调度恢复前后）+ 实例内短 TTL 缓存，不做常驻轮询
+
+## 8. 强制层（alpha2 起，四重检查）
 
 v2 把关键运行时契约从提示词升级为确定性强制。强制层由插件钩子（`hooks/hooks.json` 声明，安装后自动启用、仅新会话生效）与运行时模块（`runtime/`，纯标准库 python3）组成。
 
@@ -251,9 +262,9 @@ PreToolUse 钩子（matcher `Agent|Task`，`hooks/pre_tool_use.py`）在每次�
 
 - `scripts/validate_plugin.py`（纯标准库，14 项检查）+ CI（`.github/workflows/validate.yml`，静态校验 + 单元测试）维护契约一致性：扫描 `plugins/`、`README.md`、`marketplace.json` 与本文档，`docs/history/` 不参与当前契约校验
 - 检查覆盖：旧名清理、禁词、quota 否定式声明、任务专属 checkpoint 路径、视觉协议标记、TASK_ID 必含、视觉新调用规范措辞、`plugin.json` 与 CHANGELOG 的版本一致性、钩子清单完整性（含脚本存在性）、runtime 状态层与技能契约标记
-- 运行时模块（`runtime/`）与钩子（`hooks/`）各配单元测试与子进程冒烟（`tests/`，239 用例：状态层 87、日志 26、ownership 38、指纹 52、stop_gate 29、pre_tool_use 7，含 §98 集成冒烟场景 3-6），随 CI 执行
+- 运行时模块（`runtime/`）、钩子（`hooks/`）与 quota 子系统各配单元测试与子进程冒烟（`tests/`，394 用例：状态层 87、日志 26、ownership 38、指纹 59、stop_gate 32、pre_tool_use 7、quota 解析 29/抽象 12/适配器 25/调度器 37/凭证 25/诊断 17，含 §98 集成冒烟场景 3-6 与 §45 调度场景），随 CI 执行
 - 版本策略：`plugin.json` 版本、CHANGELOG 最新条目、git tag / GitHub Release 三者保持一致
 
 ## 11. 演化边界
 
-v2 开发在 `v2-dev` 分支进行（`main` 保持在 v1.1.0 发布态，里程碑完成后再合入）。当前处于 **2.0.0-alpha2**（alpha1 强制基座 + 证据完整性：指纹层 + 完成门四重检查），后续里程碑：alpha3 额度感知连续性 → beta1 上下文与权限 → beta2 任务管理 → rc1 并行安全 → stable。除非实际使用暴露出具体能力缺口，不新增路由维度或角色；强制层只针对高置信不变量（越界、缺失证据、过期证据），不做语义解释型拦截。
+v2 开发在 `v2-dev` 分支进行（`main` 保持在 v1.1.0 发布态，里程碑完成后再合入）。当前处于 **2.0.0-alpha3**（alpha1 强制基座 + alpha2 证据完整性 + alpha3 额度感知连续性：provider-api 监控端点、四态评估、reset 感知唤醒、诊断命令），后续里程碑：beta1 上下文与权限 → beta2 任务管理 → rc1 并行安全 → stable。除非实际使用暴露出具体能力缺口，不新增路由维度或角色；强制层只针对高置信不变量（越界、缺失证据、过期证据），不做语义解释型拦截。

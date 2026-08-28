@@ -1,5 +1,18 @@
 # Changelog
 
+## 2.0.0-alpha3
+
+v2 第三里程碑——**额度感知连续性**（Quota-Aware Continuity，依据升级指南 §23-§45，实施计划轮 5 块 B5；另清偿轮 4 终审全部 P2 遗留）：
+
+- **quota 子系统（`runtime/quota/`）**：`provider.py` 抽象边界（QuotaProvider / 五类错误词汇 / host allowlist）+ `parser.py` 标准化解析（语义字段判窗 unit/number 而非 type、周窗可选——lite 套餐实测无周窗、容忍加性未知字段、epoch ms → ISO reset）+ `scheduler.py` 纯函数四态评估（AVAILABLE/PRESSURE/EXHAUSTED/UNKNOWN，fail-open）与恢复规划（EXHAUSTED → 全部阻塞窗 max(reset)+grace 精确唤醒且唤醒后强制刷新；reset 未知 → 周期性回退，绝不虚构 reset）
+- **HTTP 适配器（zai / bigmodel）安全硬化（§37 全条款测试锚定）**：HTTPS only、严格 host allowlist（构造期拦截，绝不向清单外转发凭证）、短超时 5s、限长响应 64KiB、重定向禁用、原始响应不落盘、**凭证零落盘**（Authorization 头只存在于请求构造处，错误消息零 key 拼接；鉴权格式 `Authorization: <API Key>` 无 Bearer 前缀，与官方插件一致的实测格式）；实例内 TTL 缓存 + force 刷新
+- **凭证链（§36 provider-api 模式）**：环境变量 `GLM_CONDUCTOR_QUOTA_API_KEY` 优先，已登录 ZCode 的 `~/.zcode/v2/config.json` provider 配置回退；两者皆无 → unavailable → 周期性存活探针（调度触发本身即探针的既有机制保持不变）
+- **诊断命令 `/glm-conductor:quota`**：`report.py` 文本 + `--json` 双输出（三态：unavailable 含配置指引 / 每 provider 失败 kind / 窗口用量 + scheduler 评估与规划）；zai→bigmodel 有界探测；退出码恒 0；零凭证输出
+- **措辞全面反转（B5.6）**：v1.1「无 quota API」绝对化声明（当时防虚构接口）在 README / continuity 技能 / long-horizon / architecture 九处反转为 provider-api 实态；不变边界保留（原生插件级接口仍不存在、不硬编码 5h、额度不作路由轴）
+- **轮 4 终审 P2 清偿**：词汇外 review verdict 不再 default-allow（按 review_missing）；visual 证据缺 recorded 恒 stale；每次 Stop git 子调用 1+2N → 恒 2（touched/base 跨任务复用）；补 exhausted 后新周期重 block 单测；commit 改基线 → 证据 stale 的红线入契约
+- **校验器**：7c 禁止「无 quota API」绝对化措辞复现；检查 14 纳入 quota 八模块、五测试文件、诊断命令文件与 scheduler/http/credentials/report + 技能标记；agent 引用正则不再误报斜杠命令
+- **测试**：394 用例（新增 145：quota 解析 29 / 抽象 12 / 适配器 25 / 调度器 37 / 凭证 25 / 诊断 17；指纹 +7 / stop_gate +3 为 P2 回归）
+
 ## 2.0.0-alpha2
 
 v2 第二里程碑——**证据完整性**：「任何修复使先前验证/审查失效」从提示词契约升级为完成门的自动强制（依据 docs/glm-conductor-v2-upgrade-guide-final.md §17-§22，实施计划轮 4 块 B3/B4）：
