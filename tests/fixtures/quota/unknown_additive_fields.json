@@ -1,0 +1,50 @@
+{
+  "success": true,
+  "code": 200,
+  "msg": "成功",
+  "traceId": "monitor-9f8e7d6c",
+  "experimentFlags": {"usageV3Rollout": true, "grayTrafficPercent": 15},
+  "data": {
+    "level": "pro",
+    "region": "cn",
+    "featureToggles": ["newPricing", "detailView"],
+    "limits": [
+      {
+        "type": "TOKENS_LIMIT",
+        "unit": 3,
+        "number": 5,
+        "percentage": 82.5,
+        "currentValue": 8250000,
+        "usage": 8250000,
+        "remaining": 1750000,
+        "usageDetails": [
+          {"modelName": "glm-5.3", "usage": 6800000}
+        ],
+        "nextResetTime": 1787899502000,
+        "schemaVersion": 99,
+        "bucketDetail": [
+          {"window": "peak", "usage": 4200000},
+          {"window": "offpeak", "usage": 4050000}
+        ],
+        "newPercentMetric": {"p50": 80.1, "p99": 95.7},
+        "displayHint": "banner",
+        "metadata": {"source": "quota-engine", "revision": 7}
+      },
+      {
+        "type": "TOKENS_LIMIT",
+        "unit": 6,
+        "number": 1,
+        "percentage": 45,
+        "currentValue": 45250000,
+        "usage": 45250000,
+        "remaining": 54750000,
+        "usageDetails": [],
+        "nextResetTime": 1788265200000,
+        "schemaVersion": 99,
+        "policyTags": ["weekly", "aggregated"],
+        "forecast": {"projectedExhaust": "2026-09-01T09:30:00Z"},
+        "metadata": {"source": "quota-engine", "revision": 7}
+      }
+    ]
+  }
+}

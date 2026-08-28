@@ -1,0 +1,34 @@
+{
+  "success": true,
+  "code": 200,
+  "msg": "成功",
+  "data": {
+    "level": "lite",
+    "limits": [
+      {
+        "type": "TOKENS_LIMIT",
+        "unit": 3,
+        "number": 5,
+        "percentage": 12.5,
+        "currentValue": 125000,
+        "usage": 125000,
+        "remaining": 875000,
+        "usageDetails": [
+          {"modelName": "glm-4.7-air", "usage": 125000}
+        ],
+        "nextResetTime": 1787899502000
+      },
+      {
+        "type": "TIME_LIMIT",
+        "unit": 4,
+        "number": 1,
+        "percentage": 8,
+        "currentValue": 24,
+        "usage": 24,
+        "remaining": 276,
+        "usageDetails": [],
+        "nextResetTime": 1787919600000
+      }
+    ]
+  }
+}

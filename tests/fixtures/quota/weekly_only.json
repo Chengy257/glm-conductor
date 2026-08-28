@@ -1,0 +1,21 @@
+{
+  "success": true,
+  "code": 200,
+  "msg": "成功",
+  "data": {
+    "level": "pro",
+    "limits": [
+      {
+        "type": "TOKENS_LIMIT",
+        "unit": 6,
+        "number": 1,
+        "percentage": 33.33,
+        "currentValue": 33330000,
+        "usage": 33330000,
+        "remaining": 66670000,
+        "usageDetails": [],
+        "nextResetTime": 1788265200000
+      }
+    ]
+  }
+}

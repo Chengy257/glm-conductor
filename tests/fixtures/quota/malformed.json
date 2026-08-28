@@ -1,0 +1,9 @@
+{
+  "success": true,
+  "code": 200,
+  "msg": "成功",
+  "data": {
+    "level": "lite",
+    "note": "limits payload absent"
+  }
+}

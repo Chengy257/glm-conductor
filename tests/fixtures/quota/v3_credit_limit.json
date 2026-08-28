@@ -1,0 +1,35 @@
+{
+  "success": true,
+  "code": 200,
+  "msg": "成功",
+  "data": {
+    "level": "max",
+    "limits": [
+      {
+        "type": "CREDIT_LIMIT",
+        "unit": 3,
+        "number": 5,
+        "percentage": 66,
+        "currentValue": 66,
+        "usage": 66,
+        "remaining": 34,
+        "usageDetails": [
+          {"modelName": "glm-5.3", "usage": 41.5},
+          {"modelName": "glm-4.7-air", "usage": 24.5}
+        ],
+        "nextResetTime": 1787899502000
+      },
+      {
+        "type": "CREDIT_LIMIT",
+        "unit": 6,
+        "number": 1,
+        "percentage": 10.5,
+        "currentValue": 210,
+        "usage": 210,
+        "remaining": 1790,
+        "usageDetails": [],
+        "nextResetTime": 1788265200000
+      }
+    ]
+  }
+}
