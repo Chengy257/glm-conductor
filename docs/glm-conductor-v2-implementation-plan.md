@@ -117,6 +117,13 @@
 2. **_http.py 不可达防御代码**：`url.startswith("https://")` 对拼接结果恒真——保留作 belt-and-suspenders 并加注释注明，或下轮清理。
 3. **默认传输测试打磨**：`test_quota_adapters.py` 对默认 urllib 传输的限长读取只有间接断言、3xx-不跟随只有 handler 契约级锚定——可补离线端到端（如本地 socket/伪 server）。
 
+## 5.3 轮 6 终审微瑕（不要求修复，beta2 顺手清）
+
+终审 ship（增量确认 CONFIRMED）遗留两条非阻断项（2026-08-29）：
+
+1. `skills/enforcement/SKILL.md` §Layer B 节「确定性强制只在 Layer A」措辞在决策级门控加入后略绝对化（上下文已自我澄清）——改为「确定性完成门强制在 Layer A」。
+2. enforcement frontmatter description 未含 Bash 策略门控关键词（影响技能触发命中率）——补 "Bash 策略门控（allow/ask/deny）"。
+
 附注（residual risk 登记即可）：默认 opener 含 ProxyHandler，用户设置 HTTPS_PROXY 时请求经代理隧道（CONNECT 到 allowlisted host，端到端 TLS 不暴露 Authorization）——标准库默认行为，非 §37 违规；严格零代理部署方需知悉（可写入 README 运行时限制）。
 
 ## 6. B0.2 feature request 文稿要点（主会话撰写后随轮 1 交付）
