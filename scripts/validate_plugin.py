@@ -293,7 +293,7 @@ SKILL_CONTRACT_MARKERS = (
       "Quota-Aware Scheduling", "GLM_CONDUCTOR_QUOTA_API_KEY")),
     (LONG_HORIZON, ("state.json", "events.jsonl")),
     (ORCHESTRATION_SKILL, ("state.json", "route_selected", "task_fingerprint",
-     "ROUTING PREFLIGHT", "工作单元与任务图")),
+     "ROUTING PREFLIGHT", "工作单元与任务图", "租约")),
     (ROLE_CONTRACTS, ("TASK CONTEXT PACK", "FILES AND OWNERSHIP")),
     (ENFORCEMENT_SKILL,
      ("ENFORCEMENT DEGRADED", "gate_exhausted", "Layer A", "Layer B",

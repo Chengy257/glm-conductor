@@ -13,10 +13,10 @@
 - **独立只读终审**：assurance:high 的任务由全新上下文的只读审查者给出 `ship` / `fix-first` / `rethink` 裁决，任何修复使裁决失效
 - **视觉通道**：前端/界面任务由 visual-implementer（GLM-5.3-Flash 多模态）实施，主会话负责驱动采集截图、Flash 角色负责视觉判定——GLM-5.3 纯文本的边界被显式分工补齐
 - **长任务连续性**：continuity 作为与路由正交的生命周期层（foreground / resumable / idle），checkpoint 检查点 + 结构化恢复流程，让长任务可以跨会话中断、跨额度窗口安全续跑（见下文[长任务连续性](#长任务连续性)）
-- **任务与工作单元管理（v2 beta2）**：长任务可分解为 Work Unit 依赖图（十状态生命周期、环校验、确定性拓扑序）；中断恢复按证据对账——completed 不重跑、running 三分（干净重派/证据完成/待主会话亲验）、verifying 态由主会话裁决；显式 Join 强制任务级全局验证（跨单元集成验证永不自动替代）
-- **有界并行（v2 rc1，experimental）**：文件租约层（任务专属 owner map、全有或全无获取、异 owner 冲突拒绝）+ 派发准入五道闸（quota 四态 / ownership 不相交 / 租约 / max_workers 预算）；并行上限 4、资格 = ownership 不相交或有效租约保护；默认仍串行，串行永远合法
-- **额度感知连续性（v2 alpha3）**：resumable 任务可查询 Coding Plan 用量（已验证的 provider-api 监控端点，凭证零落盘）——四态评估（充足/高压/耗尽/未知）、EXHAUSTED 时按最晚窗口 reset 时间精确规划唤醒、PRESSURE 提前 checkpoint；凭证不可得或端点失败时 fail-open 回退周期性存活探针；`/glm-conductor:quota` 诊断命令随时查看用量与评估
-- **强制层（v2 alpha2）**：完成契约由插件钩子确定性执行——Stop 完成门四重检查（① ownership：实际改动文件 ⊆ 声明范围，越界改动无法静默通过；② 验证：required 命令全部由主会话亲自跑过；③ 审查：high-assurance 任务须有 ship 裁决；④ 证据新鲜度：验证/审查证据经 `task_fingerprint`（基线修订 + 相关文件集归一化 sha256）绑定到记录时的仓库状态，任何后续编辑使证据过期并拦截完成）+ Layer B 派发注入（每次子代理派发前注入 ownership 提醒）+ Bash 策略门控（v2 beta1：表驱动 allow/ask/deny——破坏性命令恒拒，高保障任务的推送/迁移/发布/权限变更升级为 ask）；任务状态层（`state.json`）与 append-only 执行日志（`events.jsonl`）本地落盘；钩子失效按降级可见处理（`ENFORCEMENT DEGRADED`），绝不因强制层故障卡死会话（详见 [架构文档](./docs/architecture.md) §9）
+- **任务与工作单元管理（v2）**：长任务可分解为 Work Unit 依赖图（十状态生命周期、环校验、确定性拓扑序）；中断恢复按证据对账——completed 不重跑、running 三分（干净重派/证据完成/待主会话亲验）、verifying 态由主会话裁决；显式 Join 强制任务级全局验证（跨单元集成验证永不自动替代）
+- **有界并行（v2，experimental）**：文件租约层（任务专属 owner map、全有或全无获取、异 owner 冲突拒绝）+ 派发准入五道闸（quota 四态 / ownership 不相交 / 租约 / max_workers 预算）；并行上限 4、资格 = ownership 不相交或有效租约保护；默认仍串行，串行永远合法
+- **额度感知连续性（v2）**：resumable 任务可查询 Coding Plan 用量（已验证的 provider-api 监控端点，凭证零落盘）——四态评估（充足/高压/耗尽/未知）、EXHAUSTED 时按最晚窗口 reset 时间精确规划唤醒、PRESSURE 提前 checkpoint；凭证不可得或端点失败时 fail-open 回退周期性存活探针；`/glm-conductor:quota` 诊断命令随时查看用量与评估
+- **强制层（v2）**：完成契约由插件钩子确定性执行——Stop 完成门四重检查（① ownership：实际改动文件 ⊆ 声明范围，越界改动无法静默通过；② 验证：required 命令全部由主会话亲自跑过；③ 审查：high-assurance 任务须有 ship 裁决；④ 证据新鲜度：验证/审查证据经 `task_fingerprint`（基线修订 + 相关文件集归一化 sha256）绑定到记录时的仓库状态，任何后续编辑使证据过期并拦截完成）+ Layer B 派发注入（每次子代理派发前注入 ownership 提醒）+ Bash 策略门控（v2 beta1：表驱动 allow/ask/deny——破坏性命令恒拒，高保障任务的推送/迁移/发布/权限变更升级为 ask）；任务状态层（`state.json`）与 append-only 执行日志（`events.jsonl`）本地落盘；钩子失效按降级可见处理（`ENFORCEMENT DEGRADED`），绝不因强制层故障卡死会话（详见 [架构文档](./docs/architecture.md) §9）
 - **基于证据的路由重估**：路由可双向变化（ROUTE REASSESSMENT），但必须附新观察到的证据
 - **fail-closed 纪律**：所需子智能体或证据路径缺失时停止通道并提示，绝不静默降级或替换角色
 - **结构化契约**：五段式实施规格 + IMPLEMENTATION REPORT——无证据的完成声明无效
@@ -226,8 +226,8 @@ GLM Conductor 的连续性编排基于 ZCode 原生的本地会话生命周期�
 - **闲时任务**：可用性与创建上限取决于 ZCode 版本与账号能力
 - **子智能体**：不能再派生子智能体（结构天然扁平）；只能看到会话启动时已连接的 MCP 服务，跨会话恢复后需重新确认所需服务可用
 - **子智能体运行方式**：前台调用受支持；后台子智能体不应假定可用（编排不依赖 run_in_background 语义）
-- **额度感知（v2 alpha3）**：resumable 任务可经 `/glm-conductor:quota` 诊断与 provider-api 监控端点查询 Coding Plan 用量（5h/周窗、四态评估、reset 感知唤醒规划）；凭证不可得或端点失败时 fail-open 回退周期性存活探针——调度触发本身即探针，额度观察不作为路由轴
-- **强制层（v2 beta1 边界）**：四重检查（ownership / 验证 / 审查 / 证据新鲜度）已接入完成门；Bash 策略门控只覆盖主会话调用（角色级 deny 由子智能体工具白名单负责）；引用破坏性文本的字符串与 git rm -r --cached 会被保守误拒（登记取舍）；有界并行已启用（上限 4，experimental），租约读写以主会话单编排者为前提（多会话同任务目录并行操作不在支持面内）。钩子不作用于子代理内部（ZCode 子会话不触发钩子——故强制在完成边界而非写前拦截）；`python3` 须在 PATH（见前置要求），缺失时强制层降级（stderr 报 `ENFORCEMENT DEGRADED`，不阻断会话）；强制层随插件分发，仅安装/更新后的新会话生效
+- **额度感知（v2）**：resumable 任务可经 `/glm-conductor:quota` 诊断与 provider-api 监控端点查询 Coding Plan 用量（5h/周窗、四态评估、reset 感知唤醒规划）；凭证不可得或端点失败时 fail-open 回退周期性存活探针——调度触发本身即探针，额度观察不作为路由轴
+- **强制层（v2 边界）**：四重检查（ownership / 验证 / 审查 / 证据新鲜度）已接入完成门；Bash 策略门控只覆盖主会话调用（角色级 deny 由子智能体工具白名单负责）；引用破坏性文本的字符串与 git rm -r --cached 会被保守误拒（登记取舍）；有界并行已启用（上限 4，experimental），租约读写以主会话单编排者为前提（多会话同任务目录并行操作不在支持面内）。钩子不作用于子代理内部（ZCode 子会话不触发钩子——故强制在完成边界而非写前拦截）；`python3` 须在 PATH（见前置要求），缺失时强制层降级（stderr 报 `ENFORCEMENT DEGRADED`，不阻断会话）；强制层随插件分发，仅安装/更新后的新会话生效
 
 ## 贡献
 
