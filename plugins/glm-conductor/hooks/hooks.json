@@ -1,0 +1,20 @@
+{
+  "description": "GLM Conductor v2 enforcement hooks (ZCode plugin layout under hooks/hooks.json).",
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "process",
+            "command": "python3",
+            "args": [
+              "${ZCODE_PLUGIN_ROOT}/hooks/stop_gate.py"
+            ],
+            "timeoutMs": 5000,
+            "statusMessage": "glm-conductor: checking completion gate…"
+          }
+        ]
+      }
+    ]
+  }
+}

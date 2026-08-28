@@ -30,6 +30,7 @@ GLM-5.3 与 GLM-5.3-Flash 的智力差距很小（AA 智能指数 60 vs 57），
 
 - [ZCode](https://zcode.z.ai) 客户端。Tested with ZCode 3.9.2——更早版本可能缺少多模态、定时任务、闲时执行或自定义子智能体所需的行为
 - GLM Coding Plan（或 Z.ai 账号），已连接 GLM-5.3 与 GLM-5.3-Flash
+- **Python 3**（`python3` 可在 PATH 中调用）：v2 强制层钩子（Stop 完成门）的运行时。Windows 官方 Python 安装器默认勾选加入 PATH；自检：新终端执行 `python3 --version` 有输出即满足
 
 ## 安装
 
@@ -68,6 +69,12 @@ GLM-5.3 与 GLM-5.3-Flash 的智力差距很小（AA 智能指数 60 vs 57），
    - Settings → Subagents 中出现各角色子智能体
    - `/orchestration` 与 `/continuity` 技能可用（`/` 菜单中可见）
    - 提示词中提及编排时，主会话会先输出 `SELECTIVE ROUTE` 声明
+
+钩子（v2 强制层）说明：
+
+- 插件钩子随会话启动装载，**仅在安装或更新插件后的新会话中生效**；当前会话不会获得新钩子
+- 钩子脚本依赖 `python3`（见前置要求）。自检：执行 `echo '{}' | python3 ~/.zcode/cli/plugins/cache/glm-conductor/glm-conductor/<version>/hooks/stop_gate.py`（`<version>` 换成已安装版本号，目录不存在时用 `ls ~/.zcode/cli/plugins/cache/glm-conductor/glm-conductor/` 查看），退出码为 0 即正常（无活动任务时无任何输出）
+- 钩子失效（如 python3 不在 PATH）时强制层按降级处理并在 stderr 报告 `ENFORCEMENT DEGRADED`，不会阻断普通会话
 
 ### 更新与卸载
 
