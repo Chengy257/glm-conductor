@@ -7,7 +7,7 @@ v2 第六里程碑——**租约与有界并行**（升级指南 §78-§83，实
 - **文件租约（`runtime/lease.py`，§78-§79）**：任务专属 `leases.json` owner map（原子写）——派发前全有或全无获取（同 owner 幂等、异 owner 精确冲突拒绝且零部分写入）、写相结束释放（只释放自持项）；安全并行派发的前提层
 - **有界并行启用（`dispatcher.py` 集成，§80-§83，experimental）**：准入第六闸 `lease_conflict`（候选 ownership vs 他人租约，复用模式冲突混判）；max_workers 限定 1-4（§82 推荐上限，禁无界扇出）；并行资格 = ownership 不相交或有效租约保护（§81：可独立规格化/接口已固定/验证可分离/无顺序依赖）；并行不是新路由（内部 max_workers 状态）；默认仍串行
 - **技能契约**：orchestration §10 派发段更新（租约闸、并行资格、获取/释放时点、experimental 标记）
-- **测试**：632 用例（新增 30：lease 19 / dispatcher 11——含三轮端到端并发冒烟：不相交双派发 → 租约挡重叠 → 释放后重派，active 全程对账）
+- **测试**：635 用例（新增 33：lease 19 / dispatcher 11 / state 上界 3——含三轮端到端并发冒烟：不相交双派发 → 租约挡重叠 → 释放后重派，active 全程对账）
 
 ## 2.0.0-beta2
 

@@ -276,7 +276,7 @@ v2 把关键运行时契约从提示词升级为确定性强制。强制层由�
 
 - `scripts/validate_plugin.py`（纯标准库，14 项检查）+ CI（`.github/workflows/validate.yml`，静态校验 + 单元测试）维护契约一致性：扫描 `plugins/`、`README.md`、`marketplace.json` 与本文档，`docs/history/` 不参与当前契约校验
 - 检查覆盖：旧名清理、禁词、quota 否定式声明、任务专属 checkpoint 路径、视觉协议标记、TASK_ID 必含、视觉新调用规范措辞、`plugin.json` 与 CHANGELOG 的版本一致性、钩子清单完整性（含脚本存在性）、runtime 状态层与技能契约标记
-- 运行时模块（`runtime/`）、钩子（`hooks/`）与 quota 子系统各配单元测试与子进程冒烟（`tests/`，632 用例：状态层 87、日志 26、ownership 38、指纹 59、stop_gate 32、pre_tool_use 18、policy 20、work_unit 57、dependency 52、dispatcher 55、reconcile 21、lease 19、quota 解析 29/抽象 12/适配器 28/调度器 37/凭证 25/诊断 17，含 §98 集成冒烟、§45 调度场景、§68-§69 恢复对账三场景与策略/传输端到端），随 CI 执行
+- 运行时模块（`runtime/`）、钩子（`hooks/`）与 quota 子系统各配单元测试与子进程冒烟（`tests/`，635 用例：状态层 90、日志 26、ownership 38、指纹 59、stop_gate 32、pre_tool_use 18、policy 20、work_unit 57、dependency 52、dispatcher 55、reconcile 21、lease 19、quota 解析 29/抽象 12/适配器 28/调度器 37/凭证 25/诊断 17，含 §98 集成冒烟、§45 调度场景、§68-§69 恢复对账三场景与策略/传输端到端），随 CI 执行
 - 版本策略：`plugin.json` 版本、CHANGELOG 最新条目、git tag / GitHub Release 三者保持一致
 
 ## 12. 演化边界
