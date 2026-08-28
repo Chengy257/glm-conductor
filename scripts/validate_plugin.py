@@ -197,6 +197,7 @@ RUNTIME_INIT = os.path.join(RUNTIME_DIR, "__init__.py")
 STATE_PY = os.path.join(RUNTIME_DIR, "state.py")
 JOURNAL_PY = os.path.join(RUNTIME_DIR, "journal.py")
 OWNERSHIP_PY = os.path.join(RUNTIME_DIR, "ownership.py")
+FINGERPRINT_PY = os.path.join(RUNTIME_DIR, "fingerprint.py")
 HOOKS_DIR = os.path.join(REPO_ROOT, "plugins", "glm-conductor", "hooks")
 STOP_GATE_PY = os.path.join(HOOKS_DIR, "stop_gate.py")
 PRE_TOOL_USE_PY = os.path.join(HOOKS_DIR, "pre_tool_use.py")
@@ -205,22 +206,35 @@ TESTS_DIR = os.path.join(REPO_ROOT, "tests")
 TEST_STATE = os.path.join(TESTS_DIR, "test_state.py")
 TEST_JOURNAL = os.path.join(TESTS_DIR, "test_journal.py")
 TEST_OWNERSHIP = os.path.join(TESTS_DIR, "test_ownership.py")
+TEST_FINGERPRINT = os.path.join(TESTS_DIR, "test_fingerprint.py")
+TEST_STOP_GATE = os.path.join(TESTS_DIR, "test_stop_gate.py")
+TEST_PRE_TOOL_USE = os.path.join(TESTS_DIR, "test_pre_tool_use.py")
 ORCHESTRATION_SKILL = os.path.join(SKILLS_DIR, "orchestration", "SKILL.md")
 RUNTIME_REQUIRED_FILES = (
-    RUNTIME_INIT, STATE_PY, JOURNAL_PY, OWNERSHIP_PY)
+    RUNTIME_INIT, STATE_PY, JOURNAL_PY, OWNERSHIP_PY, FINGERPRINT_PY)
 LAYER_REQUIRED_FILES = (STOP_GATE_PY, PRE_TOOL_USE_PY)
-TEST_REQUIRED_FILES = (TEST_STATE, TEST_JOURNAL, TEST_OWNERSHIP)
-STATE_REQUIRED_MARKERS = ("TASK_ID_KEYS", "CONTINUITY_ID", "TERMINAL_STATUSES")
+TEST_REQUIRED_FILES = (
+    TEST_STATE, TEST_JOURNAL, TEST_OWNERSHIP, TEST_FINGERPRINT,
+    TEST_STOP_GATE, TEST_PRE_TOOL_USE)
+STATE_REQUIRED_MARKERS = (
+    "TASK_ID_KEYS", "CONTINUITY_ID", "TERMINAL_STATUSES",
+    "record_verification", "record_review", "visual_evidence")
 JOURNAL_REQUIRED_MARKERS = ("RECOMMENDED_EVENTS", "events.jsonl")
 OWNERSHIP_REQUIRED_MARKERS = ("classify_paths", "git_touched_files")
-STOP_GATE_REQUIRED_MARKERS = ("gate_blocked", "gate_passed", "gate_exhausted")
+FINGERPRINT_REQUIRED_MARKERS = (
+    "compute_fingerprint", "task_fingerprint", "visual_evidence_status")
+STOP_GATE_REQUIRED_MARKERS = (
+    "gate_blocked", "gate_passed", "gate_exhausted",
+    "evaluate_task", "verification_stale", "review_stale")
 PRE_TOOL_USE_REQUIRED_MARKERS = ("additionalContext",)
 SKILL_CONTRACT_MARKERS = (
-    (CONTINUITY_SKILL, ("state.json", "events.jsonl", "task_created")),
+    (CONTINUITY_SKILL,
+     ("state.json", "events.jsonl", "task_created", "task_fingerprint")),
     (LONG_HORIZON, ("state.json", "events.jsonl")),
-    (ORCHESTRATION_SKILL, ("state.json", "route_selected")),
+    (ORCHESTRATION_SKILL, ("state.json", "route_selected", "task_fingerprint")),
     (ENFORCEMENT_SKILL,
-     ("ENFORCEMENT DEGRADED", "gate_exhausted", "Layer A", "Layer B")),
+     ("ENFORCEMENT DEGRADED", "gate_exhausted", "Layer A", "Layer B",
+      "verification_stale", "review_stale")),
 )
 
 
@@ -886,6 +900,7 @@ def check_14_runtime_state(results):
         (STATE_PY, STATE_REQUIRED_MARKERS),
         (JOURNAL_PY, JOURNAL_REQUIRED_MARKERS),
         (OWNERSHIP_PY, OWNERSHIP_REQUIRED_MARKERS),
+        (FINGERPRINT_PY, FINGERPRINT_REQUIRED_MARKERS),
         (STOP_GATE_PY, STOP_GATE_REQUIRED_MARKERS),
         (PRE_TOOL_USE_PY, PRE_TOOL_USE_REQUIRED_MARKERS),
     ) + SKILL_CONTRACT_MARKERS
