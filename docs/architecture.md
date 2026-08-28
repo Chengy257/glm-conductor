@@ -1,0 +1,207 @@
+# GLM Conductor 架构（权威文档）
+
+> 本文档是 GLM Conductor 的**唯一架构真相源**，描述 v1.1.0 的实际运行时行为。
+> 契约细节以插件目录为准（`plugins/glm-conductor/` 下的 agents 与 skills）；本文档与其保持一致，冲突时以修复到一致为准，不得偏离开源文档单独演化。
+> 历史提案存于 `docs/history/`，仅作参考，不构成当前实现依据。
+
+## 1. 定位
+
+```
+GLM Conductor
+
+Selective orchestration for GLM coding agents in ZCode.
+```
+
+GLM Conductor 是 ZCode 插件，为 GLM 双模型体系（GLM-5.3 主会话 + GLM-5.3-Flash 子智能体）提供选择性编排：主会话任架构师并判断密集的工作，有界、规格完备的实施委派给 Flash 执行者，assurance:high 的交付物由全新上下文的只读审查者独立终审，长任务由与路由正交的连续性层安全续跑。
+
+## 2. 架构总览
+
+```
+Delegability × Assurance
+        ↓
+solo / delegate / audit / full
+
+Executor capability（实施者能力，独立维度）
+        ↓
+main / flash-implementer / visual-implementer
+
+Reviewer capability（审查者，按任务模态选择）
+        ↓
+glm-reviewer（文本）/ visual-reviewer（视觉）
+
+Continuity lifecycle（生命周期，与路由正交）
+        ↓
+foreground / resumable / idle
+```
+
+四个维度相互独立：路由回答"谁实施、是否独立终审"；executor 回答"用哪种实施能力"；reviewer 回答"终审用哪种模态"；continuity 回答"任务很长时如何恢复"。不存在按风险单向递进的模型——路由由两个独立轴共同决定，且可基于新证据双向重估。
+
+## 3. 角色
+
+| 角色 | 模型 | 思考档位 | 工具 | 职责 |
+| --- | --- | --- | --- | --- |
+| 主会话（架构师） | GLM-5.3 | — | 全部 | 需求歧义解决、架构与路由判断、五段式规格编写、diff 检查与验证重跑、路由重估、验收 |
+| flash-implementer | GLM-5.3-Flash | high | 读写全套 | 标准（非视觉）有界实施 |
+| visual-implementer | GLM-5.3-Flash（多模态） | high | 读写全套 + 读图 | 视觉/交互有界实施，亲自读截图判定 |
+| glm-reviewer | GLM-5.3 | max | 只读白名单 | 文本任务独立终审（`GLM REVIEW`） |
+| visual-reviewer | GLM-5.3-Flash（多模态） | max | 只读白名单 + 读图 | 视觉任务独立视觉终审（`VISUAL REVIEW`） |
+
+关键约束：
+
+- 子智能体内不能再派生子智能体——结构天然扁平，主会话是唯一编排者
+- 子智能体每次调用都是全新上下文——"新鲜审查者"语义天然成立，无需额外机制
+- Browser Use 与 Computer Use 为 ZCode 主会话专用（策略层禁止子代理使用）——视觉证据由主会话采集、Flash 系角色读图判定
+- GLM-5.3 是纯文本模型——主会话在视觉链路中只做驱动与采集，不得声称做了视觉判定
+
+## 4. 双轴选择性路由
+
+### 4.1 两个独立轴
+
+- **轴 A — Delegability（可委派性）**：剩余实施是否足够有界、规格足够完备，可以委派？objective/文件边界/接口/约束/验证均明确且架构已定 → high；架构未定、root cause 未知、实质歧义、判断密集 → low
+- **轴 B — Assurance（保障等级）**：主会话验证之后，一次全新上下文的独立终审是否有实质价值？影响面有限、回归风险可控 → standard；宽影响面、高回归风险、破坏性行为、大规模用户可见变更 → high
+
+### 4.2 路由矩阵
+
+| Delegability | Assurance | Route | 实施 | 独立审查 |
+| --- | --- | --- | --- | --- |
+| low | standard | solo | GLM-5.3 主会话 | 否 |
+| high | standard | delegate | 实施者子智能体 | 否 |
+| low | high | audit | GLM-5.3 主会话 | 是 |
+| high | high | full | 实施者子智能体 | 是 |
+
+### 4.3 SELECTIVE ROUTE 声明
+
+主会话在任何 Agent 工具调用之前输出一次：
+
+```
+SELECTIVE ROUTE
+mode: solo | delegate | audit | full
+delegability: low | high
+assurance: standard | high
+executor: main | flash-implementer | visual-implementer
+continuity: foreground | resumable | idle
+reason: <简明的、基于证据的理由>
+```
+
+### 4.4 ROUTE REASSESSMENT（双向重估）
+
+路由变化必须来自新观察到的证据，可双向重估，不得凭直觉或为省事变更：
+
+```
+ROUTE REASSESSMENT
+
+delegability: <old> -> <new>
+assurance: <old> -> <new>
+mode: <old> -> <new>
+
+evidence:
+<新观察到的证据>
+```
+
+实施者返回的重估信号（ROUTE REASSESSMENT 请求）、审查者给出 rethink 或多项 fix-first，均构成有效重估证据。
+
+## 5. 委派契约
+
+委派（delegate/full）使用五段式实施规格：OBJECTIVE / FILES AND OWNERSHIP / INTERFACES / CONSTRAINTS / VERIFICATION（视觉任务追加 VISUAL ACCEPTANCE 节）。工作者返回 IMPLEMENTATION REPORT——报告只是声明，证据只存在于主会话亲自观察到的 diff 与命令输出中；无证据的完成声明无效。
+
+主会话的验证义务不可由工作者报告替代：亲自检查完整 diff、重跑全部验证命令、将命令映射到实际输出。fix-first 之后旧裁决作废，复审必须换全新审查者。
+
+## 6. 视觉执行拓扑
+
+### 6.1 规范流程（跨多次调用）
+
+```
+visual-implementer 调用
+        ↓
+实施代码改动
+        ↓
+需要视觉证据 → 返回 VISUAL_CAPTURE_REQUEST，本次调用结束
+        ↓
+主会话采集截图落盘（Browser/Computer Use 为主会话专用）
+        ↓
+新的 visual-implementer 调用（携带完整状态）
+        ↓
+实施者亲自 Read 截图、对照 VISUAL ACCEPTANCE 判定
+        ↓
+通过 → FUNCTIONAL VERIFICATION → 报告
+不符合 → 修正代码 → 再次返回 VISUAL_CAPTURE_REQUEST
+```
+
+**规范路径是"新的 visual-implementer 调用"**：每次视觉轮次自包含，由主会话携带完整状态发起——五段式规格（含 VISUAL ACCEPTANCE）、当前 diff / 改动状态、上一轮的 VISUAL_CAPTURE_REQUEST、截图文件路径清单、VISUAL_ROUND 轮次号。协议正确性**不依赖**子代理上下文保留。
+
+子代理 resume 仅作为可选优化：仅当 ZCode 运行时实际暴露并验证了稳定的子代理恢复机制时，主会话可以 resume 原实施者；任何情况下正确性都不得以 resume 为前提。
+
+约束：
+
+- 每个验收点以 VISUAL_ROUND 跟踪（1 | 2 | 3），最多 3 轮采集-判定循环，超出即 blocked 交回主会话做 ROUTE REASSESSMENT
+- 不存在子代理在单次调用内等待父会话采集的通道——实施者不得等待、不得空转、不得虚构截图结果
+- 截图不可得（主会话无法采集）时 fail-closed：视觉通道停止，不得改为纯文本验证交付
+- 视觉证据目录按任务隔离：`.glm-conductor/tasks/<任务标识>/visual-evidence/`
+
+### 6.2 视觉终审
+
+assurance:high 的视觉任务在主会话验证之后，由全新上下文的 visual-reviewer 独立终审：亲自读取每一张截图，对照 VISUAL ACCEPTANCE 判定实施者视觉结论是否成立，检查用户可见回归，输出 `VISUAL REVIEW` 裁决（ship / fix-first / rethink，含 RESIDUAL VISUAL RISK）。代码 diff 对审查者是上下文，不替代主会话的代码审查。
+
+## 7. 连续性生命周期
+
+continuity 是与路由正交的生命周期维度，不是第五种 route。
+
+| 模式 | 适用 | 行为 |
+| --- | --- | --- |
+| foreground（默认） | 当前会话内可完成 | 正常执行，不创建任何 continuation |
+| resumable | 可能跨会话/跨可用性窗口中断的长任务 | 里程碑后写 checkpoint + 定时唤醒，唤醒后先检查再恢复 |
+| idle | 非紧急、可无人值守 | 优先交给 ZCode 原生闲时任务 |
+
+### 7.1 任务标识与状态布局
+
+CONTINUITY_ID 是唯一的运行时任务标识，**生成即机械唯一**：
+
+```
+格式：<语义前缀>-<6~8 位随机十六进制后缀>
+示例：redesign-settings-page-7f3a2c / parser-refactor-a92c1d
+      （时间戳后缀可接受，随机后缀优先——并行同时建任务不碰撞）
+```
+
+生成契约：任务首次进入 resumable/idle 时生成一次；写入 checkpoint 持久化；恢复期间绝不重新生成；checkpoint 路径、视觉证据路径、定时 resume prompt、automation 关联、清理全部使用同一精确 ID。foreground 视觉任务使用同格式的临时 ID（CONTINUITY_ID 即通用运行时任务标识，不引入第二个标识概念）。
+
+```
+.glm-conductor/
+└── tasks/
+    └── <continuity-id>/
+        ├── checkpoint.md
+        └── visual-evidence/
+```
+
+恢复与清理都按精确 CONTINUITY_ID 定位目录；不以"最新 checkpoint"作为查找策略——并行任务下"最新"是歧义的。并行任务互不覆盖、互不删除。
+
+### 7.2 Checkpoint 与恢复
+
+checkpoint 是导航状态，不是仓库真相源：不复制完整 diff、不声称未验证内容。repository > checkpoint——冲突时以仓库为准，禁止为恢复 checkpoint 回滚仓库新改动。
+
+每次重新激活后执行八步恢复：检查目标 → 按 CONTINUITY_ID 读取 checkpoint → 检查仓库状态 → 检查当前 diff → 判断先前变更是否仍在 → 判断目标是否已完成 → 检查验证状态 → 从 NEXT ACTION 恢复。恢复执行前必须重新输出 SELECTIVE ROUTE 声明。
+
+### 7.3 调度与边界
+
+- 定时唤醒用安全周期性再激活（检查-恢复或等待），不 sleep 到固定时间；**调度触发本身就是存活探针**，不引入独立的额度检查器
+- 同会话投递：结果要回到当前会话，必须从当前聊天创建绑定本会话的定时续作
+- 不假设任何 quota API（getQuotaRemaining 等均属虚构）、不硬编码 5 小时重置——额度观察只来自用户告知或 UI，且只作为证据使用
+- 完成清理只作用于本任务：删除 `.glm-conductor/tasks/<continuity-id>/` 单个目录、停止关联的定时任务、终止闲时排队，避免幽灵唤醒
+- `.glm-conductor/` 是本地运行时状态：优先写入 `.git/info/exclude` 本地排除，不自动修改 tracked `.gitignore`
+
+## 8. 运行时边界（ZCode 约束）
+
+- 连续性编排基于 ZCode 原生的本地会话生命周期机制，不是独立的云调度器或后台守护进程；桌面客户端需保持运行、机器需保持唤醒
+- 定时任务数量与频率受 ZCode automation 机制约束；闲时任务可用性取决于版本与账号能力
+- 子智能体以前台调用受支持为前提，不假定后台子智能体可用
+- 子智能体只能看到会话启动时已连接的 MCP 服务，跨会话恢复后需重新确认
+- fail-closed 纪律：所需角色缺失、证据路径不可得时停止通道并告知用户，绝不静默降级或替换角色
+
+## 9. 静态校验与发布
+
+- `scripts/validate_plugin.py`（纯标准库）+ CI（`.github/workflows/validate.yml`）维护契约一致性：扫描 `plugins/`、`README.md`、`marketplace.json` 与本文档，`docs/history/` 不参与当前契约校验
+- 检查覆盖：旧名清理、禁词、quota 否定式声明、任务专属 checkpoint 路径、视觉协议标记、CONTINUITY_ID 必含、视觉新调用规范措辞、`plugin.json` 与 CHANGELOG 的版本一致性
+- 版本策略：`plugin.json` 版本、CHANGELOG 最新条目、git tag / GitHub Release 三者保持一致
+
+## 10. 演化边界
+
+当前架构视为功能完备，进入维护模式：修复运行时回归、跟进 ZCode 兼容性、完善文档、处理真实用户反馈。除非实际使用暴露出具体能力缺口，不新增路由维度或角色。

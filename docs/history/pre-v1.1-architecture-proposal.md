@@ -1,5 +1,15 @@
 # GLM Conductor — v2 Architecture & Implementation Specification
 
+> SUPERSEDED
+>
+> This document describes the pre-v1.1 architecture proposal.
+> It is retained only for historical reference.
+>
+> Do NOT use this document as the current implementation source of truth.
+> The authoritative architecture is `docs/architecture.md`.
+>
+> ----
+>
 > **Proposed project name:** `glm-conductor`  
 > **Current project:** `glm-advisor`  
 > **Target environment:** ZCode + GLM-5.3 + GLM-5.3-Flash  
