@@ -1,0 +1,215 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""GLM Conductor v2 证据指纹层（normalized diff sha256，v2 工作块 B3.1）。
+
+职责：
+    把升级指南 §17-§18 的「任何修复使先前审查失效」变成自动强制的
+    确定性基础：验证 / 审查证据必须绑定到仓库实际状态，指纹 =
+    sha256(归一化改动集表示)。本模块是纯确定性计算层，后续的指纹
+    写入 / stale 检测与完成门校验都建立在它之上：
+      - normalize_content() / content_digest()：换行归一（CRLF→LF）
+        后取 sha256——同一逻辑内容不因换行风格（CRLF/LF）改变指纹；
+      - normalize_relpath()：仓库相对路径归一与结构性校验（拒绝
+        空串、绝对路径、空段、".." 越根、"." 段等无意义 / 危险形状）；
+      - resolve_base()：基线修订号（git rev-parse HEAD；unborn 仓库
+        返回 "-"）；
+      - compute_fingerprint()：指纹绑定「基线修订 + 相关文件集的
+        归一化内容状态」——任何文件增 / 删 / 内容变化 / 文件集变化 /
+        基线变化都会改变指纹；只哈希 paths 列出的文件，不哈希 paths
+        之外的任何文件（相关范围由调用方控制）。
+
+归一说明：
+      - 换行：只把 b"\\r\\n" 替换为 b"\\n"，不做其他任何处理（不转
+        编码、不去 BOM）——Windows 检出与仓库存储的换行差异不属于
+        逻辑内容变化；
+      - 路径：反斜杠统一为 "/"，循环剥离开头 "./"（可重复），其余
+        形状异常一律拒绝（不静默转换、不做猜测式放宽）。
+
+依赖：
+    仅 Python 3 标准库（hashlib / pathlib / subprocess），零第三方依赖，
+    `python3 -S` 可运行。风格对齐 runtime/ownership.py / runtime/state.py。
+
+来源：
+    docs/glm-conductor-v2-upgrade-guide-final.md §17-§18（证据指纹）
+    + v2 升级计划工作块 B3.1。
+"""
+
+import hashlib
+import pathlib
+import subprocess
+
+
+class FingerprintError(Exception):
+    """证据指纹层的结构性错误（非 git 仓库、git 调用失败、非法路径、读取失败等）。"""
+
+
+# —— 内容归一与摘要 ——
+
+def normalize_content(data: bytes) -> bytes:
+    """换行归一：把 b"\\r\\n" 全部替换为 b"\\n"（CRLF→LF），其余字节原样。
+
+    只做这一种归一——不做编码转换、不去 BOM、不增删任何字节。
+    非 bytes 输入抛 FingerprintError（结构性错误，不静默转换）。
+    """
+    if not isinstance(data, bytes):
+        raise FingerprintError(
+            "指纹内容必须是 bytes，得到 %s" % type(data).__name__)
+    return data.replace(b"\r\n", b"\n")
+
+
+def content_digest(data: bytes) -> str:
+    """归一内容的 sha256 摘要：normalize_content(data) 的 64 位小写十六进制。"""
+    return hashlib.sha256(normalize_content(data)).hexdigest()
+
+
+# —— 路径归一 ——
+
+def normalize_relpath(path) -> str:
+    """仓库相对路径归一与结构性校验。
+
+    归一（仅两步）：
+      - 反斜杠统一为 "/"；
+      - 循环剥离开头 "./"（可重复，"././a" → "a"）。
+
+    校验（归一后逐条判定，任一命中即抛 FingerprintError，消息含路径原文）：
+      - 空串；
+      - 以 "/" 开头（POSIX 绝对路径）；
+      - 首段为 Windows 盘符形状（如 "C:"）——盘符路径同样视为绝对路径；
+      - 含空路径段（连续 "//"、首尾 "/"）；
+      - 任一段为 ".."（越出仓库根）；
+      - 任一段为 "."（无意义路径段；"." 整路径是其特例）——若放行，
+        "a/./b" 与 "a/b" 会指向同一文件却产生不同指纹，破坏确定性。
+
+    非 str 输入抛 FingerprintError（结构性错误，不静默转换）。
+    """
+    if not isinstance(path, str):
+        raise FingerprintError(
+            "路径必须是字符串，得到 %s" % type(path).__name__)
+    normalized = path.replace("\\", "/")
+    while normalized.startswith("./"):
+        normalized = normalized[2:]
+    if normalized == "":
+        raise FingerprintError("非法指纹路径（归一后为空串）：%r" % path)
+    if normalized.startswith("/"):
+        raise FingerprintError("非法指纹路径（绝对路径）：%r" % path)
+    segments = normalized.split("/")
+    first = segments[0]
+    if len(first) == 2 and first[0].isalpha() and first[1] == ":":
+        raise FingerprintError("非法指纹路径（Windows 盘符绝对路径）：%r" % path)
+    for seg in segments:
+        if seg == "":
+            raise FingerprintError(
+                "非法指纹路径（含空路径段，如连续 // 或首尾 /）：%r" % path)
+        if seg == "..":
+            raise FingerprintError(
+                "非法指纹路径（含 .. 越出仓库根）：%r" % path)
+        if seg == ".":
+            raise FingerprintError(
+                "非法指纹路径（含无意义的 . 段）：%r" % path)
+    return normalized
+
+
+# —— 基线修订 ——
+
+def resolve_base(repo_root) -> str:
+    """解析基线修订号：git rev-parse HEAD；unborn 仓库（无提交）返回 "-"。
+
+    - HEAD 存在（rc==0）→ 返回 stdout（UTF-8 容错解码）strip 后的修订号；
+    - HEAD 不存在但 --git-dir 成功 → unborn 仓库，返回 "-"（基线退化为
+      「仓库存在但无修订」，指纹仍可稳定计算）；
+    - 两者都失败 → 非 git 仓库，抛 FingerprintError（消息含 returncode
+      与 stderr 摘要前 200 字符，格式对齐 ownership.git_touched_files）；
+    - git 可执行不存在 / 超时 → FingerprintError。
+    subprocess 固定 timeout=3 秒（与 ownership.git_touched_files 一致：
+    必须小于 Stop 钩子的 timeoutMs=5000，git 挂起时让结构性错误先于
+    整进程击杀触发，降级才可见）。
+    """
+    try:
+        proc = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=str(repo_root),
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=3)
+    except FileNotFoundError as exc:
+        raise FingerprintError(
+            "git 调用失败：找不到 git 可执行文件（%s）" % exc) from exc
+    except subprocess.TimeoutExpired as exc:
+        raise FingerprintError(
+            "git 调用失败：rev-parse HEAD 超时（>3 秒，repo=%s）"
+            % repo_root) from exc
+    if proc.returncode == 0:
+        return proc.stdout.decode("utf-8", errors="replace").strip()
+    try:
+        probe = subprocess.run(
+            ["git", "rev-parse", "--git-dir"], cwd=str(repo_root),
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=3)
+    except FileNotFoundError as exc:
+        raise FingerprintError(
+            "git 调用失败：找不到 git 可执行文件（%s）" % exc) from exc
+    except subprocess.TimeoutExpired as exc:
+        raise FingerprintError(
+            "git 调用失败：rev-parse --git-dir 超时（>3 秒，repo=%s）"
+            % repo_root) from exc
+    if probe.returncode == 0:
+        return "-"
+    stderr_summary = probe.stderr.decode("utf-8", errors="replace").strip()
+    raise FingerprintError(
+        "git 调用失败：rev-parse 返回 returncode=%d（repo=%s）；stderr：%s"
+        % (probe.returncode, repo_root, stderr_summary[:200]))
+
+
+# —— 指纹计算 ——
+
+def compute_fingerprint(repo_root, paths) -> str:
+    """计算证据指纹，返回 "sha256:" + 64 位小写十六进制。
+
+    指纹绑定「基线修订 + 相关文件集的归一化内容状态」：
+      - 同一逻辑内容不因换行风格（CRLF/LF）改变指纹（content_digest
+        先做 CRLF→LF 归一）；
+      - 任何文件增 / 删 / 内容变化 / 文件集变化 / 基线变化都会改变指纹；
+      - 只读取 paths 列出的文件，不哈希 paths 之外的任何文件
+        （相关范围由调用方控制）。
+
+    流程：
+      1. paths 逐项 normalize_relpath（非法路径 FingerprintError 自然
+         上抛），归一后去重并按 str 排序（结果与输入顺序 / 重复无关）；
+      2. resolve_base(repo_root) 取基线（非 git 仓库 FingerprintError
+         自然上抛）；
+      3. 逐路径读工作区文件 <repo_root>/<归一路径>：
+           - 不存在 → 标记 "missing"；
+           - 存在但是目录 → FingerprintError；
+           - 读 bytes 时 OSError → FingerprintError（消息含路径）；
+           - 存在 → 标记 "sha256:" + content_digest(字节内容)；
+      4. preimage（UTF-8，逐行拼接、行尾 "\\n"）：
+           glm-conductor/evidence-fingerprint/1
+           base <base>
+           file <归一路径>\\0<标记>     # 每个路径一行，按排序后顺序；
+                                        # "file " 后单个空格，路径与标记
+                                        # 之间单个 NUL 字符
+         经 hashlib.sha256 得 hexdigest，返回 "sha256:" + hexdigest。
+      paths 为空 → preimage 只有头两行（空改动集也有稳定指纹）。
+    """
+    normalized_set = set()
+    for item in paths:
+        normalized_set.add(normalize_relpath(item))
+    ordered = sorted(normalized_set)
+    base = resolve_base(repo_root)
+    lines = ["glm-conductor/evidence-fingerprint/1", "base " + base]
+    for rel in ordered:
+        target = pathlib.Path(repo_root) / rel
+        if not target.exists():
+            mark = "missing"
+        else:
+            if target.is_dir():
+                raise FingerprintError(
+                    "指纹目标路径是目录而非文件：%r（repo=%s）"
+                    % (rel, repo_root))
+            try:
+                with open(target, "rb") as fh:
+                    data = fh.read()
+            except OSError as exc:
+                raise FingerprintError(
+                    "读取指纹目标文件失败：%r（repo=%s）：%s"
+                    % (rel, repo_root, exc)) from exc
+            mark = "sha256:" + content_digest(data)
+        lines.append("file " + rel + "\0" + mark)
+    preimage = "".join(line + "\n" for line in lines).encode("utf-8")
+    return "sha256:" + hashlib.sha256(preimage).hexdigest()
