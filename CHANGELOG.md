@@ -2,11 +2,18 @@
 
 ## 2.0.0-alpha1
 
-v2「从提示词契约到强制执行契约」开发线启动（依据 docs/glm-conductor-v2-upgrade-guide-final.md 与实施计划；Phase 0 运行时验证已完成）：
+v2「从提示词契约到强制执行契约」——alpha1 强制基座达成（运行时状态层 + Ownership Layer A/B + 执行日志；依据 docs/glm-conductor-v2-upgrade-guide-final.md 与实施计划，Phase 0 运行时验证先行）：
 
 - **任务标识更名**：`CONTINUITY_ID` → `TASK_ID`（v1.x 遗留 checkpoint 读取时归一化，无需重写）；路径占位统一为 `<task-id>`
-- **Ownership 强制层重设计（Phase 0 修订）**：子代理工具调用不触发钩子（本机实测+代码级确证），Ownership Gate 改为 Layer A 完成门校验（diff ⊆ ownership）+ Layer B 派发注入；后续阶段落地
-- 版本进入 2.0.0-alpha1 开发线（alpha1 里程碑 = 运行时状态层 + Ownership Layer A/B）
+- **运行时状态层（`runtime/state.py`）**：`state.json` 作为强制状态源——schema 校验（路由五字段 / ownership.files / verification / review / 13 态生命周期词汇）、原子保存、`CONTINUITY_ID` legacy 归一、活动任务发现；创建 state.json 即受完成门跟踪，foreground 普通短任务零干预
+- **执行日志（`runtime/journal.py`）**：任务专属 `events.jsonl`，append-only（追加唯一写入口、时间戳由模块管理）、坏行容错读取（撕裂 UTF-8 尾部 / U+2028 行分隔符不丢事件）、尾部查询；无秘密值、无完整 prompt
+- **Ownership Gate Layer A（完成门，`hooks/stop_gate.py` + `runtime/ownership.py`）**：Stop 时对声明了 ownership 的活动任务校验「git 改动文件 ⊆ 声明范围」，越界即 block（报文列出精确 out-of-scope 路径与两条出路）；声明形式支持精确文件 / 目录前缀（段级匹配）/ glob（`**` 跨段）；`.glm-conductor/` 运行时目录豁免（防自指拦截）；续行有界——连续两次 block 后放行并报 `ENFORCEMENT GATE EXHAUSTED`（模型义务：向用户报告 blocked，不得声称完成）
+- **Ownership Gate Layer B（派发注入，`hooks/pre_tool_use.py`）**：PreToolUse（Agent|Task）在每次子代理派发前注入 ownership 契约提醒（提示级，确定性强制在 Layer A）
+- **fail-open 降级可见**：钩子崩溃 / git 不可用时放行 + stderr 报 `ENFORCEMENT DEGRADED` + journal 记 `gate_degraded`——强制层故障不卡死会话，降级绝不静默
+- **技能契约增补**：continuity（state.json / events.jsonl 创建时机、事件时点表、恢复读取顺序）、orchestration（route 落盘、ownership.files 同步义务）、新增 `enforcement` 技能（强制层用户侧解释：环境自检 / 报文含义 / 被拦截恢复方法）
+- **静态校验器扩展至 14 项**：新增钩子清单完整性（事件合法 / python3 入口 / `${ZCODE_PLUGIN_ROOT}` 脚本存在 / Stop 必声明）与 runtime 状态层标记检查；CI 增加单元测试步骤
+- **测试**：146 个单元/集成用例（状态层 63、日志 26、ownership 38、stop_gate 12、pre_tool_use 7，含真实 git fixture 五状态、子进程冒烟与多任务记账回归）
+- Ownership 设计依据 Phase 0 修订：子代理工具调用不触发钩子（实测+代码级确证），故强制位于完成边界与派发时点（主会话上下文），写前拦截留待 ZCode 运行时演进（feature request 跟踪）
 
 ## 1.1.0
 

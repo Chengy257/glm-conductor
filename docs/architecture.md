@@ -1,6 +1,6 @@
 # GLM Conductor 架构（权威文档）
 
-> 本文档是 GLM Conductor 的**唯一架构真相源**，描述 v1.1.0 的实际运行时行为。
+> 本文档是 GLM Conductor 的**唯一架构真相源**，描述 v2.0.0-alpha1（v2-dev 开发线）的实际运行时行为。
 > 契约细节以插件目录为准（`plugins/glm-conductor/` 下的 agents 与 skills）；本文档与其保持一致，冲突时以修复到一致为准，不得偏离开源文档单独演化。
 > 历史提案存于 `docs/history/`，仅作参考，不构成当前实现依据。
 
@@ -12,7 +12,7 @@ GLM Conductor
 Selective orchestration for GLM coding agents in ZCode.
 ```
 
-GLM Conductor 是 ZCode 插件，为 GLM 双模型体系（GLM-5.3 主会话 + GLM-5.3-Flash 子智能体）提供选择性编排：主会话任架构师并判断密集的工作，有界、规格完备的实施委派给 Flash 执行者，assurance:high 的交付物由全新上下文的只读审查者独立终审，长任务由与路由正交的连续性层安全续跑。
+GLM Conductor 是 ZCode 插件，为 GLM 双模型体系（GLM-5.3 主会话 + GLM-5.3-Flash 子智能体）提供选择性编排：主会话任架构师并判断密集的工作，有界、规格完备的实施委派给 Flash 执行者，assurance:high 的交付物由全新上下文的只读审查者独立终审，长任务由与路由正交的连续性层安全续跑。v2 起，关键运行时契约（v1 为提示词契约）由**强制层**（插件钩子 + 运行时状态）确定性执行——"从提示词契约到强制执行契约"。
 
 ## 2. 架构总览
 
@@ -32,9 +32,14 @@ glm-reviewer（文本）/ visual-reviewer（视觉）
 Continuity lifecycle（生命周期，与路由正交）
         ↓
 foreground / resumable / idle
+
+Enforcement（v2 强制层，确定性）
+        ↓
+Layer A 完成门（Stop 钩子）+ Layer B 派发注入（PreToolUse 钩子）
++ 运行时状态层（state.json / events.jsonl）
 ```
 
-四个维度相互独立：路由回答"谁实施、是否独立终审"；executor 回答"用哪种实施能力"；reviewer 回答"终审用哪种模态"；continuity 回答"任务很长时如何恢复"。不存在按风险单向递进的模型——路由由两个独立轴共同决定，且可基于新证据双向重估。
+五个维度相互独立：路由回答"谁实施、是否独立终审"；executor 回答"用哪种实施能力"；reviewer 回答"终审用哪种模态"；continuity 回答"任务很长时如何恢复"；enforcement 回答"哪些契约由运行时确定性保证而非依赖模型自觉"。不存在按风险单向递进的模型——路由由两个独立轴共同决定，且可基于新证据双向重估。
 
 ## 3. 角色
 
@@ -170,11 +175,13 @@ v2 起 TASK_ID 取代 v1.x 的 CONTINUITY_ID（遗留 checkpoint 读取时归一
 .glm-conductor/
 └── tasks/
     └── <task-id>/
-        ├── checkpoint.md
+        ├── checkpoint.md        # 导航状态（叙述性恢复依据）
+        ├── state.json           # 强制状态源（完成门按它校验）
+        ├── events.jsonl         # 执行溯源（append-only）
         └── visual-evidence/
 ```
 
-恢复与清理都按精确 TASK_ID 定位目录；不以"最新 checkpoint"作为查找策略——并行任务下"最新"是歧义的。并行任务互不覆盖、互不删除。
+state.json 是 active task 的确定性状态（goal、route 五字段、ownership.files、verification、review、status 等；schema 与词汇表以插件 `runtime/state.py` 为准，legacy `CONTINUITY_ID` 读取时归一）。**创建 state.json 即受完成门跟踪**：status 非终态（completed / cancelled / failed）的任务在 Stop 完成门接受 ownership 校验；foreground 普通短任务不创建状态文件，零干预。events.jsonl 只追加（事件时点表见 continuity 技能），无秘密值、无完整 prompt。恢复与清理都按精确 TASK_ID 定位目录；不以"最新 checkpoint"作为查找策略——并行任务下"最新"是歧义的。并行任务互不覆盖、互不删除。
 
 ### 7.2 Checkpoint 与恢复
 
@@ -190,20 +197,52 @@ checkpoint 是导航状态，不是仓库真相源：不复制完整 diff、不�
 - 完成清理只作用于本任务：删除 `.glm-conductor/tasks/<task-id>/` 单个目录、停止关联的定时任务、终止闲时排队，避免幽灵唤醒
 - `.glm-conductor/` 是本地运行时状态：优先写入 `.git/info/exclude` 本地排除，不自动修改 tracked `.gitignore`
 
-## 8. 运行时边界（ZCode 约束）
+## 8. 强制层（v2 alpha1）
+
+v2 把关键运行时契约从提示词升级为确定性强制。强制层由插件钩子（`hooks/hooks.json` 声明，安装后自动启用、仅新会话生效）与运行时模块（`runtime/`，纯标准库 python3）组成。
+
+### 8.1 Ownership Gate — Layer A（完成门，确定性）
+
+主会话 turn 结束时（Stop 钩子 `hooks/stop_gate.py`），对每个声明了 `ownership.files` 的活动任务校验：
+
+```
+git 工作区改动文件（touched） ⊆ 声明 ownership？
+   否 → block：报文列出精确 out-of-scope 路径 + 两条出路（扩 ownership / 回退改动）
+   是 → 静默放行（journal 记 gate_passed）
+```
+
+- ownership 声明三种形式：精确文件、目录前缀（`src/auth` 等价 `src/auth/**`，按路径段匹配）、glob（`**` 跨段 / `*` 与 `?` 不跨段）；拒绝隐式扩张（`src/auth` 不覆盖 `src/authentication.ts`）
+- `.glm-conductor/` 运行时目录豁免——编排器自身账本不算用户仓库改动（否则创建 state.json 即自指拦截）
+- 子代理工具调用不触发钩子（Phase 0 实证：子会话不携带 hook runner），故写前拦截不可实现——**越界改动不被阻止发生，但不可能静默通过完成门**
+
+### 8.2 Ownership Gate — Layer B（派发注入，提示级）
+
+PreToolUse 钩子（matcher `Agent|Task`，`hooks/pre_tool_use.py`）在每次子代理派发前注入 ownership 契约提醒（声明清单 + 越界将拦完成门）。Layer B 提高合规但不构成强制。
+
+### 8.3 失败处理与循环安全
+
+- **fail-open 降级可见**：钩子崩溃 / git 不可用时放行并在 stderr 报 `ENFORCEMENT DEGRADED`（journal 记 `gate_degraded`）——钩子起不来时 fail-closed 会卡死所有会话，降级可见优于假强制
+- **续行有界**：运行时对 Stop block 的续行内建上限（每 turn 最多 3 次）；钩子侧连续两次 block 后第三次放行（stderr 报 `ENFORCEMENT GATE EXHAUSTED`、journal 记 `gate_exhausted`）——**此时模型必须向用户报告 blocked，不得声称完成**；两次 block 间出现真实工作事件即重置计数
+- **强制面（当前版本）**：仅 ownership 越界；验证门 / 审查门 / 证据新鲜度在 alpha2 接入同一完成门
+
+强制层的用户可见解释（自检、报文含义、被拦截恢复方法）见 `skills/enforcement`。
+
+## 9. 运行时边界（ZCode 约束）
 
 - 连续性编排基于 ZCode 原生的本地会话生命周期机制，不是独立的云调度器或后台守护进程；桌面客户端需保持运行、机器需保持唤醒
+- 强制层钩子依赖 `python3` 在 PATH（安装自检见 README / enforcement 技能）；钩子随插件分发、仅安装/更新后的新会话生效；子代理会话不触发钩子（Layer A/B 设计的由来）
 - 定时任务数量与频率受 ZCode automation 机制约束；闲时任务可用性取决于版本与账号能力
 - 子智能体以前台调用受支持为前提，不假定后台子智能体可用
 - 子智能体只能看到会话启动时已连接的 MCP 服务，跨会话恢复后需重新确认
-- fail-closed 纪律：所需角色缺失、证据路径不可得时停止通道并告知用户，绝不静默降级或替换角色
+- fail-closed 纪律：所需角色缺失、证据路径不可得时停止通道并告知用户，绝不静默降级或替换角色（强制层自身的 fail-open 降级是显式可见的例外，见 §8.3）
 
-## 9. 静态校验与发布
+## 10. 静态校验与发布
 
-- `scripts/validate_plugin.py`（纯标准库）+ CI（`.github/workflows/validate.yml`）维护契约一致性：扫描 `plugins/`、`README.md`、`marketplace.json` 与本文档，`docs/history/` 不参与当前契约校验
-- 检查覆盖：旧名清理、禁词、quota 否定式声明、任务专属 checkpoint 路径、视觉协议标记、TASK_ID 必含、视觉新调用规范措辞、`plugin.json` 与 CHANGELOG 的版本一致性
+- `scripts/validate_plugin.py`（纯标准库，14 项检查）+ CI（`.github/workflows/validate.yml`，静态校验 + 单元测试）维护契约一致性：扫描 `plugins/`、`README.md`、`marketplace.json` 与本文档，`docs/history/` 不参与当前契约校验
+- 检查覆盖：旧名清理、禁词、quota 否定式声明、任务专属 checkpoint 路径、视觉协议标记、TASK_ID 必含、视觉新调用规范措辞、`plugin.json` 与 CHANGELOG 的版本一致性、钩子清单完整性（含脚本存在性）、runtime 状态层与技能契约标记
+- 运行时模块（`runtime/`）与钩子（`hooks/`）各配单元测试与子进程冒烟（`tests/`，146 用例），随 CI 执行
 - 版本策略：`plugin.json` 版本、CHANGELOG 最新条目、git tag / GitHub Release 三者保持一致
 
-## 10. 演化边界
+## 11. 演化边界
 
-当前架构视为功能完备，进入维护模式：修复运行时回归、跟进 ZCode 兼容性、完善文档、处理真实用户反馈。除非实际使用暴露出具体能力缺口，不新增路由维度或角色。
+v2 开发在 `v2-dev` 分支进行（`main` 保持在 v1.1.0 发布态，里程碑完成后再合入）。当前处于 **2.0.0-alpha1**（强制基座：状态层 + Ownership Layer A/B + 执行日志），后续里程碑：alpha2 证据完整性（指纹/验证与审查新鲜度接入完成门）→ alpha3 额度感知连续性 → beta1 上下文与权限 → beta2 任务管理 → rc1 并行安全 → stable。除非实际使用暴露出具体能力缺口，不新增路由维度或角色；强制层只针对高置信不变量（越界、缺失证据），不做语义解释型拦截。
