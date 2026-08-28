@@ -107,6 +107,18 @@
 4. **architecture.md §8.3 措辞**：外层崩溃兜底不写 journal（只 stderr 可见），与 git 失败/求值错误的 gate_degraded 分开表述。
 5. **技能文档补一句**：记录证据后执行 commit 会改变基线修订 → 证据 stale（公式含 base，设计内保守行为，显式点名）。
 
+**→ 上述五项已于轮 5 开工块全部清偿（commit ef5f359，含回归测试）。**
+
+## 5.2 轮 5 终审遗留（P2，glm-reviewer 2026-08-29，裁决 ship / confidence high）
+
+轮 6 开工时顺手消化（不阻断 v2.0-alpha3）：
+
+1. **适配器 docstring 自洽**：`runtime/quota/zai.py` / `bigmodel.py` docstring 自称「本文件不出现 host 字符串」却写了完整端点 URL——措辞改为「代码路径不出现 host 字符串（仅 docstring 说明）」。
+2. **_http.py 不可达防御代码**：`url.startswith("https://")` 对拼接结果恒真——保留作 belt-and-suspenders 并加注释注明，或下轮清理。
+3. **默认传输测试打磨**：`test_quota_adapters.py` 对默认 urllib 传输的限长读取只有间接断言、3xx-不跟随只有 handler 契约级锚定——可补离线端到端（如本地 socket/伪 server）。
+
+附注（residual risk 登记即可）：默认 opener 含 ProxyHandler，用户设置 HTTPS_PROXY 时请求经代理隧道（CONNECT 到 allowlisted host，端到端 TLS 不暴露 Authorization）——标准库默认行为，非 §37 违规；严格零代理部署方需知悉（可写入 README 运行时限制）。
+
 ## 6. B0.2 feature request 文稿要点（主会话撰写后随轮 1 交付）
 
 - 标题：Subagent tool calls should optionally fire plugin hooks (or expose a per-subagent hook runner)
