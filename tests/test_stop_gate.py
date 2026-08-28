@@ -707,5 +707,167 @@ class StopGateEvaluationErrorDegradeTest(GitRepoFixture):
         self.assertEqual(events[0]["reason"], "evaluation_error")
 
 
+# —— B4.3 集成冒烟：§98 场景 3-6（多次 Stop 驱动的端到端流） ——
+
+@unittest.skipUnless(shutil.which("git"), "环境无 git 可执行，跳过 git fixture 测试")
+class StopGateIntegrationSmokeTest(GitRepoFixture):
+    """§98 集成冒烟场景 3-6（B4.3）。
+
+    区别于 B4.1 的单检查用例：每个场景是「多次 run_gate 的完整流」——
+    第一次 Stop 拦截 → 模拟主会话修复（record_verification /
+    record_review 落证）→ 第二次 Stop 放行。逐场景断言两次 Stop 的
+    stdout/stderr 精确形态（block 次 = 单行 JSON；放行次 = 全空）、
+    journal 事件序（含 check 字段）与 block reason 关键子串。
+    """
+
+    CMD = "python3 -m unittest tests.test_app"
+    OWNED = "src/app.py"
+
+    def _write_owned(self, data):
+        """写/改一个 owned 文件（src/** 模式覆盖 src/app.py）。"""
+        self.write(self.OWNED, data)
+
+    # —— 场景 3：verification missing → block；补证 → 放行 ——
+    def test_scenario3_verification_missing_then_supplemented_passes(self):
+        self.add_active_task(
+            ownership_files=["src/**"], verification_required=[self.CMD])
+        self._write_owned(b"v1\n")
+        # 第一次 Stop：required 命令未记录 → verification_missing 拦截
+        first = run_gate("{}", self.repo)
+        self.assertEqual(first.returncode, 0)
+        self.assertEqual(first.stdout.count("\n"), 1)
+        payload = json.loads(first.stdout)
+        self.assertEqual(payload["decision"], "block")
+        reason = payload["reason"]
+        self.assertIn("required parent verification is incomplete", reason)
+        self.assertIn("- %s" % self.CMD, reason)
+        events = self.journal_events()
+        self.assertEqual([e["event"] for e in events], ["gate_blocked"])
+        self.assertEqual(events[0]["check"], "verification_missing")
+        self.assertEqual(events[0]["task_id"], TID)
+        self.assertEqual(events[0]["missing"], [self.CMD])
+        # 模拟主会话补证：记录验证命令 + 当前证据指纹（与门同一入口真算）
+        st = state.load_state(self.repo, TID)
+        state.record_verification(st, self.CMD, self.task_fingerprint(st))
+        self.set_state(st)
+        # 第二次 Stop：证据新鲜 → 完全静默放行 + journal 尾部 gate_passed
+        second = run_gate("{}", self.repo)
+        self.assertEqual(second.returncode, 0)
+        self.assertEqual(second.stdout, "")
+        self.assertEqual(second.stderr, "")
+        self.assertEqual(
+            [e["event"] for e in self.journal_events()],
+            ["gate_blocked", "gate_passed"])
+
+    # —— 场景 4：review missing（high assurance）→ block；裁决 → 放行 ——
+    def test_scenario4_review_missing_then_verdict_passes(self):
+        self.add_active_task(
+            ownership_files=["src/**"], verification_required=[self.CMD],
+            review_required=True, reviewer="glm-reviewer")
+        self._write_owned(b"v1\n")
+        # verification 全备且指纹新鲜；§98 场景 4 名义为 high assurance
+        # （完成门行为不依赖 assurance，提升只为场景语义忠实）
+        st = state.load_state(self.repo, TID)
+        st["route"]["assurance"] = "high"
+        state.record_verification(st, self.CMD, self.task_fingerprint(st))
+        self.set_state(st)
+        # 第一次 Stop：verification 新鲜、仅 review 未完成 → review_missing
+        first = run_gate("{}", self.repo)
+        self.assertEqual(first.returncode, 0)
+        self.assertEqual(first.stdout.count("\n"), 1)
+        payload = json.loads(first.stdout)
+        self.assertEqual(payload["decision"], "block")
+        reason = payload["reason"]
+        self.assertIn("review required but not completed", reason)
+        self.assertIn("glm-reviewer", reason)
+        events = self.journal_events()
+        self.assertEqual([e["event"] for e in events], ["gate_blocked"])
+        self.assertEqual(events[0]["check"], "review_missing")
+        self.assertEqual(events[0]["task_id"], TID)
+        self.assertEqual(events[0]["reviewer"], "glm-reviewer")
+        # 模拟主会话裁决：ship + 当前指纹 → 全部新鲜
+        st = state.load_state(self.repo, TID)
+        state.record_review(st, "ship", self.task_fingerprint(st))
+        self.set_state(st)
+        # 第二次 Stop：完全静默放行 + journal 尾部 gate_passed
+        second = run_gate("{}", self.repo)
+        self.assertEqual(second.returncode, 0)
+        self.assertEqual(second.stdout, "")
+        self.assertEqual(second.stderr, "")
+        self.assertEqual(
+            [e["event"] for e in self.journal_events()],
+            ["gate_blocked", "gate_passed"])
+
+    # —— 场景 5：审查后编辑 → review stale 拦截 ——
+    def test_scenario5_post_review_edit_review_stale(self):
+        # review-only：verification_required 为空、review_required=True
+        self.add_active_task(
+            ownership_files=["src/**"], review_required=True,
+            reviewer="glm-reviewer")
+        self._write_owned(b"v1\n")
+        # 先落一个新鲜裁决（ship + 当前证据指纹）
+        st = state.load_state(self.repo, TID)
+        state.record_review(st, "ship", self.task_fingerprint(st))
+        self.set_state(st)
+        # 审查后修复：编辑 owned 文件内容 → 审查证据失效
+        self._write_owned(b"v2\n")
+        result = run_gate("{}", self.repo)
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stdout.count("\n"), 1)
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["decision"], "block")
+        reason = payload["reason"]
+        self.assertIn("review evidence is stale", reason)
+        self.assertIn("Files changed after review", reason)
+        events = self.journal_events()
+        self.assertEqual([e["event"] for e in events], ["gate_blocked"])
+        self.assertEqual(events[0]["check"], "review_stale")
+        self.assertEqual(events[0]["task_id"], TID)
+        # reason 同时含 current 与 review fingerprint 两枚指纹串
+        self.assertNotEqual(events[0]["recorded"], events[0]["current"])
+        self.assertIn(events[0]["recorded"], reason)
+        self.assertIn(events[0]["current"], reason)
+
+    # —— 场景 6：重验 + 新鲜审查 → 放行（§93 例） ——
+    def test_scenario6_reverify_fresh_review_completion_allowed(self):
+        self.add_active_task(
+            ownership_files=["src/**"], verification_required=[self.CMD],
+            review_required=True, reviewer="glm-reviewer")
+        self._write_owned(b"v1\n")
+        # 初始全部新鲜：verification 与 review 指纹都 = task_fingerprint
+        st = state.load_state(self.repo, TID)
+        fresh = self.task_fingerprint(st)
+        state.record_verification(st, self.CMD, fresh)
+        state.record_review(st, "ship", fresh)
+        self.set_state(st)
+        # 一次修复：两枚证据同时过期（§93 例）
+        self._write_owned(b"v2\n")
+        first = run_gate("{}", self.repo)
+        self.assertEqual(first.returncode, 0)
+        self.assertEqual(first.stdout.count("\n"), 1)
+        payload = json.loads(first.stdout)
+        self.assertEqual(payload["decision"], "block")
+        # §15 顺序验证在前：两枚同坏时先报 verification_stale
+        self.assertIn("verification evidence is stale", payload["reason"])
+        events = self.journal_events()
+        self.assertEqual([e["event"] for e in events], ["gate_blocked"])
+        self.assertEqual(events[0]["check"], "verification_stale")
+        self.assertEqual(events[0]["task_id"], TID)
+        # 模拟重验 + 重审：两枚证据都重新绑定当前指纹
+        st = state.load_state(self.repo, TID)
+        current = self.task_fingerprint(st)
+        state.record_verification(st, self.CMD, current)
+        state.record_review(st, "ship", current)
+        self.set_state(st)
+        # 第二次 Stop：静默放行 + journal 尾部 [gate_blocked, gate_passed]
+        second = run_gate("{}", self.repo)
+        self.assertEqual(second.returncode, 0)
+        self.assertEqual(second.stdout, "")
+        self.assertEqual(second.stderr, "")
+        self.assertEqual(
+            [e["event"] for e in self.journal_events()],
+            ["gate_blocked", "gate_passed"])
+
+
 if __name__ == "__main__":
     unittest.main()
