@@ -147,7 +147,7 @@ events.jsonl 事件时点表与写入约束见 SKILL.md「任务状态与执行�
 
 八步恢复中，第 2 步读取 checkpoint 的同时读取 state.json、并查看 events.jsonl 尾部：
 
-1. **state.json**（机器可读）：恢复 status、route、ownership、verification / review 认知——若存在且非终态，本任务仍是 active task，恢复后仍受完成门跟踪
+1. **state.json**（机器可读）：恢复 status、route、ownership、verification / review 认知——若存在且非终态，本任务仍是 active task，恢复后仍受完成门跟踪；含 work_units 时对 running/verifying 单元用 `runtime/reconcile.py` 按证据对账（completed 不重跑），见 orchestration 技能「工作单元与任务图」节
 2. **checkpoint.md**（叙述性）：恢复 NEXT ACTION 与上下文
 3. **events.jsonl 尾部**（`tail_events`，最近 20 条）：了解中断前最后发生了什么（最后一条事件往往就是中断点）
 
