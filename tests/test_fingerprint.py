@@ -1,20 +1,23 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""runtime.fingerprint 单元测试（v2 工作块 B3.1）。
+"""runtime.fingerprint 单元测试（v2 工作块 B3.1 / B3.2）。
 
 运行：
     python3 -m unittest tests.test_fingerprint -v
 
-resolve_base / compute_fingerprint 的用例需要真实 git 仓库 fixture
-（tempdir 内 git init + config + add/commit，subprocess 调 git）；
-环境无 git 可执行时自动 skipTest（CI 有 git，正常执行）。
+resolve_base / compute_fingerprint / task_fingerprint 的用例需要真实
+git 仓库 fixture（tempdir 内 git init + config + add/commit，subprocess
+调 git）；环境无 git 可执行时自动 skipTest（CI 有 git，正常执行）。
+visual_evidence_status 不依赖 git（纯文件读取），始终执行。
 """
 
 import sys, unittest
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "plugins" / "glm-conductor"))
 from runtime import fingerprint
+from runtime import ownership
 
+import hashlib
 import os
 import re
 import shutil
@@ -281,6 +284,195 @@ class TestComputeFingerprint(GitRepoFixture):
     def test_illegal_path_raises_through(self):
         with self.assertRaises(fingerprint.FingerprintError):
             fingerprint.compute_fingerprint(self.repo, ["../escape.txt"])
+
+
+# —— task_fingerprint（真实 git 仓库 fixture，B3.2） ——
+
+@unittest.skipUnless(shutil.which("git"), "环境无 git 可执行，跳过 git fixture 测试")
+class TestTaskFingerprint(GitRepoFixture):
+    """task_fingerprint：按 ownership 声明过滤 touched 后计算指纹。"""
+
+    def test_declared_ownership_hashes_only_owned_hits(self):
+        # 声明 ownership → 越界文件内容变化 → 指纹不变；owned 文件变化 → 变
+        self.write("src/owned.py", b"owned v1\n")
+        self.write("other/out-of-scope.txt", b"out v1\n")
+        st = {"ownership": {"files": ["src/**"]}}
+        fp1 = fingerprint.task_fingerprint(self.repo, st)
+        self.write("other/out-of-scope.txt", b"out v2\n")
+        fp2 = fingerprint.task_fingerprint(self.repo, st)
+        self.assertEqual(fp1, fp2)
+        self.write("src/owned.py", b"owned v2\n")
+        fp3 = fingerprint.task_fingerprint(self.repo, st)
+        self.assertNotEqual(fp1, fp3)
+
+    def test_no_ownership_hashes_all_touched(self):
+        # 未声明 ownership → 任意 touched 文件变化 → 指纹变
+        self.write("src/owned.py", b"owned v1\n")
+        self.write("other/out.txt", b"out v1\n")
+        st = {"ownership": {"files": []}}  # 空声明 = 未声明
+        fp1 = fingerprint.task_fingerprint(self.repo, st)
+        self.write("other/out.txt", b"out v2\n")
+        fp2 = fingerprint.task_fingerprint(self.repo, st)
+        self.assertNotEqual(fp1, fp2)
+        self.write("src/owned.py", b"owned v2\n")
+        fp3 = fingerprint.task_fingerprint(self.repo, st)
+        self.assertNotEqual(fp2, fp3)
+
+    def test_matches_compute_fingerprint_over_owned_scope(self):
+        # 一致性：声明 ownership 时 = 对 owned_hits 手动调 compute_fingerprint
+        self.write("src/owned.py", b"owned v1\n")
+        self.write("other/out.txt", b"out\n")
+        st = {"ownership": {"files": ["src/**"]}}
+        self.assertEqual(
+            fingerprint.task_fingerprint(self.repo, st),
+            fingerprint.compute_fingerprint(self.repo, ["src/owned.py"]))
+
+    def test_matches_compute_fingerprint_over_all_touched(self):
+        # 一致性：未声明 ownership 时 = 对全部 touched 手动调 compute_fingerprint
+        self.write("src/owned.py", b"owned v1\n")
+        self.write("other/out.txt", b"out v1\n")
+        st = {"ownership": {"files": []}}
+        self.assertEqual(
+            fingerprint.task_fingerprint(self.repo, st),
+            fingerprint.compute_fingerprint(
+                self.repo, ["src/owned.py", "other/out.txt"]))
+
+    def test_malformed_ownership_files_treated_as_empty(self):
+        # files 非 list 或全非 str 项 → 按空处理（范围 = touched 全部）
+        self.write("a.txt", b"a\n")
+        expected = fingerprint.compute_fingerprint(self.repo, ["a.txt"])
+        for bad_files in (None, "src/**", [123, ""], {"src/**"}):
+            with self.subTest(files=bad_files):
+                st = {"ownership": {"files": bad_files}}
+                self.assertEqual(
+                    fingerprint.task_fingerprint(self.repo, st), expected)
+
+    def test_ownership_key_missing_treated_as_undeclared(self):
+        self.write("a.txt", b"a\n")
+        self.assertEqual(
+            fingerprint.task_fingerprint(self.repo, {}),
+            fingerprint.compute_fingerprint(self.repo, ["a.txt"]))
+
+    def test_non_dict_task_state_raises(self):
+        # 结构性错误：task_state 非 dict → FingerprintError（不静默转换）
+        for bad in (None, "state", ["ownership"], 42):
+            with self.subTest(task_state=bad):
+                with self.assertRaises(fingerprint.FingerprintError):
+                    fingerprint.task_fingerprint(self.repo, bad)
+
+    def test_fingerprint_format_valid(self):
+        self.write("src/owned.py", b"owned v1\n")
+        fp = fingerprint.task_fingerprint(
+            self.repo, {"ownership": {"files": ["src/**"]}})
+        self.assertRegex(fp, _FINGERPRINT_RE)
+
+
+@unittest.skipUnless(shutil.which("git"), "环境无 git 可执行，跳过 git fixture 测试")
+class TestTaskFingerprintNonGit(TempDirCase):
+    """非 git 目录：task_fingerprint 让 OwnershipError 自然上抛。"""
+
+    def test_ownership_declared_raises_ownership_error(self):
+        st = {"ownership": {"files": ["src/**"]}}
+        with self.assertRaises(ownership.OwnershipError):
+            fingerprint.task_fingerprint(self.repo, st)
+
+    def test_ownership_undeclared_raises_ownership_error(self):
+        # git_touched_files 在范围判定之前调用，未声明 ownership 同样上抛
+        with self.assertRaises(ownership.OwnershipError):
+            fingerprint.task_fingerprint(self.repo, {})
+
+
+# —— visual_evidence_status（纯文件读取，不依赖 git，B3.2） ——
+
+class TestVisualEvidenceStatus(TempDirCase):
+
+    def test_non_list_entries_raise(self):
+        for bad in (None, "x", {"path": "a", "sha256": "ab"}, 42):
+            with self.subTest(entries=bad):
+                with self.assertRaises(fingerprint.FingerprintError):
+                    fingerprint.visual_evidence_status(self.repo, bad)
+
+    def test_non_dict_item_raises(self):
+        with self.assertRaises(fingerprint.FingerprintError):
+            fingerprint.visual_evidence_status(
+                self.repo, ["docs/shot.png"])
+
+    def test_illegal_path_raises(self):
+        entries = [{"path": "../escape.png", "sha256": "ab" * 32}]
+        with self.assertRaises(fingerprint.FingerprintError):
+            fingerprint.visual_evidence_status(self.repo, entries)
+
+    def test_fresh_entry_not_stale(self):
+        payload = b"\x89PNG fake bytes\n"
+        self.write("docs/shot.png", payload)
+        digest = hashlib.sha256(payload).hexdigest()
+        result = fingerprint.visual_evidence_status(
+            self.repo, [{"path": "docs/shot.png", "sha256": digest}])
+        self.assertEqual(len(result), 1)
+        item = result[0]
+        self.assertEqual(item["path"], "docs/shot.png")
+        self.assertEqual(item["recorded"], digest)
+        self.assertEqual(item["current"], digest)
+        self.assertFalse(item["stale"])
+
+    def test_content_change_stale(self):
+        self.write("docs/shot.png", b"v1 bytes\n")
+        recorded = hashlib.sha256(b"v1 bytes\n").hexdigest()
+        self.write("docs/shot.png", b"v2 bytes\n")
+        result = fingerprint.visual_evidence_status(
+            self.repo, [{"path": "docs/shot.png", "sha256": recorded}])
+        self.assertTrue(result[0]["stale"])
+        self.assertEqual(
+            result[0]["current"], hashlib.sha256(b"v2 bytes\n").hexdigest())
+
+    def test_deleted_file_current_none_and_stale(self):
+        self.write("docs/shot.png", b"bytes\n")
+        recorded = hashlib.sha256(b"bytes\n").hexdigest()
+        (self.repo / "docs" / "shot.png").unlink()
+        result = fingerprint.visual_evidence_status(
+            self.repo, [{"path": "docs/shot.png", "sha256": recorded}])
+        self.assertIsNone(result[0]["current"])
+        self.assertTrue(result[0]["stale"])
+
+    def test_directory_path_current_none_and_stale(self):
+        # 容错优先：目标是目录不抛，该项记 current=None、stale=True
+        (self.repo / "docs").mkdir(parents=True)
+        result = fingerprint.visual_evidence_status(
+            self.repo, [{"path": "docs", "sha256": "ab" * 32}])
+        self.assertIsNone(result[0]["current"])
+        self.assertTrue(result[0]["stale"])
+
+    def test_binary_bytes_not_normalized(self):
+        # raw 语义证明：含 \r\n 的文件按原始字节哈希命中（stale=False），
+        # 而 content_digest（CRLF→LF 归一）的值 ≠ recorded
+        payload = b"\x00\x01binary\r\nwith crlf\r\n\x00"
+        self.write("docs/raw.bin", payload)
+        raw_digest = hashlib.sha256(payload).hexdigest()
+        result = fingerprint.visual_evidence_status(
+            self.repo, [{"path": "docs/raw.bin", "sha256": raw_digest}])
+        self.assertFalse(result[0]["stale"])
+        self.assertNotEqual(raw_digest, fingerprint.content_digest(payload))
+
+    def test_backslash_path_normalized_but_original_returned(self):
+        # 读取用归一路径，返回值保留原始 path
+        self.write("docs/shot.png", b"bytes\n")
+        digest = hashlib.sha256(b"bytes\n").hexdigest()
+        result = fingerprint.visual_evidence_status(
+            self.repo, [{"path": "docs\\shot.png", "sha256": digest}])
+        self.assertFalse(result[0]["stale"])
+        self.assertEqual(result[0]["path"], "docs\\shot.png")
+
+    def test_multiple_entries_order_preserved(self):
+        self.write("a.png", b"a\n")
+        self.write("b.png", b"b\n")
+        entries = [
+            {"path": "b.png", "sha256": hashlib.sha256(b"b\n").hexdigest()},
+            {"path": "a.png", "sha256": hashlib.sha256(b"old\n").hexdigest()},
+        ]
+        result = fingerprint.visual_evidence_status(self.repo, entries)
+        self.assertEqual([item["path"] for item in result], ["b.png", "a.png"])
+        self.assertFalse(result[0]["stale"])
+        self.assertTrue(result[1]["stale"])
 
 
 @unittest.skipUnless(shutil.which("git"), "环境无 git 可执行，跳过 git fixture 测试")

@@ -6,6 +6,10 @@
     管理 v2 任务的确定性状态文件 `.glm-conductor/tasks/<task-id>/state.json`：
       - 定位：tasks_root / task_dir / state_path 三个纯路径函数；
       - 创建：new_task_state() 构造带默认值的完整状态 dict（只构造不校验）；
+      - 写入：record_verification() / record_review() /
+        record_visual_evidence() 三个纯 dict 变换助手（就地修改并返回
+        同一 dict，不触碰磁盘，调用方负责 save_state）——记录验证命令 /
+        审查裁决的证据指纹与视觉证据 sha256（升级指南 §19/§20/§22）；
       - 校验：validate_state() 返回中文错误列表（空列表 = 合法），不抛异常；
       - 保存：save_state() 先校验再原子写（同目录 tmp + os.replace）；
       - 读取：load_state() 读取并归一 v1.x legacy 标识（CONTINUITY_ID 等）；
@@ -180,7 +184,7 @@ def _validate_verification(verification):
 
 
 def _validate_review(review):
-    """校验 review 子对象（required 布尔 + reviewer/verdict 可空枚举）。"""
+    """校验 review 子对象（required 布尔 + reviewer/verdict 可空枚举 + fingerprint）。"""
     if not isinstance(review, dict):
         return ["review 必须是 JSON 对象"]
     errors = []
@@ -192,6 +196,31 @@ def _validate_review(review):
     verdict = review.get("verdict")
     if verdict is not None and verdict not in REVIEW_VERDICTS:
         errors.append(_enum_error("review.verdict", verdict, REVIEW_VERDICTS))
+    fingerprint = review.get("fingerprint")
+    if fingerprint is not None and not isinstance(fingerprint, str):
+        errors.append("review.fingerprint 必须是字符串或 null")
+    return errors
+
+
+def _validate_visual_evidence(entries):
+    """校验 visual_evidence 顶层数组（§22 视觉证据）。
+
+    值必须是 list；每项必须是 dict 且含非空 str 的 path 与 sha256
+    两键（其他键忽略，向前兼容）。
+    """
+    if not isinstance(entries, list):
+        return ["visual_evidence 必须是数组"]
+    errors = []
+    for index, item in enumerate(entries):
+        if not isinstance(item, dict):
+            errors.append("visual_evidence[%d] 必须是 JSON 对象" % index)
+            continue
+        path = item.get("path")
+        if not isinstance(path, str) or path == "":
+            errors.append("visual_evidence[%d].path 必须是非空字符串" % index)
+        sha256 = item.get("sha256")
+        if not isinstance(sha256, str) or sha256 == "":
+            errors.append("visual_evidence[%d].sha256 必须是非空字符串" % index)
     return errors
 
 
@@ -257,6 +286,10 @@ def validate_state(state) -> "list[str]":
     if "review" in state:
         errors.extend(_validate_review(state["review"]))
 
+    # 规则 6.5：visual_evidence（§22 视觉证据数组）
+    if "visual_evidence" in state:
+        errors.extend(_validate_visual_evidence(state["visual_evidence"]))
+
     # 规则 7：work_units 存在则必须是 list
     # （内部结构 v2 后续阶段才定义，本轮不校验）
     if "work_units" in state and not isinstance(state["work_units"], list):
@@ -311,11 +344,104 @@ def new_task_state(task_id, goal, route, *, ownership_files=(),
             "required": review_required,
             "reviewer": reviewer,
             "verdict": None,
+            "fingerprint": None,
         },
+        "visual_evidence": [],
         "work_units": [],
         "dispatch": {"max_workers": 1, "active": []},
         "status": status,
     }
+
+
+# —— 指纹 / 证据写入助手（纯 dict 变换，不触碰磁盘） ——
+
+def record_verification(st, command, fingerprint=None) -> dict:
+    """记录一条已执行验证命令（可选绑定证据指纹），就地修改并返回同一 dict。
+
+    - command 必须是非空 str，fingerprint 必须是 None 或非空 str，
+      否则 ValueError（先全量校验参数，再修改，失败不产生副作用）；
+    - command 追加进 verification.completed（已存在则不重复追加，
+      保持既有顺序）；verification 子 dict 或 completed list 缺失 /
+      形状异常时按需重建；
+    - fingerprint 非 None 时更新 verification.fingerprint；None 表示
+      「本次不更新指纹」，保留旧值。
+    调用方负责 save_state（本函数不触碰磁盘）。
+    """
+    if not isinstance(command, str) or command == "":
+        raise ValueError("record_verification：command 必须是非空字符串")
+    if fingerprint is not None and (
+            not isinstance(fingerprint, str) or fingerprint == ""):
+        raise ValueError(
+            "record_verification：fingerprint 必须是 None 或非空字符串")
+    verification = st.get("verification")
+    if not isinstance(verification, dict):
+        verification = {}
+        st["verification"] = verification
+    completed = verification.get("completed")
+    if not isinstance(completed, list):
+        completed = []
+        verification["completed"] = completed
+    if command not in completed:
+        completed.append(command)
+    if fingerprint is not None:
+        verification["fingerprint"] = fingerprint
+    return st
+
+
+def record_review(st, verdict, fingerprint=None) -> dict:
+    """记录审查裁决（可选绑定证据指纹），就地修改并返回同一 dict。
+
+    - verdict 必须在 REVIEW_VERDICTS 内，fingerprint 必须是 None 或
+      非空 str，否则 ValueError（先全量校验参数，再修改，失败不产生
+      副作用）；
+    - 更新 review.verdict；fingerprint 非 None 时更新 review.fingerprint
+      （None 表示「本次不更新指纹」，保留旧值）；
+    - review 子 dict 缺失 / 形状异常时按需重建，含 required=False、
+      reviewer=None 默认值（此时 required 语义由调用方后续负责）。
+    调用方负责 save_state（本函数不触碰磁盘）。
+    """
+    if verdict not in REVIEW_VERDICTS:
+        raise ValueError(
+            "record_review：verdict %r 不在合法取值内（%s）"
+            % (verdict, ", ".join(REVIEW_VERDICTS)))
+    if fingerprint is not None and (
+            not isinstance(fingerprint, str) or fingerprint == ""):
+        raise ValueError(
+            "record_review：fingerprint 必须是 None 或非空字符串")
+    review = st.get("review")
+    if not isinstance(review, dict):
+        review = {"required": False, "reviewer": None}
+        st["review"] = review
+    review["verdict"] = verdict
+    if fingerprint is not None:
+        review["fingerprint"] = fingerprint
+    return st
+
+
+def record_visual_evidence(st, path, sha256) -> dict:
+    """记录一条视觉证据（§22：按文件自身 sha256），就地修改并返回同一 dict。
+
+    - path / sha256 均必须是非空 str，否则 ValueError（先全量校验
+      参数，再修改，失败不产生副作用）；
+    - 向 visual_evidence 追加 {"path": ..., "sha256": ...}；同 path
+      已存在 → 就地替换该项的 sha256（不追加第二条）；顶层键缺失 /
+      形状异常时按需重建为空 list。
+    调用方负责 save_state（本函数不触碰磁盘）。
+    """
+    if not isinstance(path, str) or path == "":
+        raise ValueError("record_visual_evidence：path 必须是非空字符串")
+    if not isinstance(sha256, str) or sha256 == "":
+        raise ValueError("record_visual_evidence：sha256 必须是非空字符串")
+    entries = st.get("visual_evidence")
+    if not isinstance(entries, list):
+        entries = []
+        st["visual_evidence"] = entries
+    for entry in entries:
+        if isinstance(entry, dict) and entry.get("path") == path:
+            entry["sha256"] = sha256
+            return st
+    entries.append({"path": path, "sha256": sha256})
+    return st
 
 
 # —— 保存 / 读取 / 发现 ——

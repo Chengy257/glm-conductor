@@ -211,6 +211,27 @@ class ValidateStateTest(unittest.TestCase):
         self.assertTrue(
             any("review.reviewer" in e for e in state.validate_state(st)))
 
+    def test_review_fingerprint_valid_str(self):
+        st = make_state()
+        st["review"]["fingerprint"] = "sha256:" + "a" * 64
+        self.assertEqual(state.validate_state(st), [])
+
+    def test_review_fingerprint_null_and_missing_allowed(self):
+        st = make_state()
+        st["review"]["fingerprint"] = None
+        self.assertEqual(state.validate_state(st), [])
+        # 键整体缺失同样合法（schema 权威含 fingerprint: null，但校验宽松）
+        del st["review"]["fingerprint"]
+        self.assertEqual(state.validate_state(st), [])
+
+    def test_review_fingerprint_bad_type(self):
+        for bad in (12345, ["sha256:" + "a" * 64], {"hex": "aa"}, True):
+            st = make_state()
+            st["review"]["fingerprint"] = bad
+            errors = state.validate_state(st)
+            self.assertTrue(
+                any("review.fingerprint" in e for e in errors), repr(bad))
+
     def test_ownership_not_dict(self):
         st = make_state()
         st["ownership"] = ["src/auth.ts"]
@@ -246,6 +267,52 @@ class ValidateStateTest(unittest.TestCase):
         st["verification"]["fingerprint"] = 12345
         self.assertTrue(any(
             "verification.fingerprint" in e for e in state.validate_state(st)))
+
+    def test_visual_evidence_valid(self):
+        st = make_state()
+        st["visual_evidence"] = [
+            {"path": "docs/shot.png", "sha256": "ab" * 32, "extra": 1}]
+        # 其他键忽略（向前兼容）；空数组同样合法
+        self.assertEqual(state.validate_state(st), [])
+        st["visual_evidence"] = []
+        self.assertEqual(state.validate_state(st), [])
+
+    def test_visual_evidence_not_list(self):
+        st = make_state()
+        st["visual_evidence"] = {"path": "docs/shot.png", "sha256": "ab"}
+        errors = state.validate_state(st)
+        self.assertTrue(
+            any(e == "visual_evidence 必须是数组" for e in errors))
+
+    def test_visual_evidence_item_not_dict(self):
+        st = make_state()
+        st["visual_evidence"] = ["docs/shot.png"]
+        errors = state.validate_state(st)
+        self.assertTrue(any(
+            e == "visual_evidence[0] 必须是 JSON 对象" for e in errors))
+
+    def test_visual_evidence_missing_path(self):
+        st = make_state()
+        st["visual_evidence"] = [{"sha256": "ab" * 32}]
+        errors = state.validate_state(st)
+        self.assertTrue(any(
+            e == "visual_evidence[0].path 必须是非空字符串" for e in errors))
+
+    def test_visual_evidence_bad_sha256(self):
+        for bad in ("", 12345, None, ["ab"]):
+            st = make_state()
+            st["visual_evidence"] = [{"path": "docs/shot.png", "sha256": bad}]
+            errors = state.validate_state(st)
+            self.assertTrue(any(
+                e == "visual_evidence[0].sha256 必须是非空字符串"
+                for e in errors), repr(bad))
+
+    def test_visual_evidence_non_str_path(self):
+        st = make_state()
+        st["visual_evidence"] = [{"path": 42, "sha256": "ab" * 32}]
+        errors = state.validate_state(st)
+        self.assertTrue(any(
+            "visual_evidence[0].path" in e for e in errors))
 
     def test_work_units_not_list(self):
         st = make_state()
@@ -306,9 +373,19 @@ class NewTaskStateTest(unittest.TestCase):
             st["verification"],
             {"required": [], "completed": [], "fingerprint": None})
         self.assertEqual(
-            st["review"], {"required": False, "reviewer": None, "verdict": None})
+            st["review"],
+            {"required": False, "reviewer": None, "verdict": None,
+             "fingerprint": None})
+        self.assertEqual(st["visual_evidence"], [])
         self.assertEqual(st["work_units"], [])
         self.assertEqual(st["dispatch"], {"max_workers": 1, "active": []})
+
+    def test_visual_evidence_key_position(self):
+        # 顶层键顺序契约：visual_evidence 在 review 之后、work_units 之前
+        st = state.new_task_state("t-1", "目标", {"mode": "solo"})
+        keys = list(st.keys())
+        self.assertLess(keys.index("review"), keys.index("visual_evidence"))
+        self.assertLess(keys.index("visual_evidence"), keys.index("work_units"))
 
     def test_route_missing_keys_become_none(self):
         st = state.new_task_state("t-1", "目标", {})
@@ -336,7 +413,8 @@ class NewTaskStateTest(unittest.TestCase):
         self.assertEqual(st["verification"]["required"], ["python3 -m pytest"])
         self.assertEqual(
             st["review"],
-            {"required": True, "reviewer": "glm-reviewer", "verdict": None})
+            {"required": True, "reviewer": "glm-reviewer", "verdict": None,
+             "fingerprint": None})
         self.assertEqual(st["status"], "preflight")
         self.assertEqual(state.validate_state(st), [])
 
@@ -406,6 +484,176 @@ class SaveLoadRoundtripTest(unittest.TestCase):
             self.assertIn("status", str(ctx.exception))
             # 校验先于落盘：非法状态不得写出任何文件
             self.assertFalse(state.state_path(tmp, TID).exists())
+
+
+# —— record_* 写入助手（纯 dict 变换，不触碰磁盘） ——
+
+class RecordHelpersTest(unittest.TestCase):
+
+    FP_A = "sha256:" + "a" * 64
+    FP_B = "sha256:" + "b" * 64
+
+    # record_verification
+
+    def test_record_verification_appends_and_dedups(self):
+        st = make_state()
+        result = state.record_verification(st, "python3 -m pytest")
+        self.assertIs(result, st)  # 返回同一 dict（就地修改）
+        self.assertEqual(st["verification"]["completed"], ["python3 -m pytest"])
+        state.record_verification(st, "python3 -m pytest")  # 已存在不重复追加
+        state.record_verification(st, "python3 -m ruff check .")
+        self.assertEqual(
+            st["verification"]["completed"],
+            ["python3 -m pytest", "python3 -m ruff check ."])
+
+    def test_record_verification_fingerprint_updated_only_when_not_none(self):
+        st = make_state()
+        self.assertIsNone(st["verification"]["fingerprint"])
+        state.record_verification(st, "python3 -m pytest", fingerprint=self.FP_A)
+        self.assertEqual(st["verification"]["fingerprint"], self.FP_A)
+        # fingerprint=None 表示「本次不更新指纹」，保留旧值
+        state.record_verification(st, "python3 -m ruff check .")
+        self.assertEqual(st["verification"]["fingerprint"], self.FP_A)
+        state.record_verification(st, "python3 -m pytest", fingerprint=self.FP_B)
+        self.assertEqual(st["verification"]["fingerprint"], self.FP_B)
+
+    def test_record_verification_creates_missing_structures(self):
+        # verification 子 dict 整体缺失
+        st = {"task_id": TID}
+        state.record_verification(st, "python3 -m pytest", fingerprint=self.FP_A)
+        self.assertEqual(st["verification"]["completed"], ["python3 -m pytest"])
+        self.assertEqual(st["verification"]["fingerprint"], self.FP_A)
+        # completed list 缺失但 verification 存在
+        st2 = make_state()
+        del st2["verification"]["completed"]
+        state.record_verification(st2, "cmd-2")
+        self.assertEqual(st2["verification"]["completed"], ["cmd-2"])
+
+    def test_record_verification_value_errors_no_side_effect(self):
+        st = make_state()
+        for bad_command in ("", None, 42, ["python3 -m pytest"]):
+            with self.subTest(command=bad_command):
+                with self.assertRaises(ValueError):
+                    state.record_verification(st, bad_command)
+        for bad_fp in ("", 42, ["sha256:x"], dict(hex="aa")):
+            with self.subTest(fingerprint=bad_fp):
+                with self.assertRaises(ValueError):
+                    state.record_verification(
+                        st, "python3 -m pytest", fingerprint=bad_fp)
+        # 校验先于修改：失败不产生任何副作用
+        self.assertEqual(st["verification"]["completed"], [])
+        self.assertIsNone(st["verification"]["fingerprint"])
+
+    # record_review
+
+    def test_record_review_updates_verdict_and_fingerprint(self):
+        st = make_state(review_required=True, reviewer="glm-reviewer")
+        result = state.record_review(st, "ship", fingerprint=self.FP_A)
+        self.assertIs(result, st)
+        self.assertEqual(st["review"]["verdict"], "ship")
+        self.assertEqual(st["review"]["fingerprint"], self.FP_A)
+
+    def test_record_review_accepts_all_verdicts(self):
+        for verdict in state.REVIEW_VERDICTS:
+            st = make_state()
+            state.record_review(st, verdict)
+            self.assertEqual(st["review"]["verdict"], verdict, verdict)
+
+    def test_record_review_none_fingerprint_keeps_old(self):
+        st = make_state()
+        state.record_review(st, "missing")
+        self.assertIsNone(st["review"]["fingerprint"])
+        state.record_review(st, "ship", fingerprint=self.FP_A)
+        state.record_review(st, "fix-first")  # None → 不更新指纹
+        self.assertEqual(st["review"]["fingerprint"], self.FP_A)
+
+    def test_record_review_creates_missing_review_dict(self):
+        st = {"task_id": TID}
+        state.record_review(st, "ship", fingerprint=self.FP_A)
+        # 重建时带 required=False / reviewer=None 默认值（required 语义
+        # 由调用方后续负责）
+        self.assertEqual(
+            st["review"],
+            {"required": False, "reviewer": None, "verdict": "ship",
+             "fingerprint": self.FP_A})
+
+    def test_record_review_bad_verdict_raises_no_side_effect(self):
+        st = make_state()
+        for bad in ("looks-good", "", None, 42, True):
+            with self.subTest(verdict=bad):
+                with self.assertRaises(ValueError):
+                    state.record_review(st, bad)
+        self.assertIsNone(st["review"]["verdict"])
+
+    def test_record_review_bad_fingerprint_raises(self):
+        st = make_state()
+        for bad_fp in ("", 42):
+            with self.subTest(fingerprint=bad_fp):
+                with self.assertRaises(ValueError):
+                    state.record_review(st, "ship", fingerprint=bad_fp)
+        self.assertIsNone(st["review"]["verdict"])
+
+    # record_visual_evidence
+
+    def test_record_visual_evidence_append_and_replace(self):
+        st = make_state()
+        result = state.record_visual_evidence(st, "docs/a.png", "aa" * 32)
+        self.assertIs(result, st)
+        self.assertEqual(
+            st["visual_evidence"],
+            [{"path": "docs/a.png", "sha256": "aa" * 32}])
+        state.record_visual_evidence(st, "docs/b.png", "bb" * 32)
+        self.assertEqual(len(st["visual_evidence"]), 2)
+        # 同 path：就地替换该项 sha256，不追加第二条，顺序保持
+        state.record_visual_evidence(st, "docs/a.png", "cc" * 32)
+        self.assertEqual(
+            st["visual_evidence"],
+            [{"path": "docs/a.png", "sha256": "cc" * 32},
+             {"path": "docs/b.png", "sha256": "bb" * 32}])
+
+    def test_record_visual_evidence_creates_missing_key(self):
+        st = {"task_id": TID}
+        state.record_visual_evidence(st, "x.png", "ab" * 32)
+        self.assertEqual(
+            st["visual_evidence"], [{"path": "x.png", "sha256": "ab" * 32}])
+        # 顶层键形状异常（非 list）：重建为 list 后正常追加
+        st2 = make_state()
+        st2["visual_evidence"] = "corrupt"
+        state.record_visual_evidence(st2, "x.png", "ab" * 32)
+        self.assertEqual(
+            st2["visual_evidence"], [{"path": "x.png", "sha256": "ab" * 32}])
+
+    def test_record_visual_evidence_value_errors_no_side_effect(self):
+        st = make_state()
+        for bad_path in ("", None, 42, ["x.png"]):
+            with self.subTest(path=bad_path):
+                with self.assertRaises(ValueError):
+                    state.record_visual_evidence(st, bad_path, "ab" * 32)
+        for bad_sha in ("", None, 42, ["ab"]):
+            with self.subTest(sha256=bad_sha):
+                with self.assertRaises(ValueError):
+                    state.record_visual_evidence(st, "x.png", bad_sha)
+        self.assertEqual(st["visual_evidence"], [])
+
+    # 三个助手均不触碰磁盘 + save/load 往返字段保留
+
+    def test_record_results_survive_save_load_roundtrip(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            st = make_state(review_required=True, reviewer="glm-reviewer")
+            state.record_verification(
+                st, "python3 -m pytest", fingerprint=self.FP_A)
+            state.record_review(st, "ship", fingerprint=self.FP_B)
+            state.record_visual_evidence(st, "docs/shot.png", "ab" * 32)
+            state.save_state(tmp, st)
+            loaded = state.load_state(tmp, TID)
+            self.assertEqual(loaded, st)
+            self.assertEqual(loaded["verification"]["fingerprint"], self.FP_A)
+            self.assertEqual(loaded["review"]["fingerprint"], self.FP_B)
+            self.assertEqual(
+                loaded["visual_evidence"],
+                [{"path": "docs/shot.png", "sha256": "ab" * 32}])
+            # 加载回的状态再次通过校验（含新 schema 字段）
+            self.assertEqual(state.validate_state(loaded), [])
 
 
 # —— load_state ——

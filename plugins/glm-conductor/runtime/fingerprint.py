@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""GLM Conductor v2 证据指纹层（normalized diff sha256，v2 工作块 B3.1）。
+"""GLM Conductor v2 证据指纹层（normalized diff sha256，v2 工作块 B3.1/B3.2）。
 
 职责：
     把升级指南 §17-§18 的「任何修复使先前审查失效」变成自动强制的
@@ -16,7 +16,13 @@
       - compute_fingerprint()：指纹绑定「基线修订 + 相关文件集的
         归一化内容状态」——任何文件增 / 删 / 内容变化 / 文件集变化 /
         基线变化都会改变指纹；只哈希 paths 列出的文件，不哈希 paths
-        之外的任何文件（相关范围由调用方控制）。
+        之外的任何文件（相关范围由调用方控制）；
+      - task_fingerprint()：任务级指纹入口（B3.2）——按任务 state 的
+        ownership 声明过滤 git 工作区改动文件后计算证据指纹，主会话
+        记录验证/审查指纹与 Stop 完成门比对指纹共用此入口；
+      - visual_evidence_status()：视觉证据 stale 检测（B3.2，§22）——
+        按文件自身原始字节 sha256 与记录值比对，工作区后续变化 →
+        证据 stale → 完成被拦（§20）。
 
 归一说明：
       - 换行：只把 b"\\r\\n" 替换为 b"\\n"，不做其他任何处理（不转
@@ -30,8 +36,9 @@
     `python3 -S` 可运行。风格对齐 runtime/ownership.py / runtime/state.py。
 
 来源：
-    docs/glm-conductor-v2-upgrade-guide-final.md §17-§18（证据指纹）
-    + v2 升级计划工作块 B3.1。
+    docs/glm-conductor-v2-upgrade-guide-final.md §17-§18（证据指纹）、
+    §19-§20（验证/审查证据指纹与 stale 拦截）、§22（视觉证据）
+    + v2 升级计划工作块 B3.1、B3.2。
 """
 
 import hashlib
@@ -213,3 +220,93 @@ def compute_fingerprint(repo_root, paths) -> str:
         lines.append("file " + rel + "\0" + mark)
     preimage = "".join(line + "\n" for line in lines).encode("utf-8")
     return "sha256:" + hashlib.sha256(preimage).hexdigest()
+
+
+# —— 任务指纹入口与 stale 检测（v2 工作块 B3.2） ——
+
+def task_fingerprint(repo_root, task_state) -> str:
+    """按任务 ownership 声明计算任务级证据指纹（B3.2）。
+
+    这是主会话记录验证/审查证据指纹与 Stop 完成门比对指纹的同一入口：
+    两侧必须调用同一函数，得到的指纹才可比（升级指南 §19/§20——任何
+    工作区变化使旧证据指纹失效，完成门据此拦截）。
+
+    范围规则：
+      - 从 task_state 读 ownership.files：非 list 或全非 str 时按空
+        处理；只保留非空 str 项作为声明模式；
+      - touched = git_touched_files(repo_root)（懒导入 runtime.ownership，
+        避免模块级依赖环）；git 失败时 OwnershipError 自然上抛，
+        由调用方处理；
+      - 声明了 ownership（过滤后非空）→ 范围 = classify_paths(touched,
+        patterns) 的 owned_hits（只哈希声明覆盖的改动文件）；
+      - 未声明 → 范围 = touched 全部；
+      - 指纹 = compute_fingerprint(repo_root, 范围)。
+
+    task_state 非 dict 抛 FingerprintError（结构性错误，不静默转换）。
+    """
+    if not isinstance(task_state, dict):
+        raise FingerprintError(
+            "task_state 必须是 dict，得到 %s" % type(task_state).__name__)
+    from runtime import ownership  # 懒导入：避免模块级依赖环
+    ownership_state = task_state.get("ownership")
+    patterns = []
+    if isinstance(ownership_state, dict):
+        raw_files = ownership_state.get("files")
+        if isinstance(raw_files, list):
+            patterns = [item for item in raw_files
+                        if isinstance(item, str) and item != ""]
+    touched = ownership.git_touched_files(repo_root)
+    if patterns:
+        owned_hits, _ = ownership.classify_paths(touched, patterns)
+        scope = owned_hits
+    else:
+        scope = touched
+    return compute_fingerprint(repo_root, scope)
+
+
+def visual_evidence_status(repo_root, entries) -> "list[dict]":
+    """视觉证据 stale 检测（B3.2，升级指南 §22）。
+
+    entries 是 state.visual_evidence 数组（list of dict，每项含
+    path / sha256）；非 list 输入抛 FingerprintError，项非 dict 同样
+    抛 FingerprintError（结构性错误，不静默转换）。
+
+    逐项：
+      - 路径先 normalize_relpath（非法路径 FingerprintError 上抛）；
+      - 读 <repo_root>/<归一路径> 的原始字节取 sha256——不做 CRLF
+        归一：截图等二进制证据按文件自身字节哈希（与 content_digest
+        的唯一语义差别：后者面向文本逻辑内容，先做 CRLF→LF 归一）；
+      - 文件不存在或读取时 OSError → current=None；目标是目录 →
+        current=None 且 stale=True（容错优先，不抛）；
+      - stale = (current != recorded)。
+
+    返回 list（顺序与输入一致），每项 {"path": 原始 path,
+    "recorded": 记录值, "current": 当前值或 None, "stale": bool}。
+    """
+    if not isinstance(entries, list):
+        raise FingerprintError(
+            "visual_evidence 必须是数组，得到 %s" % type(entries).__name__)
+    results = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            raise FingerprintError(
+                "visual_evidence 项必须是 JSON 对象，得到 %s"
+                % type(entry).__name__)
+        path = entry.get("path")
+        recorded = entry.get("sha256")
+        normalized = normalize_relpath(path)
+        target = pathlib.Path(repo_root) / normalized
+        current = None
+        if target.exists() and not target.is_dir():
+            try:
+                with open(target, "rb") as fh:
+                    current = hashlib.sha256(fh.read()).hexdigest()
+            except OSError:
+                current = None
+        results.append({
+            "path": path,
+            "recorded": recorded,
+            "current": current,
+            "stale": current != recorded,
+        })
+    return results
