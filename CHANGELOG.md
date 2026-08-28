@@ -7,9 +7,9 @@ v2 第五里程碑——**任务与工作单元管理**（P1.5，升级指南 §
 - **工作单元状态模型（`runtime/work_unit.py`）**：十词状态 + 26 条合法转换边（主链 / quota·block 回退 / §69 恢复对账边 / 终态封锁）；§61 契约校验（ownership 与 verification 必填——无文件范围或无验证的单元不可派发）；`attempt` 重试记账不抹除失败史（§73）；state.json 的 work_units 逐项校验接入
 - **依赖图（`runtime/dependency.py`）**：DAG 校验（重复 id / 未知引用 / 自依赖 / 环——报全部环成员）；就绪推导（依赖全部 completed 才 ready）；传递下游闭包；确定性拓扑序（同层 id 排序）
 - **派发准入（`runtime/dispatcher.py`，主会话仍是唯一编排者）**：`plan_dispatch` 四道闸——quota 四态（EXHAUSTED→waiting_quota、UNKNOWN/PRESSURE 保守抑制，§67）→ ownership 不相交（保守近似：字面前缀相交即冲突，宁少并行不越界，§66）→ max_workers 预算 → 派发；**默认串行（max_workers=1）**，有界并行待租约层
-- **恢复对账（`runtime/reconcile.py`，§68-§69）**：中断恢复绝不盲目重放——completed 不重跑；running/verifying 单元按证据三分（无残留→干净重派 / 残留+绑定当前指纹的新鲜验证事件→completed / 残留无新鲜证据→verifying 主会话亲验）；纯建议零落盘
+- **恢复对账（`runtime/reconcile.py`，§68-§69）**：中断恢复绝不盲目重放——completed 不重跑；`running` 单元按证据三分（无残留→干净重派 / 残留+绑定当前指纹的新鲜验证事件→completed / 残留无新鲜证据→verifying 主会话亲验）；`verifying` 单元仅新鲜证据时建议 completed，其余出 advisory（保持现状 / 主会话裁决）不做转换；纯建议零落盘
 - **技能契约（orchestration 新 §10）**：分解原则（单元必须仍能接收完整五段式规格）、派发契约（plan_dispatch 准入 + dispatch.active 记账）、单元验证仍为 parent-observed、显式 Join（任务级全局验证永不自动替代）、中断恢复对账；continuity 恢复读取顺序接入
-- **测试**：596 用例（新增 168：work_unit 55 / dependency 52 / dispatcher 44 / reconcile 17——含串行多单元、依赖图派发、中断恢复三场景端到端与转换表逐边锚定）
+- **测试**：602 用例（新增 174：work_unit 57 / dependency 52 / dispatcher 44 / reconcile 21——含串行多单元、依赖图派发、中断恢复三场景端到端与转换表逐边锚定；终审修复批次 +6）
 
 ## 2.0.0-beta1
 

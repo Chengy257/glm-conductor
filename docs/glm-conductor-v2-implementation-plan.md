@@ -50,7 +50,7 @@
 | B6.2 | TASK CONTEXT PACK（五段式规格补充节） | **主会话 solo** | B4 | beta1 |
 | B7.1 | runtime/policy.py（action×resource→allow/ask/deny）+ 单测 | delegate | B2 | beta1 |
 | B7.2 | 主会话 Bash 写模式 + 高保障 ask 规则接线 + 实测 | delegate + 主会话 | B7.1 | beta1 |
-| B8.1 | work_unit.py（schema/九状态/转换）+ 单测 | delegate | B1/B2 | beta2 |
+| B8.1 | work_unit.py（schema/十词状态/转换）+ 单测 | delegate | B1/B2 | beta2 |
 | B8.2 | dependency.py（DAG 校验/环拒绝/就绪推导）+ 单测 | delegate | B8.1 | beta2 |
 | B8.3 | dispatcher.py（max_workers/quota 准入接口）+ 单测 | delegate | B8.2/B5.3 | beta2 |
 | B8.4 | 任务图恢复对账辅助 + 冒烟（串行多单元/依赖图/中断恢复） | delegate + 主会话 | B8.3 | beta2 |
