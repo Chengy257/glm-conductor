@@ -13,8 +13,8 @@
     - 转换表逐边锚定（表内容逐字锁定 + 26 条合法边逐一断言 +
       每个非终态至少一条非法边 + 终态全封锁 + 错误消息含
       from/to 与合法目标清单）；
-    - record_attempt 递增与 outcome 累积（含旧 result 非 dict 的
-      起始路径）；
+    - record_attempt 递增与 outcome 累积（含旧 result 非 dict 与
+      dict 内 attempt_outcomes 非 list 的历史保留起始路径）；
     - JSON dump/load 往返后仍通过校验。
 
 运行：
@@ -508,6 +508,31 @@ class RecordAttemptTest(unittest.TestCase):
         w["result"] = {"attempt_outcomes": ["旧失败"]}
         work_unit.record_attempt(w, outcome="新失败")
         self.assertEqual(w["result"]["attempt_outcomes"], ["旧失败", "新失败"])
+
+    def test_old_dict_non_list_outcomes_preserved_not_dropped(self):
+        # P2#4：result 为 dict 但 attempt_outcomes 为非 list 值时，
+        # 旧值不静默丢弃——保留为失败历史首条再追加（与「旧 result
+        # 非 dict」的起始路径同构），其他键原样保留
+        for old in ("自由文本报告", 42, {"旧": "形状"}, True):
+            w = make_wu()
+            w["result"] = {"attempt_outcomes": old, "summary": "历史"}
+            work_unit.record_attempt(w, outcome="新结果")
+            with self.subTest(old=old):
+                self.assertEqual(w["attempt"], 1)
+                self.assertEqual(
+                    w["result"],
+                    {"attempt_outcomes": [old, "新结果"], "summary": "历史"})
+
+    def test_outcomes_accumulate_after_non_list_value_repair(self):
+        # 非 list 旧值保留为首条后，后续 outcome 在 repaired 列表上正常累积
+        w = make_wu()
+        w["result"] = {"attempt_outcomes": "首次的字符串报告"}
+        work_unit.record_attempt(w, outcome="第二次失败")
+        work_unit.record_attempt(w, outcome="第三次失败")
+        self.assertEqual(
+            w["result"]["attempt_outcomes"],
+            ["首次的字符串报告", "第二次失败", "第三次失败"])
+        self.assertEqual(w["attempt"], 2)
 
     def test_outcome_none_does_not_touch_result(self):
         w = make_wu()

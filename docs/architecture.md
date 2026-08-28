@@ -223,7 +223,7 @@ Work Unit 是可独立派发的最小有界实施单元（§60-§73，`runtime/w
 
 v2 把关键运行时契约从提示词升级为确定性强制。强制层由插件钩子（`hooks/hooks.json` 声明，安装后自动启用、仅新会话生效）与运行时模块（`runtime/`，纯标准库 python3）组成。
 
-### 8.1 Stop 完成门 — 四重检查（Layer A，确定性）
+### 9.1 Stop 完成门 — 四重检查（Layer A，确定性）
 
 主会话 turn 结束时（Stop 钩子 `hooks/stop_gate.py`），对每个**参与任务**（ownership 声明非空 / verification.required 非空 / review.required 为 true / visual_evidence 非空，四者任一）按固定顺序校验：
 
@@ -248,14 +248,14 @@ v2 把关键运行时契约从提示词升级为确定性强制。强制层由�
 - `.glm-conductor/` 运行时目录豁免——编排器自身账本不算用户仓库改动（否则创建 state.json 即自指拦截）
 - 子代理工具调用不触发钩子（Phase 0 实证：子会话不携带 hook runner），故写前拦截不可实现——**越界改动不被阻止发生，但不可能静默通过完成门**
 
-### 8.2 PreToolUse 双面：Layer B 注入（提示级）+ Bash 策略门控（决策级，beta1）
+### 9.2 PreToolUse 双面：Layer B 注入（提示级）+ Bash 策略门控（决策级，beta1）
 
 同一钩子脚本 `hooks/pre_tool_use.py` 按载荷 tool_name 分流：
 
 - **Layer B（matcher `Agent|Task`，advisory）**：每次子代理派发前注入 ownership 契约提醒（声明清单 + 越界将拦完成门）。提高合规但不构成强制。
 - **Bash 策略门控（matcher `Bash`，决策级）**：`runtime/policy.py` 表驱动规则（§57-§59，禁 DSL）把主会话 Bash 命令分类为 allow/ask/deny，经 `permissionDecision` 返回运行时——deny：rm -r/-f、git reset --hard、git clean -f、force push（--force-with-lease 归 ask）；ask（仅活动任务 assurance:high 时）：任何 push、模式迁移、发布操作、权限变更。门控顺序：非 Bash 不管 → 无活动任务零干预 → deny 无视保障级 → ask 仅 high → 其余默认放行。只覆盖主会话调用（子代理工具调用不触发钩子，角色级 deny 由 agent 工具白名单负责）；字符串中引用的破坏性文本与 `git rm -r --cached`（仅动索引）会被保守误拒（beta1 已登记取舍：误拒方向保守安全，特判排除违反 §59 简单可检视原则）。
 
-### 8.3 失败处理与循环安全
+### 9.3 失败处理与循环安全
 
 - **fail-open 降级可见**：三种降级路径全部放行并在 stderr 报 `ENFORCEMENT DEGRADED`，但记账不同——前两类（git 失败 / 求值阶段结构性错误）会向参与任务 journal 记 `gate_degraded`，进程级崩溃兜底仅 stderr 可见、不写 journal（崩溃可能正是 journal 故障所致）——钩子起不来时 fail-closed 会卡死所有会话，降级可见优于假强制
 - **续行有界**：运行时对 Stop block 的续行内建上限（每 turn 最多 3 次）；钩子侧连续两次 block 后第三次放行（stderr 报 `ENFORCEMENT GATE EXHAUSTED`、journal 记 `gate_exhausted`）——**此时模型必须向用户报告 blocked，不得声称完成**；两次 block 间出现真实工作事件即重置计数（活体实测：四重检查全路径单次 Stop 约 0.2s，正常仓库远低于 5s 钩子预算）
@@ -281,4 +281,4 @@ v2 把关键运行时契约从提示词升级为确定性强制。强制层由�
 
 ## 12. 演化边界
 
-v2 开发在 `v2-dev` 分支进行（`main` 保持在 v1.1.0 发布态，里程碑完成后再合入）。当前处于 **2.0.0-beta2**（alpha 线三里程碑 + beta1 路由上下文与策略门控 + beta2 任务与工作单元管理：九状态模型/依赖图/派发准入/恢复对账），后续里程碑：rc1 租约与有界并行 → stable。除非实际使用暴露出具体能力缺口，不新增路由维度或角色；强制层只针对高置信不变量（越界、缺失证据、过期证据），不做语义解释型拦截。
+v2 开发在 `v2-dev` 分支进行（`main` 保持在 v1.1.0 发布态，里程碑完成后再合入）。当前处于 **2.0.0-beta2**（alpha 线三里程碑 + beta1 路由上下文与策略门控 + beta2 任务与工作单元管理：十词状态模型/依赖图/派发准入/恢复对账），后续里程碑：rc1 租约与有界并行 → stable。除非实际使用暴露出具体能力缺口，不新增路由维度或角色；强制层只针对高置信不变量（越界、缺失证据、过期证据），不做语义解释型拦截。

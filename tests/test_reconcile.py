@@ -13,13 +13,18 @@ journal + 驱动 reconcile_interrupted）+ 纯函数容错用例：
     且清空其残留 → 建议 ready（干净重派），应用后重新可派发；
   - 场景 C 中断恢复：A verifying（残留 + 新鲜验证事件 → completed）；
     B running（残留 + 过期指纹事件——先记事件再改文件 → verifying）；
-    C running 无残留 → ready；建议经 transition_work_unit 逐个应用全部
-    合法（转换表闭环），应用后 ready_units 恰为重派集合；
+    C running 无残留 → ready；应用循环只对 suggestions 生效
+    （advisories 断言为空），全部转换合法（转换表闭环），应用后
+    ready_units 恰为重派集合；
+  - verifying 态建议限定（P1#1）：新鲜证据 → suggestions completed；
+    无残留无新鲜 / 有残留无新鲜两种表外情形 → advisories（无 to、
+    不携带转换，裁决归主会话）；
   - 纯函数用例：非 running/verifying 单元零建议（全状态词汇穷举）；
-    events 注入空 / 非 list 容错；建议键序按 units 出现序；§69 证据
-    匹配四条件逐项锚定（event 名 / 指纹 / status=pass / command ∈
-    verification）；纯建议纪律（零落盘、不改 units）；结构性错误
-    （git 失败 / 非法 ownership 模式 / 指纹目标为目录）自然上抛。
+    events 注入空 / 非 list 容错；suggestions / advisories /
+    reconciled 键序均按 units 出现序；§69 证据匹配四条件逐项锚定
+    （event 名 / 指纹 / status=pass / command ∈ verification）；纯
+    建议纪律（零落盘、不改 units）；结构性错误（git 失败 / 非法
+    ownership 模式 / 指纹目标为目录）自然上抛。
 
 git fixture 做法（git init + config + commit、Windows 下 .git 只读位
 清理）对齐 tests/test_stop_gate.py 的 GitRepoFixture；环境无 git 可执行
@@ -278,23 +283,97 @@ class ScenarioCInterruptRecoveryTest(ReconcileFixture):
         self.write("src/mod-b/b.py", b"b-v2\n")
         # C（running）：无残留（不写文件）
         report = reconcile.reconcile_interrupted(str(self.repo), TID, units)
-        # 三分支建议齐全，键序按 units 出现序
+        # 三分支建议齐全，键序按 units 出现序；A（verifying+新鲜证据）
+        # 仍建议 completed 进 suggestions，advisories 为空
         self.assertEqual(list(report["suggestions"]),
                          ["mod-a", "mod-b", "mod-c"])
         self.assertEqual(report["suggestions"]["mod-a"]["to"], "completed")
         self.assertEqual(report["suggestions"]["mod-b"]["to"], "verifying")
         self.assertEqual(report["suggestions"]["mod-c"]["to"], "ready")
+        self.assertEqual(report["advisories"], {})
         self.assertEqual(report["reconciled"], ["mod-a", "mod-b", "mod-c"])
-        # 应用：verifying→completed / running→verifying / running→ready
-        # 全部在 §62 转换表内（转换闭环，无 ValueError）
-        for uid, unit in (("mod-a", unit_a), ("mod-b", unit_b),
-                          ("mod-c", unit_c)):
-            work_unit.transition_work_unit(
-                unit, report["suggestions"][uid]["to"])
+        # 应用循环只对 suggestions 生效：verifying→completed /
+        # running→verifying / running→ready 全部在 §62 转换表内
+        # （转换闭环，无 ValueError）
+        by_id = {u["id"]: u for u in units}
+        for uid, advice in report["suggestions"].items():
+            work_unit.transition_work_unit(by_id[uid], advice["to"])
         self.assertEqual([u["status"] for u in units],
                          ["completed", "verifying", "ready"])
         # 应用后重派集合恰为 mod-c（A completed 不重跑、B verifying 不重派）
         self.assertEqual(dependency.ready_units(units), ["mod-c"])
+
+
+# —— 纯函数：verifying 态建议限定（P1#1：表外情形走 advisories） ——
+
+@unittest.skipUnless(shutil.which("git"), "环境无 git 可执行，跳过 git fixture 测试")
+class ReconcileVerifyingAdviceTest(ReconcileFixture):
+    """verifying 态仅「新鲜证据 → completed」进 suggestions；无残留 /
+    有残留无新鲜两种表外情形产出 no-op 裁决提示（advisories，无 to）。"""
+
+    def verifying_unit(self, uid="ver"):
+        return make_unit(uid, ("src/ver/**",), status="verifying",
+                         verification=(CMD_A,))
+
+    def test_fresh_evidence_suggests_completed_in_suggestions(self):
+        self.write("src/ver/v.py", b"v1\n")
+        unit = self.verifying_unit()
+        fp = self.current_fingerprint(unit)
+        report = reconcile.reconcile_interrupted(
+            str(self.repo), TID, [unit],
+            events=[self.verification_event(unit, fp)])
+        # 新鲜验证证据 → suggestions completed（verifying→completed
+        # 在 §62 转换表内），advisories 为空
+        self.assertEqual(report["suggestions"], {
+            "ver": {"to": "completed",
+                    "reason": "存在绑定当前改动的新鲜验证证据"
+                              "（parent-observed），待主会话确认"}})
+        self.assertEqual(report["advisories"], {})
+        self.assertEqual(report["reconciled"], ["ver"])
+        # 应用合法：verifying → completed（转换表主验证边）
+        work_unit.transition_work_unit(
+            unit, report["suggestions"]["ver"]["to"])
+        self.assertEqual(unit["status"], "completed")
+
+    def test_no_residue_no_fresh_yields_ruling_advisory_without_to(self):
+        # verifying + 无残留：verifying→ready 非法 → 只出裁决提示
+        unit = self.verifying_unit()
+        report = reconcile.reconcile_interrupted(
+            str(self.repo), TID, [unit], touched=[], events=[])
+        self.assertEqual(report["suggestions"], {})
+        self.assertEqual(report["advisories"], {
+            "ver": {"reason": "verifying 无残留改动且无新鲜验证证据："
+                              "主会话裁决——重跑验证或按失败处理"}})
+        self.assertNotIn("to", report["advisories"]["ver"])  # 无转换可应用
+        self.assertEqual(report["reconciled"], ["ver"])
+        # 纯建议纪律：建议层不改单元状态
+        self.assertEqual(unit["status"], "verifying")
+
+    def test_residue_without_fresh_yields_stay_advisory_without_to(self):
+        # verifying + 有残留无新鲜证据：verifying→verifying 自转换非法
+        self.write("src/ver/v.py", b"v1\n")
+        unit = self.verifying_unit()
+        report = reconcile.reconcile_interrupted(
+            str(self.repo), TID, [unit], events=[])
+        self.assertEqual(report["suggestions"], {})
+        self.assertEqual(report["advisories"], {
+            "ver": {"reason": "verifying 保持现状：主会话直接运行单元"
+                              "验证后完成或失败"}})
+        self.assertNotIn("to", report["advisories"]["ver"])
+        self.assertEqual(report["reconciled"], ["ver"])
+
+    def test_stale_evidence_still_yields_stay_advisory(self):
+        # 先记事件再改文件 → 指纹过期 ≠ 新鲜证据 → 仍是保持现状提示
+        self.write("src/ver/v.py", b"v1\n")
+        unit = self.verifying_unit()
+        fp_stale = self.current_fingerprint(unit)
+        self.record_event(self.verification_event(unit, fp_stale))
+        self.write("src/ver/v.py", b"v2\n")
+        report = reconcile.reconcile_interrupted(str(self.repo), TID, [unit])
+        self.assertEqual(report["suggestions"], {})
+        self.assertEqual(report["advisories"], {
+            "ver": {"reason": "verifying 保持现状：主会话直接运行单元"
+                              "验证后完成或失败"}})
 
 
 # —— 纯函数：非中断状态零建议（§68 锚定） ——
@@ -321,8 +400,10 @@ class ReconcileNonInterruptedTest(GitRepoFixture):
     def test_units_non_list_tolerated_as_empty(self):
         report = reconcile.reconcile_interrupted(
             str(self.repo), TID, None, touched=[], events=[])
-        self.assertEqual(report,
-                         {"suggestions": {}, "reconciled": [], "touched": []})
+        self.assertEqual(
+            report,
+            {"suggestions": {}, "advisories": {}, "reconciled": [],
+             "touched": []})
 
 
 # —— 纯函数：events 注入通道容错 ——
@@ -409,11 +490,11 @@ class ReconcileEvidenceMatchingTest(ReconcileFixture):
         self.assertEqual(report["suggestions"]["ev"]["to"], "verifying")
 
 
-# —— 纯函数：建议键序按 units 出现序 ——
+# —— 纯函数：建议 / 咨询键序按 units 出现序 ——
 
 @unittest.skipUnless(shutil.which("git"), "环境无 git 可执行，跳过 git fixture 测试")
 class ReconcileSuggestionOrderTest(GitRepoFixture):
-    """suggestions / reconciled 键序按 units 出现序（非 id 排序序）。"""
+    """suggestions / advisories / reconciled 键序按 units 出现序（非 id 排序序）。"""
 
     def test_suggestion_keys_follow_units_appearance_order(self):
         # 出现序 zulu → alpha ≠ 排序序（alpha < zulu），锚定「出现序」语义
@@ -425,11 +506,18 @@ class ReconcileSuggestionOrderTest(GitRepoFixture):
         report = reconcile.reconcile_interrupted(
             str(self.repo), TID, [unit_z, unit_a],
             touched=["src/zulu/z.py"], events=[])
-        self.assertEqual(list(report["suggestions"]), ["zulu", "alpha"])
+        # zulu（running 有残留无证据）→ suggestions；alpha（verifying
+        # 无残留）→ advisories（verifying→ready 不在 §62 转换表内）；
+        # reconciled 含全部被评估单元，键序均按出现序
+        self.assertEqual(list(report["suggestions"]), ["zulu"])
+        self.assertEqual(list(report["advisories"]), ["alpha"])
         self.assertEqual(report["reconciled"], ["zulu", "alpha"])
-        # zulu 有残留（无证据）→ verifying；alpha 无残留 → ready
         self.assertEqual(report["suggestions"]["zulu"]["to"], "verifying")
-        self.assertEqual(report["suggestions"]["alpha"]["to"], "ready")
+        self.assertEqual(report["advisories"]["alpha"],
+                         {"reason": "verifying 无残留改动且无新鲜验证"
+                                    "证据：主会话裁决——重跑验证或按"
+                                    "失败处理"})
+        self.assertNotIn("to", report["advisories"]["alpha"])
 
 
 # —— 纯函数：纯建议纪律（零落盘、不改 units） ——

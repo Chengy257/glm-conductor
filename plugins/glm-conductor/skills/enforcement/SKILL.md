@@ -1,6 +1,6 @@
 ---
 name: enforcement
-description: GLM Conductor v2 强制层运行时契约。解释 Stop 完成门四重检查（ownership 越界 + 验证完成 + 审查有效 + 证据新鲜度 stale 检测）、PreToolUse Layer B（派发时注入）、状态层（state.json / events.jsonl）、证据指纹绑定（task_fingerprint）、fail-open 降级行为与 gate_exhausted 后的模型义务；含环境自检步骤与被拦截时的恢复方法。用户询问钩子行为、完成门拦截原因、verification_stale / review_stale 含义、ENFORCEMENT 报文含义或强制层是否生效时使用。
+description: GLM Conductor v2 强制层运行时契约。解释 Stop 完成门四重检查（ownership 越界 + 验证完成 + 审查有效 + 证据新鲜度 stale 检测）、PreToolUse Layer B（派发时注入）与 Bash 策略门控（allow/ask/deny 决策）、状态层（state.json / events.jsonl）、证据指纹绑定（task_fingerprint）、fail-open 降级行为与 gate_exhausted 后的模型义务；含环境自检步骤与被拦截时的恢复方法。用户询问钩子行为、完成门拦截原因、verification_stale / review_stale 含义、ENFORCEMENT 报文含义或强制层是否生效时使用。
 ---
 
 # GLM 强制层：确定性运行时契约
@@ -34,7 +34,7 @@ description: GLM Conductor v2 强制层运行时契约。解释 Stop 完成门�
 
 ### Layer B — 派发时注入（提示级）
 
-PreToolUse 钩子在每次 Agent/Task 派发前向主会话注入 ownership 契约提醒（声明清单 + "越界将无法通过完成门"）。Layer B 提高合规但**不构成强制**——确定性强制只在 Layer A。
+PreToolUse 钩子在每次 Agent/Task 派发前向主会话注入 ownership 契约提醒（声明清单 + "越界将无法通过完成门"）。Layer B 提高合规但**不构成强制**——确定性完成门强制只在 Layer A。
 
 ### Bash 策略门控（决策级，beta1）
 

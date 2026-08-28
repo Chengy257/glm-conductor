@@ -275,8 +275,9 @@ def record_attempt(wu, *, outcome=None) -> dict:
         bool → ValueError，校验先于修改，失败不产生副作用）；
       - outcome 非 None 时并入 result["attempt_outcomes"] 列表：
           * result 为 None → 以 {"attempt_outcomes": [outcome]} 起始；
-          * result 为 dict → 追加到既有 attempt_outcomes（缺失则创建），
-            其他键原样保留；
+          * result 为 dict → 追加到既有 attempt_outcomes（缺失则创建；
+            存在但非 list（自由 JSON 值，如字符串报告）→ 以
+            [旧值, outcome] 起始，旧值不丢），其他键原样保留；
           * result 为其他 JSON 值（自由历史，如字符串报告）→ 以
             {"attempt_outcomes": [旧 result, outcome]} 起始，旧值不丢；
       - outcome 为 None 时只递增 attempt，不触碰 result。
@@ -295,7 +296,11 @@ def record_attempt(wu, *, outcome=None) -> dict:
         elif isinstance(result, dict):
             outcomes = result.get("attempt_outcomes")
             if not isinstance(outcomes, list):
-                outcomes = []
+                # 键缺失 → 以空列表起始；键存在但非 list（自由 JSON
+                # 值）→ 旧值不静默丢弃，保留为失败历史首条再追加
+                # （与下方「旧 result 非 dict」的起始路径同构）
+                outcomes = [outcomes] if "attempt_outcomes" in result \
+                    else []
                 result["attempt_outcomes"] = outcomes
             outcomes.append(outcome)
         else:

@@ -104,7 +104,7 @@
 1. **词汇外 verdict default-allow**：`hooks/stop_gate.py` review 分支——verdict 不在 REVIEW_VERDICTS（手写 state.json 拼写偏差）会按 ship 路径仅做指纹比对；改为按 review_missing 处理（或 evaluation_error 降级）。同族：`runtime/fingerprint.py` visual_evidence_status 项缺 sha256 且文件不存在时 current==recorded==None 不判 stale——缺 recorded 视为 stale。
 2. **git 子调用跨任务复用**：单次 Stop 内共享同一份 touched + base（1 次 status + 1 次 rev-parse），把最坏调用数从 1+2N 压到 2，消除多任务叠加下的硬杀风险（顺带把 SKILL 时延注记从"按降级处理"改为准确表述）。
 3. **补一条仓内单测**：gate_exhausted 后第 4 次 Stop 重新 block（新周期重新计数；目前仅有链断逻辑与 B4.2 会话内活体证据）。
-4. **architecture.md §8.3 措辞**：外层崩溃兜底不写 journal（只 stderr 可见），与 git 失败/求值错误的 gate_degraded 分开表述。
+4. **architecture.md §9.3 措辞**：外层崩溃兜底不写 journal（只 stderr 可见），与 git 失败/求值错误的 gate_degraded 分开表述。
 5. **技能文档补一句**：记录证据后执行 commit 会改变基线修订 → 证据 stale（公式含 base，设计内保守行为，显式点名）。
 
 **→ 上述五项已于轮 5 开工块全部清偿（commit ef5f359，含回归测试）。**

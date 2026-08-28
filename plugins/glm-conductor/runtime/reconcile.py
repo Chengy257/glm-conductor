@@ -6,7 +6,11 @@
     中断（会话结束 / 崩溃 / 额度耗尽）后，任务图中 running / verifying
     状态的单元既不能假设「完成」（worker 报告只是 claim，§70），也不能
     盲目假设「须重跑」（改动可能已在仓库且已验证）。本模块按 §69 的
-    证据顺序给出「转换建议」——纯建议、零落盘、不修改传入 units；
+    证据顺序给出裁决输出——纯建议、零落盘、不修改传入 units：
+      - suggestions：可直接 transition_work_unit 应用的转换建议
+        （每条都落在 §62 转换表内）；
+      - advisories：无需转换的裁决提示（只有 reason、无 to——没有
+        可机械应用的转换，裁决归主会话）。
     转换的应用归调用方（work_unit.transition_work_unit，见应用示例）。
 
 completed 不重跑锚定（§68）：
@@ -16,43 +20,59 @@ completed 不重跑锚定（§68）：
     否定判断是主会话的职责，不属于本模块：reconcile 不判断 completed
     是否失效，也不对非中断状态出任何建议。
 
-证据顺序（§69 四步证据 → 三分支建议，逐中断单元）：
+证据顺序（§69 四步证据 → 分状态裁决，逐中断单元）：
     1. 仓库证据：ownership.classify_paths(touched, unit["ownership"])
        得 owned_hits——单元 ownership 声明范围内的残留改动清单；
-    2. 无残留改动（owned_hits 为空）→ 建议 ready（干净重派：工作区
-       无该单元范围内的任何残留，重派成本最低）；
+    2. 无残留改动（owned_hits 为空）→ running 建议 ready（干净重派：
+       工作区无该单元范围内的任何残留，重派成本最低）；verifying 无
+       表内合法目标（§62 转换表：verifying 仅可达 completed / failed /
+       cancelled，verifying→ready 非法）→ 只出 advisory 裁决提示
+       （重跑验证或按失败处理，归主会话裁决）；
     3. 有残留改动 → journal 指纹证据：fingerprint.compute_fingerprint
        对 owned_hits 真算当前指纹，再在 events 里从尾向头找第一条
        满足全部条件的 verification 事件：
          event == "verification" 且 fingerprint == 当前指纹 且
          status == "pass" 且 command 出现在 unit["verification"] 列表内
        - 找到 → 建议 completed（存在绑定当前改动的新鲜验证证据——
-         parent-observed 恢复解释，最终裁决待主会话确认）；
-       - 未找到 → 建议 verifying（残留改动无新鲜验证证据：主会话
-         必须亲自检查 diff 并运行单元验证——§70 claim 不算完成）；
+         parent-observed 恢复解释，最终裁决待主会话确认）；running
+         与 verifying 同此（verifying→completed 在转换表内）；
+       - 未找到 → running 建议 verifying（残留改动无新鲜验证证据：
+         主会话必须亲自检查 diff 并运行单元验证——§70 claim 不算
+         完成）；verifying 保持现状属自转换（verifying→verifying
+         非法）→ 只出 advisory 裁决提示（主会话直接运行单元验证
+         后完成或失败）；
     4. blocked 不在本模块建议词汇内——「检查失败」的裁决（failed /
        blocked 等）是主会话的职责，模块只依据仓库 + journal 证据出
        建议，绝不替主会话判死。
 
-返回（确定性，建议键序按 units 出现序）：
-    {"suggestions": {uid: {"to": ..., "reason": ...}},
+返回（确定性，suggestions / advisories / reconciled 键序均按 units
+出现序）：
+    {"suggestions": {uid: {"to": <str>, "reason": ...}},
+     "advisories": {uid: {"reason": ...}},
      "reconciled": [uid...], "touched": [...]}
-      - suggestions：仅含中断单元；键为单元 id，插入序 = units 出现序
-        （Python 3.7+ dict 保序）；
-      - reconciled：有建议的单元 id 列表（同出现序）；
+      - suggestions：只含 to 非 None 的可应用建议（可对
+        transition_work_unit 直接应用）；键为单元 id，插入序 =
+        units 出现序（Python 3.7+ dict 保序）；
+      - advisories：无需转换的裁决提示（只有 reason、无 to——没有
+        可机械应用的转换，裁决归主会话）；
+      - reconciled：全部被评估单元 id 列表（suggestions ∪ advisories
+        的键全集，同出现序）；
       - touched：实际使用的改动清单（注入原样 / 缺省 git_touched_files
         结果），供调用方日志与复算。
 
 纯建议纪律：
     reconcile 零落盘（不写 state / journal / 任何文件）、不修改传入
-    units。应用示例（主会话侧）：
+    units。应用示例（主会话侧——只对 suggestions 应用 transition，
+    advisories 仅提示、不做转换）：
         report = reconcile_interrupted(repo, task_id, st["work_units"])
         by_id = {u["id"]: u for u in st["work_units"]}
         for uid, advice in report["suggestions"].items():
             work_unit.transition_work_unit(by_id[uid], advice["to"])
+        for uid, hint in report["advisories"].items():
+            ...  # 仅向主会话提示裁决（重跑验证 / 判失败），不转换
         state.save_state(repo, st)
-    非法转换（如 verifying → ready 不在转换表）由 transition_work_unit
-    抛 ValueError 暴露——建议层不做转换表预检，应用侧闸门归 work_unit。
+    suggestions 全部落在 §62 转换表内（verifying 态表外情形一律改走
+    advisories，不出表外建议）；应用侧转换闸门仍归 work_unit。
 
 错误上抛（调用方处理，可降级或转人工）：
     - touched 缺省时 git 失败 → ownership.OwnershipError 自然上抛；
@@ -80,7 +100,7 @@ from runtime import ownership
 # 中断对账的目标状态集合：只有处于这两个状态的单元才产出建议（§68）
 INTERRUPTED_STATUSES = ("running", "verifying")
 
-# 三分支建议（§69；reason 逐字锁定，供调用方 / 测试锚定语义）
+# running 态三分支建议（§69；reason 逐字锁定，供调用方 / 测试锚定语义）
 SUGGEST_READY = {"to": "ready",
                  "reason": "无 ownership 内残留改动，干净重派"}
 SUGGEST_COMPLETED = {
@@ -92,15 +112,33 @@ SUGGEST_VERIFYING = {
     "reason": "残留改动无新鲜验证证据：主会话必须亲自检查 diff 并运行"
               "单元验证"}
 
+# verifying 态 no-op 裁决提示（不携带转换——verifying 的 §62 表内目标
+# 仅 completed / failed / cancelled；reason 逐字锁定，供测试锚定语义）
+ADVISORY_VERIFYING_RULING = {
+    "reason": "verifying 无残留改动且无新鲜验证证据：主会话裁决——"
+              "重跑验证或按失败处理"}
+ADVISORY_VERIFYING_STAY = {
+    "reason": "verifying 保持现状：主会话直接运行单元验证后完成或失败"}
 
-def _interrupted_advice(repo_root, unit, touched, events) -> dict:
-    """单个中断单元的三分支建议（§69 四步证据；分支见模块 docstring）。"""
+
+def _interrupted_advice(repo_root, unit, touched, events):
+    """单个中断单元的裁决输出：(advice, advisory) 恰一非 None。
+
+    running 走 §69 三分支建议（三分支见模块 docstring 证据顺序节）；
+    verifying 只有新鲜验证证据才建议 completed（verifying→completed
+    表内合法），无残留 / 残留无新鲜两种表外情形改出 no-op 裁决提示
+    （advisories，不携带转换——verifying→ready / verifying→verifying
+    均不在 §62 转换表内，建议层不出表外建议）。
+    """
+    status = unit.get("status")
     patterns = unit.get("ownership")
     if not isinstance(patterns, (list, tuple)):
         patterns = []
     owned_hits, _ = ownership.classify_paths(touched, patterns)
     if not owned_hits:
-        return dict(SUGGEST_READY)
+        if status == "verifying":
+            return None, dict(ADVISORY_VERIFYING_RULING)
+        return dict(SUGGEST_READY), None
     fp = fingerprint.compute_fingerprint(repo_root, owned_hits)
     command_pool = unit.get("verification")
     if not isinstance(command_pool, (list, tuple)):
@@ -112,13 +150,15 @@ def _interrupted_advice(repo_root, unit, touched, events) -> dict:
                 and event.get("fingerprint") == fp
                 and event.get("status") == "pass"
                 and event.get("command") in command_pool):
-            return dict(SUGGEST_COMPLETED)
-    return dict(SUGGEST_VERIFYING)
+            return dict(SUGGEST_COMPLETED), None
+    if status == "verifying":
+        return None, dict(ADVISORY_VERIFYING_STAY)
+    return dict(SUGGEST_VERIFYING), None
 
 
 def reconcile_interrupted(repo_root, task_id, units, *, touched=None,
                           events=None) -> dict:
-    """对中断单元（running / verifying）产出恢复转换建议（§68-§69）。
+    """对中断单元（running / verifying）产出恢复裁决（§68-§69）。
 
     参数：
       - repo_root：仓库根（git 仓库；指纹与缺省 touched 清单基于它）；
@@ -132,12 +172,15 @@ def reconcile_interrupted(repo_root, task_id, units, *, touched=None,
       - events：显式注入事件清单（read_events 同口径；None → 内部
         journal.read_events(repo_root, task_id)；非 list → 按 [] 容错）。
 
-    返回（结构见模块 docstring；suggestions 键序按 units 出现序）：
+    返回（结构见模块 docstring；suggestions / advisories / reconciled
+    键序均按 units 出现序）：
         {"suggestions": {uid: {"to", "reason"}},
+         "advisories": {uid: {"reason"}},
          "reconciled": [uid...], "touched": [...]}
 
-    纪律：纯建议——零落盘、不修改 units；应用示例见模块 docstring。
-    completed 等非中断状态零建议（§68，见模块 docstring 锚定）。
+    纪律：纯建议——零落盘、不修改 units；应用示例见模块 docstring
+    （只对 suggestions 应用 transition，advisories 仅提示）。
+    completed 等非中断状态零输出（§68，见模块 docstring 锚定）。
     """
     if touched is None:
         touched = ownership.git_touched_files(repo_root)
@@ -147,6 +190,7 @@ def reconcile_interrupted(repo_root, task_id, units, *, touched=None,
         events = []  # 注入通道容错：坏形状不炸对账
 
     suggestions = {}
+    advisories = {}
     reconciled = []
     for unit in (units if isinstance(units, list) else []):
         if not isinstance(unit, dict):
@@ -156,11 +200,16 @@ def reconcile_interrupted(repo_root, task_id, units, *, touched=None,
             continue  # 无合法 id 即无建议键，跳过（与依赖层容错一致）
         if unit.get("status") not in INTERRUPTED_STATUSES:
             continue  # §68：completed 等非中断状态零建议，不重跑
-        suggestions[uid] = _interrupted_advice(repo_root, unit, touched,
+        advice, advisory = _interrupted_advice(repo_root, unit, touched,
                                                events)
+        if advice is not None:
+            suggestions[uid] = advice
+        if advisory is not None:
+            advisories[uid] = advisory
         reconciled.append(uid)
     return {
         "suggestions": suggestions,
+        "advisories": advisories,
         "reconciled": reconciled,
         "touched": list(touched),
     }

@@ -145,7 +145,7 @@ active task 的状态同步义务：五段式规格中 FILES AND OWNERSHIP 声�
 
 单个 delegate/full 任务需要多段有界实施时，把它分解为 Work Unit（`state.json` 的 `work_units[]`，schema 见 `runtime/work_unit.py`）：**每个单元必须仍然小到能接收一个完整的五段式规格**——需要再拆说明分解不足；单元必填 ownership 与 verification（无文件范围或无验证的单元不可派发）。
 
-**分解**（§60-§63）：单元间依赖用 `depends_on` 表达（同一任务内引用、禁止环）；单元不是工作流 DSL——九个状态词、显式依赖、就绪推导，仅此而已。
+**分解**（§60-§63）：单元间依赖用 `depends_on` 表达（同一任务内引用、禁止环）；单元不是工作流 DSL——十个状态词、显式依赖、就绪推导，仅此而已。
 
 **派发**（§64-§67）：主会话仍是唯一编排者（子智能体不得派发子智能体）。多单元派发走 `runtime/dispatcher.py` 的 `plan_dispatch` 准入——就绪（依赖全部 completed）→ quota 四态闸（EXHAUSTED 转 waiting_quota、UNKNOWN/PRESSURE 保守抑制）→ ownership 不相交 → max_workers 预算。**默认串行（max_workers=1）**；有界并行在租约层（B9）落地前，仅 ownership 不相交的单元可并行且受 max_workers 约束。派发后把单元 id 记入 `dispatch.active`。
 
@@ -153,7 +153,7 @@ active task 的状态同步义务：五段式规格中 FILES AND OWNERSHIP 声�
 
 **Join**（§71-§72）：全部单元 completed 后主会话执行显式 join——检查聚合 diff → 跑**任务级全局验证**（跨单元交互的集成/构建/lint——单元局部验证永不自动替代全局验证）→ 终指纹 → assurance 审查（若需要）→ Stop 完成门。并行 worker 不得集体声明父任务完成。
 
-**中断恢复**（§68-§69，配合 continuity 技能）：恢复时**绝不盲目重放**——`completed` 单元不重跑；`running`/`verifying` 单元用 `runtime/reconcile.py` 按证据对账（ownership 内无残留改动 → 干净重派 ready；残留改动 + 绑定当前改动的新鲜验证证据 → completed；残留但无新鲜证据 → verifying，主会话必须亲自验证）。仓库状态始终权威于运行时记录。
+**中断恢复**（§68-§69，配合 continuity 技能）：恢复时**绝不盲目重放**——`completed` 单元不重跑；`running` 单元用 `runtime/reconcile.py` 按证据三分（ownership 内无残留改动 → 干净重派 ready；残留改动 + 绑定当前改动的新鲜验证证据 → completed；残留但无新鲜证据 → verifying，主会话必须亲自验证）；`verifying` 单元仅在存在新鲜验证证据时建议 completed，其余情形由主会话裁决（重跑验证或按失败处理），不做状态转换。仓库状态始终权威于运行时记录。
 
 ## 11. 评审与裁决（仅 assurance: high）
 
