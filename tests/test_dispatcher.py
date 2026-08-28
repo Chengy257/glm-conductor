@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""runtime.dispatcher 单元测试（v2 工作块 B8.3）。
+"""runtime.dispatcher 单元测试（v2 工作块 B8.3 + B10.1 租约集成）。
 
-仅 Python 3 标准库（unittest），零第三方依赖、零 I/O——被测模块
-是纯决策函数，测试同样不触碰文件系统与网络。
+仅 Python 3 标准库（unittest + tempfile），零第三方依赖；被测决策
+函数本身零 I/O；唯一触盘的是 B10.1 端到端并发冒烟（tempfile 提供的
+临时目录承载租约文件，无 git 需求），不污染真实工作区。
 
 覆盖：
     - patterns_conflict（§66 保守近似）：自身相等 / ** 与其覆盖域内
@@ -11,14 +12,22 @@
       与任何模式冲突）/ 单独 "**" / 中段 ** 字面量前缀 / 空侧短路 /
       非法模式抛 OwnershipError（含结构性错误优先于空侧短路）/
       对称性 / 段边界锚定（"src/auth" 不覆盖 "src/authentication.ts"）；
-    - plan_dispatch（§64/§65/§67）：并发余量（max_workers 与 active
-      占位）/ ownership 冲突（候选间、与 active、active id 容错）/
+    - plan_dispatch（§64/§65/§67/§78）：并发余量（max_workers 与
+      active 占位）/ ownership 冲突（候选间、与 active、active id
+      容错）/ 租约闸（他人租约 key 冲突 → lease_conflict、同 owner
+      放行、具体文件租约被候选模式覆盖、不相关租约放行、record dict
+      容错、ghost active 下租约闸独挑、闸序 ownership 先于租约）/
       quota 四态（AVAILABLE / PRESSURE 默认整批抑制与 small 放行 /
       EXHAUSTED 全转 waiting_quota / UNKNOWN 全挂起）/ 闸门顺序
       （压力放行的 small 仍受 ownership 与并发闸约束）/ 依赖层集成
       （未就绪单元不进候选）/ 候选顺序遵循 topo_order / 确定性 /
       入参不可变（deepcopy 比对）/ 非法参数 ValueError / 返回形状 /
-      决策组恰好划分候选集 / 五类 deferred reason 全覆盖。
+      决策组恰好划分候选集 / 六类 deferred reason 全覆盖；
+    - max_workers 边界（§82）：1 与 4 合法；0 / 5 / 100 / "2" /
+      bool 等非法值 ValueError（消息注明上限与 experimental）；
+    - 端到端并发冒烟（B10.1，tempdir）：不相交双单元双派发 → 双租约
+      → 第三单元与 A 冲突被租约闸拦下 → A 完成释放 → 重派成功；
+      全程 active 记账正确。
 
 运行：
     cd <repo_root> && python3 -m unittest tests.test_dispatcher -v
@@ -26,15 +35,20 @@
 
 import copy
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "plugins" / "glm-conductor"))
 from runtime import dependency
 from runtime import dispatcher
+from runtime import lease
 from runtime import ownership
 
 
 # —— 测试夹具 ——
+
+TID = "dispatch-task-1a2b3c"
+
 
 def wu(uid, owned=(), deps=(), status="ready", **extra):
     """构造最小可派发 work unit dict（§61 形状；extra 注入可选键）。"""
@@ -248,7 +262,7 @@ class PlanQuotaTest(unittest.TestCase):
     def test_unknown_suppresses_all_ready(self):
         # §67 保守：UNKNOWN 挂起且图不腐化（deferred，非 waiting_quota）
         result = dispatcher.plan_dispatch(self.three_ready(),
-                                          max_workers=5,
+                                          max_workers=4,
                                           quota_status="UNKNOWN")
         self.assertEqual(result["dispatch"], [])
         self.assertEqual(result["waiting_quota"], [])
@@ -387,6 +401,158 @@ class PlanIntegrationTest(unittest.TestCase):
              "max_workers": 1, "active": [], "quota_status": "AVAILABLE"})
 
 
+# —— plan_dispatch：max_workers 边界（§82 上限 4，experimental） ——
+
+class PlanMaxWorkersBoundTest(unittest.TestCase):
+
+    def test_boundary_one_and_four_are_legal(self):
+        # workers=1：只有 x 拿到槽位，y 落 concurrency
+        result = dispatcher.plan_dispatch(topless_pair(), max_workers=1)
+        self.assertEqual(result["max_workers"], 1)
+        self.assertEqual(result["dispatch"], ["x"])
+        self.assertEqual(reasons(result), [("y", "concurrency")])
+        # workers=4（§82 上界）：双派发
+        result = dispatcher.plan_dispatch(
+            topless_pair(), max_workers=lease.DEFAULT_MAX_WORKERS_LIMIT)
+        self.assertEqual(result["max_workers"], 4)
+        self.assertEqual(result["dispatch"], ["x", "y"])
+        self.assertEqual(result["deferred"], [])
+
+    def test_out_of_bounds_and_invalid_raise_value_error(self):
+        for bad in (0, -1, 5, 100, "2", 1.5, True, None):
+            with self.subTest(bad=bad):
+                with self.assertRaises(ValueError) as ctx:
+                    dispatcher.plan_dispatch([], max_workers=bad)
+                # 消息注明 §82 上限与 experimental 状态
+                self.assertIn("§82", str(ctx.exception))
+                self.assertIn("experimental", str(ctx.exception))
+
+    def test_invalid_leases_type_raises_value_error(self):
+        for bad in ([], "src/**", 42):
+            with self.subTest(bad=bad):
+                with self.assertRaises(ValueError):
+                    dispatcher.plan_dispatch([], leases=bad)
+
+
+# —— plan_dispatch：租约闸（B10.1，§78/§81） ——
+
+class PlanLeaseGateTest(unittest.TestCase):
+
+    def test_foreign_lease_conflicting_key_deferred(self):
+        # 候选 ownership 与他人租约 key 冲突 → deferred("lease_conflict")
+        result = dispatcher.plan_dispatch(
+            [wu("x", ("src/a/**",))], max_workers=2,
+            leases={"src/a/**": "unit-other"})
+        self.assertEqual(result["dispatch"], [])
+        self.assertEqual(reasons(result), [("x", "lease_conflict")])
+
+    def test_same_owner_lease_passes(self):
+        # §78 同 owner 放行：候选 id == 租约 owner
+        result = dispatcher.plan_dispatch(
+            [wu("x", ("src/a/**",))], max_workers=2,
+            leases={"src/a/**": "x"})
+        self.assertEqual(result["dispatch"], ["x"])
+        self.assertEqual(result["deferred"], [])
+
+    def test_specific_file_lease_covered_by_candidate_pattern(self):
+        # 租约 key 是具体文件、候选模式覆盖它（src/** vs 租约 src/a.ts）
+        # → patterns_conflict 混判冲突
+        result = dispatcher.plan_dispatch(
+            [wu("x", ("src/**",))], max_workers=2,
+            leases={"src/a.ts": "unit-other"})
+        self.assertEqual(reasons(result), [("x", "lease_conflict")])
+
+    def test_unrelated_lease_passes(self):
+        result = dispatcher.plan_dispatch(
+            [wu("x", ("src/a/**",))], max_workers=2,
+            leases={"src/b/**": "unit-other"})
+        self.assertEqual(result["dispatch"], ["x"])
+        self.assertEqual(result["deferred"], [])
+
+    def test_lease_record_dict_value_tolerated(self):
+        # 容错：lease_state 直读形状 {path: {"owner", ...}} 可直接传入
+        result = dispatcher.plan_dispatch(
+            [wu("x", ("src/a/**",))], max_workers=2,
+            leases={"src/a/**": {"owner": "unit-other",
+                                 "acquired_at": "2026-01-01T00:00:00.000Z"}})
+        self.assertEqual(reasons(result), [("x", "lease_conflict")])
+
+    def test_lease_gate_fires_when_active_unit_is_ghost(self):
+        # 正交叠加的价值：active id 不在 units（容错按空 ownership，
+        # ownership 闸无信息）时，租约闸仍凭落盘租约拦下
+        result = dispatcher.plan_dispatch(
+            [wu("x", ("src/a/**",))], max_workers=2, active=["ghost"],
+            leases={"src/a/**": "ghost"})
+        self.assertEqual(reasons(result), [("x", "lease_conflict")])
+
+    def test_gate_order_ownership_before_lease(self):
+        # 两闸同拦时先到先裁决：ownership_conflict（闸门 3）先于租约闸
+        units = [wu("run", ("src/a/**",), status="running"),
+                 wu("x", ("src/a/**",))]
+        result = dispatcher.plan_dispatch(
+            units, max_workers=2, active=["run"],
+            leases={"src/a/**": "run"})
+        self.assertEqual(reasons(result), [("x", "ownership_conflict")])
+
+
+# —— 端到端并发冒烟（B10.1，tempdir，无 git 需求） ——
+
+class EndToEndParallelSmokeTest(unittest.TestCase):
+    """租约生命周期 + plan_dispatch 联动闭环（§81）：
+    不相交双单元双派发 → 派发前双租约 → 第三单元与 A 冲突被租约闸
+    拦下（active 单元已离开待派发清单的常态）→ A 完成释放 → 重派
+    成功；全程 active 记账正确。"""
+
+    def test_parallel_dispatch_with_lease_lifecycle(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = tmp
+            units = [wu("ua", ("src/a/**",)),
+                     wu("ub", ("src/b/**",)),
+                     wu("uc", ("src/a/c.ts",))]
+
+            def held_leases():
+                return lease.lease_state(root, TID)
+
+            # 第一轮：ownership 不相交（§66）→ 双派发
+            # （首批就绪清单只含 ua/ub；uc 稍后才就绪进入待派发清单）
+            plan1 = dispatcher.plan_dispatch([units[0], units[1]],
+                                             max_workers=2)
+            self.assertEqual(plan1["dispatch"], ["ua", "ub"])
+            self.assertEqual(plan1["deferred"], [])
+            self.assertEqual(plan1["active"], [])
+            # Task Manager 派发前获取租约（§78 获取时点），单元入 active
+            lease.acquire_lease(root, TID, "ua", ["src/a/**"])
+            lease.acquire_lease(root, TID, "ub", ["src/b/**"])
+            active = ["ua", "ub"]
+
+            # 第二轮：仅剩 uc 待派发；ua/ub 已不在待派发清单（真实编排
+            # 常态）——ownership 闸无信息，租约闸凭落盘租约拦下与 A 冲突
+            plan2 = dispatcher.plan_dispatch([units[2]], max_workers=2,
+                                             active=active,
+                                             leases=held_leases())
+            self.assertEqual(plan2["dispatch"], [])
+            self.assertEqual(plan2["active"], active)
+            self.assertEqual(reasons(plan2), [("uc", "lease_conflict")])
+
+            # A 完成（§78 释放时点：completed）→ 释放租约 + 离开 active
+            self.assertEqual(lease.release_lease(root, TID, "ua"),
+                             ["src/a/**"])
+            active = ["ub"]
+
+            # 第三轮：A 的租约已释放 → uc 重派成功
+            plan3 = dispatcher.plan_dispatch([units[2]], max_workers=2,
+                                             active=active,
+                                             leases=held_leases())
+            self.assertEqual(plan3["dispatch"], ["uc"])
+            self.assertEqual(plan3["active"], active)
+            self.assertEqual(reasons(plan3), [])
+            # uc 派发前获取自己的租约成功（与 ub 的 src/b/** 不冲突）
+            lease.acquire_lease(root, TID, "uc", ["src/a/c.ts"])
+            self.assertEqual(lease.held_by(root, TID, "uc"), ["src/a/c.ts"])
+            self.assertEqual(lease.held_by(root, TID, "ub"), ["src/b/**"])
+            self.assertEqual(lease.held_by(root, TID, "ua"), [])
+
+
 # —— plan_dispatch：参数校验 / 返回形状 ——
 
 class PlanContractTest(unittest.TestCase):
@@ -423,11 +589,11 @@ class PlanContractTest(unittest.TestCase):
             dispatcher.plan_dispatch(units)
 
 
-# —— 五类 deferred reason 全覆盖（验收锚） ——
+# —— 六类 deferred reason 全覆盖（验收锚） ——
 
 class DeferReasonCoverageTest(unittest.TestCase):
 
-    def test_all_five_defer_reasons_reachable(self):
+    def test_all_six_defer_reasons_reachable(self):
         base = [wu("m", ("src/m/**",)), wu("z", ("src/z/**",))]
         pair = [wu("x", ("src/auth/**",)), wu("y", ("src/auth/x.ts",))]
         small = [wu("s", ("src/s/**",), small=True),
@@ -436,6 +602,11 @@ class DeferReasonCoverageTest(unittest.TestCase):
         # concurrency：余量耗尽
         collected.update(
             r for _, r in reasons(dispatcher.plan_dispatch(base)))
+        # lease_conflict：他人租约 key 与候选 ownership 冲突（§78）
+        collected.update(
+            r for _, r in reasons(dispatcher.plan_dispatch(
+                [wu("x", ("src/auth/**",))], max_workers=2,
+                leases={"src/auth/**": "unit-other"})))
         # ownership_conflict：候选间冲突
         collected.update(
             r for _, r in reasons(dispatcher.plan_dispatch(pair,
@@ -453,6 +624,7 @@ class DeferReasonCoverageTest(unittest.TestCase):
             r for _, r in reasons(dispatcher.plan_dispatch(
                 small, quota_status="PRESSURE",
                 allow_small_under_pressure=True)))
+        self.assertEqual(len(dispatcher.DEFER_REASONS), 6)
         self.assertEqual(collected, set(dispatcher.DEFER_REASONS))
 
 
