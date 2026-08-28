@@ -31,7 +31,9 @@ legacy 标识归一：
 依赖：
     仅 Python 3 标准库（json / os / pathlib / re）+ runtime.quota.parser
     （quota 状态词汇 QUOTA_STATUSES，§39；quota/* 不 import 本模块，
-    无循环导入），零第三方依赖，`python3 -S` 可运行（无 site-packages）。
+    无循环导入）+ runtime.work_unit（work unit 逐项校验，B8.1；
+    本模块单向导入它，它不导入本模块，无循环导入），零第三方依赖，
+    `python3 -S` 可运行（无 site-packages）。
 """
 
 import json
@@ -40,6 +42,7 @@ import pathlib
 import re
 
 from runtime.quota.parser import QUOTA_STATUSES
+from runtime.work_unit import validate_work_unit
 
 # —— 路径常量与定位 ——
 
@@ -322,10 +325,18 @@ def validate_state(state) -> "list[str]":
     if "visual_evidence" in state:
         errors.extend(_validate_visual_evidence(state["visual_evidence"]))
 
-    # 规则 7：work_units 存在则必须是 list
-    # （内部结构 v2 后续阶段才定义，本轮不校验）
-    if "work_units" in state and not isinstance(state["work_units"], list):
-        errors.append("work_units 必须是数组")
+    # 规则 7：work_units 必须是 list，且逐项按 §61 契约校验
+    # （runtime.work_unit.validate_work_unit；错误路径前缀
+    # work_units[i]，聚合全部错误不短路）
+    if "work_units" in state:
+        work_units = state["work_units"]
+        if not isinstance(work_units, list):
+            errors.append("work_units 必须是数组")
+        else:
+            for index, unit in enumerate(work_units):
+                errors.extend(
+                    "work_units[%d].%s" % (index, unit_error)
+                    for unit_error in validate_work_unit(unit))
 
     # 规则 8：dispatch
     if "dispatch" in state:
