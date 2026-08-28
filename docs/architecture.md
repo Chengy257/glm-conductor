@@ -243,7 +243,7 @@ v2 把关键运行时契约从提示词升级为确定性强制。强制层由�
 同一钩子脚本 `hooks/pre_tool_use.py` 按载荷 tool_name 分流：
 
 - **Layer B（matcher `Agent|Task`，advisory）**：每次子代理派发前注入 ownership 契约提醒（声明清单 + 越界将拦完成门）。提高合规但不构成强制。
-- **Bash 策略门控（matcher `Bash`，决策级）**：`runtime/policy.py` 表驱动规则（§57-§59，禁 DSL）把主会话 Bash 命令分类为 allow/ask/deny，经 `permissionDecision` 返回运行时——deny：rm -r/-f、git reset --hard、git clean -f、force push（--force-with-lease 归 ask）；ask（仅活动任务 assurance:high 时）：任何 push、模式迁移、发布操作、权限变更。门控顺序：非 Bash 不管 → 无活动任务零干预 → deny 无视保障级 → ask 仅 high → 其余默认放行。只覆盖主会话调用（子代理工具调用不触发钩子，角色级 deny 由 agent 工具白名单负责）；字符串中引用的破坏性文本会被保守误拒（beta1 已登记取舍）。
+- **Bash 策略门控（matcher `Bash`，决策级）**：`runtime/policy.py` 表驱动规则（§57-§59，禁 DSL）把主会话 Bash 命令分类为 allow/ask/deny，经 `permissionDecision` 返回运行时——deny：rm -r/-f、git reset --hard、git clean -f、force push（--force-with-lease 归 ask）；ask（仅活动任务 assurance:high 时）：任何 push、模式迁移、发布操作、权限变更。门控顺序：非 Bash 不管 → 无活动任务零干预 → deny 无视保障级 → ask 仅 high → 其余默认放行。只覆盖主会话调用（子代理工具调用不触发钩子，角色级 deny 由 agent 工具白名单负责）；字符串中引用的破坏性文本与 `git rm -r --cached`（仅动索引）会被保守误拒（beta1 已登记取舍：误拒方向保守安全，特判排除违反 §59 简单可检视原则）。
 
 ### 8.3 失败处理与循环安全
 

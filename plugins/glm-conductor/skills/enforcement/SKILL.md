@@ -36,6 +36,21 @@ description: GLM Conductor v2 强制层运行时契约。解释 Stop 完成门�
 
 PreToolUse 钩子在每次 Agent/Task 派发前向主会话注入 ownership 契约提醒（声明清单 + "越界将无法通过完成门"）。Layer B 提高合规但**不构成强制**——确定性强制只在 Layer A。
 
+### Bash 策略门控（决策级，beta1）
+
+主会话每次 Bash 调用（PreToolUse 钩子按 `tool_name == "Bash"` 分流）经 `runtime/policy.py` 的表驱动规则分类，`permissionDecision` 返回运行时：
+
+- **deny（活动任务期间恒拒）**：`rm` 带 r/f 标志、`git reset --hard`、`git clean -f`、force push（`--force` / `-f`；`--force-with-lease` 是可控变体，归 ask）
+- **ask（仅活动任务 route.assurance = high 时升级）**：任何 `git push`、模式迁移（alembic / prisma / manage.py migrate / knex）、发布操作（npm / cargo publish、push --tags、gh release create）、权限变更（chmod / chown / icacls / attrib）
+- **allow**：其余全部——静默放行，无任何输出
+- 无活动任务时零干预（任何命令静默放行）
+
+被拦报文形如 `GLM CONDUCTOR POLICY: deny (rm-destructive). command: <命令片段>`。恢复方法：
+
+1. **ask** → 报文只是升级确认——向用户说明操作并获确认后继续（或改用非清单内命令）
+2. **deny** → 改道：换用非破坏性等价命令（如 `git reset --soft`、`git clean -n` 预览、不带 -f 的变体）；确需破坏性操作时由用户在自己的终端执行
+3. 已登记的保守误拒（beta1 取舍）：字符串中引用的破坏性文本（如 `echo 'rm -rf …'`）与 `git rm -r --cached`（仅动索引不删工作区文件）也会被拒——改道或由用户执行即可
+
 ## 哪些钩子执行
 
 `hooks/hooks.json`（随插件分发，安装后自动启用）：
@@ -44,8 +59,9 @@ PreToolUse 钩子在每次 Agent/Task 派发前向主会话注入 ownership 契�
 | --- | --- | --- | --- |
 | Stop | `hooks/stop_gate.py` | 5s | Layer A 四重检查（block 决策） |
 | PreToolUse（Agent\|Task） | `hooks/pre_tool_use.py` | 3s | Layer B（advisory 注入） |
+| PreToolUse（Bash） | `hooks/pre_tool_use.py` | 3s | Bash 策略门控（allow/ask/deny 决策） |
 
-两者均为 `python3` 进程入口。
+三者均为 `python3` 进程入口。
 
 ## 失败处理（fail-open）
 
