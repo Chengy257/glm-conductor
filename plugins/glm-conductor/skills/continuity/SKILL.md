@@ -73,7 +73,7 @@ active task（continuity 为 resumable / idle 的任务，或需要 Stop 完成�
 | implementation_started | 实施者派发后 |
 | verification / review | 主会话验证完成 / 审查者裁决后 |
 | checkpoint_written | checkpoint 落盘后 |
-| gate_blocked / gate_exhausted | 完成门拦截 / 达上限放行时（由钩子记录） |
+| gate_passed / gate_blocked / gate_degraded / gate_exhausted | 完成门放行 / 拦截 / 降级跳过 / 达上限放行（由 Stop 钩子记录） |
 | completed / cancelled / failed | 进入终态时 |
 
 约束：不写入任何秘密值（密钥、Authorization 头）、不写入完整 prompt 或完整源码；它不是遥测。
