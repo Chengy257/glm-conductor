@@ -216,6 +216,8 @@ class HttpQuotaProvider(QuotaProvider):
         super().__init__(name, resolved_host)
 
         url = "https://" + resolved_host + _QUOTA_PATH
+        # belt-and-suspenders：URL 由 https 模板拼接，此检查正常不可达；
+        # 防御未来拼接逻辑改动引入非 https 形态（终审 P2 注记）
         if not url.startswith("https://"):
             raise QuotaProviderError(
                 "quota URL 必须是 https（host=%s，path=%s）"

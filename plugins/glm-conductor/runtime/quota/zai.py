@@ -6,7 +6,7 @@
 runtime.quota._http.HttpQuotaProvider（§37 八条安全条款在该模块
 docstring 逐条声明，测试锚定见 tests/test_quota_adapters.py）。
 本模块只绑定 provider 标识 "zai"；监控 host 经 _PROVIDER_HOSTS
-注册表解析并受 ALLOWED_HOSTS 严格校验，本文件不出现 host 字符串
+注册表解析并受 ALLOWED_HOSTS 严格校验，代码路径不出现 host 字符串（仅本 docstring 说明端点）
 （§25「不自行散布 host」）。
 
 端点（实测，§25）：GET https://api.z.ai/api/monitor/usage/quota/limit；

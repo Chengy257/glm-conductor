@@ -134,6 +134,52 @@ A completion claim without evidence is invalid / 无证据的完成声明无效
 - **VERIFICATION**——精确命令与期望的具体结果/证据
 - **RETURN**——附在规格末尾的返回要求："A completion claim without evidence is invalid / 无证据的完成声明无效"
 
+## TASK CONTEXT PACK（五段式规格的前置上下文包）
+
+复杂或陌生代码域的委派，在五段式规格**之前**附一个上下文包——主会话用昂贵的推理与侦察压缩出的有界上下文，交给实施者做有界执行（这正是异构分工的价值点：GLM-5.3 压缩、Flash 执行）。做过 ROUTING PREFLIGHT 时，包内条目直接取自 PREFLIGHT REPORT，不重复侦察。
+
+模板（附在规格最前，标题行逐字）：
+
+```
+TASK CONTEXT PACK
+
+TASK:
+<一句话任务定位>
+
+ROOT CAUSE:
+<为什么要改——实际观察到的根因，非猜测>
+
+RELEVANT FILES:
+- <文件路径（+ 关键行号/符号）>
+
+KEY SYMBOLS:
+- <函数/类/常量及其职责>
+
+CALL / DATA FLOW:
+<改动的数据或调用如何流动，两三句>
+
+INTERFACES:
+<须保持兼容的契约>
+
+OWNERSHIP:
+<本包授权的实施范围（与 FILES AND OWNERSHIP 一致）>
+
+TEST ENTRYPOINTS:
+- <验证入口命令>
+
+KNOWN RISKS:
+- <已识别的坑（并发编辑点/平台差异/隐式依赖）>
+
+EXCLUDED AREAS:
+- <明确不碰的区域>
+```
+
+规则：
+
+- **证据化、紧凑**：条目全部来自主会话实际观察（文件/符号/调用链），不把推测性事实当已定约束写入；不倾倒整个仓库、不整段复制大文件、不重复粘贴完整 diff——引用路径+行号胜过贴代码
+- 有界：通常 15-40 行；超过说明任务分解不足，先拆工作单元再委派
+- 简单任务（边界清晰、上下文自明）可省略整个包，直接五段式规格
+
 ## 视觉任务与 VISUAL ACCEPTANCE 扩展
 
 视觉任务在五段式规格之上追加 VISUAL ACCEPTANCE 节（附在 VERIFICATION 之后，其余五节保持不变）。

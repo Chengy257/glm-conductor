@@ -29,7 +29,41 @@ description: GLM 双轴选择性路由编排。GLM-5.3 主会话任架构师，�
 
 两轴独立判断，互不推导。判据全表见 references/role-contracts.md。
 
-## 3. SELECTIVE ROUTE 声明
+## 3. ROUTING PREFLIGHT（路由前置侦察）
+
+PREFLIGHT 不是路由，是路由的证据准备：双轴判断前若关键事实未知，先用只读侦察补齐，不用弱证据强行提前定路由。
+
+**触发条件**（以下任一未知即触发）：根因 / 实施边界 / ownership 集合 / 接口契约 / 验证方案 / 隐藏耦合风险。任务已经显式（上述全部已知）时跳过——不为侦察而侦察。
+
+**执行方式**：优先用 ZCode 内置只读 Explore 能力，必要时主会话亲自读码；不新增自定义侦察代理。侦察只读，不改动仓库。
+
+**产出**（侦察完成后、SELECTIVE ROUTE 声明前输出；模板逐字，条目全部来自实际观察——文件/符号/调用链证据，不得包含推测性事实；OPEN AMBIGUITY 留空表示无未决歧义）：
+
+```
+ROUTING PREFLIGHT REPORT
+
+ROOT CAUSE:
+...
+
+RELEVANT FILES:
+- ...
+
+INTERFACES:
+- ...
+
+TEST ENTRYPOINTS:
+- ...
+
+HIDDEN COUPLING:
+- ...
+
+OPEN AMBIGUITY:
+- ...
+```
+
+该报告直接喂给双轴判断（§2）与 TASK CONTEXT PACK（见 §9 规格与报告 / references/role-contracts.md）。
+
+## 4. SELECTIVE ROUTE 声明
 
 在任何 Agent（任务）工具调用之前必须输出一次（原样保留代码块）：
 
@@ -59,7 +93,7 @@ reason: implementation is bounded by explicit interfaces, owned files, and deter
 
 active task（continuity 为 resumable / idle，或需 Stop 完成门保护的 delegate / full 任务）在声明后把 route 五字段写入 `.glm-conductor/tasks/<task-id>/state.json`（字段见 continuity 技能「任务状态与执行日志」节），并向同目录 events.jsonl 追加 `route_selected` 事件；路由重估后更新 state 并追加 `route_reassessment`。foreground 普通短任务无需创建状态文件。
 
-## 4. 路由矩阵
+## 5. 路由矩阵
 
 | Delegability | Assurance | Route | 实施 | 独立审查 |
 | --- | --- | --- | --- | --- |
@@ -74,7 +108,7 @@ active task（continuity 为 resumable / idle，或需 Stop 完成门保护的 d
 - **audit = 主会话实施 + 独立终审**，特别适合判断密集、敏感、架构重的实施。
 - **full = 委派实施 + 独立终审**，适合大规模但有界的工作（明确规则的迁移、清晰规格的 UI 改版等）。
 
-## 5. Executor 选择
+## 6. Executor 选择
 
 route 决定"是否委派、是否审查"；executor 决定"谁来实施、需要什么能力"。两者分开：
 
@@ -83,7 +117,7 @@ route 决定"是否委派、是否审查"；executor 决定"谁来实施、需�
 
 视觉任务是 executor 维度的一种能力选择，**不是第五种 route**。判据与不适用清单见 role-contracts.md。
 
-## 6. 审查者选择（assurance: high 时）
+## 7. 审查者选择（assurance: high 时）
 
 按任务模态选择全新上下文的只读审查者：
 
@@ -92,7 +126,7 @@ route 决定"是否委派、是否审查"；executor 决定"谁来实施、需�
 
 GLM-5.3 主会话与 glm-reviewer 均为纯文本模型：**主会话在视觉链路中只能驱动采集（截图落盘），不得声称自己做了视觉判定**；视觉判定由 Flash 系角色完成。
 
-## 7. 预检（fail-closed）
+## 8. 预检（fail-closed）
 
 - 按声明的 executor 与审查者，核对所需子智能体是否在 Agent 工具的可用类型列表中
 - solo（executor: main）无需实施者预检；assurance: standard 无需审查者预检
@@ -100,21 +134,21 @@ GLM-5.3 主会话与 glm-reviewer 均为纯文本模型：**主会话在视觉�
 - 视觉通道额外要求：确认截图证据可以落盘并由实施者读取；不可得即停止视觉通道
 - 任何所需角色缺失、不可用或名称不符时：停止该通道，告知用户检查插件安装（Settings → Plugin Management），不得静默替换为其他子智能体类型
 
-## 8. 规格与报告
+## 9. 规格与报告
 
-- 委派必须使用五段式实施规格（OBJECTIVE / FILES AND OWNERSHIP / INTERFACES / CONSTRAINTS / VERIFICATION），返回后按 IMPLEMENTATION REPORT 接收；完整模板见 references/role-contracts.md（首次委派前必须阅读）
+- 委派必须使用五段式实施规格（OBJECTIVE / FILES AND OWNERSHIP / INTERFACES / CONSTRAINTS / VERIFICATION），返回后按 IMPLEMENTATION REPORT 接收；完整模板见 references/role-contracts.md（首次委派前必须阅读）。复杂或陌生代码域的委派在规格前附 TASK CONTEXT PACK（主会话压缩的有界上下文包，条目优先取自 ROUTING PREFLIGHT REPORT；模板与紧凑性规则见 role-contracts.md）
 - 工作者的报告仅视为声明（implementation claim）：主会话必须亲自检查完整 diff、核对改动范围、重跑验证命令，才能形成验证证据（verification evidence）
 
-active task 的状态同步义务：五段式规格中 FILES AND OWNERSHIP 声明的 owned 文件清单必须同步写入 state.json 的 ownership.files（完成门 Layer A 按"实际改动文件 ⊆ owned"校验，越界改动无法通过完成门）；派发实施者后追加 `implementation_started` 事件；主会话验证完成（含命令与结果）追加 `verification` 事件；审查裁决后追加 `review` 事件。验证与审查落账时必须同步记录证据指纹（`record_verification` / `record_review` + `fingerprint.task_fingerprint`，完成门按指纹比对拦截过期证据）——时机与红线见 continuity 技能「证据指纹的记录时机」节；任何修复使先前裁决失效（§9）由此自动强制。
+active task 的状态同步义务：五段式规格中 FILES AND OWNERSHIP 声明的 owned 文件清单必须同步写入 state.json 的 ownership.files（完成门 Layer A 按"实际改动文件 ⊆ owned"校验，越界改动无法通过完成门）；派发实施者后追加 `implementation_started` 事件；主会话验证完成（含命令与结果）追加 `verification` 事件；审查裁决后追加 `review` 事件。验证与审查落账时必须同步记录证据指纹（`record_verification` / `record_review` + `fingerprint.task_fingerprint`，完成门按指纹比对拦截过期证据）——时机与红线见 continuity 技能「证据指纹的记录时机」节；任何修复使先前裁决失效（§10）由此自动强制。
 
-## 9. 评审与裁决（仅 assurance: high）
+## 10. 评审与裁决（仅 assurance: high）
 
 - 审查者保持只读，返回 `ship` / `fix-first` / `rethink` 三种裁决之一（文本任务用 GLM REVIEW 格式，视觉任务用 VISUAL REVIEW 格式，见 role-contracts.md）
 - fix-first：audit 路由由主会话修正，full 路由由原实施者修正；修正后主会话重验，再换用全新审查者
 - rethink：修订架构，不得报告完成
 - 任何修复使先前裁决失效；审查者与实施者/主会话同模型家族，独立性来自全新上下文与只读隔离，不宣称跨模型独立
 
-## 10. ROUTE REASSESSMENT
+## 11. ROUTE REASSESSMENT
 
 路由不是单向阶梯。路由变化必须来自**新观察到的证据**，可以双向重估：
 
@@ -152,6 +186,6 @@ evidence: root cause, architecture, owned files and verification are now fully d
 
 无新证据时不得变更路由；不得为了省事或直觉变更。
 
-## 11. Continuity（独立维度）
+## 12. Continuity（独立维度）
 
 `continuity` 是与 route 正交的生命周期维度（foreground / resumable / idle），不是第五种 route。长任务的检查点、恢复与闲时执行机制见 `skills/continuity`；本技能只在路由声明中携带 continuity 字段，不在此重复实现。
