@@ -1,6 +1,6 @@
 # GLM Conductor 架构（权威文档）
 
-> 本文档是 GLM Conductor 的**唯一架构真相源**，描述 v2.0.0-beta2（v2-dev 开发线）的实际运行时行为。
+> 本文档是 GLM Conductor 的**唯一架构真相源**，描述 v2.0.0-rc1（v2-dev 开发线）的实际运行时行为。
 > 契约细节以插件目录为准（`plugins/glm-conductor/` 下的 agents 与 skills）；本文档与其保持一致，冲突时以修复到一致为准，不得偏离开源文档单独演化。
 > 历史提案存于 `docs/history/`，仅作参考，不构成当前实现依据。
 
@@ -215,7 +215,7 @@ Work Unit 是可独立派发的最小有界实施单元（§60-§73，`runtime/w
 
 - **状态模型**：十词状态词汇 + 26 条合法转换边（主链 pending→…→completed；quota/block 回退边；§69 恢复对账边；终态封锁）；单元必填 ownership 与 verification（无范围或无验证不可派发）；`attempt` 记录重试史，新调用不抹除失败史（§73 有界重试）
 - **依赖图**：`depends_on` 同任务内引用、环拒绝（报全部环成员）；就绪 = status ready 且依赖全部 completed；确定性拓扑序驱动派发顺序
-- **派发准入**（主会话仍是唯一编排者）：`plan_dispatch` 四道闸——quota 四态（EXHAUSTED→waiting_quota、UNKNOWN/PRESSURE 保守抑制，§67）→ ownership 不相交（保守近似：字面前缀相交即冲突，宁少并行不越界，§66）→ max_workers 预算 → 派发；**默认串行**，有界并行待租约层（B9/rc1）
+- **派发准入**（主会话仍是唯一编排者）：`plan_dispatch` 五道闸——quota 四态（EXHAUSTED→waiting_quota、UNKNOWN/PRESSURE 保守抑制，§67）→ ownership 不相交（保守近似：字面前缀相交即冲突，宁少并行不越界，§66）→ **租约闸（`runtime/lease.py`：任务专属 leases.json owner map、派发前全有或全无获取、同 owner 幂等、异 owner 冲突拒绝、写相结束释放，§78-§79）→ max_workers 预算（1-4，§82）→ 派发；默认串行，有界并行（上限 4，experimental）已启用——并行资格 = ownership 不相交或有效租约保护（§81）
 - **恢复对账**（§68-§69）：恢复绝不盲目重放——completed 不重跑；`running` 单元按证据三分为 ready（无残留）/ completed（残留 + 绑定当前指纹的新鲜验证事件）/ verifying（残留无新鲜证据，主会话必须亲自验证）；`verifying` 单元仅在存在新鲜验证证据时建议 completed，其余情形出 advisory（保持现状由主会话直接验证 / 无残留由主会话裁决），不做状态转换；仓库状态权威于运行时记录
 - **Join**（§71-§72）：全部单元 completed 后主会话显式 join——聚合 diff → 任务级全局验证（跨单元集成/构建/lint，局部验证永不自动替代）→ 终指纹 → 审查 → 完成门
 
@@ -276,9 +276,9 @@ v2 把关键运行时契约从提示词升级为确定性强制。强制层由�
 
 - `scripts/validate_plugin.py`（纯标准库，14 项检查）+ CI（`.github/workflows/validate.yml`，静态校验 + 单元测试）维护契约一致性：扫描 `plugins/`、`README.md`、`marketplace.json` 与本文档，`docs/history/` 不参与当前契约校验
 - 检查覆盖：旧名清理、禁词、quota 否定式声明、任务专属 checkpoint 路径、视觉协议标记、TASK_ID 必含、视觉新调用规范措辞、`plugin.json` 与 CHANGELOG 的版本一致性、钩子清单完整性（含脚本存在性）、runtime 状态层与技能契约标记
-- 运行时模块（`runtime/`）、钩子（`hooks/`）与 quota 子系统各配单元测试与子进程冒烟（`tests/`，602 用例：状态层 87、日志 26、ownership 38、指纹 59、stop_gate 32、pre_tool_use 18、policy 20、work_unit 57、dependency 52、dispatcher 44、reconcile 21、quota 解析 29/抽象 12/适配器 28/调度器 37/凭证 25/诊断 17，含 §98 集成冒烟、§45 调度场景、§68-§69 恢复对账三场景与策略/传输端到端），随 CI 执行
+- 运行时模块（`runtime/`）、钩子（`hooks/`）与 quota 子系统各配单元测试与子进程冒烟（`tests/`，632 用例：状态层 87、日志 26、ownership 38、指纹 59、stop_gate 32、pre_tool_use 18、policy 20、work_unit 57、dependency 52、dispatcher 54、reconcile 21、lease 19、quota 解析 29/抽象 12/适配器 28/调度器 37/凭证 25/诊断 17，含 §98 集成冒烟、§45 调度场景、§68-§69 恢复对账三场景与策略/传输端到端），随 CI 执行
 - 版本策略：`plugin.json` 版本、CHANGELOG 最新条目、git tag / GitHub Release 三者保持一致
 
 ## 12. 演化边界
 
-v2 开发在 `v2-dev` 分支进行（`main` 保持在 v1.1.0 发布态，里程碑完成后再合入）。当前处于 **2.0.0-beta2**（alpha 线三里程碑 + beta1 路由上下文与策略门控 + beta2 任务与工作单元管理：十词状态模型/依赖图/派发准入/恢复对账），后续里程碑：rc1 租约与有界并行 → stable。除非实际使用暴露出具体能力缺口，不新增路由维度或角色；强制层只针对高置信不变量（越界、缺失证据、过期证据），不做语义解释型拦截。
+v2 开发在 `v2-dev` 分支进行（`main` 保持在 v1.1.0 发布态，里程碑完成后再合入）。当前处于 **2.0.0-rc1**（alpha 三里程碑 + beta1 路由上下文与策略门控 + beta2 任务与工作单元管理 + rc1 租约与有界并行（上限 4，experimental）），后续里程碑：stable 加固。除非实际使用暴露出具体能力缺口，不新增路由维度或角色；强制层只针对高置信不变量（越界、缺失证据、过期证据），不做语义解释型拦截。

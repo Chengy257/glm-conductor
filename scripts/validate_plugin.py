@@ -221,6 +221,7 @@ WORK_UNIT_PY = os.path.join(RUNTIME_DIR, "work_unit.py")
 DEPENDENCY_PY = os.path.join(RUNTIME_DIR, "dependency.py")
 DISPATCHER_PY = os.path.join(RUNTIME_DIR, "dispatcher.py")
 RECONCILE_PY = os.path.join(RUNTIME_DIR, "reconcile.py")
+LEASE_PY = os.path.join(RUNTIME_DIR, "lease.py")
 HOOKS_DIR = os.path.join(REPO_ROOT, "plugins", "glm-conductor", "hooks")
 STOP_GATE_PY = os.path.join(HOOKS_DIR, "stop_gate.py")
 PRE_TOOL_USE_PY = os.path.join(HOOKS_DIR, "pre_tool_use.py")
@@ -237,6 +238,7 @@ TEST_WORK_UNIT = os.path.join(TESTS_DIR, "test_work_unit.py")
 TEST_DEPENDENCY = os.path.join(TESTS_DIR, "test_dependency.py")
 TEST_DISPATCHER = os.path.join(TESTS_DIR, "test_dispatcher.py")
 TEST_RECONCILE = os.path.join(TESTS_DIR, "test_reconcile.py")
+TEST_LEASE = os.path.join(TESTS_DIR, "test_lease.py")
 QUOTA_DIR = os.path.join(RUNTIME_DIR, "quota")
 QUOTA_PARSER_PY = os.path.join(QUOTA_DIR, "parser.py")
 QUOTA_PROVIDER_PY = os.path.join(QUOTA_DIR, "provider.py")
@@ -259,12 +261,12 @@ RUNTIME_REQUIRED_FILES = (
     QUOTA_PARSER_PY, QUOTA_PROVIDER_PY, QUOTA_HTTP_PY, QUOTA_ZAI_PY,
     QUOTA_BIGMODEL_PY, QUOTA_SCHEDULER_PY, QUOTA_CREDENTIALS_PY,
     QUOTA_REPORT_PY, POLICY_PY, WORK_UNIT_PY, DEPENDENCY_PY,
-    DISPATCHER_PY, RECONCILE_PY)
+    DISPATCHER_PY, RECONCILE_PY, LEASE_PY)
 LAYER_REQUIRED_FILES = (STOP_GATE_PY, PRE_TOOL_USE_PY)
 TEST_REQUIRED_FILES = (
     TEST_STATE, TEST_JOURNAL, TEST_OWNERSHIP, TEST_FINGERPRINT,
     TEST_STOP_GATE, TEST_PRE_TOOL_USE, TEST_POLICY, TEST_WORK_UNIT,
-    TEST_DEPENDENCY, TEST_DISPATCHER, TEST_RECONCILE,
+    TEST_DEPENDENCY, TEST_DISPATCHER, TEST_RECONCILE, TEST_LEASE,
     TEST_QUOTA_PARSER, TEST_QUOTA_ADAPTERS, TEST_QUOTA_SCHEDULER,
     TEST_QUOTA_CREDENTIALS, TEST_QUOTA_REPORT)
 COMMAND_REQUIRED_FILES = (QUOTA_COMMAND,)
@@ -278,6 +280,7 @@ WORK_UNIT_REQUIRED_MARKERS = ("WORK_UNIT_STATUSES", "WU_TRANSITIONS", "record_at
 DEPENDENCY_REQUIRED_MARKERS = ("graph_errors", "ready_units", "topo_order")
 DISPATCHER_REQUIRED_MARKERS = ("plan_dispatch", "patterns_conflict", "max_workers")
 RECONCILE_REQUIRED_MARKERS = ("reconcile_interrupted", "suggestions")
+LEASE_REQUIRED_MARKERS = ("LeaseConflictError", "acquire_lease", "release_lease")
 FINGERPRINT_REQUIRED_MARKERS = (
     "compute_fingerprint", "task_fingerprint", "visual_evidence_status")
 STOP_GATE_REQUIRED_MARKERS = (
@@ -989,6 +992,7 @@ def check_14_runtime_state(results):
         (DEPENDENCY_PY, DEPENDENCY_REQUIRED_MARKERS),
         (DISPATCHER_PY, DISPATCHER_REQUIRED_MARKERS),
         (RECONCILE_PY, RECONCILE_REQUIRED_MARKERS),
+        (LEASE_PY, LEASE_REQUIRED_MARKERS),
         (STOP_GATE_PY, STOP_GATE_REQUIRED_MARKERS),
         (PRE_TOOL_USE_PY, PRE_TOOL_USE_REQUIRED_MARKERS),
         (QUOTA_SCHEDULER_PY,
