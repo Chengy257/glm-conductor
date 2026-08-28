@@ -16,8 +16,10 @@
          一致——验证后文件又变化 → verification_stale；
       3. review：review.required 为 True 时，verdict 为 ship 且绑定当前
          指纹才放行——None / missing / not-required → review_missing，
-         fix-first / rethink → review_rejected，审查后文件又变化或
-         verdict 已标记 stale → review_stale；
+         词汇外取值（手写 state.json 的拼写偏差，如 "Ship"）同样按
+         review_missing 处理（不静默放宽为 ship 路径），fix-first /
+         rethink → review_rejected，审查后文件又变化或 verdict 已标记
+         stale → review_stale；
       4. visual：visual_evidence 记录的视觉证据按文件自身字节哈希比对，
          记录后发生变化 → visual_stale（§22）。
     参与校验判定：ownership 声明非空 / verification.required 非空 /
@@ -318,7 +320,7 @@ def task_participates(task_state):
     return False
 
 
-def evaluate_task(task_id, task_state, repo, touched):
+def evaluate_task(task_id, task_state, repo, touched, base):
     """对单个参与任务按 §15 顺序做四重检查，首个失败即返回。
 
     返回 None（全部通过，或四项声明全空不参与）或 (check, detail)；
@@ -329,13 +331,14 @@ def evaluate_task(task_id, task_state, repo, touched):
     比对首次需要时才算，每任务至多一次，两处共用——ownership / 命令
     清单层面的失败不触发 git 指纹计算。
 
-    参数 touched 为调用方取好的 git 改动清单（单次 git 调用，ownership
-    检查直接复用）；fingerprint.task_fingerprint 内部自取 touched（与
-    主会话记录证据同一入口，属指纹层自身契约）。
+    参数 touched / base 为调用方取好的 git 改动清单与基线修订号（单次
+    Stop 内各取一次、跨任务复用——每次 Stop 恒为 2 次 git 子调用），
+    透传给 fingerprint.task_fingerprint（与主会话记录证据同一入口，
+    属指纹层自身契约；主会话侧用缺省调用自取，两者语义等价）。
 
     classify_paths 的模式非法（OwnershipError）与 task_fingerprint 的
-    git 失败 / 结构性错误（OwnershipError / FingerprintError）自然向上
-    抛，由调用方并入降级路径（不静默放宽）。
+    结构性错误（OwnershipError / FingerprintError）自然向上抛，由调用
+    方并入降级路径（不静默放宽）。
     """
     from runtime import fingerprint, ownership
 
@@ -352,8 +355,8 @@ def evaluate_task(task_id, task_state, repo, touched):
 
     def current_fingerprint():
         if "value" not in current_cache:
-            current_cache["value"] = fingerprint.task_fingerprint(repo,
-                                                                  task_state)
+            current_cache["value"] = fingerprint.task_fingerprint(
+                repo, task_state, touched=touched, base=base)
         return current_cache["value"]
 
     # 2) verification：required 全部完成，且证据指纹新鲜
@@ -376,6 +379,12 @@ def evaluate_task(task_id, task_state, repo, touched):
         verdict = review.get("verdict")
         if verdict is None or verdict in ("missing", "not-required"):
             return ("review_missing", {"reviewer": review.get("reviewer")})
+        if verdict not in ("fix-first", "rethink", "stale", "ship"):
+            # 词汇外取值（手写 state.json 的拼写偏差，如 "Ship"/"ship "）
+            # 按 review_missing 处理，不静默放宽为 ship 路径（detail
+            # 携带 verdict 原值；报文模板不变）
+            return ("review_missing",
+                    {"reviewer": review.get("reviewer"), "verdict": verdict})
         if verdict in ("fix-first", "rethink"):
             return ("review_rejected", {"verdict": verdict})
         # "stale"（审查者标记失效）与 "ship" 都要指纹比对（此处才惰性计算）
@@ -383,7 +392,7 @@ def evaluate_task(task_id, task_state, repo, touched):
         recorded = review.get("fingerprint")
         if verdict == "stale":
             return ("review_stale", {"recorded": recorded, "current": current})
-        # verdict == "ship"（REVIEW_VERDICTS 词汇封闭，其余值不可达）
+        # verdict == "ship"（词汇外已在上方按 review_missing 处理）
         if recorded is None or recorded != current:
             return ("review_stale", {"recorded": recorded, "current": current})
 
@@ -401,7 +410,7 @@ def evaluate_task(task_id, task_state, repo, touched):
     return None
 
 
-def collect_violations(state, repo, touched, active):
+def collect_violations(state, repo, touched, base, active):
     """逐任务做 §15 四重检查（ownership → verification → review → visual）。
 
     返回 (violations, declared)：
@@ -413,6 +422,8 @@ def collect_violations(state, repo, touched, active):
         兜底记 active[0]（保留降级运行痕迹）。
 
     - state.json 在发现后消失（load_state → None）同样按未参与跳过；
+    - touched / base 为调用方取好的单份清单与基线（跨任务复用，见
+      evaluate_task docstring），原样透传；
     - classify_paths / task_fingerprint 的结构性错误自然向上抛，由调用方
       并入降级路径（不静默放宽）。
     """
@@ -425,7 +436,7 @@ def collect_violations(state, repo, touched, active):
         if not task_participates(task_state):
             continue
         declared.append(task_id)
-        result = evaluate_task(task_id, task_state, repo, touched)
+        result = evaluate_task(task_id, task_state, repo, touched, base)
         if result is not None:
             check, detail = result
             violations.append((task_id, check, detail))
@@ -489,11 +500,15 @@ def main():
             {"event": "gate_degraded", "reason": "git_unavailable"})
         return 0
 
-    # 5) 逐任务按 §15 顺序做四重检查，收集违规与参与校验任务；
-    #    evaluate 阶段的结构性错误（rev-parse 突然失败 / 声明模式非法等）
-    #    并入降级路径——不静默放宽，也不卡会话
+    # 5) 基线修订号 + 逐任务 §15 四重检查：touched 与 base 单次 Stop 内
+    #    各取一次、跨任务复用（每次 Stop 恒为 2 次 git 子调用：1 次
+    #    status + 1 次 rev-parse，多任务不再叠加 rev-parse）；基线解析与
+    #    evaluate 阶段的结构性错误（rev-parse 突然失败 / 声明模式非法
+    #    等）并入同一降级路径——不静默放宽，也不卡会话
     try:
-        violations, declared = collect_violations(state, repo, touched, active)
+        base = fingerprint.resolve_base(repo)
+        violations, declared = collect_violations(state, repo, touched, base,
+                                                  active)
     except (ownership.OwnershipError, fingerprint.FingerprintError) as exc:
         warn_stderr(
             "ENFORCEMENT DEGRADED: cannot evaluate completion gate (%s); "

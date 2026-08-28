@@ -232,7 +232,7 @@ PreToolUse 钩子（matcher `Agent|Task`，`hooks/pre_tool_use.py`）在每次�
 
 ### 8.3 失败处理与循环安全
 
-- **fail-open 降级可见**：钩子崩溃 / git 不可用 / 求值阶段结构性错误时放行并在 stderr 报 `ENFORCEMENT DEGRADED`（journal 记 `gate_degraded`）——钩子起不来时 fail-closed 会卡死所有会话，降级可见优于假强制
+- **fail-open 降级可见**：三种降级路径全部放行并在 stderr 报 `ENFORCEMENT DEGRADED`，但记账不同——前两类（git 失败 / 求值阶段结构性错误）会向参与任务 journal 记 `gate_degraded`，进程级崩溃兜底仅 stderr 可见、不写 journal（崩溃可能正是 journal 故障所致）——钩子起不来时 fail-closed 会卡死所有会话，降级可见优于假强制
 - **续行有界**：运行时对 Stop block 的续行内建上限（每 turn 最多 3 次）；钩子侧连续两次 block 后第三次放行（stderr 报 `ENFORCEMENT GATE EXHAUSTED`、journal 记 `gate_exhausted`）——**此时模型必须向用户报告 blocked，不得声称完成**；两次 block 间出现真实工作事件即重置计数（活体实测：四重检查全路径单次 Stop 约 0.2s，正常仓库远低于 5s 钩子预算）
 - **强制面（alpha2）**：ownership 越界 + 验证完成 + 审查有效 + 证据新鲜度（含视觉证据），四者同门按序检查
 

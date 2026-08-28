@@ -165,7 +165,7 @@ def resolve_base(repo_root) -> str:
 
 # —— 指纹计算 ——
 
-def compute_fingerprint(repo_root, paths) -> str:
+def compute_fingerprint(repo_root, paths, *, base=None) -> str:
     """计算证据指纹，返回 "sha256:" + 64 位小写十六进制。
 
     指纹绑定「基线修订 + 相关文件集的归一化内容状态」：
@@ -175,11 +175,19 @@ def compute_fingerprint(repo_root, paths) -> str:
       - 只读取 paths 列出的文件，不哈希 paths 之外的任何文件
         （相关范围由调用方控制）。
 
+    可选参数 base（关键字专用，缺省 None 时行为与既有调用完全一致）：
+      - None → 内部 resolve_base(repo_root) 取基线（非 git 仓库
+        FingerprintError 自然上抛）；
+      - 非 None → 直接使用（不再调 git rev-parse）——调用方已持有基线
+        时省一次 git 子调用（Stop 完成门的 2 次子调用预算），指纹语义
+        与缺省调用完全等价；
+      - 显式 base 必须是非空 str：其他类型或空串抛 FingerprintError
+        （结构性错误，不静默转换，与 normalize_relpath 的输入纪律一致）。
+
     流程：
       1. paths 逐项 normalize_relpath（非法路径 FingerprintError 自然
          上抛），归一后去重并按 str 排序（结果与输入顺序 / 重复无关）；
-      2. resolve_base(repo_root) 取基线（非 git 仓库 FingerprintError
-         自然上抛）；
+      2. 取基线（按上述 base 参数规则）；
       3. 逐路径读工作区文件 <repo_root>/<归一路径>：
            - 不存在 → 标记 "missing"；
            - 存在但是目录 → FingerprintError；
@@ -198,7 +206,11 @@ def compute_fingerprint(repo_root, paths) -> str:
     for item in paths:
         normalized_set.add(normalize_relpath(item))
     ordered = sorted(normalized_set)
-    base = resolve_base(repo_root)
+    if base is None:
+        base = resolve_base(repo_root)
+    elif not isinstance(base, str) or base == "":
+        raise FingerprintError(
+            "显式 base 必须是非空字符串，得到 %r" % (base,))
     lines = ["glm-conductor/evidence-fingerprint/1", "base " + base]
     for rel in ordered:
         target = pathlib.Path(repo_root) / rel
@@ -224,23 +236,34 @@ def compute_fingerprint(repo_root, paths) -> str:
 
 # —— 任务指纹入口与 stale 检测（v2 工作块 B3.2） ——
 
-def task_fingerprint(repo_root, task_state) -> str:
+def task_fingerprint(repo_root, task_state, *, touched=None, base=None) -> str:
     """按任务 ownership 声明计算任务级证据指纹（B3.2）。
 
     这是主会话记录验证/审查证据指纹与 Stop 完成门比对指纹的同一入口：
     两侧必须调用同一函数，得到的指纹才可比（升级指南 §19/§20——任何
     工作区变化使旧证据指纹失效，完成门据此拦截）。
 
+    可选参数 touched / base（关键字专用，缺省 None 时行为与既有调用
+    完全一致）：Stop 完成门传入 touched/base 以复用单次 git 调用
+    （每次 Stop 恒为 1 次 status + 1 次 rev-parse，不随任务数增长）；
+    主会话记录证据仍用缺省调用（内部自取），两者语义等价。
+      - touched 非 None → 跳过 git status，直接用该清单做范围过滤
+        （须为 git_touched_files 同口径的路径清单；非 list 抛
+        FingerprintError，结构性错误不静默转换；项的类型错误由
+        classify_paths 的既有规则抛 OwnershipError）；
+      - base 透传 compute_fingerprint（None → 内部 resolve_base；
+        非 None 须为非空 str，规则见彼处 docstring）。
+
     范围规则：
       - 从 task_state 读 ownership.files：非 list 或全非 str 时按空
         处理；只保留非空 str 项作为声明模式；
-      - touched = git_touched_files(repo_root)（懒导入 runtime.ownership，
-        避免模块级依赖环）；git 失败时 OwnershipError 自然上抛，
-        由调用方处理；
+      - touched = 传入清单，或 git_touched_files(repo_root)（懒导入
+        runtime.ownership，避免模块级依赖环）；git 失败时
+        OwnershipError 自然上抛，由调用方处理；
       - 声明了 ownership（过滤后非空）→ 范围 = classify_paths(touched,
         patterns) 的 owned_hits（只哈希声明覆盖的改动文件）；
       - 未声明 → 范围 = touched 全部；
-      - 指纹 = compute_fingerprint(repo_root, 范围)。
+      - 指纹 = compute_fingerprint(repo_root, 范围, base=base)。
 
     task_state 非 dict 抛 FingerprintError（结构性错误，不静默转换）。
     """
@@ -255,13 +278,18 @@ def task_fingerprint(repo_root, task_state) -> str:
         if isinstance(raw_files, list):
             patterns = [item for item in raw_files
                         if isinstance(item, str) and item != ""]
-    touched = ownership.git_touched_files(repo_root)
+    if touched is None:
+        touched = ownership.git_touched_files(repo_root)
+    elif not isinstance(touched, list):
+        raise FingerprintError(
+            "显式 touched 必须是路径清单（list），得到 %s"
+            % type(touched).__name__)
     if patterns:
         owned_hits, _ = ownership.classify_paths(touched, patterns)
         scope = owned_hits
     else:
         scope = touched
-    return compute_fingerprint(repo_root, scope)
+    return compute_fingerprint(repo_root, scope, base=base)
 
 
 def visual_evidence_status(repo_root, entries) -> "list[dict]":
@@ -278,7 +306,11 @@ def visual_evidence_status(repo_root, entries) -> "list[dict]":
         的唯一语义差别：后者面向文本逻辑内容，先做 CRLF→LF 归一）；
       - 文件不存在或读取时 OSError → current=None；目标是目录 →
         current=None 且 stale=True（容错优先，不抛）；
-      - stale = (current != recorded)。
+      - recorded（entry["sha256"]）非非空 str（缺失 / 空串 / 非 str）
+        → 该项直接 stale=True（缺 recorded 视为 stale：证据未绑定
+        内容即不可信——否则 recorded 与 current 同时为 None 会被误判
+        为新鲜）；
+      - stale = recorded 合法时 (current != recorded)，否则恒 True。
 
     返回 list（顺序与输入一致），每项 {"path": 原始 path,
     "recorded": 记录值, "current": 当前值或 None, "stale": bool}。
@@ -303,10 +335,16 @@ def visual_evidence_status(repo_root, entries) -> "list[dict]":
                     current = hashlib.sha256(fh.read()).hexdigest()
             except OSError:
                 current = None
+        if isinstance(recorded, str) and recorded != "":
+            stale = current != recorded
+        else:
+            # 缺 recorded 视为 stale：证据未绑定内容即不可信（否则
+            # recorded 与 current 同时为 None 会被误判为新鲜）
+            stale = True
         results.append({
             "path": path,
             "recorded": recorded,
             "current": current,
-            "stale": current != recorded,
+            "stale": stale,
         })
     return results

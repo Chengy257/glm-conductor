@@ -93,6 +93,7 @@ active task（continuity 为 resumable / idle 的任务，或需要 Stop 完成�
 - 指纹必须经 `runtime.fingerprint.task_fingerprint` 计算（与完成门同一入口、同一范围规则：声明了 ownership 时取「当前改动 ∩ 声明范围」，未声明时取全部当前改动）；不得手算、不得另定范围——两侧口径不一致的指纹永远无法通过比对
 - 记录指纹后不得再改动 owned 文件：任何后续编辑都使指纹过期——这是设计意图（任何修复使先前验证/审查失效）。确需改动 → 改完后重走「验证 →（审查）→ 记指纹」
 - fix-first / rethink 修复后的重新审查是新裁决：verdict 与 fingerprint 一并重记
+- 记录证据后执行 git commit 会改变基线修订 → 证据随之 stale（指纹公式含 base，属设计内保守行为；提交前重走「验证 →（审查）→ 记指纹」即可）
 - stale 的恢复路径只有一条：重跑验证 / 重新审查并记录新指纹；禁止回写旧指纹"续命"
 
 **写入方式**：主会话定位已安装插件的 runtime 模块（含 `runtime/state.py` 的插件根，通常在 `~/.zcode/cli/plugins/cache/` 下），用 Bash 调 python3：

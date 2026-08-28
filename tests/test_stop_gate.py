@@ -132,6 +132,22 @@ class TempDirFixture(unittest.TestCase):
         state.save_state(self.repo, st)
         return st
 
+    def patch_state_file_raw(self, task_id, mutate):
+        """绕过 save_state 校验直接改写已落盘的 state.json（模拟手写
+        state.json 的形状异常）。
+
+        save_state 会按 validate_state 拒绝词汇外 review.verdict、缺
+        sha256 的 visual_evidence 项等形状；本助手先落合法状态，再对
+        JSON 文件就地打补丁，精确复现「手写偏差」场景。mutate 就地修改
+        load 出的 dict，无返回值。
+        """
+        path = state.state_path(self.repo, task_id)
+        with open(path, "r", encoding="utf-8") as fh:
+            raw = json.load(fh)
+        mutate(raw)
+        with open(path, "w", encoding="utf-8", newline="\n") as fh:
+            json.dump(raw, fh, ensure_ascii=False, indent=2)
+
     def task_fingerprint(self, st):
         """按门同一入口真算任务证据指纹（fingerprint.task_fingerprint），
         保证测试记录值与完成门比对值可比。"""
@@ -277,6 +293,39 @@ class StopGateLayerAEnforceTest(GitRepoFixture):
             [e["event"] for e in events],
             ["gate_blocked", "gate_blocked", "gate_exhausted"])
         self.assertEqual(events[-1]["out_of_scope"], ["src/other/rogue.ts"])
+
+    # —— 用例 c2：exhausted 后第 4 次 Stop → 重新 block（新周期额度） ——
+    def test_fourth_stop_blocks_again_after_gate_exhausted(self):
+        # gate_exhausted 事件断开 journal 尾部的 gate_blocked 连续链：
+        # 第 4 次 Stop 从尾部数到的连续 gate_blocked 为 0 → 重新计数，
+        # 新周期重新获得 2 次 block 额度（无此机制则同一违规永远放行）
+        self.add_gate_task()
+        self.make_violating_diff()
+        first = run_gate("{}", self.repo)
+        second = run_gate("{}", self.repo)
+        third = run_gate("{}", self.repo)
+        self.assertEqual(json.loads(first.stdout)["decision"], "block")
+        self.assertEqual(json.loads(second.stdout)["decision"], "block")
+        self.assertEqual(third.returncode, 0)
+        self.assertEqual(third.stdout, "")
+        self.assertIn("ENFORCEMENT GATE EXHAUSTED", third.stderr)
+        # 第 4 次：尾部最新事件是 gate_exhausted（非 gate_blocked）→
+        # 连续计数为 0 → 再次 block，且无 EXHAUSTED 报警
+        fourth = run_gate("{}", self.repo)
+        self.assertEqual(fourth.returncode, 0)
+        self.assertEqual(json.loads(fourth.stdout)["decision"], "block")
+        self.assertNotIn("ENFORCEMENT GATE EXHAUSTED", fourth.stderr)
+        self.assertEqual(
+            [e["event"] for e in self.journal_events()],
+            ["gate_blocked", "gate_blocked", "gate_exhausted",
+             "gate_blocked"])
+        # 新周期语义：第 5 次 Stop（尾部 1 条 gate_blocked < 2）仍 block，
+        # 第 6 次才再次 exhausted——额度确实重新计满
+        fifth = run_gate("{}", self.repo)
+        self.assertEqual(json.loads(fifth.stdout)["decision"], "block")
+        sixth = run_gate("{}", self.repo)
+        self.assertEqual(sixth.stdout, "")
+        self.assertIn("ENFORCEMENT GATE EXHAUSTED", sixth.stderr)
 
     # —— 用例 d：链断重置——block 之间出现其他事件 → 重新计数 ——
     def test_journal_chain_break_resets_block_count(self):
@@ -556,6 +605,33 @@ class StopGateReviewCheckTest(GitRepoFixture):
         self.assertEqual(events[0]["check"], "review_stale")
         self.assertNotEqual(events[0]["recorded"], events[0]["current"])
 
+    def test_out_of_vocabulary_verdict_blocks_as_review_missing(self):
+        # 回归（终审 P2）：verdict 词汇外（手写 state.json 拼写偏差，如
+        # 大写 "Ship"）不得沿 ship 路径仅做指纹比对后放行——按
+        # review_missing 处理，detail 携带 verdict 原值，报文模板不变
+        self.write("src/a.py", b"v1\n")
+        self.add_active_task(review_required=True, reviewer="reviewer-a")
+        st = state.load_state(self.repo, TID)
+        current = self.task_fingerprint(st)
+        # 指纹绑定当前状态（若被误当 ship 处理则此处会静默放行）
+        def mutate(raw):
+            raw["review"]["verdict"] = "Ship"
+            raw["review"]["fingerprint"] = current
+        self.patch_state_file_raw(TID, mutate)
+        result = run_gate("{}", self.repo)
+        self.assertEqual(result.returncode, 0)
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["decision"], "block")
+        reason = payload["reason"]
+        self.assertIn("review required but not completed", reason)
+        self.assertIn("reviewer-a", reason)
+        self.assertIn("runtime.state.record_review", reason)
+        events = self.journal_events()
+        self.assertEqual(events[0]["check"], "review_missing")
+        self.assertEqual(events[0]["task_id"], TID)
+        self.assertEqual(events[0]["reviewer"], "reviewer-a")
+        self.assertEqual(events[0]["verdict"], "Ship")
+
 
 # —— B4.1 四重检查：visual evidence（stale） ——
 
@@ -603,6 +679,40 @@ class StopGateVisualEvidenceCheckTest(GitRepoFixture):
         self.assertEqual(stale[0]["current"],
                          hashlib.sha256(b"png-bytes-v2").hexdigest())
         self.assertIn(hashlib.sha256(b"png-bytes-v1").hexdigest()[:12], reason)
+
+    def test_visual_entry_without_sha256_is_stale(self):
+        # 回归（终审 P2）：证据项只有 path、缺 sha256 时不得因
+        # current==recorded==None 被误判新鲜——缺 recorded 视为 stale
+        # （证据未绑定内容即不可信），文件存在与否均拦
+        self.add_active_task()
+        # 手写形状：record_visual_evidence 校验参数，缺 sha256 的证据项
+        # 直接对已落盘 state.json 打补丁构造
+        self.patch_state_file_raw(
+            TID, lambda raw: raw.update(
+                {"visual_evidence": [{"path": self.SHOT}]}))
+        # 场景一：文件不存在 → current=None，同样 stale → block
+        # （旧实现 current==recorded==None 会误判新鲜而静默放行）
+        missing = run_gate("{}", self.repo)
+        self.assertEqual(missing.returncode, 0)
+        payload = json.loads(missing.stdout)
+        self.assertEqual(payload["decision"], "block")
+        reason = payload["reason"]
+        self.assertIn("visual evidence changed after review", reason)
+        self.assertIn(self.SHOT, reason)
+        self.assertIn("recorded missing, current missing", reason)
+        # 场景二：同 path 文件存在 → current 非 None，仍 stale → block
+        self.write(self.SHOT, b"png-bytes-v1")
+        second = run_gate("{}", self.repo)
+        self.assertEqual(json.loads(second.stdout)["decision"], "block")
+        events = self.journal_events()
+        self.assertEqual([e["event"] for e in events],
+                         ["gate_blocked", "gate_blocked"])
+        self.assertEqual([e["check"] for e in events],
+                         ["visual_stale", "visual_stale"])
+        self.assertEqual(events[-1]["stale"],
+                         [{"path": self.SHOT, "recorded": None,
+                           "current": hashlib.sha256(
+                               b"png-bytes-v1").hexdigest()}])
 
 
 # —— B4.1 四重检查：全新鲜通过 / 混合违规 / 新 check 续行上限 / 降级 ——

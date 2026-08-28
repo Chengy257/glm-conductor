@@ -285,6 +285,26 @@ class TestComputeFingerprint(GitRepoFixture):
         with self.assertRaises(fingerprint.FingerprintError):
             fingerprint.compute_fingerprint(self.repo, ["../escape.txt"])
 
+    def test_explicit_base_matches_default(self):
+        # 回归（终审 P2）：显式传入 base（调用方已持有的基线，省一次
+        # rev-parse）与缺省调用结果完全相等（语义等价）
+        self.write("base.txt", b"v2\n")
+        base = fingerprint.resolve_base(self.repo)
+        self.assertEqual(
+            fingerprint.compute_fingerprint(self.repo, ["base.txt"],
+                                            base=base),
+            fingerprint.compute_fingerprint(self.repo, ["base.txt"]))
+
+    def test_invalid_explicit_base_raises(self):
+        # 显式 base 必须是非空 str（None = 内部自取；其他类型 / 空串抛
+        # FingerprintError，结构性错误不静默转换）
+        self.write("base.txt", b"v2\n")
+        for bad in (123, b"abc", "", ["abc"], {}):
+            with self.subTest(base=bad):
+                with self.assertRaises(fingerprint.FingerprintError):
+                    fingerprint.compute_fingerprint(self.repo, ["base.txt"],
+                                                    base=bad)
+
 
 # —— task_fingerprint（真实 git 仓库 fixture，B3.2） ——
 
@@ -365,6 +385,47 @@ class TestTaskFingerprint(GitRepoFixture):
         fp = fingerprint.task_fingerprint(
             self.repo, {"ownership": {"files": ["src/**"]}})
         self.assertRegex(fp, _FINGERPRINT_RE)
+
+    def test_explicit_touched_and_base_match_default(self):
+        # 回归（终审 P2）：Stop 门路径（传入 touched/base 复用单次 git
+        # 调用）与缺省调用（内部自取）结果完全相等——两者语义等价
+        self.write("src/owned.py", b"owned v1\n")
+        self.write("other/out.txt", b"out v1\n")
+        st = {"ownership": {"files": ["src/**"]}}
+        touched = ownership.git_touched_files(self.repo)
+        base = fingerprint.resolve_base(self.repo)
+        self.assertEqual(
+            fingerprint.task_fingerprint(self.repo, st, touched=touched,
+                                         base=base),
+            fingerprint.task_fingerprint(self.repo, st))
+
+    def test_explicit_touched_list_is_actually_used(self):
+        # 传入的 touched 清单真实生效：后续新增文件不改变显式调用结果
+        # （快照语义），缺省调用则会看到它
+        self.write("src/owned.py", b"owned v1\n")
+        st = {"ownership": {"files": []}}  # 未声明 → 范围 = touched 全部
+        touched = ownership.git_touched_files(self.repo)
+        base = fingerprint.resolve_base(self.repo)
+        explicit = fingerprint.task_fingerprint(self.repo, st, touched=touched,
+                                                base=base)
+        self.write("src/added-later.py", b"new file\n")
+        self.assertEqual(
+            fingerprint.task_fingerprint(self.repo, st, touched=touched,
+                                         base=base),
+            explicit)
+        self.assertNotEqual(
+            fingerprint.task_fingerprint(self.repo, st), explicit)
+
+    def test_invalid_explicit_touched_raises(self):
+        # 显式 touched 须为路径清单（list）：非 list 抛 FingerprintError
+        # （结构性错误，不静默转换；项级类型错误仍由 classify_paths 的
+        # OwnershipError 规则抛出）
+        self.write("src/owned.py", b"owned v1\n")
+        st = {"ownership": {"files": ["src/**"]}}
+        for bad in ("src/owned.py", {"src/owned.py"}, 42):
+            with self.subTest(touched=bad):
+                with self.assertRaises(fingerprint.FingerprintError):
+                    fingerprint.task_fingerprint(self.repo, st, touched=bad)
 
 
 @unittest.skipUnless(shutil.which("git"), "环境无 git 可执行，跳过 git fixture 测试")
@@ -474,6 +535,35 @@ class TestVisualEvidenceStatus(TempDirCase):
         self.assertFalse(result[0]["stale"])
         self.assertTrue(result[1]["stale"])
 
+    def test_missing_recorded_sha256_is_stale(self):
+        # 回归（终审 P2）：recorded 非（非空 str）——缺失 / 空串 / 非
+        # str——一律 stale（证据未绑定内容即不可信），current 照常计算
+        # 场景一：文件不存在 → current=None；旧实现 current==recorded
+        # ==None 会被误判为新鲜
+        result = fingerprint.visual_evidence_status(
+            self.repo, [{"path": "docs/ghost.png"}])
+        self.assertIsNone(result[0]["recorded"])
+        self.assertIsNone(result[0]["current"])
+        self.assertTrue(result[0]["stale"])
+        # 场景二：同 path 文件存在 → current 非 None，同样 stale
+        self.write("docs/ghost.png", b"bytes\n")
+        result = fingerprint.visual_evidence_status(
+            self.repo, [{"path": "docs/ghost.png"}])
+        self.assertIsNone(result[0]["recorded"])
+        self.assertEqual(result[0]["current"],
+                         hashlib.sha256(b"bytes\n").hexdigest())
+        self.assertTrue(result[0]["stale"])
+        # 空串 / 非 str 的 recorded 同样恒 stale
+        self.write("docs/empty-sha.png", b"bytes\n")
+        current = hashlib.sha256(b"bytes\n").hexdigest()
+        for bad in ("", 42, [], None):
+            with self.subTest(recorded=bad):
+                result = fingerprint.visual_evidence_status(self.repo, [
+                    {"path": "docs/empty-sha.png", "sha256": bad}])
+                self.assertEqual(result[0]["recorded"], bad)
+                self.assertEqual(result[0]["current"], current)
+                self.assertTrue(result[0]["stale"])
+
 
 @unittest.skipUnless(shutil.which("git"), "环境无 git 可执行，跳过 git fixture 测试")
 class TestUnbornRepo(TempDirCase):
@@ -495,6 +585,13 @@ class TestUnbornRepo(TempDirCase):
         self.assertRegex(fp, _FINGERPRINT_RE)
         self.assertEqual(
             fp, fingerprint.compute_fingerprint(self.repo, ["base.txt"]))
+
+    def test_explicit_base_dash_matches_default(self):
+        # unborn 仓库的基线记号 "-" 同样可显式传入（与缺省调用语义等价）
+        self.write("base.txt", b"content before first commit\n")
+        self.assertEqual(
+            fingerprint.compute_fingerprint(self.repo, ["base.txt"], base="-"),
+            fingerprint.compute_fingerprint(self.repo, ["base.txt"]))
 
 
 class TestNonGitDir(TempDirCase):
