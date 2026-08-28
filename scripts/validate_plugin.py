@@ -13,7 +13,8 @@
          name / description；
       4. 引用 agent 存在：plugins/ 内出现的 `glm-conductor:<agent>` 引用
          （flash-implementer / visual-implementer / glm-reviewer /
-         visual-reviewer），对应 agents/<agent>.md 必须存在；
+         visual-reviewer），对应 agents/<agent>.md 必须存在；`/glm-conductor:
+         <name>` 斜杠命令引用形式不算 agent 引用；
       5. 命名一致性：plugins/、marketplace.json、README.md、
          docs/architecture.md 中不得出现旧名 `glm-advisor`；
       6. 禁词：同上范围内不得出现 `升级信号` / `上报升级` / `升级路由`；
@@ -25,6 +26,9 @@
             （.glm-conductor/tasks/<task-id>/checkpoint.md 与
             .glm-conductor/tasks/<id>/checkpoint.md），再检查不得残留
             workspace-global 路径 .glm-conductor/checkpoint.md；
+         c) 「无 quota API」绝对化措辞在 README.md / docs/architecture.md /
+            continuity SKILL.md / long-horizon.md 四文件中零命中
+            （v2 alpha3 quota 感知上线后的措辞反转防回潮）；
       8. 视觉协议一致性：VISUAL_CAPTURE_REQUEST 与 VISUAL ACCEPTANCE 必须出
          现在 agents/visual-implementer.md，VISUAL_CAPTURE_REQUEST 必须出现
          在 skills/orchestration/references/role-contracts.md；VISUAL REVIEW
@@ -72,10 +76,18 @@
          gate_passed / gate_exhausted（Layer A 记账词汇），
          hooks/pre_tool_use.py 必含 additionalContext（Layer B 注入）；
          skills/continuity/SKILL.md 必含 state.json / events.jsonl /
-         task_created，skills/continuity/references/long-horizon.md 必含
+         task_created / Quota-Aware Scheduling / GLM_CONDUCTOR_QUOTA_API_KEY，
+         skills/continuity/references/long-horizon.md 必含
          state.json / events.jsonl，skills/orchestration/SKILL.md 必含
          state.json / route_selected，skills/enforcement/SKILL.md 必含
-         ENFORCEMENT DEGRADED / gate_exhausted / Layer A / Layer B。
+         ENFORCEMENT DEGRADED / gate_exhausted / Layer A / Layer B；
+         runtime/quota/ 下的 parser / provider / _http / zai / bigmodel /
+         scheduler / credentials / report 八模块、commands/quota.md 与
+         tests/ 下五个 test_quota*.py 均存在且非空，scheduler 必含
+         evaluate / plan_resume / PRESSURE / EXHAUSTED，_http 必含
+         ALLOWED_HOSTS / malformed，credentials 必含
+         GLM_CONDUCTOR_QUOTA_API_KEY / builtin:bigmodel-coding-plan，
+         report 必含 --json / unavailable。
 
     扫描范围说明：检查 5/6/7/8（及 8 内的旧名负向检查）的扫描范围是显式
     列表——plugins/ 全部文件 + marketplace.json + README.md +
@@ -130,9 +142,15 @@ SKILL_REQUIRED_KEYS = ("name", "description")
 CANONICAL_AGENTS = (
     "flash-implementer", "visual-implementer", "glm-reviewer", "visual-reviewer")
 
-AGENT_REF_RE = re.compile(r"glm-conductor:([A-Za-z0-9_][A-Za-z0-9_-]*)")
+# agent 引用；`/glm-conductor:<name>`（斜杠命令引用，如 /glm-conductor:quota）
+# 指向 commands/<name>.md 而非 agents/<name>.md，用负向后顾排除
+AGENT_REF_RE = re.compile(r"(?<!/)glm-conductor:([A-Za-z0-9_][A-Za-z0-9_-]*)")
 QUOTA_TOKENS = ("getQuotaRemaining", "getQuotaResetTime", "onQuotaReset")
 QUOTA_NEGATIONS = ("虚构", "不存在")
+# 7c：v2 alpha3 quota 感知上线后的措辞反转——「无 quota API」绝对化措辞
+# 在四个权威文档中必须零命中（「无原生 quota API」不含该子串，允许存在）
+QUOTA_ABSOLUTE_PHRASE = "无 quota API"
+QUOTA_ABSOLUTE_FILES = (README, ARCH_DOC, CONTINUITY_SKILL, LONG_HORIZON)
 # 允许的任务专属 checkpoint 路径：<task-id> / <id> 均为单段占位
 ALLOWED_CHECKPOINT_RE = re.compile(
     r"\.glm-conductor[/\\]tasks[/\\][^/\\\s\"'`]+[/\\]checkpoint\.md")
@@ -209,13 +227,35 @@ TEST_OWNERSHIP = os.path.join(TESTS_DIR, "test_ownership.py")
 TEST_FINGERPRINT = os.path.join(TESTS_DIR, "test_fingerprint.py")
 TEST_STOP_GATE = os.path.join(TESTS_DIR, "test_stop_gate.py")
 TEST_PRE_TOOL_USE = os.path.join(TESTS_DIR, "test_pre_tool_use.py")
+QUOTA_DIR = os.path.join(RUNTIME_DIR, "quota")
+QUOTA_PARSER_PY = os.path.join(QUOTA_DIR, "parser.py")
+QUOTA_PROVIDER_PY = os.path.join(QUOTA_DIR, "provider.py")
+QUOTA_HTTP_PY = os.path.join(QUOTA_DIR, "_http.py")
+QUOTA_ZAI_PY = os.path.join(QUOTA_DIR, "zai.py")
+QUOTA_BIGMODEL_PY = os.path.join(QUOTA_DIR, "bigmodel.py")
+QUOTA_SCHEDULER_PY = os.path.join(QUOTA_DIR, "scheduler.py")
+QUOTA_CREDENTIALS_PY = os.path.join(QUOTA_DIR, "credentials.py")
+QUOTA_REPORT_PY = os.path.join(QUOTA_DIR, "report.py")
+QUOTA_COMMAND = os.path.join(
+    REPO_ROOT, "plugins", "glm-conductor", "commands", "quota.md")
+TEST_QUOTA_PARSER = os.path.join(TESTS_DIR, "test_quota_parser.py")
+TEST_QUOTA_ADAPTERS = os.path.join(TESTS_DIR, "test_quota_adapters.py")
+TEST_QUOTA_SCHEDULER = os.path.join(TESTS_DIR, "test_quota_scheduler.py")
+TEST_QUOTA_CREDENTIALS = os.path.join(TESTS_DIR, "test_quota_credentials.py")
+TEST_QUOTA_REPORT = os.path.join(TESTS_DIR, "test_quota_report.py")
 ORCHESTRATION_SKILL = os.path.join(SKILLS_DIR, "orchestration", "SKILL.md")
 RUNTIME_REQUIRED_FILES = (
-    RUNTIME_INIT, STATE_PY, JOURNAL_PY, OWNERSHIP_PY, FINGERPRINT_PY)
+    RUNTIME_INIT, STATE_PY, JOURNAL_PY, OWNERSHIP_PY, FINGERPRINT_PY,
+    QUOTA_PARSER_PY, QUOTA_PROVIDER_PY, QUOTA_HTTP_PY, QUOTA_ZAI_PY,
+    QUOTA_BIGMODEL_PY, QUOTA_SCHEDULER_PY, QUOTA_CREDENTIALS_PY,
+    QUOTA_REPORT_PY)
 LAYER_REQUIRED_FILES = (STOP_GATE_PY, PRE_TOOL_USE_PY)
 TEST_REQUIRED_FILES = (
     TEST_STATE, TEST_JOURNAL, TEST_OWNERSHIP, TEST_FINGERPRINT,
-    TEST_STOP_GATE, TEST_PRE_TOOL_USE)
+    TEST_STOP_GATE, TEST_PRE_TOOL_USE,
+    TEST_QUOTA_PARSER, TEST_QUOTA_ADAPTERS, TEST_QUOTA_SCHEDULER,
+    TEST_QUOTA_CREDENTIALS, TEST_QUOTA_REPORT)
+COMMAND_REQUIRED_FILES = (QUOTA_COMMAND,)
 STATE_REQUIRED_MARKERS = (
     "TASK_ID_KEYS", "CONTINUITY_ID", "TERMINAL_STATUSES",
     "record_verification", "record_review", "visual_evidence")
@@ -229,7 +269,8 @@ STOP_GATE_REQUIRED_MARKERS = (
 PRE_TOOL_USE_REQUIRED_MARKERS = ("additionalContext",)
 SKILL_CONTRACT_MARKERS = (
     (CONTINUITY_SKILL,
-     ("state.json", "events.jsonl", "task_created", "task_fingerprint")),
+     ("state.json", "events.jsonl", "task_created", "task_fingerprint",
+      "Quota-Aware Scheduling", "GLM_CONDUCTOR_QUOTA_API_KEY")),
     (LONG_HORIZON, ("state.json", "events.jsonl")),
     (ORCHESTRATION_SKILL, ("state.json", "route_selected", "task_fingerprint")),
     (ENFORCEMENT_SKILL,
@@ -502,6 +543,28 @@ def check_7_continuity(results):
                 "FAIL: %s:%d 残留 workspace-global checkpoint 路径 "
                 ".glm-conductor/checkpoint.md" % (rel_display(path), lineno))
             ok = False
+
+    # 7c) 「无 quota API」绝对化措辞反转（v2 alpha3）：四文档零命中，
+    #     命中即 FAIL（行号 + 摘要），全部零命中输出一行 PASS
+    absolute_hits = 0
+    for path in QUOTA_ABSOLUTE_FILES:
+        text = read_text(path)
+        shown = rel_display(path)
+        if text is None or not os.path.isfile(path):
+            details.append("FAIL: %s 不存在或无法读取，无法执行 7c 检查" % shown)
+            ok = False
+            continue
+        for lineno, line in enumerate(text.splitlines(), 1):
+            if QUOTA_ABSOLUTE_PHRASE in line:
+                absolute_hits += 1
+                details.append(
+                    "FAIL: %s:%d 出现「无 quota API」绝对化措辞: %s"
+                    % (shown, lineno, line.strip()))
+                ok = False
+    if absolute_hits == 0:
+        details.append(
+            "PASS: 四文档（README / architecture / continuity SKILL / "
+            "long-horizon）均无「无 quota API」绝对化措辞")
 
     if ok:
         details.append("PASS: quota API 名称均处于否定式声明行（同行含 虚构/不存在）")
@@ -881,6 +944,7 @@ def check_14_runtime_state(results):
     for group_name, paths in (
             ("runtime 状态层", RUNTIME_REQUIRED_FILES),
             ("强制层钩子", LAYER_REQUIRED_FILES),
+            ("诊断命令文件", COMMAND_REQUIRED_FILES),
             ("单元测试", TEST_REQUIRED_FILES)):
         for path in paths:
             shown = rel_display(path)
@@ -903,6 +967,12 @@ def check_14_runtime_state(results):
         (FINGERPRINT_PY, FINGERPRINT_REQUIRED_MARKERS),
         (STOP_GATE_PY, STOP_GATE_REQUIRED_MARKERS),
         (PRE_TOOL_USE_PY, PRE_TOOL_USE_REQUIRED_MARKERS),
+        (QUOTA_SCHEDULER_PY,
+         ("evaluate", "plan_resume", "PRESSURE", "EXHAUSTED")),
+        (QUOTA_HTTP_PY, ("ALLOWED_HOSTS", "malformed")),
+        (QUOTA_CREDENTIALS_PY,
+         ("GLM_CONDUCTOR_QUOTA_API_KEY", "builtin:bigmodel-coding-plan")),
+        (QUOTA_REPORT_PY, ("--json", "unavailable")),
     ) + SKILL_CONTRACT_MARKERS
     for path, markers in marker_plans:
         shown = rel_display(path)

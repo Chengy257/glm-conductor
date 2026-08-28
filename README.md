@@ -159,7 +159,7 @@ continuity 是与路由**正交**的生命周期维度——回答"任务如果�
 - **CONTINUITY CHECKPOINT**：实质性里程碑后写入任务专属路径 `.glm-conductor/tasks/<task-id>/checkpoint.md`——每个长任务一个机械唯一的 TASK_ID（语义前缀+随机后缀，如 `redesign-settings-page-7f3a2c`），并行任务互不覆盖、互不删除（建议将 `.glm-conductor/` 加入 `.git/info/exclude` 本地排除，而非修改 tracked `.gitignore`）；checkpoint 记录目标、路由、已完成项、下一步与验证状态，是导航状态，不是仓库真相源
 - **repository > checkpoint**：恢复时八步检查（目标 → checkpoint → 仓库状态 → diff → 变更是否仍在 → 目标是否已完成 → 验证状态 → 从 NEXT ACTION 继续），仓库真实状态始终优先；禁止盲目重播旧指令，禁止为恢复 checkpoint 回滚仓库新改动
 - **安全周期性再激活**：定时唤醒做"检查-恢复或等待"，而非 sleep 到固定时间；恢复前重新声明 SELECTIVE ROUTE
-- **明确的边界**：不虚构 quota API、不硬编码 5 小时重置；额度观察只来自用户或 UI，定时/闲时能力不可用时如实报告"手动可恢复"
+- **明确的边界**：不虚构原生 quota 接口、不硬编码 5 小时重置；额度感知走已验证的 provider-api 监控端点（凭证零落盘，不可用时回退周期性探针），定时/闲时能力不可用时如实报告"手动可恢复"
 - **完成即清理**：目标验收后只删除本任务目录（`.glm-conductor/tasks/<id>/`）与其关联的定时任务，避免幽灵唤醒，也不影响并行任务
 
 ## 角色
@@ -223,7 +223,7 @@ GLM Conductor 的连续性编排基于 ZCode 原生的本地会话生命周期�
 - **闲时任务**：可用性与创建上限取决于 ZCode 版本与账号能力
 - **子智能体**：不能再派生子智能体（结构天然扁平）；只能看到会话启动时已连接的 MCP 服务，跨会话恢复后需重新确认所需服务可用
 - **子智能体运行方式**：前台调用受支持；后台子智能体不应假定可用（编排不依赖 run_in_background 语义）
-- **额度观察**：无 quota API；调度触发本身即存活探针，额度相关的观察只来自用户告知或 UI
+- **额度感知（v2 alpha3）**：resumable 任务可经 `/glm-conductor:quota` 诊断与 provider-api 监控端点查询 Coding Plan 用量（5h/周窗、四态评估、reset 感知唤醒规划）；凭证不可得或端点失败时 fail-open 回退周期性存活探针——调度触发本身即探针，额度观察不作为路由轴
 - **强制层（v2 alpha2 边界）**：四重检查（ownership / 验证 / 审查 / 证据新鲜度）已接入完成门；work-unit 任务图与有界并行属后续 beta 里程碑。钩子不作用于子代理内部（ZCode 子会话不触发钩子——故强制在完成边界而非写前拦截）；`python3` 须在 PATH（见前置要求），缺失时强制层降级（stderr 报 `ENFORCEMENT DEGRADED`，不阻断会话）；强制层随插件分发，仅安装/更新后的新会话生效
 
 ## 贡献

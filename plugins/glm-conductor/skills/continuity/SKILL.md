@@ -149,7 +149,7 @@ resumable 模式的唤醒不用 sleep 直到固定时间，而用安全周期性
 
 唤醒 → 检查目标是否已完成（完成即停止并清理）→ 检查执行是否可用（可用则恢复；不可用则不触碰仓库，等下次触发）
 
-调度触发本身就是存活探针：唤醒成功启动即说明模型执行当前可用；唤醒失败或未启动则不会产生任何仓库改动，自然等待下次触发。不需要、也不引入独立的额度检查器。
+调度触发本身就是存活探针：唤醒成功启动即说明模型执行当前可用；唤醒失败或未启动则不会产生任何仓库改动，自然等待下次触发。额度感知调度（见「Quota-Aware Scheduling」节）在此之上提供精确的 reset 时间规划；凭证不可得或查询失败时自动回退到本周期性探针机制，不引入独立的常驻额度轮询器。
 
 安排定时任务时使用 references/long-horizon.md 中的结构化 resume prompt（自包含，不依赖会话上下文，且必须携带 TASK_ID 与精确 checkpoint 路径）。若希望结果回到当前会话，续作必须从当前聊天内创建绑定本会话的定时任务。
 
@@ -175,11 +175,15 @@ continuity 不重新实现 Goal 模式。职责分工：
 - **所需 executor（如 visual-implementer）缺失**：fail-closed，不自动换成其他执行者
 - **唤醒后发现目标已完成**：立即停止 continuation 并清理（见下）
 
-## Quota API Boundary
+## Quota-Aware Scheduling（alpha3）
 
-本技能不假设存在任何 quota API——getQuotaRemaining / getQuotaResetTime / onQuotaReset 均为虚构。不硬编码 5 小时重置或周期额度假设，不宣传能实时读取额度。
+额度感知是 continuity 层的增强，不是路由轴——额度决定"何时能继续工作"，不决定"谁来做"。
 
-额度相关的观察只能来自用户告知或 UI 截图，且只作为证据使用、不作为 API。
+**provider-api 模式（当前实现）**：经 `runtime/quota/` 用 Coding Plan API Key 查询已验证的监控端点（`api.z.ai` / `open.bigmodel.cn` 的 `/api/monitor/usage/quota/limit`），解析为标准化快照（5h 窗必选、周窗可选——lite 套餐无周窗；按语义字段 unit/number 判窗）。四态评估（AVAILABLE / PRESSURE / EXHAUSTED / UNKNOWN）与恢复规划（EXHAUSTED 时 max(reset)+grace 精确唤醒、reset 未知或查询失败 → 周期性回退、唤醒后强制刷新）由 `scheduler.py` 确定性给出。诊断命令：`/glm-conductor:quota`（文本 + `--json` 双输出）。
+
+**凭证**：环境变量 `GLM_CONDUCTOR_QUOTA_API_KEY` 优先，已登录 ZCode 的 `~/.zcode/v2/config.json` provider 配置为文档化回退；凭证零落盘（不进 state.json / events.jsonl / checkpoint / 日志 / 任何输出）。凭证不可得 → unavailable 模式 → 周期性存活探针回退。
+
+**不变边界**：原生插件级 quota API（getQuotaRemaining / getQuotaResetTime / onQuotaReset 等）仍不存在，不得虚构；不硬编码 5 小时重置；不把额度观察当作路由证据；不实现常驻轮询——查询只发生在任务开始 / 路由选定后 / 大段派发前 / 里程碑后 / 调度恢复前后等刷新点。额度观察除本节 provider-api 通道外仍可来自用户告知或 UI，只作为证据使用。
 
 ## Completion Cleanup
 
