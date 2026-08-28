@@ -45,6 +45,54 @@ resumable / idle 任务在实质性里程碑后（不是每次工具调用后）
 - repository 状态始终优先：checkpoint 与仓库冲突时以仓库为准
 - 每个长任务一个机械唯一（语义前缀+随机后缀）的 TASK_ID 与专属目录；并行长任务互不覆盖、互不删除
 
+## 任务状态与执行日志（state.json / events.jsonl）
+
+active task（continuity 为 resumable / idle 的任务，或需要 Stop 完成门保护的 delegate / full 任务）在专属目录内维护两个机器可读文件，与 checkpoint.md 同目录：
+
+```
+.glm-conductor/tasks/<task-id>/
+├── checkpoint.md     # 导航状态（模型可读的恢复叙述）
+├── state.json        # 强制状态源（Stop 完成门按它校验完成条件）
+├── events.jsonl      # 执行溯源（append-only，一行一事件）
+└── visual-evidence/
+```
+
+**state.json**：任务的确定性运行时状态（goal、route 五字段、ownership.files、verification、review、status 等；schema 与状态词汇以插件 `runtime/state.py` 为准）。写入规则：
+
+- 创建即受跟踪：state.json 存在且 status 非终态（completed / cancelled / failed）= active task，Stop 完成门将跟踪其完成条件
+- foreground 普通短任务不创建 state.json——无状态文件时完成门零干预
+- 原子写（先写临时文件再替换）；status 只能按任务生命周期推进，不回退
+- repository 文件仍是代码状态真相源，state.json 只是运行时任务状态
+
+**events.jsonl**：append-only 执行日志，只在实质性节点追加一行结构化事实，禁止重写或截断。事件时点：
+
+| 事件 | 追加时机 |
+| --- | --- |
+| task_created | 创建 state.json 时 |
+| route_selected / route_reassessment | SELECTIVE ROUTE 声明 / 路由重估后 |
+| implementation_started | 实施者派发后 |
+| verification / review | 主会话验证完成 / 审查者裁决后 |
+| checkpoint_written | checkpoint 落盘后 |
+| gate_blocked / gate_exhausted | 完成门拦截 / 达上限放行时（由钩子记录） |
+| completed / cancelled / failed | 进入终态时 |
+
+约束：不写入任何秘密值（密钥、Authorization 头）、不写入完整 prompt 或完整源码；它不是遥测。
+
+**写入方式**：主会话定位已安装插件的 runtime 模块（含 `runtime/state.py` 的插件根，通常在 `~/.zcode/cli/plugins/cache/` 下），用 Bash 调 python3：
+
+```bash
+python3 -c "
+import sys; sys.path.insert(0, r'<插件根>')
+from runtime import state, journal
+st = state.new_task_state('<task-id>', '<goal>', <route 五字段 dict>,
+    ownership_files=[...], verification_required=[...])
+state.save_state('<用户仓库根>', st)
+journal.append_event('<用户仓库根>', '<task-id>', {'event': 'task_created'})
+"
+```
+
+runtime 模块不可得时，按 `runtime/state.py` 的 schema 手写 state.json（字段与枚举必须逐项一致），恢复优先用模块读取（自动归一 v1.x 遗留标识）。
+
 ## Runtime State 与 Git
 
 `.glm-conductor/` 是本地运行时状态，不得侵入用户受版本控制的仓库内容：

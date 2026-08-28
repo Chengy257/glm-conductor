@@ -117,6 +117,41 @@ checkpoint 原则清单：
 - **repository 优先**：checkpoint 与仓库状态冲突时，以仓库为准
 - **每个实质性里程碑更新一次即可**：不是每次工具调用后都写
 
+## Runtime State（state.json）与执行日志（events.jsonl）
+
+active task 在 checkpoint 之外维护两个机器可读文件（同目录、同 TASK_ID），三者分工：
+
+| 文件 | 性质 | 读者 |
+| --- | --- | --- |
+| checkpoint.md | 导航状态（叙述性恢复依据） | 模型 |
+| state.json | 强制状态源（Stop 完成门按它校验完成条件） | 钩子 / 模型 |
+| events.jsonl | 执行溯源（append-only，一行一事件） | 模型 / 审计 |
+
+state.json 字段概览（权威 schema 见插件 `runtime/state.py`）：
+
+| 字段 | 说明 |
+| --- | --- |
+| task_id / goal / status | 标识、目标、生命周期状态 |
+| route | mode / delegability / assurance / executor / continuity 五字段 |
+| ownership.files | 声明拥有的文件清单（完成门 Layer A 按"touched ⊆ owned"校验） |
+| verification | required / completed 命令清单 + fingerprint（证据指纹，后续阶段启用） |
+| review | required / reviewer / verdict + fingerprint |
+| work_units / dispatch | 多工作单元与派发状态（后续阶段启用） |
+
+status 生命周期词汇：`created → preflight → routed → decomposed → executing → joining → verifying → reviewing → completed`，附加态 `waiting_quota / blocked / cancelled / failed`；终态为 `completed / cancelled / failed`（终态后不再被完成门跟踪）。status 只前进不回退；repository 仍是代码状态真相源，state.json 只是运行时任务状态。
+
+events.jsonl 事件时点表与写入约束见 SKILL.md「任务状态与执行日志」节；追加一律通过 `runtime/journal.py`（时间戳由模块管理，调用方不得自带）。
+
+### 恢复时的读取顺序
+
+八步恢复中，第 2 步读取 checkpoint 的同时读取 state.json、并查看 events.jsonl 尾部：
+
+1. **state.json**（机器可读）：恢复 status、route、ownership、verification / review 认知——若存在且非终态，本任务仍是 active task，恢复后仍受完成门跟踪
+2. **checkpoint.md**（叙述性）：恢复 NEXT ACTION 与上下文
+3. **events.jsonl 尾部**（`tail_events`，最近 20 条）：了解中断前最后发生了什么（最后一条事件往往就是中断点）
+
+三者冲突时仍以 repository 为准；state.json 与 checkpoint.md 的叙述冲突以仓库实际 diff 裁决并修正两者。
+
 ## Resume Procedure（八步）
 
 每次重新激活后必须依次执行：

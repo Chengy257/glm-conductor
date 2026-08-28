@@ -57,6 +57,8 @@ reason: implementation is bounded by explicit interfaces, owned files, and deter
 
 声明之前不得调用任何任务工具。
 
+active task（continuity 为 resumable / idle，或需 Stop 完成门保护的 delegate / full 任务）在声明后把 route 五字段写入 `.glm-conductor/tasks/<task-id>/state.json`（字段见 continuity 技能「任务状态与执行日志」节），并向同目录 events.jsonl 追加 `route_selected` 事件；路由重估后更新 state 并追加 `route_reassessment`。foreground 普通短任务无需创建状态文件。
+
 ## 4. 路由矩阵
 
 | Delegability | Assurance | Route | 实施 | 独立审查 |
@@ -102,6 +104,8 @@ GLM-5.3 主会话与 glm-reviewer 均为纯文本模型：**主会话在视觉�
 
 - 委派必须使用五段式实施规格（OBJECTIVE / FILES AND OWNERSHIP / INTERFACES / CONSTRAINTS / VERIFICATION），返回后按 IMPLEMENTATION REPORT 接收；完整模板见 references/role-contracts.md（首次委派前必须阅读）
 - 工作者的报告仅视为声明（implementation claim）：主会话必须亲自检查完整 diff、核对改动范围、重跑验证命令，才能形成验证证据（verification evidence）
+
+active task 的状态同步义务：五段式规格中 FILES AND OWNERSHIP 声明的 owned 文件清单必须同步写入 state.json 的 ownership.files（完成门 Layer A 按"实际改动文件 ⊆ owned"校验，越界改动无法通过完成门）；派发实施者后追加 `implementation_started` 事件；主会话验证完成（含命令与结果）追加 `verification` 事件；审查裁决后追加 `review` 事件。
 
 ## 9. 评审与裁决（仅 assurance: high）
 
