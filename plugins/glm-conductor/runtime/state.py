@@ -29,14 +29,17 @@ legacy 标识归一：
     （TASK_ID 全量替代 CONTINUITY_ID）。读取时按 TASK_ID_KEYS 顺序归一。
 
 依赖：
-    仅 Python 3 标准库（json / os / pathlib / re），零第三方依赖，
-    `python3 -S` 可运行（无 site-packages）。
+    仅 Python 3 标准库（json / os / pathlib / re）+ runtime.quota.parser
+    （quota 状态词汇 QUOTA_STATUSES，§39；quota/* 不 import 本模块，
+    无循环导入），零第三方依赖，`python3 -S` 可运行（无 site-packages）。
 """
 
 import json
 import os
 import pathlib
 import re
+
+from runtime.quota.parser import QUOTA_STATUSES
 
 # —— 路径常量与定位 ——
 
@@ -239,6 +242,35 @@ def _validate_dispatch(dispatch):
     return errors
 
 
+def _validate_quota(quota):
+    """校验可选顶层 quota 块（§39，B5.3 增补；四态评估见
+    runtime.quota.scheduler）。
+
+    只做形状校验：quota 块按契约永不含凭证（§37 凭证零落盘），
+    本函数因此不校验任何秘密字段的存在性，内部细粒度形状
+    （five_hour / weekly 的窗口字段）也留给 quota 子系统。
+      - status 存在且非 None → ∈ QUOTA_STATUSES（词汇复用
+        runtime.quota.parser，与调度器共用同一词汇表）；
+      - source / provider / last_checked 存在且非 None → 非空 str；
+      - five_hour / weekly 存在且非 None → dict。
+    """
+    if not isinstance(quota, dict):
+        return ["quota 必须是 JSON 对象"]
+    errors = []
+    status = quota.get("status")
+    if status is not None and status not in QUOTA_STATUSES:
+        errors.append(_enum_error("quota.status", status, QUOTA_STATUSES))
+    for key in ("source", "provider", "last_checked"):
+        value = quota.get(key)
+        if value is not None and (not isinstance(value, str) or value == ""):
+            errors.append("quota.%s 必须是非空字符串或 null" % key)
+    for key in ("five_hour", "weekly"):
+        value = quota.get(key)
+        if value is not None and not isinstance(value, dict):
+            errors.append("quota.%s 必须是 JSON 对象或 null" % key)
+    return errors
+
+
 def validate_state(state) -> "list[str]":
     """校验状态 dict，返回错误消息列表（中文，含字段路径）；空列表 = 合法。
 
@@ -298,6 +330,10 @@ def validate_state(state) -> "list[str]":
     # 规则 8：dispatch
     if "dispatch" in state:
         errors.extend(_validate_dispatch(state["dispatch"]))
+
+    # 规则 8.5：quota（§39 可选顶层 quota 块；永不含有凭证字段）
+    if "quota" in state:
+        errors.extend(_validate_quota(state["quota"]))
 
     # 规则 9：status ∈ TASK_STATUSES
     if "status" in state:
