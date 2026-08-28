@@ -148,7 +148,7 @@ continuity 是与路由**正交**的生命周期维度——回答"任务如果�
 
 核心机制：
 
-- **CONTINUITY CHECKPOINT**：实质性里程碑后写入任务专属路径 `.glm-conductor/tasks/<continuity-id>/checkpoint.md`——每个长任务一个稳定的 CONTINUITY_ID，并行任务互不覆盖、互不删除（建议将 `.glm-conductor/` 加入 `.git/info/exclude` 本地排除，而非修改 tracked `.gitignore`）；checkpoint 记录目标、路由、已完成项、下一步与验证状态，是导航状态，不是仓库真相源
+- **CONTINUITY CHECKPOINT**：实质性里程碑后写入任务专属路径 `.glm-conductor/tasks/<continuity-id>/checkpoint.md`——每个长任务一个机械唯一的 CONTINUITY_ID（语义前缀+随机后缀，如 `redesign-settings-page-7f3a2c`），并行任务互不覆盖、互不删除（建议将 `.glm-conductor/` 加入 `.git/info/exclude` 本地排除，而非修改 tracked `.gitignore`）；checkpoint 记录目标、路由、已完成项、下一步与验证状态，是导航状态，不是仓库真相源
 - **repository > checkpoint**：恢复时八步检查（目标 → checkpoint → 仓库状态 → diff → 变更是否仍在 → 目标是否已完成 → 验证状态 → 从 NEXT ACTION 继续），仓库真实状态始终优先；禁止盲目重播旧指令，禁止为恢复 checkpoint 回滚仓库新改动
 - **安全周期性再激活**：定时唤醒做"检查-恢复或等待"，而非 sleep 到固定时间；恢复前重新声明 SELECTIVE ROUTE
 - **明确的边界**：不虚构 quota API、不硬编码 5 小时重置；额度观察只来自用户或 UI，定时/闲时能力不可用时如实报告"手动可恢复"
@@ -160,7 +160,7 @@ continuity 是与路由**正交**的生命周期维度——回答"任务如果�
 | --- | --- | --- | --- | --- |
 | 主会话（架构师） | GLM-5.3 | — | 全部 | 需求歧义解决、架构与路由、任务分解、五段式规格、diff 检查与验证重跑、路由重估、验收 |
 | flash-implementer | GLM-5.3-Flash | high | 读写全套 | 执行有界的五段式实施规格，返回 IMPLEMENTATION REPORT |
-| visual-implementer | GLM-5.3-Flash | high | 读写全套 + 读图 | 视觉任务实施：含 VISUAL ACCEPTANCE 的规格执行；需截图时返回 `VISUAL_CAPTURE_REQUEST` 结束本次调用，读图判定并有限次修正 |
+| visual-implementer | GLM-5.3-Flash | high | 读写全套 + 读图 | 视觉任务实施：含 VISUAL ACCEPTANCE 的规格执行；需截图时返回 `VISUAL_CAPTURE_REQUEST` 结束本次调用，主会话采集后以携带完整状态的新调用开启下一轮，读图判定并有限次修正 |
 | visual-reviewer | GLM-5.3-Flash | max | 只读白名单 + 读图 | 视觉任务独立视觉终审（`VISUAL REVIEW`）：亲自读截图对照验收标准，检查用户可见回归 |
 | glm-reviewer | GLM-5.3 | max | 只读白名单 | 文本任务独立终审，输出 ship / fix-first / rethink 裁决与证据 |
 
@@ -201,7 +201,7 @@ ROUTE REASSESSMENT（任何阶段，凭新证据双向重估）
 
 本项目受 [DannyMac180/sol-advisor](https://github.com/DannyMac180/sol-advisor)（MIT）启发，将其中针对 Codex 生态的选择性路由编排移植到 ZCode 与 GLM 双模型体系。主要适配：
 
-1. **双轴路由替代一维风险阶梯**：GLM 体系只有两档模型，v1 的"高风险通道并入 solo"在 v2 中被形式化为 Delegability × Assurance 双轴——判断密集/高风险实施即 delegability:low，由旗舰亲自完成（详见 [v2 架构规范](./docs/)）
+1. **双轴路由替代一维风险阶梯**：GLM 体系只有两档模型，v1 的"高风险通道并入 solo"在 v2 中被形式化为 Delegability × Assurance 双轴——判断密集/高风险实施即 delegability:low，由旗舰亲自完成（详见 [架构文档](./docs/architecture.md)）
 2. **TOML + 安装脚本改为 Markdown 目录约定**：子智能体与技能均以带 YAML frontmatter 的 Markdown 文件定义，由 ZCode 按目录约定自动发现，无需安装脚本
 3. **子智能体天然新上下文**：ZCode 子智能体每次调用都是全新上下文，无需原项目的 fork 参数即可保证"新鲜审查者"语义
 
@@ -209,11 +209,12 @@ ROUTE REASSESSMENT（任何阶段，凭新证据双向重估）
 
 GLM Conductor 的连续性编排基于 ZCode 原生的本地会话生命周期机制，**不是独立的云调度器或后台守护进程**。已知限制：
 
-- **依赖本地桌面环境**：ZCode 桌面客户端需保持运行，机器需保持唤醒；远程/无头工作区的行为未验证
+- **依赖本地桌面环境**：面向 ZCode 本地桌面与本地项目工作区设计；桌面客户端需保持运行，机器需保持唤醒；远程/无头工作区不在支持范围
 - **视觉拓扑**：Browser Use 与 Computer Use 为 ZCode 主会话专用（策略层禁止子代理使用）——视觉证据由主会话采集、Flash 系角色读图判定，反馈环跨多次调用完成（`VISUAL_CAPTURE_REQUEST`）
 - **定时任务**：数量与频率受 ZCode automation 机制约束；只有从当前聊天创建的续作才能把结果送回当前会话，通用入口创建的分离 automation 不等价
 - **闲时任务**：可用性与创建上限取决于 ZCode 版本与账号能力
 - **子智能体**：不能再派生子智能体（结构天然扁平）；只能看到会话启动时已连接的 MCP 服务，跨会话恢复后需重新确认所需服务可用
+- **子智能体运行方式**：前台调用受支持；后台子智能体不应假定可用（编排不依赖 run_in_background 语义）
 - **额度观察**：无 quota API；调度触发本身即存活探针，额度相关的观察只来自用户告知或 UI
 
 ## 贡献
