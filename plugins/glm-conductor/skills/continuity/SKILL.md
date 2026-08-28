@@ -78,6 +78,23 @@ active task（continuity 为 resumable / idle 的任务，或需要 Stop 完成�
 
 约束：不写入任何秘密值（密钥、Authorization 头）、不写入完整 prompt 或完整源码；它不是遥测。
 
+### 证据指纹的记录时机（verification / review / visual-evidence）
+
+验证与审查证据必须绑定到记录时的仓库状态：state.json 的 `verification.fingerprint` / `review.fingerprint` / `visual_evidence[].sha256` 会被 Stop 完成门与**同一入口**（`runtime.fingerprint.task_fingerprint`）算出的当前指纹比对，不一致 = 证据过期（stale），完成被拦后必须重走证据链。记录时机契约：
+
+| 证据 | 记录时机 | 记录动作 |
+| --- | --- | --- |
+| verification.fingerprint | 主会话**亲自**重跑全部 verification.required 命令且通过后，立即记录 | `state.record_verification(st, cmd, fingerprint.task_fingerprint(repo, st))` 后 save_state |
+| review.fingerprint | 审查者返回裁决后、且裁决对应的 diff 未再变动时 | `state.record_review(st, verdict, fingerprint.task_fingerprint(repo, st))` 后 save_state |
+| visual_evidence | 视觉验收通过时，对每张截图按原始字节哈希记录 | `state.record_visual_evidence(st, path, sha256)` 后 save_state |
+
+红线：
+
+- 指纹必须经 `runtime.fingerprint.task_fingerprint` 计算（与完成门同一入口、同一范围规则：声明了 ownership 时取「当前改动 ∩ 声明范围」，未声明时取全部当前改动）；不得手算、不得另定范围——两侧口径不一致的指纹永远无法通过比对
+- 记录指纹后不得再改动 owned 文件：任何后续编辑都使指纹过期——这是设计意图（任何修复使先前验证/审查失效）。确需改动 → 改完后重走「验证 →（审查）→ 记指纹」
+- fix-first / rethink 修复后的重新审查是新裁决：verdict 与 fingerprint 一并重记
+- stale 的恢复路径只有一条：重跑验证 / 重新审查并记录新指纹；禁止回写旧指纹"续命"
+
 **写入方式**：主会话定位已安装插件的 runtime 模块（含 `runtime/state.py` 的插件根，通常在 `~/.zcode/cli/plugins/cache/` 下），用 Bash 调 python3：
 
 ```bash
@@ -88,6 +105,19 @@ st = state.new_task_state('<task-id>', '<goal>', <route 五字段 dict>,
     ownership_files=[...], verification_required=[...])
 state.save_state('<用户仓库根>', st)
 journal.append_event('<用户仓库根>', '<task-id>', {'event': 'task_created'})
+"
+```
+
+验证 / 审查 / 视觉证据的指纹记录（时机契约见上节）同一接法：
+
+```bash
+python3 -c "
+import sys; sys.path.insert(0, r'<插件根>')
+from runtime import state, fingerprint
+st = state.load_state('<用户仓库根>', '<task-id>')
+fp = fingerprint.task_fingerprint('<用户仓库根>', st)
+state.record_verification(st, '<命令>', fp)  # 或 record_review(st, verdict, fp)
+state.save_state('<用户仓库根>', st)
 "
 ```
 

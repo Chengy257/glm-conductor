@@ -105,7 +105,7 @@ GLM-5.3 主会话与 glm-reviewer 均为纯文本模型：**主会话在视觉�
 - 委派必须使用五段式实施规格（OBJECTIVE / FILES AND OWNERSHIP / INTERFACES / CONSTRAINTS / VERIFICATION），返回后按 IMPLEMENTATION REPORT 接收；完整模板见 references/role-contracts.md（首次委派前必须阅读）
 - 工作者的报告仅视为声明（implementation claim）：主会话必须亲自检查完整 diff、核对改动范围、重跑验证命令，才能形成验证证据（verification evidence）
 
-active task 的状态同步义务：五段式规格中 FILES AND OWNERSHIP 声明的 owned 文件清单必须同步写入 state.json 的 ownership.files（完成门 Layer A 按"实际改动文件 ⊆ owned"校验，越界改动无法通过完成门）；派发实施者后追加 `implementation_started` 事件；主会话验证完成（含命令与结果）追加 `verification` 事件；审查裁决后追加 `review` 事件。
+active task 的状态同步义务：五段式规格中 FILES AND OWNERSHIP 声明的 owned 文件清单必须同步写入 state.json 的 ownership.files（完成门 Layer A 按"实际改动文件 ⊆ owned"校验，越界改动无法通过完成门）；派发实施者后追加 `implementation_started` 事件；主会话验证完成（含命令与结果）追加 `verification` 事件；审查裁决后追加 `review` 事件。验证与审查落账时必须同步记录证据指纹（`record_verification` / `record_review` + `fingerprint.task_fingerprint`，完成门按指纹比对拦截过期证据）——时机与红线见 continuity 技能「证据指纹的记录时机」节；任何修复使先前裁决失效（§9）由此自动强制。
 
 ## 9. 评审与裁决（仅 assurance: high）
 
