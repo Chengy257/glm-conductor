@@ -231,15 +231,20 @@ def _validate_visual_evidence(entries):
 
 
 def _validate_dispatch(dispatch):
-    """校验 dispatch 子对象（max_workers >= 1 的整数 + active 数组）。"""
+    """校验 dispatch 子对象（max_workers 为 1-§82 上限的整数 + active 数组）。"""
     if not isinstance(dispatch, dict):
         return ["dispatch 必须是 JSON 对象"]
+    from runtime.lease import DEFAULT_MAX_WORKERS_LIMIT
     errors = []
     max_workers = dispatch.get("max_workers", 1)
     # bool 是 int 的子类，但 True/False 不应充当 max_workers
     if isinstance(max_workers, bool) or not isinstance(max_workers, int) \
             or max_workers < 1:
         errors.append("dispatch.max_workers 必须是 >= 1 的整数")
+    elif max_workers > DEFAULT_MAX_WORKERS_LIMIT:
+        errors.append(
+            "dispatch.max_workers 超过并行上限 %d（§82，1-%d）"
+            % (DEFAULT_MAX_WORKERS_LIMIT, DEFAULT_MAX_WORKERS_LIMIT))
     if not isinstance(dispatch.get("active", []), list):
         errors.append("dispatch.active 必须是数组")
     return errors

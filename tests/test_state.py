@@ -770,5 +770,30 @@ class FindActiveTasksTest(unittest.TestCase):
                     ["a-active-111111", "z-later-333333"])
 
 
+
+class DispatchMaxWorkersBoundTest(unittest.TestCase):
+    """dispatch.max_workers 上界校验（§82 并行上限，R9 终审 P2 修复）。"""
+
+    def _dispatch_errors(self, max_workers):
+        st = {"task_id": "t-1", "goal": "g", "route": {"mode": "solo"},
+              "dispatch": {"max_workers": max_workers, "active": []},
+              "status": "created"}
+        return state.validate_state(st)
+
+    def test_bound_1_and_4_pass(self):
+        for n in (1, 4):
+            self.assertEqual([e for e in self._dispatch_errors(n)
+                              if "max_workers" in e], [])
+
+    def test_bound_over_4_rejected(self):
+        errors = self._dispatch_errors(5)
+        self.assertTrue(any("超过并行上限" in e for e in errors), errors)
+
+    def test_bool_and_zero_still_rejected(self):
+        for bad in (True, 0, -1):
+            errors = self._dispatch_errors(bad)
+            self.assertTrue(any("max_workers" in e for e in errors), errors)
+
+
 if __name__ == "__main__":
     unittest.main()
