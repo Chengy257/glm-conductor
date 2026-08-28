@@ -1,17 +1,31 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""hooks.pre_tool_use 子进程冒烟测试（v2 Ownership Gate Layer B 注入钩子）。
+"""hooks.pre_tool_use 子进程冒烟测试（v2 Layer B 注入 + Bash 策略门控）。
 
 以子进程方式运行 plugins/glm-conductor/hooks/pre_tool_use.py，验证其
-advisory fail-open 契约的可观测行为：
+advisory fail-open 契约与 Bash 策略门控契约的可观测行为：
+
+Layer B 注入路径（matcher "Agent|Task"）：
   - 存在声明 ownership.files（非空）的活动任务：stdout 输出单行 JSON
     hookSpecificOutput（hookEventName=="PreToolUse"，additionalContext
     含 task_id、ownership 路径与 Layer A 兜底警告），stderr 恒空，exit 0；
   - 无活动任务 / 活动任务未声明 ownership / 任务已终态：静默放行
     （exit 0，stdout 与 stderr 均空）；
   - stdin 空串 / 非法 JSON：按空对象容错，照常注入并 exit 0；
-  - 多任务：逐任务一段，最多列 3 个并注明省略；
-  - hooks.json：Stop 与 PreToolUse 条目并存，matcher 为 "Agent|Task"。
+  - 多任务：逐任务一段，最多列 3 个并注明省略。
+
+Bash 策略门控路径（matcher "Bash"，B7.2）：
+  - Bash + deny 规则命令 + 活动任务：stdout 单行 JSON
+    permissionDecision=="deny"，reason 含 rule 名与截断命令片段；
+  - Bash + ask 规则命令（git push）+ assurance=high 活动任务：
+    permissionDecision=="ask"；同命令 + standard 任务 → stdout 空
+    （allow 静默，不升级）；
+  - Bash + 普通命令（ls）+ 活动任务 → 静默；
+  - Bash + deny 命令 + 无活动任务（空仓库）→ 静默（零干预）；
+  - tool_input 非 dict / command 缺失 → 容错放行静默；
+  - payload {}（tool_name 缺失）→ 按现状走注入路径（兼容选择）。
+
+hooks.json：Stop、PreToolUse（Agent|Task 与 Bash 两条）条目并存。
 
 仅 Python 3 标准库（unittest + subprocess + tempfile），零第三方依赖；
 被检仓库目录由 tempfile.TemporaryDirectory 提供，不污染真实工作区；
@@ -38,6 +52,8 @@ HOOKS_JSON = (Path(__file__).resolve().parents[1]
 TID = "demo-task-1a2b3c"
 ROUTE = {"mode": "delegate", "delegability": "high", "assurance": "standard",
          "executor": "flash-implementer", "continuity": "foreground"}
+# Bash 策略 ask 升级场景用的高保障 route（其余字段与 ROUTE 一致）
+HIGH_ROUTE = dict(ROUTE, assurance="high")
 OWNED = ["plugins/glm-conductor/hooks/pre_tool_use.py",
          "tests/test_pre_tool_use.py"]
 
@@ -55,10 +71,14 @@ def run_hook(stdin_text, project_dir):
         env=dict(os.environ, ZCODE_PROJECT_DIR=str(project_dir)))
 
 
-def save_task(repo, task_id=TID, ownership_files=OWNED, status="executing"):
-    """在临时仓库构造一个任务状态文件（runtime.state 构造 + 校验原子保存）。"""
+def save_task(repo, task_id=TID, ownership_files=OWNED, status="executing",
+              route=None):
+    """在临时仓库构造一个任务状态文件（runtime.state 构造 + 校验原子保存）。
+
+    route 缺省用标准保障 ROUTE；策略 ask 升级用例传 HIGH_ROUTE。
+    """
     active = state.new_task_state(
-        task_id, "Layer B 注入冒烟测试目标", dict(ROUTE),
+        task_id, "Layer B 注入冒烟测试目标", dict(route or ROUTE),
         ownership_files=ownership_files, status=status)
     state.save_state(repo, active)
 
@@ -69,6 +89,12 @@ def parse_single_line_json(text):
     if "\n" in stripped:
         raise AssertionError("stdout 不是单行 JSON: %r" % text)
     return json.loads(stripped)
+
+
+def bash_stdin(command):
+    """构造 Bash 策略路径的 PreToolUse 事件 stdin（Claude 兼容 JSON）。"""
+    return json.dumps(
+        {"tool_name": "Bash", "tool_input": {"command": command}})
 
 
 class OwnershipInjectionTest(unittest.TestCase):
@@ -191,6 +217,151 @@ class HooksManifestTest(unittest.TestCase):
         self.assertTrue(
             any(arg.endswith("pre_tool_use.py") for arg in pre_args),
             "PreToolUse 条目应指向 pre_tool_use.py: %r" % pre_args)
+
+    def test_bash_matcher_entry_appended(self):
+        # B7.2：PreToolUse 数组追加 Bash matcher 第二项（Agent|Task 项不动）
+        with open(str(HOOKS_JSON), "r", encoding="utf-8") as fh:
+            manifest = json.load(fh)
+        entries = manifest["hooks"]["PreToolUse"]
+        matchers = [entry.get("matcher") for entry in entries
+                    if isinstance(entry, dict)]
+        self.assertEqual(matchers, ["Agent|Task", "Bash"])
+        hook = entries[matchers.index("Bash")]["hooks"][0]
+        self.assertEqual(hook["type"], "process")
+        self.assertEqual(hook["command"], "python3")
+        self.assertEqual(hook["timeoutMs"], 3000)
+        self.assertEqual(
+            hook["args"], ["${ZCODE_PLUGIN_ROOT}/hooks/pre_tool_use.py"])
+
+
+class BashPolicyDenyTest(unittest.TestCase):
+    """Bash + deny 规则 + 活动任务：stdout 单行 JSON permissionDecision=deny。"""
+
+    def test_deny_command_with_active_task_emits_json(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            save_task(tmp)
+            result = run_hook(bash_stdin("rm -rf ./build"), tmp)
+            self.assertEqual(result.returncode, 0)
+            # 决策成功路径不写 stderr
+            self.assertEqual(result.stderr, "")
+            payload = parse_single_line_json(result.stdout)
+            # Zod 严格校验形态：顶层仅 hookSpecificOutput，无多余顶层键
+            self.assertEqual(sorted(payload.keys()), ["hookSpecificOutput"])
+            out = payload["hookSpecificOutput"]
+            self.assertEqual(
+                sorted(out.keys()),
+                ["hookEventName", "permissionDecision",
+                 "permissionDecisionReason"])
+            self.assertEqual(out["hookEventName"], "PreToolUse")
+            self.assertEqual(out["permissionDecision"], "deny")
+            reason = out["permissionDecisionReason"]
+            self.assertIn("GLM CONDUCTOR POLICY: deny", reason)
+            self.assertIn("rm-destructive", reason)
+            self.assertIn("rm -rf ./build", reason)
+
+    def test_deny_reason_command_truncated_to_60_chars(self):
+        # reason 模板：GLM CONDUCTOR POLICY: <decision> (<rule>).
+        # command: <截断 60 字符命令>
+        command = "rm -rf " + "x" * 100
+        with tempfile.TemporaryDirectory() as tmp:
+            save_task(tmp)
+            result = run_hook(bash_stdin(command), tmp)
+            out = parse_single_line_json(result.stdout)["hookSpecificOutput"]
+            self.assertEqual(
+                out["permissionDecisionReason"],
+                "GLM CONDUCTOR POLICY: deny (rm-destructive). command: %s"
+                % command[:60])
+
+    def test_deny_ignores_assurance_level(self):
+        # deny 无视 assurance：high 任务同样 deny（而非升级成 ask）
+        with tempfile.TemporaryDirectory() as tmp:
+            save_task(tmp, task_id="demo-task-high1", route=HIGH_ROUTE)
+            result = run_hook(bash_stdin("git reset --hard"), tmp)
+            out = parse_single_line_json(result.stdout)["hookSpecificOutput"]
+            self.assertEqual(out["permissionDecision"], "deny")
+            self.assertIn("git-reset-hard", out["permissionDecisionReason"])
+
+
+class BashPolicyAskTest(unittest.TestCase):
+    """Bash + ask 规则（git push）：assurance=high 升级 ask，standard 静默。"""
+
+    def test_git_push_with_high_assurance_task_asks(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            save_task(tmp, task_id="demo-task-high2", route=HIGH_ROUTE)
+            result = run_hook(bash_stdin("git push origin main"), tmp)
+            self.assertEqual(result.returncode, 0)
+            self.assertEqual(result.stderr, "")
+            out = parse_single_line_json(result.stdout)["hookSpecificOutput"]
+            self.assertEqual(out["hookEventName"], "PreToolUse")
+            self.assertEqual(out["permissionDecision"], "ask")
+            reason = out["permissionDecisionReason"]
+            self.assertIn("GLM CONDUCTOR POLICY: ask", reason)
+            self.assertIn("git-push", reason)
+            self.assertIn("git push origin main", reason)
+
+    def test_git_push_with_standard_assurance_task_silent(self):
+        # ask 命中但 assurance=standard → 不升级，allow 完全静默
+        with tempfile.TemporaryDirectory() as tmp:
+            save_task(tmp)  # ROUTE：assurance=standard
+            result = run_hook(bash_stdin("git push origin main"), tmp)
+            self.assertEqual(result.returncode, 0)
+            self.assertEqual(result.stdout, "")
+            self.assertEqual(result.stderr, "")
+
+
+class BashPolicyAllowSilentTest(unittest.TestCase):
+    """策略 allow 路径完全静默（stdout 恒空），含零干预与容错场景。"""
+
+    def test_plain_command_with_active_task_silent(self):
+        # 活动任务 + 无规则命中的普通命令 → 静默
+        with tempfile.TemporaryDirectory() as tmp:
+            save_task(tmp)
+            result = run_hook(bash_stdin("ls"), tmp)
+            self.assertEqual(result.returncode, 0)
+            self.assertEqual(result.stdout, "")
+            self.assertEqual(result.stderr, "")
+
+    def test_deny_command_without_active_task_silent(self):
+        # 空仓库（无活动任务）→ 策略零干预：deny 规则也不触发，静默
+        with tempfile.TemporaryDirectory() as tmp:
+            result = run_hook(bash_stdin("rm -rf ./build"), tmp)
+            self.assertEqual(result.returncode, 0)
+            self.assertEqual(result.stdout, "")
+            self.assertEqual(result.stderr, "")
+
+    def test_tool_input_not_dict_tolerated_silent(self):
+        # tool_input 非 dict → command 容错为 None → 放行静默
+        with tempfile.TemporaryDirectory() as tmp:
+            save_task(tmp)
+            result = run_hook(
+                '{"tool_name":"Bash","tool_input":"oops"}', tmp)
+            self.assertEqual(result.returncode, 0)
+            self.assertEqual(result.stdout, "")
+            self.assertEqual(result.stderr, "")
+
+
+class NonBashDispatchCompatTest(unittest.TestCase):
+    """payload {} / tool_name 缺失按现状走注入路径（B7.2 显式兼容选择）。"""
+
+    def test_empty_payload_routes_to_injection_path(self):
+        # Bash matcher 场景下 stdin 空 / 形态异常（payload {}）按非 Bash
+        # 路径处理：有声明 ownership 的活动任务时照常注入（现状一致）
+        with tempfile.TemporaryDirectory() as tmp:
+            save_task(tmp)
+            result = run_hook("{}", tmp)
+            self.assertEqual(result.returncode, 0)
+            out = parse_single_line_json(result.stdout)["hookSpecificOutput"]
+            self.assertEqual(out["hookEventName"], "PreToolUse")
+            self.assertIn("OWNERSHIP REMINDER (Layer B)",
+                          out["additionalContext"])
+
+    def test_empty_payload_without_active_task_silent(self):
+        # 无活动任务（空仓库）：现状兼容，静默放行
+        with tempfile.TemporaryDirectory() as tmp:
+            result = run_hook("{}", tmp)
+            self.assertEqual(result.returncode, 0)
+            self.assertEqual(result.stdout, "")
+            self.assertEqual(result.stderr, "")
 
 
 if __name__ == "__main__":

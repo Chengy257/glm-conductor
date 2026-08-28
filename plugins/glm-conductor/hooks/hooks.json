@@ -30,6 +30,20 @@
             "statusMessage": "glm-conductor: injecting ownership contract…"
           }
         ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "process",
+            "command": "python3",
+            "args": [
+              "${ZCODE_PLUGIN_ROOT}/hooks/pre_tool_use.py"
+            ],
+            "timeoutMs": 3000,
+            "statusMessage": "glm-conductor: evaluating bash policy…"
+          }
+        ]
       }
     ]
   }

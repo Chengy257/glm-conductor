@@ -7,14 +7,18 @@
 
 【零真实网络纪律】本文件全部测试通过注入 transport（可调用桩，
 签名 transport(url, headers, timeout) -> (status, body)）驱动适配器，
-不发任何真实网络请求；默认 urllib 传输只做纯单元断言
-（_NoRedirectHandler 行为与 opener 组成），同样零网络。
+不发任何真实网络请求；默认 urllib 传输除纯单元断言（_NoRedirectHandler
+行为与 opener 组成）外，另以 127.0.0.1 本地回环 http.server 做端到端
+锚定（§5.2 #3：限长读取真上限 / 真实 urllib 路径的重定向禁用），仍
+不触 allowlist/https 逻辑、不访问任何外网。
 覆盖：§37 八条安全条款逐条锚定 + 错误分类矩阵 + §34 缓存语义。
 """
 
+import http.server
 import json
 import socket
 import sys
+import threading
 import unittest
 import urllib.error
 import urllib.request
@@ -447,6 +451,121 @@ class TestConstructorValidation(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     BigModelQuotaProvider(FAKE_KEY, **kwargs)
         self.assertEqual(transport.count, 0)  # 校验路径绝不发请求
+
+
+# —— 默认传输离线端到端（§5.2 #3：本地回环 http，仅测传输闭包） ——
+
+class _BigBodyHandler(http.server.BaseHTTPRequestHandler):
+    """恒返回 100KiB body 的回环 handler（限长读取上限锚定用）。"""
+
+    def do_GET(self):
+        body = b"B" * (100 * 1024)
+        self.send_response(200)
+        self.send_header("Content-Type", "application/octet-stream")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        try:
+            self.wfile.write(body)
+        except ConnectionError:
+            pass  # 客户端限长读取后提前关闭连接（测试设计如此）
+
+    def log_message(self, format, *args):
+        pass  # 静默访问日志（测试输出纪律）
+
+
+class _RedirectHandler(http.server.BaseHTTPRequestHandler):
+    """恒返回 302 的回环 handler（真实 urllib 重定向禁用锚定用）。"""
+
+    hits = 0  # 类级请求计数：锚定 302 后绝不发起第二次请求
+
+    def do_GET(self):
+        _RedirectHandler.hits += 1
+        self.send_response(302)
+        self.send_header("Location", "http://127.0.0.1:9/moved")
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
+    def log_message(self, format, *args):
+        pass
+
+
+class _SmallBodyHandler(http.server.BaseHTTPRequestHandler):
+    """返回 200 小 JSON body 的回环 handler（正常回读锚定用）。"""
+
+    def do_GET(self):
+        body = b'{"ok": true}'
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, format, *args):
+        pass
+
+
+class DefaultTransportEndToEndTest(unittest.TestCase):
+    """make_default_transport(max_bytes) 闭包的本地回环端到端测试。
+
+    本地回环 http（127.0.0.1 随机端口 + http.server + threading），
+    仅测传输闭包本身（限长读取真上限 / 重定向禁用的真实 urllib 路径 /
+    200 正常回读），不触 allowlist/https 逻辑——https 由 provider 构造
+    期模板保证（§37 条款 1，transport 本身不限 URL scheme）。
+    服务线程以 try/finally 关闭（shutdown + server_close + join）。
+    """
+
+    def _start(self, handler_cls):
+        """在 127.0.0.1 随机端口起回环服务，返回 (server, thread, base_url)。"""
+        server = http.server.HTTPServer(("127.0.0.1", 0), handler_cls)
+        thread = threading.Thread(target=server.serve_forever)
+        thread.daemon = True
+        thread.start()
+        url = "http://127.0.0.1:%d/" % server.server_address[1]
+        return server, thread, url
+
+    def _stop(self, server, thread):
+        """关闭服务与线程（try/finally 调用，保证无泄漏）。"""
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+    def test_bounded_read_returns_exactly_max_bytes_plus_one(self):
+        """100KiB body + max_bytes=1024 → transport 恰返回 1025 字节
+        （限长读取的真上限锚定：read(max_bytes+1)）。"""
+        server, thread, url = self._start(_BigBodyHandler)
+        try:
+            transport = _http.make_default_transport(1024)
+            status, body = transport(url, {}, 5.0)
+            self.assertEqual(status, 200)
+            self.assertIsInstance(body, bytes)
+            self.assertEqual(len(body), 1025)
+        finally:
+            self._stop(server, thread)
+
+    def test_redirect_raises_httperror_without_following(self):
+        """服务端 302 → transport 抛 urllib.error.HTTPError（真实 urllib
+        路径的重定向禁用锚定），且全程只发一次请求（不跟随、无第二次）。"""
+        _RedirectHandler.hits = 0
+        server, thread, url = self._start(_RedirectHandler)
+        try:
+            transport = _http.make_default_transport(65536)
+            with self.assertRaises(urllib.error.HTTPError) as ctx:
+                transport(url, {}, 5.0)
+            self.assertEqual(ctx.exception.code, 302)
+        finally:
+            self._stop(server, thread)
+        self.assertEqual(_RedirectHandler.hits, 1)
+
+    def test_small_body_roundtrip(self):
+        """服务端 200 小 body → transport 原样返回 (200, body)。"""
+        server, thread, url = self._start(_SmallBodyHandler)
+        try:
+            transport = _http.make_default_transport(65536)
+            status, body = transport(url, {}, 5.0)
+            self.assertEqual(status, 200)
+            self.assertEqual(body, b'{"ok": true}')
+        finally:
+            self._stop(server, thread)
 
 
 if __name__ == "__main__":

@@ -1,13 +1,23 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""GLM Conductor v2 Ownership Gate Layer B——派发时注入钩子（PreToolUse）。
+"""GLM Conductor v2 PreToolUse 钩子——双职责（Layer B 注入 + Bash 策略门控）。
 
-职责（advisory，提示级）：
+职责一（advisory，提示级）：Ownership Gate Layer B 派发时注入。
     以 ZCode 插件钩子（hooks/hooks.json 声明，matcher "Agent|Task"）挂在
     PreToolUse 事件上，在主会话每次派发子代理（Agent / Task 工具）前，
     查询 runtime.state 中声明了 ownership.files（非空）的活动任务，并把
     ownership 契约提醒以 additionalContext 注入派发上下文，使实施者在
     开工前再次看到自己的文件边界。
+
+职责二（policy，ask/deny）：主会话 Bash 策略门控（B7.2）。
+    hooks/hooks.json 另声明 matcher "Bash" 的同脚本条目：tool_name 为
+    "Bash" 时走 runtime.policy 策略引擎（§57-§59 Route-aware Permission
+    Policy）——无活动任务零干预；活动任务期间 deny 规则恒拒、ask 规则
+    仅在任一活动任务 route.assurance == "high" 时升级为 ask。ask / deny
+    向 stdout 输出单行 JSON permissionDecision（含 permissionDecision-
+    Reason，英文，含 rule 名与截断 60 字符的命令片段）；allow 路径完全
+    静默（stdout 恒空）。本层只覆盖 Bash 主会话调用；角色级 deny
+    （reviewer 等）由 agent 工具白名单负责，不在本钩子。
 
 与 Layer A 的分工：
     - Layer B（本钩子）：提示级注入，只能「提高合规率」，无法确定性约束
@@ -16,17 +26,26 @@
       touched ⊆ owned 的确定性校验，越界改动无法静默通过完成门。
     B 提高合规、A 兜底强制，两层互补（指南 §9）。
 
-fail-open 契约：
-    本钩子属 advisory 层，全路径 fail-open：任何内部异常（含 runtime.state
-    不可用、stdin 异常）都不得影响派发——一律向 stderr 输出一行
+分发与兼容选择：
+    按 payload 的 tool_name 分发：tool_name 严格等于 "Bash" → 策略门控
+    路径；其余（Agent / Task，以及 tool_name 缺失 / stdin 空 / 非 JSON
+    的 payload {}）一律走既有注入路径——tool_name 缺失按现状走注入路径
+    是显式兼容选择（B7.2 之前 payload 从未被消费，保持该场景行为逐字节
+    不变）。
+
+fail-open 契约（两条路径共同遵守）：
+    本钩子主体属 advisory / 策略层，全路径 fail-open：任何内部异常（含
+    runtime.state / runtime.policy 不可用、stdin 异常）都不得影响工具
+    调用放行——一律向 stderr 输出一行
     "ENFORCEMENT DEGRADED: pre_tool_use failed: ..." 后 exit 0 放行。
-    stdout 只在成功注入路径写一行 JSON（ZCode 对钩子 stdout 做 Zod 严格
-    校验，只接受 hookSpecificOutput 标准形态，绝不夹带多余顶层键），
-    其余任何路径 stdout 恒为空。
+    stdout 只在成功注入 / ask / deny 路径写一行 JSON（ZCode 对钩子
+    stdout 做 Zod 严格校验，只接受 hookSpecificOutput 标准形态，绝不
+    夹带多余顶层键），其余任何路径（含策略 allow）stdout 恒为空。
 
 来源：
     docs/glm-conductor-v2-upgrade-guide-final.md §9
-    （Ownership Gate —— Layer B: dispatch-time injection）+ 实施计划 B2.3。
+    （Ownership Gate —— Layer B: dispatch-time injection）+ 实施计划
+    B2.3；§57-§59（Route-aware Permission Policy）+ 实施计划 B7.1/B7.2。
 """
 
 import json
@@ -41,6 +60,9 @@ sys.path.insert(0, str(PLUGIN_ROOT))
 # 注入提醒最多列出的任务数（超出部分注明省略，避免提醒文本膨胀）
 MAX_INJECTED_TASKS = 3
 
+# Bash 策略 ask/deny 决策理由中命令片段的截断长度（控制决策文本体积）
+MAX_POLICY_SNIPPET = 60
+
 
 def repo_root():
     """返回被检查的仓库根：优先 ZCODE_PROJECT_DIR（ZCode 钩子进程注入，
@@ -52,9 +74,9 @@ def read_payload():
     """读取并解析 stdin 的 PreToolUse 事件输入，返回 dict（任何输入问题按 {} 处理）。
 
     输入为 Claude 兼容 JSON（含 session_id / tool_name / tool_input 等字段），
-    可能为空串或非 JSON。本钩子的注入决策只依赖活动任务状态，payload 仅
-    为事件形态兼容而读取，因此空 / 非法 JSON / 非 dict 一律容错为空对象，
-    不构成降级理由。
+    可能为空串或非 JSON。注入路径的决策只依赖活动任务状态（payload 仅
+    为事件形态兼容而读取）；策略路径消费 tool_name / tool_input。因此
+    空 / 非法 JSON / 非 dict 一律容错为空对象，不构成降级理由。
     """
     try:
         raw = sys.stdin.read()
@@ -130,17 +152,96 @@ def build_reminder(ownership_pairs):
     return "\n".join(lines)
 
 
-def main():
-    """主流程：读 stdin（容错）→ 发现声明 ownership 的活动任务 → 注入提醒。
+# —— 职责二：主会话 Bash 策略门控（B7.2，runtime.policy 引擎接线） ——
 
-    无任何声明 ownership 的活动任务 → 静默放行（stdout 恒空）；有 → 向
-    stdout 输出单行 JSON hookSpecificOutput（PreToolUse / additionalContext）
-    后放行。任何路径 return 0；绝不 deny、绝不 block。
+def any_assurance_high(repo, task_ids):
+    """任一活动任务 route.assurance == "high" → True，否则 False。
+
+    逐个 load_state 读取 route；load 失败（状态文件在扫描与读取之间
+    损坏 / 被移除等）→ 跳过该任务（策略层宁可少升级也不降级放行判断）。
     """
-    # 1) 读 stdin；payload 仅保持事件形态兼容，注入决策只看活动任务状态
-    read_payload()
+    from runtime import state
 
-    # 2) 发现声明了非空 ownership.files 的活动任务；无 → 静默放行
+    for task_id in task_ids:
+        try:
+            loaded = state.load_state(repo, task_id)
+        except (ValueError, OSError):
+            continue
+        if not isinstance(loaded, dict):
+            continue
+        route = loaded.get("route")
+        if isinstance(route, dict) and route.get("assurance") == "high":
+            return True
+    return False
+
+
+def bash_policy_gate(payload):
+    """Bash 策略门控路径：allow → 完全静默；ask / deny → 单行 JSON 决策。
+
+    command 取 tool_input.command（tool_input 非 dict 容错为 None）；
+    活动任务以 state.find_active_tasks 为准，assurance_high 取任一活动
+    任务 route.assurance == "high"。决策经 runtime.policy.evaluate：
+      - allow → 不写任何输出（stdout 恒空，零干预）；
+      - ask / deny → stdout 单行 JSON hookSpecificOutput
+        （PreToolUse / permissionDecision + permissionDecisionReason，
+        英文，含 rule 名与截断 MAX_POLICY_SNIPPET 字符的命令片段）。
+    任何路径 return 0（放行交给 ZCode 按 permissionDecision 处理）；
+    内部异常由模块入口的 fail-open 兜底（绝不阻断）。
+    """
+    from runtime import policy, state
+
+    # 1) 提取命令（容错：tool_input 缺失 / 非 dict → None）
+    tool_input = payload.get("tool_input")
+    command = tool_input.get("command") \
+        if isinstance(tool_input, dict) else None
+
+    # 2) 活动任务与 assurance 评级（终态任务不算活动任务）
+    repo = repo_root()
+    active = state.find_active_tasks(repo)
+
+    # 3) 策略评估（门控顺序见 runtime.policy.evaluate docstring）
+    verdict = policy.evaluate(
+        tool="Bash", command=command,
+        active_task=bool(active),
+        assurance_high=any_assurance_high(repo, active))
+    if verdict["decision"] == "allow":
+        return 0  # allow 路径零输出（stdout 纪律）
+
+    # 4) ask / deny：唯一 stdout 写点（ensure_ascii=True 的单行 JSON，
+    #    形态与 Zod 严格校验一致，无多余顶层键）
+    snippet = command[:MAX_POLICY_SNIPPET] \
+        if isinstance(command, str) else ""
+    reason = "GLM CONDUCTOR POLICY: %s (%s). command: %s" % (
+        verdict["decision"], verdict["rule"], snippet)
+    output = {
+        "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": verdict["decision"],
+            "permissionDecisionReason": reason,
+        }
+    }
+    sys.stdout.write(json.dumps(output) + "\n")
+    return 0
+
+
+def main():
+    """主流程：读 stdin（容错）→ 按 tool_name 分发两条路径。
+
+    - tool_name == "Bash" → 策略门控路径（bash_policy_gate）；
+    - 其余（Agent / Task / tool_name 缺失 / 空 payload）→ 既有注入路径：
+      发现声明 ownership 的活动任务，无 → 静默放行（stdout 恒空），
+      有 → stdout 输出单行 JSON hookSpecificOutput（PreToolUse /
+      additionalContext）后放行。任何路径 return 0；注入路径绝不
+      deny、绝不 block（策略路径的 ask/deny 由 ZCode 按决策处理）。
+    """
+    # 1) 读 stdin 并解析（容错为 {}）；按 tool_name 分发（缺失按现状
+    #    走注入路径，见模块 docstring「分发与兼容选择」）
+    payload = read_payload()
+    if payload.get("tool_name") == "Bash":
+        return bash_policy_gate(payload)
+
+    # 2) 注入路径：发现声明了非空 ownership.files 的活动任务；
+    #    无 → 静默放行
     ownership_pairs = declared_ownership_tasks(repo_root())
     if not ownership_pairs:
         return 0
