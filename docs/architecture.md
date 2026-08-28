@@ -1,6 +1,6 @@
 # GLM Conductor 架构（权威文档）
 
-> 本文档是 GLM Conductor 的**唯一架构真相源**，描述 v2.0.0-alpha3（v2-dev 开发线）的实际运行时行为。
+> 本文档是 GLM Conductor 的**唯一架构真相源**，描述 v2.0.0-beta1（v2-dev 开发线）的实际运行时行为。
 > 契约细节以插件目录为准（`plugins/glm-conductor/` 下的 agents 与 skills）；本文档与其保持一致，冲突时以修复到一致为准，不得偏离开源文档单独演化。
 > 历史提案存于 `docs/history/`，仅作参考，不构成当前实现依据。
 
@@ -35,7 +35,8 @@ foreground / resumable / idle
 
 Enforcement（v2 强制层，确定性）
         ↓
-Layer A 完成门（Stop 钩子）+ Layer B 派发注入（PreToolUse 钩子）
+Layer A 完成门（Stop 钩子）+ Layer B 派发注入（PreToolUse Agent|Task）
++ Bash 策略门控（PreToolUse Bash，allow/ask/deny）
 + 运行时状态层（state.json / events.jsonl）
 ```
 
@@ -237,9 +238,12 @@ v2 把关键运行时契约从提示词升级为确定性强制。强制层由�
 - `.glm-conductor/` 运行时目录豁免——编排器自身账本不算用户仓库改动（否则创建 state.json 即自指拦截）
 - 子代理工具调用不触发钩子（Phase 0 实证：子会话不携带 hook runner），故写前拦截不可实现——**越界改动不被阻止发生，但不可能静默通过完成门**
 
-### 8.2 Ownership Gate — Layer B（派发注入，提示级）
+### 8.2 PreToolUse 双面：Layer B 注入（提示级）+ Bash 策略门控（决策级，beta1）
 
-PreToolUse 钩子（matcher `Agent|Task`，`hooks/pre_tool_use.py`）在每次子代理派发前注入 ownership 契约提醒（声明清单 + 越界将拦完成门）。Layer B 提高合规但不构成强制。
+同一钩子脚本 `hooks/pre_tool_use.py` 按载荷 tool_name 分流：
+
+- **Layer B（matcher `Agent|Task`，advisory）**：每次子代理派发前注入 ownership 契约提醒（声明清单 + 越界将拦完成门）。提高合规但不构成强制。
+- **Bash 策略门控（matcher `Bash`，决策级）**：`runtime/policy.py` 表驱动规则（§57-§59，禁 DSL）把主会话 Bash 命令分类为 allow/ask/deny，经 `permissionDecision` 返回运行时——deny：rm -r/-f、git reset --hard、git clean -f、force push（--force-with-lease 归 ask）；ask（仅活动任务 assurance:high 时）：任何 push、模式迁移、发布操作、权限变更。门控顺序：非 Bash 不管 → 无活动任务零干预 → deny 无视保障级 → ask 仅 high → 其余默认放行。只覆盖主会话调用（子代理工具调用不触发钩子，角色级 deny 由 agent 工具白名单负责）；字符串中引用的破坏性文本会被保守误拒（beta1 已登记取舍）。
 
 ### 8.3 失败处理与循环安全
 
@@ -262,9 +266,9 @@ PreToolUse 钩子（matcher `Agent|Task`，`hooks/pre_tool_use.py`）在每次�
 
 - `scripts/validate_plugin.py`（纯标准库，14 项检查）+ CI（`.github/workflows/validate.yml`，静态校验 + 单元测试）维护契约一致性：扫描 `plugins/`、`README.md`、`marketplace.json` 与本文档，`docs/history/` 不参与当前契约校验
 - 检查覆盖：旧名清理、禁词、quota 否定式声明、任务专属 checkpoint 路径、视觉协议标记、TASK_ID 必含、视觉新调用规范措辞、`plugin.json` 与 CHANGELOG 的版本一致性、钩子清单完整性（含脚本存在性）、runtime 状态层与技能契约标记
-- 运行时模块（`runtime/`）、钩子（`hooks/`）与 quota 子系统各配单元测试与子进程冒烟（`tests/`，394 用例：状态层 87、日志 26、ownership 38、指纹 59、stop_gate 32、pre_tool_use 7、quota 解析 29/抽象 12/适配器 25/调度器 37/凭证 25/诊断 17，含 §98 集成冒烟场景 3-6 与 §45 调度场景），随 CI 执行
+- 运行时模块（`runtime/`）、钩子（`hooks/`）与 quota 子系统各配单元测试与子进程冒烟（`tests/`，428 用例：状态层 87、日志 26、ownership 38、指纹 59、stop_gate 32、pre_tool_use 18、policy 20、quota 解析 29/抽象 12/适配器 28/调度器 37/凭证 25/诊断 17，含 §98 集成冒烟场景 3-6、§45 调度场景与策略/传输端到端），随 CI 执行
 - 版本策略：`plugin.json` 版本、CHANGELOG 最新条目、git tag / GitHub Release 三者保持一致
 
 ## 11. 演化边界
 
-v2 开发在 `v2-dev` 分支进行（`main` 保持在 v1.1.0 发布态，里程碑完成后再合入）。当前处于 **2.0.0-alpha3**（alpha1 强制基座 + alpha2 证据完整性 + alpha3 额度感知连续性：provider-api 监控端点、四态评估、reset 感知唤醒、诊断命令），后续里程碑：beta1 上下文与权限 → beta2 任务管理 → rc1 并行安全 → stable。除非实际使用暴露出具体能力缺口，不新增路由维度或角色；强制层只针对高置信不变量（越界、缺失证据、过期证据），不做语义解释型拦截。
+v2 开发在 `v2-dev` 分支进行（`main` 保持在 v1.1.0 发布态，里程碑完成后再合入）。当前处于 **2.0.0-beta1**（alpha 线三里程碑 + beta1：ROUTING PREFLIGHT / TASK CONTEXT PACK 路由上下文契约 + Bash 策略门控），后续里程碑：beta2 任务与工作单元管理 → rc1 并行安全 → stable。除非实际使用暴露出具体能力缺口，不新增路由维度或角色；强制层只针对高置信不变量（越界、缺失证据、过期证据），不做语义解释型拦截。

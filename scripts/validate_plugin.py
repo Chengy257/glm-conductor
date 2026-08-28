@@ -216,6 +216,7 @@ STATE_PY = os.path.join(RUNTIME_DIR, "state.py")
 JOURNAL_PY = os.path.join(RUNTIME_DIR, "journal.py")
 OWNERSHIP_PY = os.path.join(RUNTIME_DIR, "ownership.py")
 FINGERPRINT_PY = os.path.join(RUNTIME_DIR, "fingerprint.py")
+POLICY_PY = os.path.join(RUNTIME_DIR, "policy.py")
 HOOKS_DIR = os.path.join(REPO_ROOT, "plugins", "glm-conductor", "hooks")
 STOP_GATE_PY = os.path.join(HOOKS_DIR, "stop_gate.py")
 PRE_TOOL_USE_PY = os.path.join(HOOKS_DIR, "pre_tool_use.py")
@@ -227,6 +228,7 @@ TEST_OWNERSHIP = os.path.join(TESTS_DIR, "test_ownership.py")
 TEST_FINGERPRINT = os.path.join(TESTS_DIR, "test_fingerprint.py")
 TEST_STOP_GATE = os.path.join(TESTS_DIR, "test_stop_gate.py")
 TEST_PRE_TOOL_USE = os.path.join(TESTS_DIR, "test_pre_tool_use.py")
+TEST_POLICY = os.path.join(TESTS_DIR, "test_policy.py")
 QUOTA_DIR = os.path.join(RUNTIME_DIR, "quota")
 QUOTA_PARSER_PY = os.path.join(QUOTA_DIR, "parser.py")
 QUOTA_PROVIDER_PY = os.path.join(QUOTA_DIR, "provider.py")
@@ -248,11 +250,11 @@ RUNTIME_REQUIRED_FILES = (
     RUNTIME_INIT, STATE_PY, JOURNAL_PY, OWNERSHIP_PY, FINGERPRINT_PY,
     QUOTA_PARSER_PY, QUOTA_PROVIDER_PY, QUOTA_HTTP_PY, QUOTA_ZAI_PY,
     QUOTA_BIGMODEL_PY, QUOTA_SCHEDULER_PY, QUOTA_CREDENTIALS_PY,
-    QUOTA_REPORT_PY)
+    QUOTA_REPORT_PY, POLICY_PY)
 LAYER_REQUIRED_FILES = (STOP_GATE_PY, PRE_TOOL_USE_PY)
 TEST_REQUIRED_FILES = (
     TEST_STATE, TEST_JOURNAL, TEST_OWNERSHIP, TEST_FINGERPRINT,
-    TEST_STOP_GATE, TEST_PRE_TOOL_USE,
+    TEST_STOP_GATE, TEST_PRE_TOOL_USE, TEST_POLICY,
     TEST_QUOTA_PARSER, TEST_QUOTA_ADAPTERS, TEST_QUOTA_SCHEDULER,
     TEST_QUOTA_CREDENTIALS, TEST_QUOTA_REPORT)
 COMMAND_REQUIRED_FILES = (QUOTA_COMMAND,)
@@ -261,18 +263,21 @@ STATE_REQUIRED_MARKERS = (
     "record_verification", "record_review", "visual_evidence")
 JOURNAL_REQUIRED_MARKERS = ("RECOMMENDED_EVENTS", "events.jsonl")
 OWNERSHIP_REQUIRED_MARKERS = ("classify_paths", "git_touched_files")
+POLICY_REQUIRED_MARKERS = ("classify_bash", "DECISIONS", "git-reset-hard")
 FINGERPRINT_REQUIRED_MARKERS = (
     "compute_fingerprint", "task_fingerprint", "visual_evidence_status")
 STOP_GATE_REQUIRED_MARKERS = (
     "gate_blocked", "gate_passed", "gate_exhausted",
     "evaluate_task", "verification_stale", "review_stale")
-PRE_TOOL_USE_REQUIRED_MARKERS = ("additionalContext",)
+PRE_TOOL_USE_REQUIRED_MARKERS = ("additionalContext", "permissionDecision")
 SKILL_CONTRACT_MARKERS = (
     (CONTINUITY_SKILL,
      ("state.json", "events.jsonl", "task_created", "task_fingerprint",
       "Quota-Aware Scheduling", "GLM_CONDUCTOR_QUOTA_API_KEY")),
     (LONG_HORIZON, ("state.json", "events.jsonl")),
-    (ORCHESTRATION_SKILL, ("state.json", "route_selected", "task_fingerprint")),
+    (ORCHESTRATION_SKILL, ("state.json", "route_selected", "task_fingerprint",
+     "ROUTING PREFLIGHT")),
+    (ROLE_CONTRACTS, ("TASK CONTEXT PACK", "FILES AND OWNERSHIP")),
     (ENFORCEMENT_SKILL,
      ("ENFORCEMENT DEGRADED", "gate_exhausted", "Layer A", "Layer B",
       "verification_stale", "review_stale")),
@@ -965,6 +970,7 @@ def check_14_runtime_state(results):
         (JOURNAL_PY, JOURNAL_REQUIRED_MARKERS),
         (OWNERSHIP_PY, OWNERSHIP_REQUIRED_MARKERS),
         (FINGERPRINT_PY, FINGERPRINT_REQUIRED_MARKERS),
+        (POLICY_PY, POLICY_REQUIRED_MARKERS),
         (STOP_GATE_PY, STOP_GATE_REQUIRED_MARKERS),
         (PRE_TOOL_USE_PY, PRE_TOOL_USE_REQUIRED_MARKERS),
         (QUOTA_SCHEDULER_PY,

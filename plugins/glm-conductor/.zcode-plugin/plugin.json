@@ -1,6 +1,6 @@
 {
   "name": "glm-conductor",
-  "version": "2.0.0-alpha3",
+  "version": "2.0.0-beta1",
   "description": "GLM 双轴选择性路由编排插件：GLM-5.3 主会话任架构师，按 Delegability × Assurance 声明 solo/delegate/audit/full 路由；GLM-5.3-Flash 执行标准与视觉实施，全新上下文只读审查者独立终审；continuity 支持长任务跨会话恢复。",
   "license": "MIT",
   "keywords": [

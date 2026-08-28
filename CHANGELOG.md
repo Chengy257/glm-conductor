@@ -1,5 +1,17 @@
 # Changelog
 
+## 2.0.0-beta1
+
+v2 第四里程碑——**路由上下文契约 + 权限策略层**（依据升级指南 §48-§53 ROUTING PREFLIGHT / TASK CONTEXT PACK、§57-§59 Route-aware Permission Policy，实施计划轮 6 块 B6/B7；另清偿轮 5 终审全部 P2 遗留）：
+
+- **ROUTING PREFLIGHT（orchestration 技能新 §3）**：双轴判断前的证据准备——根因/边界/ownership/接口/验证/耦合任一未知即触发只读侦察（优先 ZCode 内置 Explore，不新增自定义代理）；报告模板逐字锁定（ROOT CAUSE / RELEVANT FILES / INTERFACES / TEST ENTRYPOINTS / HIDDEN COUPLING / OPEN AMBIGUITY），条目全部证据化；任务已显式时跳过
+- **TASK CONTEXT PACK（role-contracts.md 五段式规格前置节）**：主会话压缩的有界上下文包（TASK / ROOT CAUSE / RELEVANT FILES / KEY SYMBOLS / CALL·DATA FLOW / INTERFACES / OWNERSHIP / TEST ENTRYPOINTS / KNOWN RISKS / EXCLUDED AREAS 十节模板）——「GLM-5.3 压缩、Flash 执行」异构分工的落地形态；条目优先复用 PREFLIGHT REPORT；15-40 行有界、禁整库倾倒/大文件复制/推测性事实；简单任务可省略
+- **Bash 策略门控（`runtime/policy.py` + PreToolUse(Bash) 接线）**：表驱动 allow/ask/deny（禁 DSL）——deny 恒拒：rm -r/-f、git reset --hard、git clean -f、force push；ask（仅活动任务 assurance:high）：任何 push、模式迁移（alembic/prisma/manage.py/knex）、发布操作（npm/cargo publish、push --tags、gh release）、权限变更（chmod/chown/icacls/attrib）；门控顺序：非 Bash 不管 → 无活动任务零干预 → deny 无视保障级 → ask 仅 high → 默认放行；决策经 `permissionDecision` 返回运行时（Phase 0 实证能力）；force-with-lease 归 ask 组（可控变体不硬拒）；`--force\b(?!-)` 正则同时满足 force 拒止与 lease 放行
+- **策略边界**：只覆盖主会话 Bash 调用（子代理工具调用不触发钩子——角色级 deny 由 agent 工具白名单负责）；字符串中引用的破坏性文本（echo 'rm -rf'）保守误拒，beta1 登记取舍
+- **轮 5 P2 清偿**：适配器 docstring 措辞自洽（"代码路径不出现 host 字符串"）；_http.py 不可达 https 检查注记 belt-and-suspenders；默认传输本地回环端到端测试（限长读取恰 max_bytes+1、302 真实拒绝跟随）
+- **校验器**：检查 14 纳入 policy.py 与测试文件、pre_tool_use permissionDecision 标记、技能 ROUTING PREFLIGHT / TASK CONTEXT PACK 标记
+- **测试**：428 用例（新增 34：policy 20、pre_tool_use 11、quota 适配器端到端 3）；B7.2 活体实测 8/8（deny/ask/allow/零干预/force-with-lease 归组/Agent 注入回归）
+
 ## 2.0.0-alpha3
 
 v2 第三里程碑——**额度感知连续性**（Quota-Aware Continuity，依据升级指南 §23-§45，实施计划轮 5 块 B5；另清偿轮 4 终审全部 P2 遗留）：
