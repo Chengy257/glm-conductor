@@ -1,5 +1,18 @@
 # Changelog
 
+## 2.0.0-alpha2
+
+v2 第二里程碑——**证据完整性**：「任何修复使先前验证/审查失效」从提示词契约升级为完成门的自动强制（依据 docs/glm-conductor-v2-upgrade-guide-final.md §17-§22，实施计划轮 4 块 B3/B4）：
+
+- **证据指纹层（`runtime/fingerprint.py`）**：`task_fingerprint` = sha256(基线修订 + 相关文件集归一化内容状态)——换行归一（CRLF/LF 逻辑内容不变则指纹不变）、路径归一、unborn 仓库基线回退；范围规则：声明了 ownership 取「当前改动 ∩ 声明范围」，未声明取全部改动；主会话记录证据与 Stop 完成门比对共用同一入口
+- **完成门四重检查（`hooks/stop_gate.py`）**：Layer A 从单一 ownership 校验升级为 §15 顺序流水线——① ownership（touched ⊆ owned）② 验证（required 命令全部由主会话完成 + 指纹新鲜）③ 审查（required 时 verdict=ship + 指纹新鲜）④ 视觉证据（截图字节 sha256 一致）；七种失败形态（ownership / verification_missing / verification_stale / review_missing / review_rejected / review_stale / visual_stale）各有可行动 block 报文与 journal `check` 字段；参与判定：四项声明任一非空即受门跟踪
+- **指纹状态写入（`runtime/state.py`）**：`record_verification` / `record_review` / `record_visual_evidence` 纯 dict 助手（去重追加、fingerprint=None 保留旧值、同 path 就地替换 sha256）；schema 增补 `review.fingerprint` 与 `visual_evidence` 数组校验
+- **stale 自动检测**：记录证据后任何文件编辑 → 指纹不一致 → verification_stale / review_stale 拦截完成；恢复路径唯一：重跑验证 / 重新审查并记录新指纹（禁止旧指纹续命）
+- **技能契约**：continuity 新增「证据指纹的记录时机」节（三类证据的记录时机表 + 同一入口 + 记录后不改 owned 文件红线）；orchestration 状态同步义务接入指纹落账；enforcement 技能重写为四重检查契约（检查表、参与判定、按 check 分类的恢复方法、evaluation_error 降级行）
+- **校验器标记扩展（§97 对应项）**：指纹层文件与标记、stop_gate 四重检查标记、状态层写入助手标记、测试文件清单补全、技能 stale 语义标记
+- **测试**：239 个单元/集成用例（新增 93：指纹层 52、状态层 +24、stop_gate 四重检查 13 + §98 集成冒烟场景 3-6 端到端流 4）；B4.2 Stop 循环安全活体实测 14/14（续行上限 2 block + 1 exhausted、exhausted 后新周期重新计数、链断重置、四重检查全路径单次 ~0.2s）
+- 已知限制：完成门每次 Stop 执行 1 次 git status + 每个需指纹比对的参与任务 ≤2 次短 git 子调用（各 3s 超时上限，钩子总预算 5s）——正常仓库毫秒级，git 病态缓慢时按降级处理
+
 ## 2.0.0-alpha1
 
 v2「从提示词契约到强制执行契约」——alpha1 强制基座达成（运行时状态层 + Ownership Layer A/B + 执行日志；依据 docs/glm-conductor-v2-upgrade-guide-final.md 与实施计划，Phase 0 运行时验证先行）：

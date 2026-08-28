@@ -1,6 +1,6 @@
 # GLM Conductor 架构（权威文档）
 
-> 本文档是 GLM Conductor 的**唯一架构真相源**，描述 v2.0.0-alpha1（v2-dev 开发线）的实际运行时行为。
+> 本文档是 GLM Conductor 的**唯一架构真相源**，描述 v2.0.0-alpha2（v2-dev 开发线）的实际运行时行为。
 > 契约细节以插件目录为准（`plugins/glm-conductor/` 下的 agents 与 skills）；本文档与其保持一致，冲突时以修复到一致为准，不得偏离开源文档单独演化。
 > 历史提案存于 `docs/history/`，仅作参考，不构成当前实现依据。
 
@@ -197,21 +197,32 @@ checkpoint 是导航状态，不是仓库真相源：不复制完整 diff、不�
 - 完成清理只作用于本任务：删除 `.glm-conductor/tasks/<task-id>/` 单个目录、停止关联的定时任务、终止闲时排队，避免幽灵唤醒
 - `.glm-conductor/` 是本地运行时状态：优先写入 `.git/info/exclude` 本地排除，不自动修改 tracked `.gitignore`
 
-## 8. 强制层（v2 alpha1）
+## 8. 强制层（v2 alpha2）
 
 v2 把关键运行时契约从提示词升级为确定性强制。强制层由插件钩子（`hooks/hooks.json` 声明，安装后自动启用、仅新会话生效）与运行时模块（`runtime/`，纯标准库 python3）组成。
 
-### 8.1 Ownership Gate — Layer A（完成门，确定性）
+### 8.1 Stop 完成门 — 四重检查（Layer A，确定性）
 
-主会话 turn 结束时（Stop 钩子 `hooks/stop_gate.py`），对每个声明了 `ownership.files` 的活动任务校验：
+主会话 turn 结束时（Stop 钩子 `hooks/stop_gate.py`），对每个**参与任务**（ownership 声明非空 / verification.required 非空 / review.required 为 true / visual_evidence 非空，四者任一）按固定顺序校验：
 
 ```
-git 工作区改动文件（touched） ⊆ 声明 ownership？
-   否 → block：报文列出精确 out-of-scope 路径 + 两条出路（扩 ownership / 回退改动）
-   是 → 静默放行（journal 记 gate_passed）
+1. ownership：git 工作区改动文件（touched） ⊆ 声明 ownership？
+   否 → block（ownership）：报文列出 out-of-scope 路径 + 两条出路
+2. 验证：required 命令全部 completed？
+   否 → block（verification_missing）：报文列出缺失命令
+        且 verification.fingerprint = 当前指纹？
+   否 → block（verification_stale）
+3. 审查（review.required=true 时）：verdict = ship？
+   否 → block（review_missing / review_rejected）
+        且 review.fingerprint = 当前指纹？
+   否 → block（review_stale）
+4. 视觉证据：visual_evidence 每项文件字节 sha256 与记录一致？
+   否 → block（visual_stale）
+全部通过 → 静默放行（journal 记 gate_passed）
 ```
 
 - ownership 声明三种形式：精确文件、目录前缀（`src/auth` 等价 `src/auth/**`，按路径段匹配）、glob（`**` 跨段 / `*` 与 `?` 不跨段）；拒绝隐式扩张（`src/auth` 不覆盖 `src/authentication.ts`）
+- **证据指纹**（`runtime/fingerprint.py`）：`task_fingerprint` = sha256(基线修订 + 相关文件集归一化内容状态)（CRLF/LF 归一、路径归一）；范围 = 声明 ownership 时的「改动 ∩ 声明」，未声明时 = 全部改动。主会话记录证据（`record_verification` / `record_review`，时机契约见 continuity 技能）与完成门比对用**同一入口**——任何记录后的文件编辑都使指纹不一致，证据判 stale，完成被拦（「任何修复使先前验证/审查失效」的自动强制）
 - `.glm-conductor/` 运行时目录豁免——编排器自身账本不算用户仓库改动（否则创建 state.json 即自指拦截）
 - 子代理工具调用不触发钩子（Phase 0 实证：子会话不携带 hook runner），故写前拦截不可实现——**越界改动不被阻止发生，但不可能静默通过完成门**
 
@@ -221,9 +232,9 @@ PreToolUse 钩子（matcher `Agent|Task`，`hooks/pre_tool_use.py`）在每次�
 
 ### 8.3 失败处理与循环安全
 
-- **fail-open 降级可见**：钩子崩溃 / git 不可用时放行并在 stderr 报 `ENFORCEMENT DEGRADED`（journal 记 `gate_degraded`）——钩子起不来时 fail-closed 会卡死所有会话，降级可见优于假强制
-- **续行有界**：运行时对 Stop block 的续行内建上限（每 turn 最多 3 次）；钩子侧连续两次 block 后第三次放行（stderr 报 `ENFORCEMENT GATE EXHAUSTED`、journal 记 `gate_exhausted`）——**此时模型必须向用户报告 blocked，不得声称完成**；两次 block 间出现真实工作事件即重置计数
-- **强制面（当前版本）**：仅 ownership 越界；验证门 / 审查门 / 证据新鲜度在 alpha2 接入同一完成门
+- **fail-open 降级可见**：钩子崩溃 / git 不可用 / 求值阶段结构性错误时放行并在 stderr 报 `ENFORCEMENT DEGRADED`（journal 记 `gate_degraded`）——钩子起不来时 fail-closed 会卡死所有会话，降级可见优于假强制
+- **续行有界**：运行时对 Stop block 的续行内建上限（每 turn 最多 3 次）；钩子侧连续两次 block 后第三次放行（stderr 报 `ENFORCEMENT GATE EXHAUSTED`、journal 记 `gate_exhausted`）——**此时模型必须向用户报告 blocked，不得声称完成**；两次 block 间出现真实工作事件即重置计数（活体实测：四重检查全路径单次 Stop 约 0.2s，正常仓库远低于 5s 钩子预算）
+- **强制面（alpha2）**：ownership 越界 + 验证完成 + 审查有效 + 证据新鲜度（含视觉证据），四者同门按序检查
 
 强制层的用户可见解释（自检、报文含义、被拦截恢复方法）见 `skills/enforcement`。
 
@@ -240,9 +251,9 @@ PreToolUse 钩子（matcher `Agent|Task`，`hooks/pre_tool_use.py`）在每次�
 
 - `scripts/validate_plugin.py`（纯标准库，14 项检查）+ CI（`.github/workflows/validate.yml`，静态校验 + 单元测试）维护契约一致性：扫描 `plugins/`、`README.md`、`marketplace.json` 与本文档，`docs/history/` 不参与当前契约校验
 - 检查覆盖：旧名清理、禁词、quota 否定式声明、任务专属 checkpoint 路径、视觉协议标记、TASK_ID 必含、视觉新调用规范措辞、`plugin.json` 与 CHANGELOG 的版本一致性、钩子清单完整性（含脚本存在性）、runtime 状态层与技能契约标记
-- 运行时模块（`runtime/`）与钩子（`hooks/`）各配单元测试与子进程冒烟（`tests/`，146 用例），随 CI 执行
+- 运行时模块（`runtime/`）与钩子（`hooks/`）各配单元测试与子进程冒烟（`tests/`，239 用例：状态层 87、日志 26、ownership 38、指纹 52、stop_gate 29、pre_tool_use 7，含 §98 集成冒烟场景 3-6），随 CI 执行
 - 版本策略：`plugin.json` 版本、CHANGELOG 最新条目、git tag / GitHub Release 三者保持一致
 
 ## 11. 演化边界
 
-v2 开发在 `v2-dev` 分支进行（`main` 保持在 v1.1.0 发布态，里程碑完成后再合入）。当前处于 **2.0.0-alpha1**（强制基座：状态层 + Ownership Layer A/B + 执行日志），后续里程碑：alpha2 证据完整性（指纹/验证与审查新鲜度接入完成门）→ alpha3 额度感知连续性 → beta1 上下文与权限 → beta2 任务管理 → rc1 并行安全 → stable。除非实际使用暴露出具体能力缺口，不新增路由维度或角色；强制层只针对高置信不变量（越界、缺失证据），不做语义解释型拦截。
+v2 开发在 `v2-dev` 分支进行（`main` 保持在 v1.1.0 发布态，里程碑完成后再合入）。当前处于 **2.0.0-alpha2**（alpha1 强制基座 + 证据完整性：指纹层 + 完成门四重检查），后续里程碑：alpha3 额度感知连续性 → beta1 上下文与权限 → beta2 任务管理 → rc1 并行安全 → stable。除非实际使用暴露出具体能力缺口，不新增路由维度或角色；强制层只针对高置信不变量（越界、缺失证据、过期证据），不做语义解释型拦截。

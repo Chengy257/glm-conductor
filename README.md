@@ -13,7 +13,7 @@
 - **独立只读终审**：assurance:high 的任务由全新上下文的只读审查者给出 `ship` / `fix-first` / `rethink` 裁决，任何修复使裁决失效
 - **视觉通道**：前端/界面任务由 visual-implementer（GLM-5.3-Flash 多模态）实施，主会话负责驱动采集截图、Flash 角色负责视觉判定——GLM-5.3 纯文本的边界被显式分工补齐
 - **长任务连续性**：continuity 作为与路由正交的生命周期层（foreground / resumable / idle），checkpoint 检查点 + 结构化恢复流程，让长任务可以跨会话中断、跨额度窗口安全续跑（见下文[长任务连续性](#长任务连续性)）
-- **强制层（v2 alpha1）**：ownership 契约由插件钩子确定性执行——Layer A 完成门（Stop 时校验"实际改动文件 ⊆ 声明 ownership"，越界改动无法静默通过完成门，报文列出精确越界路径）+ Layer B 派发注入（每次子代理派发前注入 ownership 提醒）；任务状态层（`state.json`）与 append-only 执行日志（`events.jsonl`）本地落盘；钩子失效按降级可见处理（`ENFORCEMENT DEGRADED`），绝不因强制层故障卡死会话（详见 [架构文档](./docs/architecture.md) §8）
+- **强制层（v2 alpha2）**：完成契约由插件钩子确定性执行——Stop 完成门四重检查（① ownership：实际改动文件 ⊆ 声明范围，越界改动无法静默通过；② 验证：required 命令全部由主会话亲自跑过；③ 审查：high-assurance 任务须有 ship 裁决；④ 证据新鲜度：验证/审查证据经 `task_fingerprint`（基线修订 + 相关文件集归一化 sha256）绑定到记录时的仓库状态，任何后续编辑使证据过期并拦截完成）+ Layer B 派发注入（每次子代理派发前注入 ownership 提醒）；任务状态层（`state.json`）与 append-only 执行日志（`events.jsonl`）本地落盘；钩子失效按降级可见处理（`ENFORCEMENT DEGRADED`），绝不因强制层故障卡死会话（详见 [架构文档](./docs/architecture.md) §8）
 - **基于证据的路由重估**：路由可双向变化（ROUTE REASSESSMENT），但必须附新观察到的证据
 - **fail-closed 纪律**：所需子智能体或证据路径缺失时停止通道并提示，绝不静默降级或替换角色
 - **结构化契约**：五段式实施规格 + IMPLEMENTATION REPORT——无证据的完成声明无效
@@ -224,7 +224,7 @@ GLM Conductor 的连续性编排基于 ZCode 原生的本地会话生命周期�
 - **子智能体**：不能再派生子智能体（结构天然扁平）；只能看到会话启动时已连接的 MCP 服务，跨会话恢复后需重新确认所需服务可用
 - **子智能体运行方式**：前台调用受支持；后台子智能体不应假定可用（编排不依赖 run_in_background 语义）
 - **额度观察**：无 quota API；调度触发本身即存活探针，额度相关的观察只来自用户告知或 UI
-- **强制层（v2 alpha1 边界）**：仅 ownership 越界接入完成门（验证/审查/证据新鲜度属后续 alpha 里程碑）；钩子不作用于子代理内部（ZCode 子会话不触发钩子——故强制在完成边界而非写前拦截）；`python3` 须在 PATH（见前置要求），缺失时强制层降级（stderr 报 `ENFORCEMENT DEGRADED`，不阻断会话）；强制层随插件分发，仅安装/更新后的新会话生效
+- **强制层（v2 alpha2 边界）**：四重检查（ownership / 验证 / 审查 / 证据新鲜度）已接入完成门；work-unit 任务图与有界并行属后续 beta 里程碑。钩子不作用于子代理内部（ZCode 子会话不触发钩子——故强制在完成边界而非写前拦截）；`python3` 须在 PATH（见前置要求），缺失时强制层降级（stderr 报 `ENFORCEMENT DEGRADED`，不阻断会话）；强制层随插件分发，仅安装/更新后的新会话生效
 
 ## 贡献
 
