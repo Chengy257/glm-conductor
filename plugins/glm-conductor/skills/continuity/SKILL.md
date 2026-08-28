@@ -37,13 +37,13 @@ continuity 字段随 SELECTIVE ROUTE 声明携带（见 orchestration 技能）�
 
 ## Checkpoint
 
-resumable / idle 任务在实质性里程碑后（不是每次工具调用后）写入 CONTINUITY CHECKPOINT 到任务专属路径 `.glm-conductor/tasks/<continuity-id>/checkpoint.md`；CONTINUITY_ID 规则与完整模板见 references/long-horizon.md。
+resumable / idle 任务在实质性里程碑后（不是每次工具调用后）写入 CONTINUITY CHECKPOINT 到任务专属路径 `.glm-conductor/tasks/<task-id>/checkpoint.md`；TASK_ID 规则与完整模板见 references/long-horizon.md。
 
 原则：
 
 - checkpoint 是导航状态，不是仓库真相源——不复制完整 diff、不复制大量代码、不声称未验证内容
 - repository 状态始终优先：checkpoint 与仓库冲突时以仓库为准
-- 每个长任务一个机械唯一（语义前缀+随机后缀）的 CONTINUITY_ID 与专属目录；并行长任务互不覆盖、互不删除
+- 每个长任务一个机械唯一（语义前缀+随机后缀）的 TASK_ID 与专属目录；并行长任务互不覆盖、互不删除
 
 ## Runtime State 与 Git
 
@@ -58,7 +58,7 @@ resumable / idle 任务在实质性里程碑后（不是每次工具调用后）
 
 每次重新激活后必须依次执行八步：
 
-检查目标 → 按 CONTINUITY_ID 读取 checkpoint → 检查仓库状态 → 检查当前 diff → 判断先前变更是否仍在 → 判断目标是否已完成 → 检查验证状态 → 从 NEXT ACTION 恢复
+检查目标 → 按 TASK_ID 读取 checkpoint → 检查仓库状态 → 检查当前 diff → 判断先前变更是否仍在 → 判断目标是否已完成 → 检查验证状态 → 从 NEXT ACTION 恢复
 
 禁止盲目重播旧指令。若 checkpoint 与仓库不一致：repository > checkpoint——分析变化来源后更新认知，不得为恢复 checkpoint 而回滚仓库新改动。恢复执行前必须重新输出 SELECTIVE ROUTE 声明（沿用或基于新证据重估）。
 
@@ -72,7 +72,7 @@ resumable 模式的唤醒不用 sleep 直到固定时间，而用安全周期性
 
 调度触发本身就是存活探针：唤醒成功启动即说明模型执行当前可用；唤醒失败或未启动则不会产生任何仓库改动，自然等待下次触发。不需要、也不引入独立的额度检查器。
 
-安排定时任务时使用 references/long-horizon.md 中的结构化 resume prompt（自包含，不依赖会话上下文，且必须携带 CONTINUITY_ID 与精确 checkpoint 路径）。若希望结果回到当前会话，续作必须从当前聊天内创建绑定本会话的定时任务。
+安排定时任务时使用 references/long-horizon.md 中的结构化 resume prompt（自包含，不依赖会话上下文，且必须携带 TASK_ID 与精确 checkpoint 路径）。若希望结果回到当前会话，续作必须从当前聊天内创建绑定本会话的定时任务。
 
 ## Idle Execution
 
@@ -106,8 +106,8 @@ continuity 不重新实现 Goal 模式。职责分工：
 
 目标完成并验收后，只清理本任务的状态：
 
-1. 删除本任务目录 `.glm-conductor/tasks/<continuity-id>/`（仅此目录，不得触碰其他任务的 checkpoint 或视觉证据）
-2. 停止并移除与该 CONTINUITY_ID 关联的定时任务
+1. 删除本任务目录 `.glm-conductor/tasks/<task-id>/`（仅此目录，不得触碰其他任务的 checkpoint 或视觉证据）
+2. 停止并移除与该 TASK_ID 关联的定时任务
 3. 终止该任务的闲时任务排队
 
 避免幽灵唤醒重复执行；并行任务下删除全局或他人状态是禁止操作。

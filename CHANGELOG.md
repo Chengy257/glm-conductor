@@ -1,5 +1,13 @@
 # Changelog
 
+## 2.0.0-alpha1
+
+v2「从提示词契约到强制执行契约」开发线启动（依据 docs/glm-conductor-v2-upgrade-guide-final.md 与实施计划；Phase 0 运行时验证已完成）：
+
+- **任务标识更名**：`CONTINUITY_ID` → `TASK_ID`（v1.x 遗留 checkpoint 读取时归一化，无需重写）；路径占位统一为 `<task-id>`
+- **Ownership 强制层重设计（Phase 0 修订）**：子代理工具调用不触发钩子（本机实测+代码级确证），Ownership Gate 改为 Layer A 完成门校验（diff ⊆ ownership）+ Layer B 派发注入；后续阶段落地
+- 版本进入 2.0.0-alpha1 开发线（alpha1 里程碑 = 运行时状态层 + Ownership Layer A/B）
+
 ## 1.1.0
 
 v1.1.0 — v1.0 发布后的审计整改与运行时加固（release hardening）：

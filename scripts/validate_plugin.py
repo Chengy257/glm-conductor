@@ -22,7 +22,7 @@
             onQuotaReset）只允许出现在否定式声明行（同行含 `虚构` 或
             `不存在`）；
          b) 先移除允许的任务专属 checkpoint 路径
-            （.glm-conductor/tasks/<continuity-id>/checkpoint.md 与
+            （.glm-conductor/tasks/<task-id>/checkpoint.md 与
             .glm-conductor/tasks/<id>/checkpoint.md），再检查不得残留
             workspace-global 路径 .glm-conductor/checkpoint.md；
       8. 视觉协议一致性：VISUAL_CAPTURE_REQUEST 与 VISUAL ACCEPTANCE 必须出
@@ -32,13 +32,13 @@
          agents/visual-reviewer.md 中不得出现 `GLM REVIEW`；修正前的旧名
          VISUAL_ACCEPT_REQUEST 不得出现在扫描范围内；
       9. 权威架构文档契约：docs/architecture.md 必须存在；必含
-         VISUAL_CAPTURE_REQUEST / CONTINUITY_ID / .glm-conductor/tasks/ /
+         VISUAL_CAPTURE_REQUEST / TASK_ID / .glm-conductor/tasks/ /
          ROUTE REASSESSMENT / VISUAL REVIEW / 随机十六进制后缀 /
          solo / delegate / audit / full / foreground / resumable / idle；
          禁含 风险阶梯 / risk ladder / glm-advisor（均大小写不敏感）；
          `最新 checkpoint` / `latest checkpoint` 只允许出现在含否定词
          （不 / 禁止 / never / not）的行；
-     10. 连续性标识：CONTINUITY_ID 必含于
+     10. 任务标识：TASK_ID 必含于
          skills/continuity/SKILL.md、
          skills/continuity/references/long-horizon.md 与
          docs/architecture.md；`随机十六进制后缀` 必含于 long-horizon.md
@@ -109,7 +109,7 @@ CANONICAL_AGENTS = (
 AGENT_REF_RE = re.compile(r"glm-conductor:([A-Za-z0-9_][A-Za-z0-9_-]*)")
 QUOTA_TOKENS = ("getQuotaRemaining", "getQuotaResetTime", "onQuotaReset")
 QUOTA_NEGATIONS = ("虚构", "不存在")
-# 允许的任务专属 checkpoint 路径：<continuity-id> / <id> 均为单段占位
+# 允许的任务专属 checkpoint 路径：<task-id> / <id> 均为单段占位
 ALLOWED_CHECKPOINT_RE = re.compile(
     r"\.glm-conductor[/\\]tasks[/\\][^/\\\s\"'`]+[/\\]checkpoint\.md")
 GLOBAL_CHECKPOINT_RE = re.compile(r"\.glm-conductor[/\\]checkpoint\.md")
@@ -129,7 +129,7 @@ SCAN_SCOPE_DESC = (
 # —— 检查 9：权威架构文档契约（docs/architecture.md） ——
 ARCH_REQUIRED_MARKERS = (
     "VISUAL_CAPTURE_REQUEST",
-    "CONTINUITY_ID",
+    "TASK_ID",
     ".glm-conductor/tasks/",
     "ROUTE REASSESSMENT",
     "VISUAL REVIEW",
@@ -142,8 +142,8 @@ ARCH_FORBIDDEN_CI = ("风险阶梯", "risk ladder", "glm-advisor")  # 大小写�
 CHECKPOINT_REF_TOKENS = ("最新 checkpoint", "latest checkpoint")
 CHECKPOINT_REF_NEGATIONS = ("不", "禁止", "never", "not")
 
-# —— 检查 10：连续性标识 ——
-CONTINUITY_ID_FILES = (CONTINUITY_SKILL, LONG_HORIZON, ARCH_DOC)
+# —— 检查 10：任务标识 ——
+TASK_ID_FILES = (CONTINUITY_SKILL, LONG_HORIZON, ARCH_DOC)
 HEX_SUFFIX_FILES = (LONG_HORIZON, ARCH_DOC)
 
 # —— 检查 11：视觉规范拓扑 ——
@@ -515,15 +515,15 @@ def check_9_arch_doc(results):
 
 
 def check_10_continuity_id(results):
-    """检查 10：连续性标识（CONTINUITY_ID 必含与唯一格式）。"""
-    title = "连续性标识（CONTINUITY_ID 必含与唯一格式）"
+    """检查 10：任务标识（TASK_ID 必含与唯一格式）。"""
+    title = "任务标识（TASK_ID 必含与唯一格式）"
     details = []
     ok = True
 
-    # CONTINUITY_ID 必含于三个文件；`随机十六进制后缀` 必含于 long-horizon.md
+    # TASK_ID 必含于三个文件；`随机十六进制后缀` 必含于 long-horizon.md
     # 与 docs/architecture.md（「语义前缀+随机后缀」机械唯一格式的落点标记）
     plans = (
-        (CONTINUITY_ID_FILES, ("CONTINUITY_ID",)),
+        (TASK_ID_FILES, ("TASK_ID",)),
         (HEX_SUFFIX_FILES, ("随机十六进制后缀",)),
     )
     for paths, markers in plans:

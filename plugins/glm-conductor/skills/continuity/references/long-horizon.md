@@ -27,12 +27,12 @@
 
 ## CONTINUITY CHECKPOINT 模板
 
-resumable / idle 任务在每个实质性里程碑后（不是每次工具调用后）写入任务专属路径 `.glm-conductor/tasks/<continuity-id>/checkpoint.md`。同一任务的多次写入覆盖本任务自己的文件；不同任务各用各的目录，互不覆盖、互不删除。模板可直接复制：
+resumable / idle 任务在每个实质性里程碑后（不是每次工具调用后）写入任务专属路径 `.glm-conductor/tasks/<task-id>/checkpoint.md`。同一任务的多次写入覆盖本任务自己的文件；不同任务各用各的目录，互不覆盖、互不删除。模板可直接复制：
 
 ```
 CONTINUITY CHECKPOINT
 
-CONTINUITY_ID:
+TASK_ID:
 <语义前缀>-<随机十六进制后缀>（如 redesign-settings-page-7f3a2c；生成契约见下）
 
 GOAL:
@@ -82,7 +82,7 @@ IDLE_TASK_ID:
 <闲时任务标识>
 ```
 
-### CONTINUITY_ID 规则
+### TASK_ID 规则
 
 格式——生成即机械唯一，不依赖命名约定：
 
@@ -107,6 +107,7 @@ IDLE_TASK_ID:
 - 恢复与清理都按它定位 `.glm-conductor/tasks/<id>/` 目录
 - 视觉证据目录也按它隔离（见 orchestration 技能的视觉通道运行细节）
 - 不以"最新 checkpoint"作为查找策略——并行任务下"最新"是歧义的
+- 读取 v1.x 遗留 checkpoint 时，旧字段名 `CONTINUITY_ID` 视同 `TASK_ID`（读取时归一化，不要求重写已存在的 checkpoint 文件）
 
 checkpoint 原则清单：
 
@@ -121,7 +122,7 @@ checkpoint 原则清单：
 每次重新激活后必须依次执行：
 
 1. **检查当前 Goal**：确认当前会话目标是否仍是同一目标
-2. **读取本任务 checkpoint**：读取 resume 指令携带的 `.glm-conductor/tasks/<continuity-id>/checkpoint.md`；指令未携带 ID 时，按目标语义在 `.glm-conductor/tasks/` 下定位匹配目录；不存在时按无 checkpoint 处理，只能从目标与仓库现状重建认知
+2. **读取本任务 checkpoint**：读取 resume 指令携带的 `.glm-conductor/tasks/<task-id>/checkpoint.md`；指令未携带 ID 时，按目标语义在 `.glm-conductor/tasks/` 下定位匹配目录；不存在时按无 checkpoint 处理，只能从目标与仓库现状重建认知
 3. **检查仓库状态**：仓库真实状态优先于 checkpoint（repository > checkpoint）
 4. **检查当前 diff**：确认工作区当前实际有哪些改动
 5. **判断先前变更是否仍在**：checkpoint 声称已完成的改动，是否能在 diff 与仓库中观察到
@@ -141,7 +142,7 @@ checkpoint 原则清单：
 ```
 Resume GLM Conductor task:
 
-CONTINUITY_ID: <id>
+TASK_ID: <id>
 CHECKPOINT: .glm-conductor/tasks/<id>/checkpoint.md
 
 Inspect the current goal, the specified checkpoint, and the current
@@ -149,7 +150,7 @@ repository state.
 
 If the goal represented by this checkpoint is already satisfied,
 perform no further implementation and clean up only the runtime state
-associated with this CONTINUITY_ID.
+associated with this TASK_ID.
 
 If incomplete, inspect the current diff and verification state before
 resuming from NEXT ACTION.
@@ -169,7 +170,7 @@ delegability or assurance.
 
 映射到 ZCode 定时任务：
 
-- **触发内容** = 上述结构化 resume prompt（已替换 CONTINUITY_ID 与 checkpoint 路径）
+- **触发内容** = 上述结构化 resume prompt（已替换 TASK_ID 与 checkpoint 路径）
 - **触发节奏** = 安全周期性再激活，例如每 30-60 分钟检查一次，而非 sleep 5 小时
 
 **调度触发即存活探针**：唤醒成功启动即说明模型执行当前可用，直接进入恢复流程；唤醒失败或未启动则不会产生任何仓库改动，自然等待下次触发。不实现独立的额度检查器——调度机制本身完成了探测。
@@ -187,7 +188,7 @@ ZCode 闲时任务支持配置了自定义模型的子智能体。无人值守�
 - 标准有界实施 → `flash-implementer`
 - 视觉/交互实施 → `visual-implementer`
 
-主会话负责在闲时段落结束后做父级验证——闲时段落的 IMPLEMENTATION REPORT 仍只是声明，证据只来自主会话亲自观察的 diff 与命令输出。同目标的多段闲时执行之间靠任务专属 checkpoint 衔接（同一 CONTINUITY_ID）。
+主会话负责在闲时段落结束后做父级验证——闲时段落的 IMPLEMENTATION REPORT 仍只是声明，证据只来自主会话亲自观察的 diff 与命令输出。同目标的多段闲时执行之间靠任务专属 checkpoint 衔接（同一 TASK_ID）。
 
 ## Route Recovery
 
@@ -197,14 +198,14 @@ ZCode 闲时任务支持配置了自定义模型的子智能体。无人值守�
 
 目标完成并验收后的动作清单（只作用于本任务）：
 
-1. 删除本任务目录 `.glm-conductor/tasks/<continuity-id>/`（仅此目录，不得触碰其他任务的状态）
-2. 移除与该 CONTINUITY_ID 关联的定时任务
+1. 删除本任务目录 `.glm-conductor/tasks/<task-id>/`（仅此目录，不得触碰其他任务的状态）
+2. 移除与该 TASK_ID 关联的定时任务
 3. 终止该任务的闲时任务排队
 4. 向用户报告最终状态
 
 ## Failure Cases
 
-- **automation 不可用**（定时/闲时能力均不可用）：不得声称已启用连续性；保留本任务 checkpoint 目录，向用户报告手动可恢复，并附恢复方法——新建会话输入"读取 .glm-conductor/tasks/<continuity-id>/checkpoint.md 并按八步恢复流程继续"
+- **automation 不可用**（定时/闲时能力均不可用）：不得声称已启用连续性；保留本任务 checkpoint 目录，向用户报告手动可恢复，并附恢复方法——新建会话输入"读取 .glm-conductor/tasks/<task-id>/checkpoint.md 并按八步恢复流程继续"
 - **executor 缺失**（如 visual-implementer）：fail-closed，不自动换成其他执行者，交回用户处理
 - **唤醒后 checkpoint 与仓库严重不一致**：以仓库为准，向用户报告差异后继续；不得回滚仓库新改动
 

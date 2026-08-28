@@ -148,7 +148,7 @@ continuity 是与路由**正交**的生命周期维度——回答"任务如果�
 
 核心机制：
 
-- **CONTINUITY CHECKPOINT**：实质性里程碑后写入任务专属路径 `.glm-conductor/tasks/<continuity-id>/checkpoint.md`——每个长任务一个机械唯一的 CONTINUITY_ID（语义前缀+随机后缀，如 `redesign-settings-page-7f3a2c`），并行任务互不覆盖、互不删除（建议将 `.glm-conductor/` 加入 `.git/info/exclude` 本地排除，而非修改 tracked `.gitignore`）；checkpoint 记录目标、路由、已完成项、下一步与验证状态，是导航状态，不是仓库真相源
+- **CONTINUITY CHECKPOINT**：实质性里程碑后写入任务专属路径 `.glm-conductor/tasks/<task-id>/checkpoint.md`——每个长任务一个机械唯一的 TASK_ID（语义前缀+随机后缀，如 `redesign-settings-page-7f3a2c`），并行任务互不覆盖、互不删除（建议将 `.glm-conductor/` 加入 `.git/info/exclude` 本地排除，而非修改 tracked `.gitignore`）；checkpoint 记录目标、路由、已完成项、下一步与验证状态，是导航状态，不是仓库真相源
 - **repository > checkpoint**：恢复时八步检查（目标 → checkpoint → 仓库状态 → diff → 变更是否仍在 → 目标是否已完成 → 验证状态 → 从 NEXT ACTION 继续），仓库真实状态始终优先；禁止盲目重播旧指令，禁止为恢复 checkpoint 回滚仓库新改动
 - **安全周期性再激活**：定时唤醒做"检查-恢复或等待"，而非 sleep 到固定时间；恢复前重新声明 SELECTIVE ROUTE
 - **明确的边界**：不虚构 quota API、不硬编码 5 小时重置；额度观察只来自用户或 UI，定时/闲时能力不可用时如实报告"手动可恢复"

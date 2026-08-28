@@ -136,7 +136,7 @@ visual-implementer 调用
 - 每个验收点以 VISUAL_ROUND 跟踪（1 | 2 | 3），最多 3 轮采集-判定循环，超出即 blocked 交回主会话做 ROUTE REASSESSMENT
 - 不存在子代理在单次调用内等待父会话采集的通道——实施者不得等待、不得空转、不得虚构截图结果
 - 截图不可得（主会话无法采集）时 fail-closed：视觉通道停止，不得改为纯文本验证交付
-- 视觉证据目录按任务隔离：`.glm-conductor/tasks/<任务标识>/visual-evidence/`
+- 视觉证据目录按任务隔离：`.glm-conductor/tasks/<task-id>/visual-evidence/`
 
 ### 6.2 视觉终审
 
@@ -154,7 +154,7 @@ continuity 是与路由正交的生命周期维度，不是第五种 route。
 
 ### 7.1 任务标识与状态布局
 
-CONTINUITY_ID 是唯一的运行时任务标识，**生成即机械唯一**：
+TASK_ID 是唯一的运行时任务标识，**生成即机械唯一**：
 
 ```
 格式：<语义前缀>-<6~8 位随机十六进制后缀>
@@ -162,30 +162,32 @@ CONTINUITY_ID 是唯一的运行时任务标识，**生成即机械唯一**：
       （时间戳后缀可接受，随机后缀优先——并行同时建任务不碰撞）
 ```
 
-生成契约：任务首次进入 resumable/idle 时生成一次；写入 checkpoint 持久化；恢复期间绝不重新生成；checkpoint 路径、视觉证据路径、定时 resume prompt、automation 关联、清理全部使用同一精确 ID。foreground 视觉任务使用同格式的临时 ID（CONTINUITY_ID 即通用运行时任务标识，不引入第二个标识概念）。
+v2 起 TASK_ID 取代 v1.x 的 CONTINUITY_ID（遗留 checkpoint 读取时归一化）。
+
+生成契约：任务首次进入 resumable/idle 时生成一次；写入 checkpoint 持久化；恢复期间绝不重新生成；checkpoint 路径、视觉证据路径、定时 resume prompt、automation 关联、清理全部使用同一精确 ID。foreground 视觉任务使用同格式的临时 ID（TASK_ID 即通用运行时任务标识，不引入第二个标识概念）。
 
 ```
 .glm-conductor/
 └── tasks/
-    └── <continuity-id>/
+    └── <task-id>/
         ├── checkpoint.md
         └── visual-evidence/
 ```
 
-恢复与清理都按精确 CONTINUITY_ID 定位目录；不以"最新 checkpoint"作为查找策略——并行任务下"最新"是歧义的。并行任务互不覆盖、互不删除。
+恢复与清理都按精确 TASK_ID 定位目录；不以"最新 checkpoint"作为查找策略——并行任务下"最新"是歧义的。并行任务互不覆盖、互不删除。
 
 ### 7.2 Checkpoint 与恢复
 
 checkpoint 是导航状态，不是仓库真相源：不复制完整 diff、不声称未验证内容。repository > checkpoint——冲突时以仓库为准，禁止为恢复 checkpoint 回滚仓库新改动。
 
-每次重新激活后执行八步恢复：检查目标 → 按 CONTINUITY_ID 读取 checkpoint → 检查仓库状态 → 检查当前 diff → 判断先前变更是否仍在 → 判断目标是否已完成 → 检查验证状态 → 从 NEXT ACTION 恢复。恢复执行前必须重新输出 SELECTIVE ROUTE 声明。
+每次重新激活后执行八步恢复：检查目标 → 按 TASK_ID 读取 checkpoint → 检查仓库状态 → 检查当前 diff → 判断先前变更是否仍在 → 判断目标是否已完成 → 检查验证状态 → 从 NEXT ACTION 恢复。恢复执行前必须重新输出 SELECTIVE ROUTE 声明。
 
 ### 7.3 调度与边界
 
 - 定时唤醒用安全周期性再激活（检查-恢复或等待），不 sleep 到固定时间；**调度触发本身就是存活探针**，不引入独立的额度检查器
 - 同会话投递：结果要回到当前会话，必须从当前聊天创建绑定本会话的定时续作
 - 不假设任何 quota API（getQuotaRemaining 等均属虚构）、不硬编码 5 小时重置——额度观察只来自用户告知或 UI，且只作为证据使用
-- 完成清理只作用于本任务：删除 `.glm-conductor/tasks/<continuity-id>/` 单个目录、停止关联的定时任务、终止闲时排队，避免幽灵唤醒
+- 完成清理只作用于本任务：删除 `.glm-conductor/tasks/<task-id>/` 单个目录、停止关联的定时任务、终止闲时排队，避免幽灵唤醒
 - `.glm-conductor/` 是本地运行时状态：优先写入 `.git/info/exclude` 本地排除，不自动修改 tracked `.gitignore`
 
 ## 8. 运行时边界（ZCode 约束）
@@ -199,7 +201,7 @@ checkpoint 是导航状态，不是仓库真相源：不复制完整 diff、不�
 ## 9. 静态校验与发布
 
 - `scripts/validate_plugin.py`（纯标准库）+ CI（`.github/workflows/validate.yml`）维护契约一致性：扫描 `plugins/`、`README.md`、`marketplace.json` 与本文档，`docs/history/` 不参与当前契约校验
-- 检查覆盖：旧名清理、禁词、quota 否定式声明、任务专属 checkpoint 路径、视觉协议标记、CONTINUITY_ID 必含、视觉新调用规范措辞、`plugin.json` 与 CHANGELOG 的版本一致性
+- 检查覆盖：旧名清理、禁词、quota 否定式声明、任务专属 checkpoint 路径、视觉协议标记、TASK_ID 必含、视觉新调用规范措辞、`plugin.json` 与 CHANGELOG 的版本一致性
 - 版本策略：`plugin.json` 版本、CHANGELOG 最新条目、git tag / GitHub Release 三者保持一致
 
 ## 10. 演化边界
