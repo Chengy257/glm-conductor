@@ -94,8 +94,18 @@
 | 子会话钩子继承在 ZCode 版本更新后变化（两处未追踪构造点） | B0.1 专项复测；ZCode 升级后重跑；FR 跟踪 |
 | Stop 门与用户交互习惯冲突（正常 solo 任务被误拦） | 仅"active task"（state.json 存在）才启用门；无状态文件零干预 |
 | quota 端点改版 | 适配器隔离 + 显式 fallback 端点 + fixture 驱动 + fail-open |
-| 钩子拖慢每次工具调用 | 轻量设计（§87）：毫秒级 JSON 读 + 单次 git 调用；超时 3-5s 上限 |
+| 钩子拖慢每次 Stop（alpha2 实测） | 轻量设计：毫秒级 JSON 读 + git 子调用（1 次 status + 每个需指纹比对的参与任务 ≤2 次短调用，各 3s 上限，钩子总预算 5s）；四重检查全路径实测 ~0.2s；病态缓慢的 git 在多任务叠加下可能触发运行时硬杀（降级不可见）——轮 5 优化项见下 |
 | scope 膨胀（P1.5 走向工作流引擎） | §75 边界清单为验收项；reviewer 对照检查 |
+
+## 5.1 轮 4 终审遗留（P2，glm-reviewer 2026-08-28，裁决 ship）
+
+轮 5 开工前/开工时消化的小项（不阻断 v2.0-alpha2）：
+
+1. **词汇外 verdict default-allow**：`hooks/stop_gate.py` review 分支——verdict 不在 REVIEW_VERDICTS（手写 state.json 拼写偏差）会按 ship 路径仅做指纹比对；改为按 review_missing 处理（或 evaluation_error 降级）。同族：`runtime/fingerprint.py` visual_evidence_status 项缺 sha256 且文件不存在时 current==recorded==None 不判 stale——缺 recorded 视为 stale。
+2. **git 子调用跨任务复用**：单次 Stop 内共享同一份 touched + base（1 次 status + 1 次 rev-parse），把最坏调用数从 1+2N 压到 2，消除多任务叠加下的硬杀风险（顺带把 SKILL 时延注记从"按降级处理"改为准确表述）。
+3. **补一条仓内单测**：gate_exhausted 后第 4 次 Stop 重新 block（新周期重新计数；目前仅有链断逻辑与 B4.2 会话内活体证据）。
+4. **architecture.md §8.3 措辞**：外层崩溃兜底不写 journal（只 stderr 可见），与 git 失败/求值错误的 gate_degraded 分开表述。
+5. **技能文档补一句**：记录证据后执行 commit 会改变基线修订 → 证据 stale（公式含 base，设计内保守行为，显式点名）。
 
 ## 6. B0.2 feature request 文稿要点（主会话撰写后随轮 1 交付）
 
