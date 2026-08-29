@@ -29,15 +29,20 @@ completed 不重跑锚定（§68）：
        cancelled，verifying→ready 非法）→ 只出 advisory 裁决提示
        （重跑验证或按失败处理，归主会话裁决）；
     3. 有残留改动 → journal 指纹证据：fingerprint.compute_fingerprint
-       对 owned_hits 真算当前指纹，再在 events 里从尾向头找第一条
-       满足全部条件的 verification 事件：
+       对 owned_hits 真算当前指纹，再经共享谓词 fresh_unit_verification
+       （RB-1 / WU-P1）校验——unit["verification"] 内每个 required
+       command 须各存在至少一条满足全部条件的 verification 事件
+       （all-match，v2.0.1 有意收紧：多 command 单元须全部有新鲜证据
+       才建议 completed，部分证据按无证据处理；release hardening
+       计划 D2 决策）：
          event == "verification" 且 unit == 该单元 id（逐字精确）且
-         fingerprint == 当前指纹 且 status == "pass" 且 command 出现在
-         unit["verification"] 列表内
-       - 找到 → 建议 completed（存在绑定当前改动的新鲜验证证据——
-         parent-observed 恢复解释，最终裁决待主会话确认）；running
-         与 verifying 同此（verifying→completed 在转换表内）；
-       - 未找到 → running 建议 verifying（残留改动无新鲜验证证据：
+         fingerprint == 当前指纹 且 status == "pass" 且 command ==
+         该 required command
+       - 全部命中 → 建议 completed（每个 required command 都有绑定
+         当前改动的新鲜验证证据——parent-observed 恢复解释，最终
+         裁决待主会话确认）；running 与 verifying 同此（verifying→
+         completed 在转换表内）；
+       - 任一缺失 → running 建议 verifying（残留改动无新鲜验证证据：
          主会话必须亲自检查 diff 并运行单元验证——§70 claim 不算
          完成）；verifying 保持现状属自转换（verifying→verifying
          非法）→ 只出 advisory 裁决提示（主会话直接运行单元验证
@@ -115,7 +120,10 @@ completed 不重跑锚定（§68）：
     docs/glm-conductor-v2-upgrade-guide-final.md §68（恢复后 completed
     不重跑）/ §69（中断单元恢复证据四步）+ v2 升级计划工作块 B8.4
     + v2.0.1 加固工作包 H5（P1-4/P1-5，租约对账）与 H6（P1-7，
-    verification 证据归属绑定 unit）。
+    verification 证据归属绑定 unit）+ release hardening 补丁计划
+    docs/GLM-Conductor-v2.0.1-Release-Hardening-Patch-Agent-Implementation-Plan.md
+    （RB-1 / WU-P1：共享证据谓词 fresh_unit_verification + all-match
+    收紧，D2 决策）。
 """
 
 from runtime import fingerprint
@@ -147,20 +155,93 @@ ADVISORY_VERIFYING_STAY = {
     "reason": "verifying 保持现状：主会话直接运行单元验证后完成或失败"}
 
 
-def _interrupted_advice(repo_root, unit, touched, events):
+def fresh_unit_verification(repo_root, task_id, unit, *, touched=None,
+                            events=None) -> dict:
+    """单元验证证据纯判断谓词（v2.0.1 RB-1 / WU-P1，all-match 口径）。
+
+    判断 unit["verification"] 内每个 required command 是否各存在至少
+    一条五条件全满足的新鲜 pass 证据（all-match：任一缺失即不完整，
+    多 command 单元不得凭部分证据过关——D2 决策，v2.0.1 有意收紧）。
+    与 task_manager.record_unit_verification 的写入口径配套，供
+    finish_unit 完成门与本模块恢复对账共用同一套证据谓词（本模块
+    不导入 task_manager——后者已导入本模块，避免循环导入）。
+
+    返回（确定性）：
+        {"ok": bool, "fingerprint": str | None, "required": [str],
+         "matched": [str], "missing": [str]}
+      - ok：required 全部命中（空 required 平凡成立）；
+      - fingerprint：证据比对的当前指纹（快路径未算 → None）；
+      - required / matched / missing：均按 unit["verification"] 原序。
+
+    五条件（与恢复对账同一口径，H6 起）：event == "verification"、
+    unit == 单元 id（逐字精确，无 unit 字段的旧格式事件不匹配）、
+    fingerprint == 当前指纹（对 owned_hits 真算——空 owned_hits 也算，
+    指纹仍绑定基线修订，与 _interrupted_advice 原口径一致）、
+    status == "pass"、command == 该 required command。
+
+    快路径：unit["verification"] 非 list/tuple 视为空 required → 立即
+    返回 ok=True（fingerprint=None）——不取 touched、不读 journal、
+    不碰 git（下游完成门依赖此性质：零 required 的完成路径零 git）。
+
+    参数容错（与 reconcile_interrupted 同口径）：touched 缺省 →
+    ownership.git_touched_files（git 失败 OwnershipError 自然上抛）；
+    events 缺省 → journal.read_events(repo_root, task_id)；注入非
+    list → 按 [] 容错；ownership 声明模式非 list/tuple → []；指纹
+    计算失败 FingerprintError 自然上抛。
+
+    纯函数纪律：零落盘（不写 state / journal / 任何文件）、不修改
+    传入 unit / events / touched。
+    """
+    uid = unit.get("id")
+    required = unit.get("verification")
+    if not isinstance(required, (list, tuple)):
+        required = ()
+    if not required:  # 快路径：零 required 平凡成立，零 git / 零读盘
+        return {"ok": True, "fingerprint": None, "required": [],
+                "matched": [], "missing": []}
+    patterns = unit.get("ownership")
+    if not isinstance(patterns, (list, tuple)):
+        patterns = []
+    if touched is None:
+        touched = ownership.git_touched_files(repo_root)
+    if events is None:
+        events = journal.read_events(repo_root, task_id)
+    elif not isinstance(events, list):
+        events = []  # 注入通道容错：坏形状不炸判断（对账同口径）
+    owned_hits, _ = ownership.classify_paths(touched, patterns)
+    fp = fingerprint.compute_fingerprint(repo_root, owned_hits)
+    matched = []
+    for command in required:
+        # 从尾向头找第一条五条件全满足的事件（与原对账口径同序）
+        for event in reversed(events):
+            if not isinstance(event, dict):
+                continue
+            if (event.get("event") == "verification"
+                    and event.get("unit") == uid
+                    and event.get("fingerprint") == fp
+                    and event.get("status") == "pass"
+                    and event.get("command") == command):
+                matched.append(command)
+                break
+    missing = [c for c in required if c not in matched]
+    return {"ok": not missing, "fingerprint": fp,
+            "required": list(required), "matched": matched,
+            "missing": missing}
+
+
+def _interrupted_advice(repo_root, task_id, unit, touched, events):
     """单个中断单元的裁决输出：(advice, advisory) 恰一非 None。
 
     running 走 §69 三分支建议（三分支见模块 docstring 证据顺序节）；
-    verifying 只有新鲜验证证据才建议 completed（verifying→completed
-    表内合法），无残留 / 残留无新鲜两种表外情形改出 no-op 裁决提示
-    （advisories，不携带转换——verifying→ready / verifying→verifying
-    均不在 §62 转换表内，建议层不出表外建议）。
-    证据匹配五条件（H6 起）：event 名 / unit == 单元 id（逐字精确，
-    无 unit 字段的旧格式事件不匹配）/ 指纹相等 / status=pass /
-    command ∈ verification。
+    verifying 只有全部 required command 都有新鲜验证证据才建议
+    completed（verifying→completed 表内合法），无残留 / 残留证据
+    不全两种表外情形改出 no-op 裁决提示（advisories，不携带转换——
+    verifying→ready / verifying→verifying 均不在 §62 转换表内，
+    建议层不出表外建议）。
+    证据判断复用 fresh_unit_verification（注入手中已有的 touched /
+    events，避免二次 git 与读盘；五条件逐字口径见该谓词 docstring）。
     """
     status = unit.get("status")
-    uid = unit.get("id")
     patterns = unit.get("ownership")
     if not isinstance(patterns, (list, tuple)):
         patterns = []
@@ -169,19 +250,10 @@ def _interrupted_advice(repo_root, unit, touched, events):
         if status == "verifying":
             return None, dict(ADVISORY_VERIFYING_RULING)
         return dict(SUGGEST_READY), None
-    fp = fingerprint.compute_fingerprint(repo_root, owned_hits)
-    command_pool = unit.get("verification")
-    if not isinstance(command_pool, (list, tuple)):
-        command_pool = ()
-    for event in reversed(events):
-        if not isinstance(event, dict):
-            continue
-        if (event.get("event") == "verification"
-                and event.get("unit") == uid
-                and event.get("fingerprint") == fp
-                and event.get("status") == "pass"
-                and event.get("command") in command_pool):
-            return dict(SUGGEST_COMPLETED), None
+    evidence = fresh_unit_verification(repo_root, task_id, unit,
+                                       touched=touched, events=events)
+    if evidence["ok"]:
+        return dict(SUGGEST_COMPLETED), None
     if status == "verifying":
         return None, dict(ADVISORY_VERIFYING_STAY)
     return dict(SUGGEST_VERIFYING), None
@@ -231,8 +303,8 @@ def reconcile_interrupted(repo_root, task_id, units, *, touched=None,
             continue  # 无合法 id 即无建议键，跳过（与依赖层容错一致）
         if unit.get("status") not in INTERRUPTED_STATUSES:
             continue  # §68：completed 等非中断状态零建议，不重跑
-        advice, advisory = _interrupted_advice(repo_root, unit, touched,
-                                               events)
+        advice, advisory = _interrupted_advice(repo_root, task_id, unit,
+                                               touched, events)
         if advice is not None:
             suggestions[uid] = advice
         if advisory is not None:

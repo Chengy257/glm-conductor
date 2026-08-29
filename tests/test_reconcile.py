@@ -36,7 +36,16 @@ journal + 驱动 reconcile_interrupted）+ 纯函数容错用例：
     unit_id，git 基座真算指纹）：同 command / 重叠 ownership 的 A/B
     双 running 单元——unit=uA 的验证事件 → A 建议 completed、B 只得
     verifying（不得复用）；事件归属对调对称成立；无 unit 字段的旧
-    格式事件不再匹配（双方 verifying，保守按无证据处理）。
+    格式事件不再匹配（双方 verifying，保守按无证据处理）；
+  - WU-P1 共享证据谓词（fresh_unit_verification，all-match 口径）：
+    直测——2 条 required 仅 1 条有证据 → ok=False 且 missing 恰为
+    未验证那条（all-match，D2 收紧）；空 required 快路径（无 git 的
+    普通 tempdir 可调用，零 git 零读盘；非 list/tuple required 同
+    口径）；unit=other / status=fail / stale 指纹 / command 不在
+    required 内 / 无 unit 字段旧格式五类事件均不算；events 注入非
+    list 容错为 []；恢复集成（经 reconcile_interrupted）——多
+    command 部分证据 + 残留改动 → running 得 verifying（不再
+    completed）、verifying 得 stay advisory，全部证据才双双 completed。
 
 git fixture 做法（git init + config + commit、Windows 下 .git 只读位
 清理）对齐 tests/test_stop_gate.py 的 GitRepoFixture；环境无 git 可执行
@@ -506,6 +515,200 @@ class ReconcileEvidenceMatchingTest(ReconcileFixture):
         report = reconcile.reconcile_interrupted(
             str(self.repo), TID, [unit])  # events 走缺省通道（真 journal）
         self.assertEqual(report["suggestions"]["ev"]["to"], "verifying")
+
+
+# —— WU-P1：fresh_unit_verification 共享证据谓词（all-match 口径直测） ——
+
+@unittest.skipUnless(shutil.which("git"), "环境无 git 可执行，跳过 git fixture 测试")
+class FreshUnitVerificationPredicateTest(ReconcileFixture):
+    """fresh_unit_verification 直测：五条件逐项 + all-match 收紧 +
+    events 注入容错（touched 显式注入，指纹与 reconcile 同口径真算）。"""
+
+    TOUCHED = ["src/multi/m.py"]
+
+    def multi_unit(self):
+        """双 required command 的 running 单元（all-match 的最小载体）。"""
+        self.write("src/multi/m.py", b"v1\n")
+        return make_unit("multi", ("src/multi/**",), status="running",
+                         verification=(CMD_A, CMD_B))
+
+    def evidence(self, unit, fp, *, command=None, unit_id=None,
+                 status="pass", event_name="verification"):
+        """构造一条可逐字段变异的验证事件（H6 journal 形态）。"""
+        return {"event": event_name,
+                "unit": unit["id"] if unit_id is None else unit_id,
+                "command": unit["verification"][0] if command is None
+                else command,
+                "status": status,
+                "fingerprint": fp}
+
+    def verdict(self, unit, events):
+        return reconcile.fresh_unit_verification(
+            str(self.repo), TID, unit, touched=self.TOUCHED, events=events)
+
+    def test_partial_required_evidence_is_not_ok(self):
+        # ① 2 条 required 仅 1 条有证据 → ok=False，missing 恰为未验证那条
+        unit = self.multi_unit()
+        fp = self.current_fingerprint(unit, self.TOUCHED)
+        report = self.verdict(unit, [self.evidence(unit, fp)])  # 仅 CMD_A
+        self.assertEqual(
+            report,
+            {"ok": False, "fingerprint": fp,
+             "required": [CMD_A, CMD_B], "matched": [CMD_A],
+             "missing": [CMD_B]})
+
+    def test_other_unit_event_does_not_count(self):
+        # ③ unit=other 的事件不算（H6 归属绑定）
+        unit = self.multi_unit()
+        fp = self.current_fingerprint(unit, self.TOUCHED)
+        events = [self.evidence(unit, fp),
+                  self.evidence(unit, fp, command=CMD_B, unit_id="other")]
+        report = self.verdict(unit, events)
+        self.assertFalse(report["ok"])
+        self.assertEqual(report["matched"], [CMD_A])
+        self.assertEqual(report["missing"], [CMD_B])
+
+    def test_fail_status_does_not_count(self):
+        # ④ status="fail" 不算 pass 证据
+        unit = self.multi_unit()
+        fp = self.current_fingerprint(unit, self.TOUCHED)
+        events = [self.evidence(unit, fp),
+                  self.evidence(unit, fp, command=CMD_B, status="fail")]
+        report = self.verdict(unit, events)
+        self.assertFalse(report["ok"])
+        self.assertEqual(report["matched"], [CMD_A])
+        self.assertEqual(report["missing"], [CMD_B])
+
+    def test_stale_fingerprint_does_not_count(self):
+        # ⑤ 指纹不匹配（stale）不算：事件先记、文件后改
+        unit = self.multi_unit()
+        fp_stale = self.current_fingerprint(unit, self.TOUCHED)
+        self.write("src/multi/m.py", b"v2\n")
+        events = [self.evidence(unit, fp_stale),
+                  self.evidence(unit, fp_stale, command=CMD_B)]
+        report = self.verdict(unit, events)
+        self.assertFalse(report["ok"])
+        self.assertEqual(report["matched"], [])
+        self.assertEqual(report["missing"], [CMD_A, CMD_B])
+
+    def test_command_outside_required_does_not_count(self):
+        # ⑥ command 不在 required 内不算（喂饱 required 之外的命令无用）
+        unit = self.multi_unit()
+        fp = self.current_fingerprint(unit, self.TOUCHED)
+        report = self.verdict(unit, [self.evidence(unit, fp, command=CMD_C)])
+        self.assertFalse(report["ok"])
+        self.assertEqual(report["matched"], [])
+        self.assertEqual(report["missing"], [CMD_A, CMD_B])
+
+    def test_legacy_event_without_unit_field_does_not_count(self):
+        # ⑦ 无 unit 字段的旧格式事件不算（H6 破坏性决策不回退）
+        unit = self.multi_unit()
+        fp = self.current_fingerprint(unit, self.TOUCHED)
+        events = [{"event": "verification", "command": CMD_A,
+                   "status": "pass", "fingerprint": fp}]
+        report = self.verdict(unit, events)
+        self.assertFalse(report["ok"])
+        self.assertEqual(report["matched"], [])
+
+    def test_non_list_events_tolerated_as_empty(self):
+        # ⑧ events 注入非 list → 按 [] 容错（全部 required 归 missing）
+        unit = self.multi_unit()
+        for events in ("not-a-list", {"event": "verification"}, 42):
+            with self.subTest(events=events):
+                report = self.verdict(unit, events)
+                self.assertFalse(report["ok"])
+                self.assertEqual(report["required"], [CMD_A, CMD_B])
+                self.assertEqual(report["matched"], [])
+                self.assertEqual(report["missing"], [CMD_A, CMD_B])
+
+
+class FreshUnitVerificationFastPathTest(TempDirFixture):
+    """空 required 快路径：无 git 的普通 tempdir 可调用（零 git 零读盘）。"""
+
+    def test_empty_required_returns_ok_without_git(self):
+        # ② verification 为空 → 平凡 ok；touched / events 缺省也不碰 git
+        # （若误触缺省通道，git_touched_files 会在非 git tempdir 上抛
+        # OwnershipError，本用例即失败——快路径性质的机械证明）
+        unit = make_unit("nofix", ("src/nofix/**",), status="completed")
+        result = reconcile.fresh_unit_verification(str(self.repo), TID, unit)
+        self.assertEqual(
+            result,
+            {"ok": True, "fingerprint": None, "required": [],
+             "matched": [], "missing": []})
+
+    def test_non_list_required_tolerated_as_empty_fast_path(self):
+        # required 非 list/tuple（缺字段 / 标量）同走快路径，不碰 git
+        raw_unit = {"id": "raw-legacy", "ownership": ["src/raw/**"],
+                    "status": "running"}
+        result = reconcile.fresh_unit_verification(
+            str(self.repo), TID, raw_unit, touched=["src/raw/x.py"],
+            events=[{"event": "verification"}])
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["required"], [])
+
+    def test_non_empty_required_without_git_raises_ownership_error(self):
+        # 对照：required 非空才走缺省 touched 通道 → 非 git 仓库上抛
+        unit = make_unit("g", ("src/g/**",), status="running",
+                         verification=(CMD_A,))
+        with self.assertRaises(ownership.OwnershipError):
+            reconcile.fresh_unit_verification(str(self.repo), TID, unit)
+
+
+# —— WU-P1：恢复集成（D2 收紧经 reconcile_interrupted 生效） ——
+
+@unittest.skipUnless(shutil.which("git"), "环境无 git 可执行，跳过 git fixture 测试")
+class ReconcileAllMatchRecoveryTest(ReconcileFixture):
+    """多 command 单元部分证据不得 completed（D2 收紧）：
+    running → verifying（非 completed）、verifying → stay advisory；
+    全部 required 各有新鲜证据才恢复 completed 建议。"""
+
+    TOUCHED = ["src/duo/d.py"]
+
+    def duo_units(self):
+        """同 ownership 的 running / verifying 双单元（各双 required）。"""
+        self.write("src/duo/d.py", b"v1\n")
+        running = make_unit("duo-run", ("src/duo/**",), status="running",
+                            verification=(CMD_A, CMD_B))
+        verifying = make_unit("duo-ver", ("src/duo/**",), status="verifying",
+                              verification=(CMD_A, CMD_B))
+        return running, verifying
+
+    def test_partial_evidence_no_longer_suggests_completed(self):
+        # ⑨ 仅 CMD_A 有证据 → running 得 verifying、verifying 得 stay
+        running, verifying = self.duo_units()
+        fp = self.current_fingerprint(running, self.TOUCHED)
+        events = [self.verification_event(running, fp)]  # 夹具默认首 command
+        events.append({"event": "verification", "unit": "duo-ver",
+                       "command": CMD_A, "status": "pass",
+                       "fingerprint": fp})
+        report = reconcile.reconcile_interrupted(
+            str(self.repo), TID, [running, verifying],
+            touched=self.TOUCHED, events=events)
+        self.assertEqual(report["suggestions"], {
+            "duo-run": {"to": "verifying",
+                        "reason": "残留改动无新鲜验证证据：主会话必须"
+                                  "亲自检查 diff 并运行单元验证"}})
+        self.assertEqual(report["advisories"], {
+            "duo-ver": {"reason": "verifying 保持现状：主会话直接运行"
+                                  "单元验证后完成或失败"}})
+        self.assertEqual(report["reconciled"], ["duo-run", "duo-ver"])
+
+    def test_full_evidence_still_suggests_completed(self):
+        # ⑩ 全部 required 各有新鲜证据 → 双双 completed（D2 全量口径）
+        running, verifying = self.duo_units()
+        fp = self.current_fingerprint(running, self.TOUCHED)
+        events = []
+        for unit in (running, verifying):
+            for command in (CMD_A, CMD_B):
+                events.append({"event": "verification",
+                               "unit": unit["id"], "command": command,
+                               "status": "pass", "fingerprint": fp})
+        report = reconcile.reconcile_interrupted(
+            str(self.repo), TID, [running, verifying],
+            touched=self.TOUCHED, events=events)
+        self.assertEqual(report["suggestions"]["duo-run"]["to"], "completed")
+        self.assertEqual(report["suggestions"]["duo-ver"]["to"], "completed")
+        self.assertEqual(report["advisories"], {})
 
 
 # —— 纯函数：建议 / 咨询键序按 units 出现序 ——
