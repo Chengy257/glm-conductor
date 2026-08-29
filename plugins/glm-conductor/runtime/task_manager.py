@@ -70,6 +70,13 @@
     重叠 ownership 的单元之间不存在错误复用证据的空间。任务级（完成
     门口径）证据仍走 runtime.state.record_verification，两者口径正交。
 
+多单元就绪流转（v2.0.1 收尾，dogfood 缺口补齐）：
+    finish_unit 使某单元到达 completed 后调用 refresh_readiness——
+    依赖全部 completed 的 pending / waiting_dependency 单元提升为
+    ready（§62 表内合法边；就绪是可推导的状态提升，刻意不落
+    journal），随后 prepare_dispatch 即可直接准入下一单元——主会话
+    不再手工转态。
+
 分层关系：
     runtime.dispatcher —— 纯决策器：plan_dispatch 零 I/O，只产出「谁可
         派发 / 谁挂起及理由」的决策 dict；本层在 prepare 中消费它；
@@ -93,6 +100,7 @@
     §64-§67（准入）/ §70（父验证）/ §78（租约时点）/ §69（恢复对账）。
 """
 
+from runtime import dependency
 from runtime import dispatcher
 from runtime import journal
 from runtime import lease
@@ -401,6 +409,59 @@ def finish_unit(repo_root, task_id, uid, *, outcome="completed") -> dict:
     journal.append_event(repo_root, task_id, {
         "event": "unit_finished", "unit": uid, "outcome": outcome})
     return st
+
+
+# —— readiness：就绪推导态提升（v2.0.1 收尾，dogfood 缺口补齐） ——
+
+# 依赖满足后可被提升为 ready 的单元状态（§62 表内合法边：
+# pending → ready 与 waiting_dependency → ready 均在转换表内）
+PROMOTABLE_STATUSES = ("pending", "waiting_dependency")
+
+
+def refresh_readiness(repo_root, task_id) -> "list[str]":
+    """把「依赖已全部 completed」的 pending / waiting_dependency 单元
+    提升为 ready，返回本次提升的 uid 列表（按 units 出现序）。
+
+    动机（dogfood 发现）：单元依赖满足后会停在 pending——
+    prepare_dispatch 只接受 ready 单元（§64 就绪集推导），此前依赖
+    满足后的状态提升靠调用方手工 transition_work_unit。本 API 把
+    这一步固化为显式入口。
+
+    流程：
+      1. load_state（任务缺失 TaskManagerError；损坏 ValueError 上抛）；
+      2. 逐单元：status ∈ PROMOTABLE_STATUSES 且
+         dependency.deps_satisfied（每个依赖都存在且 completed）→
+         transition_work_unit(unit, "ready")（§62 表内合法边）；
+      3. 有提升才 save_state（单次）；无提升零写入（零落盘、零
+         半状态，可安全重复调用）；
+      4. 不写 journal——就绪是可从依赖图重新推导的状态提升，不是
+         生命周期事实；journal 只记事实（派发 / 终态 / 租约），
+         不记推导（刻意裁量，非遗漏）。
+
+    调用时机：commit_dispatch / finish_unit 使某单元到达 completed
+    之后、prepare_dispatch 派发下一单元之前——下游单元即可直接过
+    准入，无需任何手工转态。
+    """
+    api = "refresh_readiness"
+    st = _require_state(repo_root, task_id, api)
+    units = st.get("work_units")
+    if not isinstance(units, list):
+        return []
+    by_id = {unit.get("id"): unit for unit in units
+             if isinstance(unit, dict) and isinstance(unit.get("id"), str)}
+    promoted = []
+    for unit in units:
+        if not isinstance(unit, dict):
+            continue
+        if unit.get("status") not in PROMOTABLE_STATUSES:
+            continue
+        if not dependency.deps_satisfied(unit, by_id):
+            continue
+        work_unit.transition_work_unit(unit, "ready")
+        promoted.append(unit.get("id"))
+    if promoted:
+        state.save_state(repo_root, st)
+    return promoted
 
 
 # —— 单元验证证据写入口（v2.0.1 加固 H6，审查项 P1-7） ——

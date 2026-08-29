@@ -2,7 +2,7 @@
 
 [English](./README.en.md) | **简体中文**
 
-![Version](https://img.shields.io/badge/version-2.0.0-blue.svg)
+![Version](https://img.shields.io/badge/version-2.0.1-blue.svg)
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
 ![ZCode Plugin](https://img.shields.io/badge/ZCode-plugin-green.svg)
 ![Models](https://img.shields.io/badge/models-GLM--5.3%20%2F%20GLM--5.3--Flash-orange.svg)
@@ -46,6 +46,8 @@ v2 起，插件把原本写在提示词里的关键契约升级为**运行时强
 - **文件租约与有界并行**（experimental）——全有或全无获取、异 owner 冲突拒绝；并行上限 4，默认串行
 - **额度感知连续性**——查询 Coding Plan 用量（凭证零落盘），四态评估，EXHAUSTED 按最晚窗口 reset 精确规划唤醒；不可用时 fail-open 回退周期性探针；`/glm-conductor:quota` 随时诊断
 - **跨会话恢复**——任务专属 checkpoint + 八步恢复检查，仓库真实状态始终优先于记录
+
+**v2.0.1 运行时完整性加固**——依据 v2.0.0 全面审查的 H1-H8 收口：完成生命周期门控（`finalizing` + 状态转换表，`completed` 仅完成门可提交）、路由跨字段不变量与任务发现四分类 fail-closed（损坏的 state.json 不再被当成"无任务"）。`task_manager` 事务边界四 API 固化派发生命周期（决策 → 租约 → 状态转换 → 记账 → 落盘 → 事件），崩溃窗口有确定性恢复路径。租约获得 TTL/generation/心跳续约，`recover_leases` 自动清理 stale 租约——崩溃后无需人工删 leases.json。验证证据显式绑定 work unit id（无 `unit` 字段的旧事件不再被恢复对账采信，属有意的破坏性变更；主会话需重新验证）。CI 覆盖 ubuntu + windows × Python 3.8/3.13。
 
 ## 路由矩阵
 

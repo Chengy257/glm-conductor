@@ -2,7 +2,7 @@
 
 **English** | [简体中文](./README.md)
 
-![Version](https://img.shields.io/badge/version-2.0.0-blue.svg)
+![Version](https://img.shields.io/badge/version-2.0.1-blue.svg)
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
 ![ZCode Plugin](https://img.shields.io/badge/ZCode-plugin-green.svg)
 ![Models](https://img.shields.io/badge/models-GLM--5.3%20%2F%20GLM--5.3--Flash-orange.svg)
@@ -46,6 +46,8 @@ Since v2, the plugin upgrades its key contracts from prompt text to **runtime en
 - **File leases & bounded parallelism** (experimental) — all-or-nothing acquisition, foreign-owner conflict rejection; parallel cap of 4, serial by default
 - **Quota-aware continuity** — query Coding Plan usage (zero credential persistence), four-state evaluation, EXHAUSTED schedules wake-ups against the latest blocking reset; falls back to periodic liveness probing when unavailable; `/glm-conductor:quota` for on-demand diagnostics
 - **Cross-session resume** — per-task checkpoints with an eight-step recovery check; repository truth always wins over recorded state
+
+**v2.0.1 runtime integrity hardening** — closing out H1-H8 from the v2.0.0 comprehensive review: a gated completion lifecycle (`finalizing` + a status transition table, with `completed` committable only through the Stop gate), cross-field route invariants, and four-way fail-closed task discovery (a corrupt state.json is no longer treated as "no task"). The `task_manager` transaction boundary fuses the dispatch lifecycle into four APIs (plan → lease → transition → bookkeeping → save → journal) with deterministic crash-window recovery. Leases gain TTL/generation/heartbeat renewal, and `recover_leases` automatically cleans up stale leases — no manual leases.json deletion after a crash. Verification evidence is explicitly bound to a work unit id (legacy events without a `unit` field are no longer trusted by resume reconciliation — an intentional breaking change; the main session re-verifies). CI covers ubuntu + windows × Python 3.8/3.13.
 
 ## Routing Matrix
 

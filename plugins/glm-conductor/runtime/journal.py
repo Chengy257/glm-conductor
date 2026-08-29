@@ -47,6 +47,7 @@ RECOMMENDED_EVENTS = (
     "implementation_started",  # 实施者派发
     "dispatch_prepared",   # task_manager.prepare_dispatch（决策通过 + 租约在位）
     "dispatch_aborted",    # task_manager.abort_dispatch（未提交准备的回退）
+    "lease_recovered",     # task_manager.recover_leases（崩溃后 stale 租约释放）
     "verification",        # 主会话验证（含 command/status）
     "review",              # 审查者裁决（含 verdict）
     "unit_finished",       # task_manager.finish_unit（单元终态 + 租约释放）

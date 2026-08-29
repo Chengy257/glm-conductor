@@ -57,9 +57,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "plugins" / "glm-co
 from runtime import fingerprint as fingerprint_mod
 from runtime import journal as journal_mod
 from runtime import state
-# H3：钩子模块直接导入，单测 _corrupt_requires_fail_closed 证据规则、
-# build_block_reason 的 corrupt_state 报文模板与 commit_finalizing_
-# completions 的失败隔离（子进程冒烟之外的快速反馈）
+# H1/H3：钩子模块直接导入——commit_finalizing_completions 的完成提交
+# 通道与失败隔离（H1）、_corrupt_requires_fail_closed 证据规则与
+# build_block_reason 的 corrupt_state 报文模板（H3）的模块级直测
+# （子进程冒烟之外的快速反馈）
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "plugins" / "glm-conductor" / "hooks"))
 import stop_gate
 from stop_gate import _corrupt_requires_fail_closed, build_block_reason

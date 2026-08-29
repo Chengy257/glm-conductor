@@ -51,7 +51,11 @@ new_work_unit 构造，非 mock state），不污染真实工作区。
     - H6（验证证据归属绑定）：record_unit_verification 正常写入逐字段
       锚定 / fail 合法词汇 / 空 uid-command-fingerprint 与非法 status
       各抛 ValueError（消息含字段名）/ prepare→commit→
-      record_unit_verification→finish_unit 全流程事件序。
+      record_unit_verification→finish_unit 全流程事件序；
+    - RELEASE（refresh_readiness）：pending+依赖满足提升并返回 /
+      waiting_dependency 提升 / 依赖未满足不提升零写入 / 全 ready 与
+      空图零写入零返回零 journal / 提升序按 units 出现序 / 提升后
+      prepare_dispatch 直接准入（集成）。
 
 运行：
     cd <repo_root> && python3 -m unittest tests.test_task_manager -v
@@ -740,6 +744,68 @@ class RecordUnitVerificationTest(TaskManagerTestBase):
         self.assertEqual(names, ["dispatch_prepared",
                                  "implementation_started",
                                  "verification", "unit_finished"])
+
+
+# —— RELEASE：就绪推导态提升（refresh_readiness，dogfood 缺口补齐） ——
+
+class RefreshReadinessTest(TaskManagerTestBase):
+
+    def test_pending_unit_with_satisfied_deps_is_promoted(self):
+        make_task(self.root, [wu("u0", status="completed"),
+                              wu("u1", ("src/b/**",), deps=("u0",),
+                                 status="pending")])
+        promoted = task_manager.refresh_readiness(self.root, TID)
+        self.assertEqual(promoted, ["u1"])
+        st = state.load_state(self.root, TID)
+        self.assertEqual(unit_of(st, "u1")["status"], "ready")
+
+    def test_waiting_dependency_unit_is_promoted(self):
+        make_task(self.root, [wu("u0", status="completed"),
+                              wu("u1", ("src/b/**",), deps=("u0",),
+                                 status="waiting_dependency")])
+        promoted = task_manager.refresh_readiness(self.root, TID)
+        self.assertEqual(promoted, ["u1"])
+        st = state.load_state(self.root, TID)
+        self.assertEqual(unit_of(st, "u1")["status"], "ready")
+
+    def test_unmet_dependency_blocks_promotion(self):
+        # 一个 dep completed、另一个 running → 不满足 → 不提升、零写入
+        make_task(self.root, [wu("u0", status="completed"),
+                              wu("u9", ("src/z/**",), status="running"),
+                              wu("u1", ("src/b/**",), deps=("u0", "u9"),
+                                 status="pending")])
+        before = state_bytes(self.root)
+        self.assertEqual(task_manager.refresh_readiness(self.root, TID), [])
+        self.assertEqual(state_bytes(self.root), before)
+        st = state.load_state(self.root, TID)
+        self.assertEqual(unit_of(st, "u1")["status"], "pending")
+
+    def test_no_promotion_means_zero_writes_and_no_journal(self):
+        # 全部已 ready → 零返回零写入；journal 不落任何事件
+        make_task(self.root, [wu("u1")])
+        before = state_bytes(self.root)
+        self.assertEqual(task_manager.refresh_readiness(self.root, TID), [])
+        self.assertEqual(state_bytes(self.root), before)
+        self.assertEqual(journal.read_events(self.root, TID), [])
+
+    def test_promotion_order_follows_units_appearance_order(self):
+        make_task(self.root, [wu("u0", status="completed"),
+                              wu("u2", ("src/c/**",), deps=("u0",),
+                                 status="pending"),
+                              wu("u1", ("src/b/**",), deps=("u0",),
+                                 status="pending")])
+        promoted = task_manager.refresh_readiness(self.root, TID)
+        self.assertEqual(promoted, ["u2", "u1"])
+
+    def test_promoted_unit_passes_prepare_dispatch_directly(self):
+        # 集成：提升后 prepare_dispatch 无需任何手工转态直接准入
+        make_task(self.root, [wu("u0", status="completed"),
+                              wu("u1", ("src/b/**",), deps=("u0",),
+                                 status="pending")])
+        self.assertEqual(task_manager.refresh_readiness(self.root, TID),
+                         ["u1"])
+        plan = task_manager.prepare_dispatch(self.root, TID, "u1")
+        self.assertEqual(plan["dispatch"], ["u1"])
 
 
 if __name__ == "__main__":
