@@ -70,7 +70,10 @@ fail-open 策略：
         OSError）→ 读该目录 journal 找高保障证据（route_selected 的
         mode ∈ (audit, full) 或 assurance=high，或 status_changed 的
         to=finalizing）：有 → fail-closed 并入违规清单（check=
-        corrupt_state，走统一 block / exhaustion 机器，报文含恢复指引）；
+        corrupt_state，走统一 block / exhaustion 机器，报文含恢复指引），
+        且在发现阶段即 stderr 报警（deferred for enforcement——保证
+        git_unavailable / evaluation_error 降级早退路径下高保障 corrupt
+        至少留下 stderr 痕迹；journal 记账仍在统一 block 机器）；
         无 → 降级放行（stderr 报警 + journal 记 gate_degraded，
         reason=corrupt_state）。
     由此区分 no task（静默零干预）与 unreadable task（结构化报警，
@@ -590,8 +593,9 @@ def main():
     发现段用 state.discover_tasks 四分类（H3/P0-3，见模块 docstring
     「发现完整性」）：orphaned 永不拦截、无证据 corrupt 降级放行（均
     stderr 报警 + journal gate_degraded 可见），有高保障证据的 corrupt
-    并入违规清单 fail-closed；无 corrupt/orphaned 目录时流程与四分类
-    引入前完全一致。
+    在发现阶段即 stderr 报警（deferred for enforcement）后并入违规清单
+    fail-closed——即使本轮随后走入 git/求值降级早退，也留下可见痕迹；
+    无 corrupt/orphaned 目录时流程与四分类引入前完全一致。
     全绿放行路径额外做完成提交：对全部 finalizing 任务原子提交
     completed 并记 completed 事件（见模块 docstring「完成提交」）。
     """
@@ -625,6 +629,12 @@ def main():
     for name, reason in discovery["corrupt"]:
         if _corrupt_requires_fail_closed(repo, name):
             deferred_corrupt.append((name, reason))
+            # 发现阶段即报警：即便本轮后续走入 git / 求值降级早退
+            # （deferred 违规不进入统一 block 机器），高保障 corrupt
+            # 也已在 stderr 留下可见痕迹（journal 记账仍归 block 路径）
+            warn_stderr(
+                "ENFORCEMENT: unreadable high-assurance task state "
+                "deferred for enforcement (task %s): %s" % (name, reason))
         else:
             warn_stderr(
                 "ENFORCEMENT DEGRADED: task %s state.json unreadable and "

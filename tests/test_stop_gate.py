@@ -51,14 +51,17 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "plugins" / "glm-conductor"))
 from runtime import fingerprint as fingerprint_mod
 from runtime import journal as journal_mod
 from runtime import state
-# H3：钩子模块直接导入，单测 _corrupt_requires_fail_closed 证据规则与
-# build_block_reason 的 corrupt_state 报文模板（子进程冒烟之外的快速反馈）
+# H3：钩子模块直接导入，单测 _corrupt_requires_fail_closed 证据规则、
+# build_block_reason 的 corrupt_state 报文模板与 commit_finalizing_
+# completions 的失败隔离（子进程冒烟之外的快速反馈）
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "plugins" / "glm-conductor" / "hooks"))
+import stop_gate
 from stop_gate import _corrupt_requires_fail_closed, build_block_reason
 
 # 被测钩子脚本：仓库根 plugins/glm-conductor/hooks/stop_gate.py
@@ -1446,6 +1449,88 @@ class StopGateCorruptWithActiveTaskTest(GitRepoFixture):
         self.assertEqual(
             [e["event"] for e in self.journal_events(self.CORRUPT)],
             ["route_selected"])
+
+
+# —— H1 补充：commit_finalizing_completions 单任务失败隔离（fail-open） ——
+
+@unittest.skipUnless(shutil.which("git"), "环境无 git 可执行，跳过 git fixture 测试")
+class StopGateCommitFailureIsolationTest(GitRepoFixture):
+    """提交步骤单任务失败只降级该任务：stderr 报警 + 保持 finalizing，
+    后续任务照常提交 completed + completed 事件（记账异常绝不崩放行路径）。"""
+
+    def test_single_commit_failure_does_not_block_next_task(self):
+        first = self.add_active_task(
+            status="finalizing", task_id="commit-fail-aaa")
+        second = self.add_active_task(
+            status="finalizing", task_id="commit-ok-bbb")
+        real_commit = state.commit_completion
+
+        def flaky_commit(repo_root, task_id):
+            if task_id == first:
+                raise RuntimeError("模拟记账失败")
+            return real_commit(repo_root, task_id)
+
+        with mock.patch.object(state, "commit_completion",
+                               side_effect=flaky_commit), \
+                mock.patch.object(stop_gate, "warn_stderr") as warn_mock:
+            stop_gate.commit_finalizing_completions(
+                state, fingerprint_mod, journal_mod, str(self.repo),
+                [first, second], touched=None, base=None)
+        # 第一个任务：恰好一次 DEGRADED 报警（含任务 ID）+ 状态保持
+        # finalizing + 无 completed 事件
+        self.assertEqual(warn_mock.call_count, 1)
+        warn_message = warn_mock.call_args[0][0]
+        self.assertIn("ENFORCEMENT DEGRADED", warn_message)
+        self.assertIn(first, warn_message)
+        self.assertIn("left in finalizing", warn_message)
+        self.assertEqual(
+            state.load_state(self.repo, first)["status"], "finalizing")
+        self.assertEqual(self.journal_events(first), [])
+        # 第二个任务：不受牵连，正常提交 completed + completed 事件
+        self.assertEqual(
+            state.load_state(self.repo, second)["status"], "completed")
+        events = self.journal_events(second)
+        self.assertEqual([e["event"] for e in events], ["completed"])
+        self.assertEqual(events[0]["via"], "completion_gate")
+        self.assertEqual(events[0]["task_id"], second)
+
+
+# —— H3 补充：corrupt 高保障 × git 失败交叉路径（deferred stderr 痕迹） ——
+
+class StopGateCorruptWithGitFailureTest(TempDirFixture):
+    """active 非空 + git 不可用降级早退时，已收集的 deferred 高保障
+    corrupt 任务因发现阶段已报警而留下 stderr 痕迹（journal 记账仍归
+    统一 block 机器，降级路径不写）。"""
+
+    CORRUPT = "corrupt-task-aaa"
+
+    def test_git_failure_path_still_warns_deferred_corrupt(self):
+        self.add_corrupt_task(self.CORRUPT)
+        journal_mod.append_event(
+            self.repo, self.CORRUPT,
+            {"event": "route_selected", "mode": "full",
+             "delegability": "high", "assurance": "high"})
+        # 非 git 目录（TempDirFixture 无 git init）+ 声明 ownership 的
+        # active 任务 → git touched 清单不可得 → 降级早退
+        self.add_active_task(ownership_files=["src/owned/**"])
+        result = run_gate("{}", self.repo)
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stdout, "")  # 降级放行
+        # stderr 同时含 git 降级报警与 deferred corrupt 报警
+        self.assertIn("cannot list touched files", result.stderr)
+        self.assertIn(
+            "deferred for enforcement (task %s)" % self.CORRUPT,
+            result.stderr)
+        # corrupt 任务无 gate_blocked 记账（记账归统一 block 机器），
+        # active 侧照旧记 git_unavailable 降级
+        self.assertEqual(
+            [e["event"] for e in self.journal_events(self.CORRUPT)],
+            ["route_selected"])
+        self.assertEqual(
+            [e["event"] for e in self.journal_events()],
+            ["gate_degraded"])
+        self.assertEqual(
+            self.journal_events()[0]["reason"], "git_unavailable")
 
 
 if __name__ == "__main__":

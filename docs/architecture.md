@@ -266,7 +266,7 @@ R3 review 绑定：mode ∈ (audit, full) 或 assurance=high（derive_review_req
 R4 delegate/full 实质性：ownership.files 与 verification.required 必须非空数组
 ```
 
-配套地，`new_task_state` 的 `review_required` 缺省值改为按 route 推导（audit/full 或 assurance:high → True；solo/delegate + standard → False；信息不足落 False；显式 True/False 照传——显式 False + 推导 True 的组合由 R3 在保存时拒绝）。门侧同步：`hooks/stop_gate.py` 的参与判定与检查 3 的条件从「只认 `review.required` 标志」改为「标志为 True 或 route 推导要求审查」——即使手写 state.json 绕过 `save_state` 校验漏写标志，high-assurance 任务也无法跳过独立 fresh ship 裁决的检查（报文与七种 check 词汇不变，仍按 review_missing / review_stale 拦截）。
+配套地，`new_task_state` 的 `review_required` 缺省值改为按 route 推导（audit/full 或 assurance:high → True；solo/delegate + standard → False；信息不足落 False；显式 True/False 照传——显式 False + 推导 True 的组合由 R3 在保存时拒绝）。门侧同步：`hooks/stop_gate.py` 的参与判定与检查 3 的条件从「只认 `review.required` 标志」改为「标志为 True 或 route 推导要求审查」——即使手写 state.json 绕过 `save_state` 校验漏写标志，high-assurance 任务也无法跳过独立 fresh ship 裁决的检查（不新增 check 词汇，仍按 review_missing / review_stale 拦截）。
 
 ### 9.1.3 任务发现完整性（P0-3）
 

@@ -139,7 +139,7 @@ state.json 字段概览（权威 schema 见插件 `runtime/state.py`）：
 | visual_evidence | 视觉证据清单（path + 原始字节 sha256；截图被替换即 stale） |
 | work_units / dispatch | 多工作单元与派发状态（beta2 起：十状态模型/依赖图/准入对账见 orchestration 技能「工作单元与任务图」） |
 
-status 生命周期词汇：`created → preflight → routed → decomposed → executing → joining → verifying → reviewing → completed`，附加态 `waiting_quota / blocked / cancelled / failed`；终态为 `completed / cancelled / failed`（终态后不再被完成门跟踪）。status 只前进不回退；repository 仍是代码状态真相源，state.json 只是运行时任务状态。
+status 生命周期词汇：`created → preflight → routed → decomposed → executing → joining → verifying → reviewing → finalizing → completed`（finalizing=完成请求态，completed 仅由完成门提交），附加态 `waiting_quota / blocked / cancelled / failed`；终态为 `completed / cancelled / failed`（终态后不再被完成门跟踪）。status 只前进不回退；repository 仍是代码状态真相源，state.json 只是运行时任务状态。
 
 events.jsonl 事件时点表与写入约束见 SKILL.md「任务状态与执行日志」节；追加一律通过 `runtime/journal.py`（时间戳由模块管理，调用方不得自带）。
 

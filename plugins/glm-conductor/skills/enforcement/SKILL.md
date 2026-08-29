@@ -19,13 +19,13 @@ description: GLM Conductor v2 强制层运行时契约。解释 Stop 完成门�
 
 ### Layer A — Stop 完成门（确定性，alpha2 起为四重检查）
 
-活动任务（state.json 存在且 status 非终态）在主会话 turn 结束时按固定顺序做四重检查，任一失败即 block（报文可行动：列出缺失项/过期证据与恢复动作）。**参与判定**：ownership 声明非空、verification.required 非空、review.required 为 true、visual_evidence 非空——四者任一成立即受门跟踪；全部为空的任务不参与（普通会话零干预）。
+活动任务（state.json 存在且 status 非终态）在主会话 turn 结束时按固定顺序做四重检查，任一失败即 block（报文可行动：列出缺失项/过期证据与恢复动作）。**参与判定**：ownership 声明非空、verification.required 非空、review.required 为 true **或 route 推导要求审查（mode 为 audit/full 或 assurance=high，同钩子 `_route_requires_review` 推导）**、visual_evidence 非空——四者任一成立即受门跟踪（route 推导保证手写 state 漏写 review.required 也参与，无法绕过）；全部为空的任务不参与（普通会话零干预）。
 
 | # | 检查 | 通过条件 | 失败形态（journal `check` 字段） |
 | --- | --- | --- | --- |
 | 1 | ownership（Layer A 原有） | git 改动文件 ⊆ 声明 ownership.files | `ownership`（报文列 out-of-scope 路径与两条出路） |
 | 2 | 验证 | required 命令全部 completed，且 verification.fingerprint = 当前指纹 | `verification_missing` / `verification_stale` |
-| 3 | 审查（review.required=true 时） | verdict = ship，且 review.fingerprint = 当前指纹 | `review_missing` / `review_rejected`（fix-first/rethink）/ `review_stale` |
+| 3 | 审查（review.required=true **或 route 推导要求审查——mode 为 audit/full 或 assurance=high**——时同样受查，手写 state 漏写标志无法绕过） | verdict = ship，且 review.fingerprint = 当前指纹 | `review_missing` / `review_rejected`（fix-first/rethink）/ `review_stale` |
 | 4 | 视觉证据 | visual_evidence 每项文件字节 sha256 与记录一致 | `visual_stale` |
 | 5 | 状态完整性（H3/P0-3） | state.json 可读 | `corrupt_state`（state.json 损坏 + journal 高保障证据 → fail-closed 拦截；见下方「损坏状态的处置与恢复指引」） |
 
