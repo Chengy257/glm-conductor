@@ -102,6 +102,8 @@ active task（continuity 为 resumable / idle，或需 Stop 完成门保护的 d
 | low | high | `audit` | GLM-5.3 主会话 | 是 |
 | high | high | `full` | 实施者子智能体 | 是 |
 
+矩阵与 review/ownership/verification/executor 绑定自 v2.0.1 起由 runtime.state.validate_route_invariants 在保存时强制，Stop 完成门按 route 推导审查义务——漏写 review.required 无法绕过。
+
 语义要点：
 
 - **delegate 不是 solo 的"升级"**。solo = 旗舰实施，delegate = Flash 实施，两者只是实施者不同；delegate 表达的是"该实施已足够有界，可由执行模型完成"，并不天然更安全或更高级。

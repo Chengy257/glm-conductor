@@ -56,8 +56,11 @@ from runtime import state
 from runtime import work_unit
 
 TID = "recon-task-1a2b3c"
-ROUTE = {"mode": "delegate", "delegability": "high", "assurance": "standard",
-         "executor": "flash-implementer", "continuity": "foreground"}
+# H2 夹具迁移：delegate 路由在规则 R4 下要求非空 ownership/verification，
+# 而本文件的指纹口径依赖「未声明 ownership = 全部改动」基座——改用矩阵
+# 合法的 solo 路由（被测的对账行为与路由模式无关，ownership 保持未声明）
+ROUTE = {"mode": "solo", "delegability": "low", "assurance": "standard",
+         "executor": "main", "continuity": "foreground"}
 
 CMD_A = "python3 -m unittest tests.test_feature_a"
 CMD_B = "python3 -m unittest tests.test_feature_b"

@@ -11,6 +11,9 @@
         同一 dict，不触碰磁盘，调用方负责 save_state）——记录验证命令 /
         审查裁决的证据指纹与视觉证据 sha256（升级指南 §19/§20/§22）；
       - 校验：validate_state() 返回中文错误列表（空列表 = 合法），不抛异常；
+        除逐字段枚举外还强制 route 跨字段不变量（矩阵一致性 / executor /
+        review / delegate-full 实质性绑定，validate_route_invariants，
+        H2/P0-2）；
       - 保存：save_state() 先校验再原子写（同目录 tmp + os.replace），并按
         顶层状态转换表（TASK_TRANSITIONS）拒绝非法 status 迁移——
         completed 只能由完成门经内部通道（commit_completion）提交；
@@ -65,6 +68,14 @@ DELEGABILITY_LEVELS = ("low", "high")
 ASSURANCE_LEVELS = ("standard", "high")
 # 实施者（主会话自己实施 / 两个实施侧 agent）
 EXECUTORS = ("main", "flash-implementer", "visual-implementer")
+# Delegability × Assurance → mode 路由矩阵（SKILL.md §5 的代码化权威定义；
+# validate_route_invariants 规则 1 据此强制矩阵一致性，H2/P0-2）
+ROUTE_MATRIX = {
+    "low": {"standard": "solo", "high": "audit"},
+    "high": {"standard": "delegate", "high": "full"},
+}
+# 委派实施侧的两个实施者（R2 executor 绑定的 delegate/full 合法集合）
+IMPLEMENTER_EXECUTORS = ("flash-implementer", "visual-implementer")
 # 连续性三模式
 CONTINUITY_MODES = ("foreground", "resumable", "idle")
 # 任务全生命周期状态（finalizing = 完成请求态：进入即请求完成，
@@ -194,6 +205,102 @@ def _validate_route(route):
             ("continuity", CONTINUITY_MODES)):
         if key in route and route[key] is not None and route[key] not in allowed:
             errors.append(_enum_error("route." + key, route[key], allowed))
+    return errors
+
+
+def derive_review_required(route):
+    """由 route 推导审查义务：mode ∈ (audit, full) 或 assurance == "high"
+    → True；mode ∈ (solo, delegate) 且 assurance == "standard" → False；
+    其余（信息不足 / route 非 dict）→ None。"""
+    if not isinstance(route, dict):
+        return None
+    mode = route.get("mode")
+    assurance = route.get("assurance")
+    if mode in ("audit", "full") or assurance == "high":
+        return True
+    if mode in ("solo", "delegate") and assurance == "standard":
+        return False
+    return None
+
+
+def validate_route_invariants(state) -> "list[str]":
+    """校验 route 跨字段不变量（H2/P0-2：route 与 review/executor/
+    ownership/verification 的关系成为确定性约束），返回中文错误列表
+    （空列表 = 合法；不抛异常）。
+
+    四条规则（均在涉及字段为合法枚举值时生效——非法值已有基线枚举
+    错误，不重复报；route 非 dict 或 mode 非法 → 返回空列表）：
+      - R1 矩阵一致性：mode 必须等于 ROUTE_MATRIX[delegability][assurance]；
+      - R2 executor 绑定：solo/audit ↔ "main"；delegate/full ↔ 实施者；
+      - R3 review 绑定：derive_review_required 为 True 时 review.required
+        必须为 True（review 块缺失按非 True 处理）；
+      - R4 delegate/full 实质性：ownership.files 与 verification.required
+        必须为非空数组。
+    """
+    if not isinstance(state, dict):
+        return []
+    route = state.get("route")
+    if not isinstance(route, dict):
+        return []
+    mode = route.get("mode")
+    if mode not in ROUTE_MODES:
+        return []
+    errors = []
+
+    delegability = route.get("delegability")
+    assurance = route.get("assurance")
+    # R1 矩阵一致性（delegability 与 assurance 均为合法枚举时才判）
+    if delegability in DELEGABILITY_LEVELS and assurance in ASSURANCE_LEVELS:
+        expected = ROUTE_MATRIX[delegability][assurance]
+        if mode != expected:
+            errors.append(
+                "route.mode %r 与 delegability=%r / assurance=%r "
+                "的矩阵组合不一致（应为 %r）"
+                % (mode, delegability, assurance, expected))
+
+    # R2 executor 绑定（executor 为合法枚举值时才判；None / 非法值跳过）
+    executor = route.get("executor")
+    if executor in EXECUTORS:
+        if mode in ("solo", "audit"):
+            if executor != "main":
+                errors.append(
+                    "route.executor %r 与 mode=%r 不一致"
+                    "（solo/audit 要求 executor 为 \"main\"）"
+                    % (executor, mode))
+        elif executor not in IMPLEMENTER_EXECUTORS:
+            errors.append(
+                "route.executor %r 与 mode=%r 不一致"
+                "（delegate/full 要求 executor 为 %s 之一）"
+                % (executor, mode, " / ".join(IMPLEMENTER_EXECUTORS)))
+
+    # R3 review 绑定：route 推导要求审查时 review.required 必须为 True
+    if derive_review_required(route) is True:
+        review = state.get("review")
+        required = review.get("required") if isinstance(review, dict) else None
+        if required is not True:
+            errors.append(
+                "review.required 必须为 true：route.mode=%r / "
+                "route.assurance=%r 推导出独立审查义务——该路由要求 "
+                "review.required=true" % (mode, assurance))
+
+    # R4 delegate/full 实质性：必须声明非空 ownership 与 verification
+    if mode in ("delegate", "full"):
+        ownership = state.get("ownership")
+        files = (
+            ownership.get("files") if isinstance(ownership, dict) else None)
+        if not isinstance(files, list) or not files:
+            errors.append(
+                "route.mode=%r 要求 ownership.files 为非空数组"
+                "（delegate/full 任务必须声明实质文件范围）" % mode)
+        verification = state.get("verification")
+        required_commands = (
+            verification.get("required")
+            if isinstance(verification, dict) else None)
+        if not isinstance(required_commands, list) or not required_commands:
+            errors.append(
+                "route.mode=%r 要求 verification.required 为非空数组"
+                "（delegate/full 任务必须声明验证命令）" % mode)
+
     return errors
 
 
@@ -387,13 +494,17 @@ def validate_state(state) -> "list[str]":
         if status not in TASK_STATUSES:
             errors.append(_enum_error("status", status, TASK_STATUSES))
 
+    # 规则 11：route 不变量（H2/P0-2 跨字段一致性：矩阵 / executor /
+    # review / delegate-full 实质性绑定；非法组合在 save_state 即被拒）
+    errors.extend(validate_route_invariants(state))
+
     return errors
 
 
 # —— 构造 ——
 
 def new_task_state(task_id, goal, route, *, ownership_files=(),
-                   verification_required=(), review_required=False,
+                   verification_required=(), review_required=None,
                    reviewer=None, status="created") -> dict:
     """构造带默认值的完整状态 dict。
 
@@ -401,11 +512,20 @@ def new_task_state(task_id, goal, route, *, ownership_files=(),
     含 mode / delegability / assurance / executor / continuity 五键，
     缺键时对应值填 None（mode 缺失会导致 validate_state 报 route.mode 错）；
     route 非 dict 时抛 TypeError。
+
+    review_required 缺省 None 时由 route 推导审查义务
+    （derive_review_required）：audit / full 或 assurance=high → True，
+    solo / delegate + standard → False，信息不足落 False；显式 True/False
+    照传（显式 False + 派生 True 的组合由 validate_route_invariants 规则
+    R3 在保存时拒绝；显式 True 恒合法——比推导更严）。
     """
     if not isinstance(route, dict):
         raise TypeError(
             "route 必须是 dict（SELECTIVE ROUTE 五字段），得到 %s"
             % type(route).__name__)
+    if review_required is None:
+        derived = derive_review_required(route)
+        review_required = False if derived is None else derived
     return {
         "task_id": task_id,
         "goal": goal,

@@ -14,7 +14,9 @@
          在 completed（缺失 → verification_missing），且 verification.
          fingerprint 与当前证据指纹（fingerprint.task_fingerprint，B3.2）
          一致——验证后文件又变化 → verification_stale；
-      3. review：review.required 为 True 时，verdict 为 ship 且绑定当前
+      3. review：review.required 为 True 或 route 推导要求审查（mode 为
+         audit / full，或 assurance 为 high——手写 state.json 无法靠漏写
+         review.required 跳过审查检查）时，verdict 为 ship 且绑定当前
          指纹才放行——None / missing / not-required → review_missing，
          词汇外取值（手写 state.json 的拼写偏差，如 "Ship"）同样按
          review_missing 处理（不静默放宽为 ship 路径），fix-first /
@@ -23,7 +25,8 @@
       4. visual：visual_evidence 记录的视觉证据按文件自身字节哈希比对，
          记录后发生变化 → visual_stale（§22）。
     参与校验判定：ownership 声明非空 / verification.required 非空 /
-    review.required 为 True / visual_evidence 非空——四者任一成立即参与；
+    review.required 为 True（或 route 推导要求审查）/ visual_evidence
+    非空——四者任一成立即参与；
     全部不成立 → 跳过（普通会话与合规任务零干预）。gate_passed /
     gate_degraded 的记账对象即参与集合。
 
@@ -316,14 +319,30 @@ def _nonempty_strs(value):
     return [item for item in value if isinstance(item, str) and item != ""]
 
 
+def _route_requires_review(task_state):
+    """route 推导的审查义务：mode ∈ (audit, full) 或 assurance == "high"
+    → True（H2：手写 state.json 无法靠漏写 review.required 跳过审查检查；
+    推导与 runtime.state.derive_review_required 同源）。
+
+    route 缺失 / 形状异常 → False（与既有参与判定同口径：仅按显式声明
+    参与，不因形状异常扩大拦截面；推导不确定（None）按 False 处理）。
+    """
+    from runtime import state
+    route = task_state.get("route") if isinstance(task_state, dict) else None
+    return state.derive_review_required(route) is True
+
+
 def task_participates(task_state):
     """§15 参与判定：ownership / verification / review / visual 任一声明
-    非空即参与校验；全部不成立 → 跳过（不参与 Layer A 也不参与新检查）。"""
+    非空即参与校验（review 条件含 route 推导——audit/full 或
+    assurance:high 任务即使漏写 review.required 也参与）；全部不成立 →
+    跳过（不参与 Layer A 也不参与新检查）。"""
     if _nonempty_strs(_section(task_state, "ownership").get("files")):
         return True
     if _nonempty_strs(_section(task_state, "verification").get("required")):
         return True
-    if _section(task_state, "review").get("required") is True:
+    if _section(task_state, "review").get("required") is True \
+            or _route_requires_review(task_state):
         return True
     visual = task_state.get("visual_evidence")
     if isinstance(visual, list) and visual:
@@ -346,6 +365,11 @@ def evaluate_task(task_id, task_state, repo, touched, base):
     Stop 内各取一次、跨任务复用——每次 Stop 恒为 2 次 git 子调用），
     透传给 fingerprint.task_fingerprint（与主会话记录证据同一入口，
     属指纹层自身契约；主会话侧用缺省调用自取，两者语义等价）。
+
+    review 检查条件：review.required 为 True 或 route 推导要求审查
+    （_route_requires_review：audit/full 或 assurance:high）——不依赖
+    「模型记得把 review.required 写对」。verdict 词汇处理与指纹比对
+    分支不变。
 
     classify_paths 的模式非法（OwnershipError）与 task_fingerprint 的
     结构性错误（OwnershipError / FingerprintError）自然向上抛，由调用
@@ -384,9 +408,10 @@ def evaluate_task(task_id, task_state, repo, touched, base):
             return ("verification_stale",
                     {"recorded": recorded, "current": current})
 
-    # 3) review：required 为 True 才检查（非 True / 缺键跳过）
+    # 3) review：required 为 True 或 route 推导要求审查（audit/full 或
+    #    assurance:high——手写 state 漏写 review.required 也逃不过检查）
     review = _section(task_state, "review")
-    if review.get("required") is True:
+    if review.get("required") is True or _route_requires_review(task_state):
         verdict = review.get("verdict")
         if verdict is None or verdict in ("missing", "not-required"):
             return ("review_missing", {"reviewer": review.get("reviewer")})

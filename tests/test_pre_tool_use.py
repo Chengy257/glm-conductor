@@ -50,10 +50,15 @@ HOOKS_JSON = (Path(__file__).resolve().parents[1]
               / "plugins/glm-conductor/hooks/hooks.json")
 
 TID = "demo-task-1a2b3c"
-ROUTE = {"mode": "delegate", "delegability": "high", "assurance": "standard",
-         "executor": "flash-implementer", "continuity": "foreground"}
-# Bash 策略 ask 升级场景用的高保障 route（其余字段与 ROUTE 一致）
-HIGH_ROUTE = dict(ROUTE, assurance="high")
+# H2 夹具迁移：delegate 路由在规则 R4 下要求非空 ownership/verification，
+# 本文件被测的注入 / 策略门控行为与路由模式无关——基座改用矩阵合法的
+# solo 路由；ask 升级场景用矩阵合法的 audit 路由表达 assurance=high
+ROUTE = {"mode": "solo", "delegability": "low", "assurance": "standard",
+         "executor": "main", "continuity": "foreground"}
+# Bash 策略 ask 升级场景用的高保障 route（assurance=high；矩阵一致 → audit，
+# new_task_state 缺省推导 review.required=true，满足规则 R3）
+HIGH_ROUTE = {"mode": "audit", "delegability": "low", "assurance": "high",
+              "executor": "main", "continuity": "foreground"}
 OWNED = ["plugins/glm-conductor/hooks/pre_tool_use.py",
          "tests/test_pre_tool_use.py"]
 

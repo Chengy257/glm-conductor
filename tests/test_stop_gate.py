@@ -54,8 +54,12 @@ STOP_GATE = (Path(__file__).resolve().parents[1]
              / "plugins/glm-conductor/hooks/stop_gate.py")
 
 TID = "demo-task-1a2b3c"
-ROUTE = {"mode": "delegate", "delegability": "high", "assurance": "standard",
-         "executor": "flash-implementer", "continuity": "foreground"}
+# H2 夹具迁移：delegate 路由在规则 R4 下要求非空 ownership/verification，
+# 而本文件的门行为用例大量依赖「空声明」基座（被测语义与路由无关）——
+# 基座改用矩阵合法的 solo 路由（solo+standard 推导无审查义务）；需要
+# delegate/audit/full 语义的场景各自显式构造 route
+ROUTE = {"mode": "solo", "delegability": "low", "assurance": "standard",
+         "executor": "main", "continuity": "foreground"}
 
 
 def run_gate(stdin_text, project_dir):
@@ -876,9 +880,13 @@ class StopGateIntegrationSmokeTest(GitRepoFixture):
             review_required=True, reviewer="glm-reviewer")
         self._write_owned(b"v1\n")
         # verification 全备且指纹新鲜；§98 场景 4 名义为 high assurance
-        # （完成门行为不依赖 assurance，提升只为场景语义忠实）
+        # （H2 起矩阵/不变量在保存时强制：solo+high 非法，改用矩阵合法的
+        # audit 路由表达同一 high-assurance 语义；review_required 已显式
+        # True，完成门行为不变）
         st = state.load_state(self.repo, TID)
-        st["route"]["assurance"] = "high"
+        st["route"] = {"mode": "audit", "delegability": "low",
+                       "assurance": "high", "executor": "main",
+                       "continuity": "foreground"}
         state.record_verification(st, self.CMD, self.task_fingerprint(st))
         self.set_state(st)
         # 第一次 Stop：verification 新鲜、仅 review 未完成 → review_missing
@@ -1084,6 +1092,60 @@ class StopGateCompletionCommitTest(GitRepoFixture):
             state.load_state(self.repo, TID)["status"], "executing")
         self.assertEqual(
             [e["event"] for e in self.journal_events()], ["gate_passed"])
+
+
+# —— H2 路由不变量：门侧按 route 推导审查义务（手写 state 也逃不过） ——
+
+@unittest.skipUnless(shutil.which("git"), "环境无 git 可执行，跳过 git fixture 测试")
+class StopGateRouteDerivedReviewTest(GitRepoFixture):
+    """检查 3 的条件不依赖 review.required 标志（H2/P0-2）：手写 full 路由
+    + review.required=false + verdict 缺失 → block review_missing；同状态
+    补 ship 裁决 + 新鲜指纹 → 放行。漏写标志无法绕过 high-assurance 审查
+    约束（state.json 直接打补丁构造，绕过 save_state 校验）。"""
+
+    FULL_ROUTE = {"mode": "full", "delegability": "high", "assurance": "high",
+                  "executor": "flash-implementer", "continuity": "foreground"}
+
+    def _handwritten_full_route_task(self):
+        # 先经 save_state 落合法 solo 基座，再绕过校验把 route 补丁为
+        # full——精确复现「手写 state.json 绕过 save_state 校验」场景
+        self.add_active_task()
+        self.patch_state_file_raw(
+            TID, lambda raw: raw.update({"route": dict(self.FULL_ROUTE)}))
+
+    def test_full_route_derived_review_blocks_then_fresh_ship_passes(self):
+        self._handwritten_full_route_task()
+        # 第一次 Stop：review.required 仍为 false，但 full 路由推导要求
+        # 审查且 verdict 缺失 → review_missing 拦截（参与判定同样按推导）
+        first = run_gate("{}", self.repo)
+        self.assertEqual(first.returncode, 0)
+        payload = json.loads(first.stdout)
+        self.assertEqual(payload["decision"], "block")
+        reason = payload["reason"]
+        self.assertIn("review required but not completed", reason)
+        self.assertIn("Reviewer: unassigned", reason)
+        self.assertIn("runtime.state.record_review", reason)
+        events = self.journal_events()
+        self.assertEqual([e["event"] for e in events], ["gate_blocked"])
+        self.assertEqual(events[0]["check"], "review_missing")
+        self.assertEqual(events[0]["task_id"], TID)
+        self.assertIsNone(events[0]["reviewer"])
+        # 同状态补 ship 裁决 + 新鲜指纹（仍绕过 save_state：required 保持
+        # false——放行凭 route 推导 + 证据，而非凭标志）
+        st = state.load_state(self.repo, TID)
+        current = self.task_fingerprint(st)
+
+        def mutate(raw):
+            raw["review"]["verdict"] = "ship"
+            raw["review"]["fingerprint"] = current
+        self.patch_state_file_raw(TID, mutate)
+        second = run_gate("{}", self.repo)
+        self.assertEqual(second.returncode, 0)
+        self.assertEqual(second.stdout, "")
+        self.assertEqual(second.stderr, "")
+        self.assertEqual(
+            [e["event"] for e in self.journal_events()],
+            ["gate_blocked", "gate_passed"])
 
 
 if __name__ == "__main__":

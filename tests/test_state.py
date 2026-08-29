@@ -19,10 +19,13 @@ from runtime import journal, state
 # —— 测试夹具 ——
 
 TID = "demo-task-1a2b3c"
+# H2 夹具迁移：full 路由在路由矩阵下必须 assurance=high
+# （high+standard 应为 delegate）；规则 R3 由此要求 review.required=true，
+# new_task_state 缺省派生正好满足
 FULL_ROUTE = {
     "mode": "full",
     "delegability": "high",
-    "assurance": "standard",
+    "assurance": "high",
     "executor": "flash-implementer",
     "continuity": "foreground",
 }
@@ -30,9 +33,17 @@ FULL_ROUTE = {
 
 def make_state(task_id=TID, goal="重构认证中间件", route=None, status="created",
                **kwargs):
-    """构造一个默认合法的完整状态 dict（route 缺省用 FULL_ROUTE）。"""
+    """构造一个默认合法的完整状态 dict（route 缺省用 FULL_ROUTE）。
+
+    H2 规则 R4 要求 delegate/full 任务声明非空 ownership.files 与
+    verification.required：夹具缺省补占位声明，保证默认构造可过
+    validate_state；各用例关注的字段不受影响。
+    """
     if route is None:
         route = dict(FULL_ROUTE)
+    kwargs.setdefault("ownership_files", ("src/auth.ts",))
+    kwargs.setdefault(
+        "verification_required", ("python3 -m unittest tests.test_state",))
     return state.new_task_state(task_id, goal, route, status=status, **kwargs)
 
 
@@ -999,6 +1010,151 @@ class TaskTransitionGateTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             with self.assertRaises(ValueError):
                 state.transition_task_status(tmp, TID, "executing")
+
+
+# —— route 不变量（H2：跨字段一致性，P0-2 修复） ——
+
+class RouteInvariantTest(unittest.TestCase):
+    """validate_route_invariants 四条规则 + derive_review_required /
+    new_task_state 的审查义务推导（非法组合在 save_state 即被拒，
+    完成门不再依赖「模型记得把 review.required 写对」）。"""
+
+    SOLO_ROUTE = {"mode": "solo", "delegability": "low",
+                  "assurance": "standard", "executor": "main",
+                  "continuity": "foreground"}
+    DELEGATE_ROUTE = {"mode": "delegate", "delegability": "high",
+                      "assurance": "standard", "executor": "flash-implementer",
+                      "continuity": "foreground"}
+    AUDIT_ROUTE = {"mode": "audit", "delegability": "low",
+                   "assurance": "high", "executor": "main",
+                   "continuity": "foreground"}
+
+    def _substantive(self, **kwargs):
+        """delegate/full 用例所需的实质性声明（R4）。"""
+        kwargs.setdefault("ownership_files", ("src/auth.ts",))
+        kwargs.setdefault("verification_required", ("python3 -m unittest",))
+        return kwargs
+
+    # —— R3 review 绑定（含保存被拒） ——
+
+    def test_full_route_missing_review_invariant_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            st = state.new_task_state(TID, "目标", dict(FULL_ROUTE))
+            st["review"]["required"] = False  # full 路由漏写审查义务
+            errors = state.validate_state(st)
+            self.assertTrue(
+                any("review.required" in e for e in errors), errors)
+            # save_state 拒绝非法组合且不落盘
+            with self.assertRaises(ValueError) as ctx:
+                state.save_state(tmp, st)
+            self.assertIn("review.required", str(ctx.exception))
+            self.assertFalse(state.state_path(tmp, TID).exists())
+
+    def test_high_assurance_requires_review_required_true(self):
+        # audit 路由（low+high）review.required=false 同样被拒
+        st = state.new_task_state(TID, "目标", dict(self.AUDIT_ROUTE))
+        st["review"]["required"] = False
+        errors = state.validate_state(st)
+        self.assertTrue(any("review.required" in e for e in errors), errors)
+
+    # —— R1 矩阵一致性 ——
+
+    def test_delegate_with_high_assurance_matrix_rejected(self):
+        st = state.new_task_state(
+            TID, "目标", dict(self.DELEGATE_ROUTE, assurance="high"),
+            **self._substantive())
+        errors = state.validate_state(st)
+        self.assertTrue(
+            any("矩阵组合不一致" in e and "应为 'full'" in e
+                for e in errors), errors)
+
+    def test_all_matrix_combinations_validate_clean(self):
+        # 四个矩阵组合全部合法（validate_state 零错误）
+        cases = (
+            (self.SOLO_ROUTE, {}),
+            (self.DELEGATE_ROUTE, self._substantive()),
+            (self.AUDIT_ROUTE, {}),
+            (dict(FULL_ROUTE, executor="visual-implementer"),
+             self._substantive()),
+        )
+        for route, kwargs in cases:
+            st = state.new_task_state("t-1", "目标", route, **kwargs)
+            self.assertEqual(state.validate_state(st), [], route["mode"])
+
+    # —— R2 executor 绑定 ——
+
+    def test_solo_with_implementer_executor_rejected(self):
+        st = state.new_task_state(
+            TID, "目标", dict(self.SOLO_ROUTE, executor="flash-implementer"))
+        errors = state.validate_state(st)
+        self.assertTrue(any("route.executor" in e for e in errors), errors)
+
+    def test_full_with_main_executor_rejected(self):
+        st = state.new_task_state(
+            TID, "目标", dict(FULL_ROUTE, executor="main"),
+            **self._substantive())
+        errors = state.validate_state(st)
+        self.assertTrue(any("route.executor" in e for e in errors), errors)
+
+    # —— R4 delegate 实质性 ——
+
+    def test_delegate_requires_nonempty_ownership_and_verification(self):
+        st = state.new_task_state(TID, "目标", dict(self.DELEGATE_ROUTE))
+        errors = state.validate_state(st)
+        self.assertTrue(any("ownership.files" in e for e in errors), errors)
+        self.assertTrue(
+            any("verification.required" in e for e in errors), errors)
+        # ownership 块整体缺失同样按缺声明拒绝
+        del st["ownership"]
+        self.assertTrue(any(
+            "ownership.files" in e for e in state.validate_state(st)))
+        # 只补 ownership 仍缺 verification
+        st2 = state.new_task_state(
+            TID, "目标", dict(self.DELEGATE_ROUTE),
+            ownership_files=("src/auth.ts",))
+        self.assertTrue(any(
+            "verification.required" in e
+            for e in state.validate_state(st2)))
+
+    # —— new_task_state 派生审查义务 ——
+
+    def test_new_task_state_derives_review_required_default(self):
+        # full / audit → True（不显式传 review_required）
+        for route in (dict(FULL_ROUTE), dict(self.AUDIT_ROUTE)):
+            st = state.new_task_state("t-1", "目标", route)
+            self.assertIs(st["review"]["required"], True, route["mode"])
+        # delegate + standard 与 solo（信息不足）→ False
+        st = state.new_task_state("t-1", "目标", dict(self.DELEGATE_ROUTE))
+        self.assertIs(st["review"]["required"], False)
+        st = state.new_task_state("t-1", "目标", {"mode": "solo"})
+        self.assertIs(st["review"]["required"], False)
+
+    def test_explicit_review_required_true_legal_under_delegate_standard(self):
+        # 显式 True 恒合法——比推导更严
+        st = state.new_task_state(
+            TID, "目标", dict(self.DELEGATE_ROUTE),
+            ownership_files=("src/auth.ts",),
+            verification_required=("python3 -m unittest",),
+            review_required=True, reviewer="glm-reviewer")
+        self.assertEqual(state.validate_state(st), [])
+
+    # —— derive_review_required 直测 ——
+
+    def test_derive_review_required_truth_table(self):
+        self.assertIs(state.derive_review_required({"mode": "audit"}), True)
+        self.assertIs(state.derive_review_required({"mode": "full"}), True)
+        self.assertIs(state.derive_review_required(
+            {"mode": "solo", "assurance": "high"}), True)
+        self.assertIs(state.derive_review_required(
+            {"mode": "delegate", "assurance": "standard"}), False)
+        self.assertIs(state.derive_review_required(
+            {"mode": "solo", "assurance": "standard"}), False)
+        # 信息不足 / route 非 dict → None
+        for info_poor in ({"mode": "solo"}, {"mode": "delegate"},
+                          {"mode": "solo", "assurance": None}, {},
+                          None, "solo", 42):
+            self.assertIsNone(
+                state.derive_review_required(info_poor), repr(info_poor))
 
 
 if __name__ == "__main__":

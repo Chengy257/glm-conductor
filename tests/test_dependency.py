@@ -316,8 +316,13 @@ class StateIntegrationTest(unittest.TestCase):
     TASK_ID = "t-wu-1a2b3c"
 
     def make_state(self, work_units):
+        # H2 规则 R4：delegate 路由要求非空 ownership/verification
+        # （被测语义是 work_units 校验，路由仅作合法载体，行为不变）
         st = state.new_task_state(
-            self.TASK_ID, "目标", {"mode": "delegate"})
+            self.TASK_ID, "目标", {"mode": "delegate"},
+            ownership_files=("src/wu.py",),
+            verification_required=(
+                "python3 -m unittest tests.test_dependency",))
         st["work_units"] = work_units
         return st
 
