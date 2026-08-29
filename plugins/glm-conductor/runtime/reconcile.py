@@ -74,6 +74,17 @@ completed 不重跑锚定（§68）：
     suggestions 全部落在 §62 转换表内（verifying 态表外情形一律改走
     advisories，不出表外建议）；应用侧转换闸门仍归 work_unit。
 
+租约对账（v2.0.1 加固 H5，审查项 P1-4/P1-5）：
+    reconcile_leases() 把任务图与落盘租约（runtime.lease）对读，把
+    每条租约三分——
+      - stale：owner 不是图中任何 running/verifying 单元（图中无此
+        单元 / 单元在 completed / failed / cancelled / ready 等非活跃
+        写相）→ 可被 task_manager.recover_leases 自动释放；
+      - active：owner 为 running/verifying 单元且未过期 → 保留；
+      - expired_running：owner 为 running/verifying 单元但已过期 →
+        不建议自动释放（worker 可能仍在写，裁决归主会话）。
+    纪律同 reconcile_interrupted：纯建议、零落盘、不修改入参。
+
 错误上抛（调用方处理，可降级或转人工）：
     - touched 缺省时 git 失败 → ownership.OwnershipError 自然上抛；
     - 指纹计算失败 → fingerprint.FingerprintError 自然上抛；
@@ -84,17 +95,20 @@ completed 不重跑锚定（§68）：
 
 依赖：
     runtime.ownership / runtime.fingerprint / runtime.journal（缺省
-    证据来源）。不导入 runtime.work_unit（建议层不依赖转换层——
-    应用示例里的 transition_work_unit 由调用方导入，无循环导入）。
-    仅 Python 3 标准库，`python3 -S` 可运行。
+    证据来源）、runtime.lease（H5 租约对读——expired_leases 过期集
+    + lease_state 明细）。不导入 runtime.work_unit（建议层不依赖转
+    换层——应用示例里的 transition_work_unit 由调用方导入，无循环
+    导入）。仅 Python 3 标准库，`python3 -S` 可运行。
 
 来源：
     docs/glm-conductor-v2-upgrade-guide-final.md §68（恢复后 completed
-    不重跑）/ §69（中断单元恢复证据四步）+ v2 升级计划工作块 B8.4。
+    不重跑）/ §69（中断单元恢复证据四步）+ v2 升级计划工作块 B8.4
+    + v2.0.1 加固工作包 H5（审查项 P1-4/P1-5）。
 """
 
 from runtime import fingerprint
 from runtime import journal
+from runtime import lease
 from runtime import ownership
 
 # 中断对账的目标状态集合：只有处于这两个状态的单元才产出建议（§68）
@@ -212,4 +226,69 @@ def reconcile_interrupted(repo_root, task_id, units, *, touched=None,
         "advisories": advisories,
         "reconciled": reconciled,
         "touched": list(touched),
+    }
+
+
+def reconcile_leases(repo_root, task_id, units, *, now=None) -> dict:
+    """对落盘租约做崩溃恢复三分裁决（v2.0.1 加固 H5，P1-4/P1-5）。
+
+    把 leases.json 逐条与任务图对读，产出（各桶按 path 排序，确定）：
+      - stale：[{"path", "owner", "reason"}...]——owner 不是图中任何
+        running/verifying 单元（图中无此单元 / 单元在 completed /
+        failed / cancelled / ready 等非活跃写相；reason 中文注明归属
+        状态或「图中无此单元」）——可被 task_manager.recover_leases
+        自动释放；
+      - active：[{"path", "owner"}...]——owner 为 running/verifying
+        单元且未过期（活跃写相的正常租约，保留）；
+      - expired_running：[{"path", "owner", "expires_at"}...]——owner
+        为 running/verifying 单元但已过期。**不建议自动释放**：worker
+        可能仍在写（TTL 只是保守估计），释放裁决归主会话。
+
+    参数：
+      - units：work unit dict 列表（§61 形状；非 list 按空图处理）；
+      - now：过期判定时刻（None → 当前 UTC；透传
+        runtime.lease.expired_leases，接受 datetime / ISO 字符串）。
+
+    纪律（与 reconcile_interrupted 同一口径）：纯建议——零落盘、不
+    修改传入 units。形状异常记录（owner 非非空字符串）按 owner=None
+    归入 stale 上报（可见、保守不误清）；leases.json 损坏的
+    ValueError 自然上抛（不静默）。
+    """
+    by_id = {}
+    for unit in (units if isinstance(units, list) else []):
+        if not isinstance(unit, dict):
+            continue
+        uid = unit.get("id")
+        if isinstance(uid, str) and uid != "" and uid not in by_id:
+            by_id[uid] = unit
+    expired_entries = lease.expired_leases(repo_root, task_id, now=now)
+    expires_by_path = {entry["path"]: entry["expires_at"]
+                       for entry in expired_entries}
+    leases = lease.lease_state(repo_root, task_id)
+    stale = []
+    active = []
+    expired_running = []
+    for path, record in leases.items():
+        holder = record.get("owner") if isinstance(record, dict) else None
+        if not isinstance(holder, str) or holder == "":
+            holder = None  # 形状异常记录：保守视为无主（不上报具体归属）
+        unit = by_id.get(holder)
+        status = unit.get("status") if isinstance(unit, dict) else None
+        if status in INTERRUPTED_STATUSES:
+            if path in expires_by_path:
+                expired_running.append({"path": path, "owner": holder,
+                                        "expires_at": expires_by_path[path]})
+            else:
+                active.append({"path": path, "owner": holder})
+        else:
+            if unit is None:
+                reason = "图中无此单元"
+            else:
+                reason = "归属单元状态为 %s（非活跃写相）" % status
+            stale.append({"path": path, "owner": holder, "reason": reason})
+    return {
+        "stale": sorted(stale, key=lambda item: item["path"]),
+        "active": sorted(active, key=lambda item: item["path"]),
+        "expired_running": sorted(expired_running,
+                                  key=lambda item: item["path"]),
     }

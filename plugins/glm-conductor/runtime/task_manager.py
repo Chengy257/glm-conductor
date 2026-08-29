@@ -53,6 +53,15 @@
     （同 commit 后窗口，reconcile 接管）；崩在 save 后即终态，reconcile
     对终态零建议（§68 completed 不重跑）。
 
+租约生命周期闭环（v2.0.1 加固 H5，审查项 P1-4/P1-5）：
+    prepare 以 LEASE_DEFAULT_TTL_SECONDS（1800 秒）保守 TTL 落盘
+    expires_at（session_id/generation/heartbeat_at 同记录落盘），长期
+    实施由 runtime.lease.renew_lease 心跳续约；崩溃后 recover_leases
+    对租约做 stale / active / expired_running 三分对账——stale（owner
+    已不在活跃写相）自动释放 + lease_recovered 事件（零释放不落事件），
+    expired_running（活跃写相但已过期——worker 可能仍在写）仅上报、
+    裁决归主会话——崩溃后无需人工删除 leases.json。
+
 分层关系：
     runtime.dispatcher —— 纯决策器：plan_dispatch 零 I/O，只产出「谁可
         派发 / 谁挂起及理由」的决策 dict；本层在 prepare 中消费它；
@@ -80,8 +89,10 @@ from runtime import dispatcher
 from runtime import journal
 from runtime import lease
 from runtime import ownership
+from runtime import reconcile
 from runtime import state
 from runtime import work_unit
+from runtime.lease import LEASE_DEFAULT_TTL_SECONDS
 
 # finish_unit 的合法结局词汇（work unit 终态全集，§62）
 FINISH_OUTCOMES = ("completed", "failed", "cancelled")
@@ -180,9 +191,10 @@ def prepare_dispatch(repo_root, task_id, uid, *, quota_status="AVAILABLE",
          （waiting_quota 组 → quota EXHAUSTED；deferred 组 → 对应
          reason；未进候选 → 依赖未满足等）；
       7. lease.acquire_lease（全有或全无，同 owner 幂等；ownership 非
-         list 容错为 []）；
-      8. journal dispatch_prepared（unit + leased=持有中的归一路径，
-         排序确定）；
+         list 容错为 []；按 LEASE_DEFAULT_TTL_SECONDS 保守 TTL 落盘
+         expires_at，长期实施由 runtime.lease.renew_lease 心跳续约）；
+      8. journal dispatch_prepared（unit + leased=持有中的归一路径 +
+         ttl_seconds，排序确定）；
       9. 返回 plan 决策快照（供调用方参考，不落盘）。
 
     失败零副作用锚定：决策未批准（步骤 6）发生在获取租约（步骤 7）与
@@ -231,11 +243,13 @@ def prepare_dispatch(repo_root, task_id, uid, *, quota_status="AVAILABLE",
     owned = unit.get("ownership")
     if not isinstance(owned, (list, tuple)):
         owned = []
-    lease.acquire_lease(repo_root, task_id, uid, owned)
+    lease.acquire_lease(repo_root, task_id, uid, owned,
+                        ttl_seconds=LEASE_DEFAULT_TTL_SECONDS)
     # leased 记持有事实（归一路径、排序、同 owner 幂等重入不虚报）
     held = lease.held_by(repo_root, task_id, uid)
     journal.append_event(repo_root, task_id, {
-        "event": "dispatch_prepared", "unit": uid, "leased": held})
+        "event": "dispatch_prepared", "unit": uid, "leased": held,
+        "ttl_seconds": LEASE_DEFAULT_TTL_SECONDS})
     return plan
 
 
@@ -379,3 +393,50 @@ def finish_unit(repo_root, task_id, uid, *, outcome="completed") -> dict:
     journal.append_event(repo_root, task_id, {
         "event": "unit_finished", "unit": uid, "outcome": outcome})
     return st
+
+
+# —— recover：崩溃后 stale 租约闭环清理（v2.0.1 加固 H5，P1-4/P1-5） ——
+
+def recover_leases(repo_root, task_id, *, now=None) -> dict:
+    """崩溃恢复的租约清理入口：reconcile_leases 三分对账 → 仅释放
+    stale 组 → lease_recovered 事件；返回对账结果 + released 清单。
+
+    流程：
+      1. load_state（任务缺失 TaskManagerError；units 非列表按空图
+         容错）；
+      2. reconcile.reconcile_leases 纯建议三分（stale / active /
+         expired_running，各桶按 path 排序）；
+      3. 仅对 stale 组逐路径 release_lease（owner 精确、不代删他人）；
+         形状异常记录（owner 非非空字符串）无精确持有者可删，保守
+         跳过——仍在返回值的 stale 组中可见；
+      4. released 非空时 journal {"event": "lease_recovered",
+         "released": [...], "kept_expired_running": [...]}；零释放不
+         落事件（对账是只读惯例动作，不留噪声行）；
+      5. expired_running（活跃写相但已过期——worker 可能仍在写）不
+         动，仅在返回值中上报，裁决归主会话。
+
+    返回：reconcile_leases 的结果 dict + "released" 键（实际释放的
+    归一路径，排序）。崩溃后无需人工删除 leases.json——recover 与
+    后续 prepare（§78 同 owner 幂等、自有租约不挡 plan）共同闭环。
+    """
+    api = "recover_leases"
+    st = _require_state(repo_root, task_id, api)
+    units = st.get("work_units")
+    if not isinstance(units, list):
+        units = []
+    report = reconcile.reconcile_leases(repo_root, task_id, units, now=now)
+    released = []
+    for entry in report["stale"]:
+        holder = entry["owner"]
+        if not isinstance(holder, str) or holder == "":
+            continue  # 无精确持有者可删，保守不动（stale 组仍上报）
+        if lease.release_lease(repo_root, task_id, holder, [entry["path"]]):
+            released.append(entry["path"])
+    released = sorted(released)
+    if released:
+        journal.append_event(repo_root, task_id, {
+            "event": "lease_recovered", "released": released,
+            "kept_expired_running": sorted(
+                item["path"] for item in report["expired_running"])})
+    report["released"] = released
+    return report

@@ -19,12 +19,18 @@ journal + 驱动 reconcile_interrupted）+ 纯函数容错用例：
   - verifying 态建议限定（P1#1）：新鲜证据 → suggestions completed；
     无残留无新鲜 / 有残留无新鲜两种表外情形 → advisories（无 to、
     不携带转换，裁决归主会话）；
-  - 纯函数用例：非 running/verifying 单元零建议（全状态词汇穷举）；
+    - 纯函数用例：非 running/verifying 单元零建议（全状态词汇穷举）；
     events 注入空 / 非 list 容错；suggestions / advisories /
     reconciled 键序均按 units 出现序；§69 证据匹配四条件逐项锚定
     （event 名 / 指纹 / status=pass / command ∈ verification）；纯
     建议纪律（零落盘、不改 units）；结构性错误（git 失败 / 非法
-    ownership 模式 / 指纹目标为目录）自然上抛。
+    ownership 模式 / 指纹目标为目录）自然上抛；
+  - H5 reconcile_leases 三分（无 git 需求，tempdir + 手工租约）：
+    completed/ready owner → stale（reason 注明状态）、图中无 owner →
+    stale（图中无此单元）、running/verifying 未过期 → active、running
+    已过期 → expired_running（不入 stale，不自动清）、桶内按 path
+    排序、空租约空报告、非 list units 按空图容错、纯建议纪律
+    （零落盘、不改 units）。
 
 git fixture 做法（git init + config + commit、Windows 下 .git 只读位
 清理）对齐 tests/test_stop_gate.py 的 GitRepoFixture；环境无 git 可执行
@@ -36,6 +42,7 @@ git fixture 做法（git init + config + commit、Windows 下 .git 只读位
 """
 
 import copy
+import json
 import os
 import shutil
 import stat
@@ -50,6 +57,7 @@ from runtime import dependency
 from runtime import dispatcher
 from runtime import fingerprint as fingerprint_mod
 from runtime import journal as journal_mod
+from runtime import lease as lease_mod
 from runtime import ownership
 from runtime import reconcile
 from runtime import state
@@ -570,6 +578,145 @@ class ReconcileErrorPropagationTest(TempDirFixture):
         with self.assertRaises(fingerprint_mod.FingerprintError):
             reconcile.reconcile_interrupted(str(self.repo), TID, [unit],
                                             touched=["src/dir"], events=[])
+
+
+# —— H5：reconcile_leases 租约三分对账（纯建议、零落盘、无 git 需求） ——
+
+LEASE_T0 = "2026-01-01T00:00:00.000Z"
+LEASE_NOW = "2026-06-01T00:00:00.000Z"
+LEASE_FUTURE = "2099-01-01T00:00:00.000Z"
+LEASE_PAST = "2020-01-01T00:00:00.000Z"
+
+
+class ReconcileLeasesTest(TempDirFixture):
+    """reconcile_leases 三分裁决：tempdir + 手工落盘租约，无 git 需求。"""
+
+    def setUp(self):
+        super().setUp()
+        self.units = [
+            make_unit("u1", ("src/a/**",), status="completed"),
+            make_unit("u2", ("src/b/**",), status="running"),
+            make_unit("u3", ("src/c/**",), status="verifying"),
+            make_unit("u4", ("src/d/**",), status="ready"),
+        ]
+
+    def _write_lease_map(self, mapping):
+        path = lease_mod.lease_path(self.repo, TID)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "w", encoding="utf-8", newline="\n") as fh:
+            fh.write(json.dumps(mapping, ensure_ascii=False, indent=2,
+                                sort_keys=True))
+
+    def _record(self, owner, expires_at=None):
+        record = {"owner": owner, "acquired_at": LEASE_T0}
+        if expires_at is not None:
+            record["expires_at"] = expires_at
+        return record
+
+    def test_completed_owner_is_stale(self):
+        self._write_lease_map(
+            {"src/a/**": self._record("u1", LEASE_FUTURE)})
+        report = reconcile.reconcile_leases(self.repo, TID, self.units,
+                                            now=LEASE_NOW)
+        # 单元在非活跃写相（completed）→ stale，reason 注明归属状态
+        self.assertEqual(report["stale"],
+                         [{"path": "src/a/**", "owner": "u1",
+                           "reason": "归属单元状态为 completed"
+                                     "（非活跃写相）"}])
+        self.assertEqual(report["active"], [])
+        self.assertEqual(report["expired_running"], [])
+
+    def test_owner_absent_from_graph_is_stale(self):
+        self._write_lease_map({"src/g.ts": self._record("ghost")})
+        report = reconcile.reconcile_leases(self.repo, TID, self.units,
+                                            now=LEASE_NOW)
+        self.assertEqual(len(report["stale"]), 1)
+        self.assertEqual(report["stale"][0]["path"], "src/g.ts")
+        self.assertEqual(report["stale"][0]["owner"], "ghost")
+        self.assertEqual(report["stale"][0]["reason"], "图中无此单元")
+
+    def test_ready_owner_is_stale(self):
+        # ready 未进入活跃写相：孤儿租约可见（端到端崩溃场景的裁决依据）
+        self._write_lease_map({"src/d/**": self._record("u4", LEASE_FUTURE)})
+        report = reconcile.reconcile_leases(self.repo, TID, self.units,
+                                            now=LEASE_NOW)
+        self.assertEqual(len(report["stale"]), 1)
+        self.assertIn("ready", report["stale"][0]["reason"])
+
+    def test_running_and_verifying_unexpired_are_active(self):
+        self._write_lease_map({
+            "src/c/**": self._record("u3", LEASE_FUTURE),
+            "src/b/**": self._record("u2", LEASE_FUTURE)})
+        report = reconcile.reconcile_leases(self.repo, TID, self.units,
+                                            now=LEASE_NOW)
+        # 桶内按 path 排序（确定性）
+        self.assertEqual(report["active"],
+                         [{"path": "src/b/**", "owner": "u2"},
+                          {"path": "src/c/**", "owner": "u3"}])
+        self.assertEqual(report["stale"], [])
+        self.assertEqual(report["expired_running"], [])
+
+    def test_running_expired_goes_to_expired_running_not_stale(self):
+        # running 但已过期：worker 可能仍在写 → 不入 stale（不自动清）
+        self._write_lease_map(
+            {"src/b/**": self._record("u2", LEASE_PAST)})
+        report = reconcile.reconcile_leases(self.repo, TID, self.units,
+                                            now=LEASE_NOW)
+        self.assertEqual(report["stale"], [])
+        self.assertEqual(report["active"], [])
+        self.assertEqual(report["expired_running"],
+                         [{"path": "src/b/**", "owner": "u2",
+                           "expires_at": LEASE_PAST}])
+
+    def test_buckets_sorted_and_report_shape(self):
+        self._write_lease_map({
+            "src/z.ts": self._record("ghost"),
+            "src/a/**": self._record("u2", LEASE_PAST),
+            "src/b/**": self._record("u2", LEASE_PAST),
+            "src/c/**": self._record("u3", LEASE_FUTURE)})
+        report = reconcile.reconcile_leases(self.repo, TID, self.units,
+                                            now=LEASE_NOW)
+        self.assertEqual(set(report),
+                         {"stale", "active", "expired_running"})
+        self.assertEqual([item["path"] for item in report["stale"]],
+                         ["src/z.ts"])
+        self.assertEqual([item["path"] for item in report["active"]],
+                         ["src/c/**"])
+        # expired_running 按桶内 path 排序
+        self.assertEqual([item["path"] for item in
+                          report["expired_running"]],
+                         ["src/a/**", "src/b/**"])
+
+    def test_no_leases_yields_empty_report(self):
+        report = reconcile.reconcile_leases(self.repo, TID, self.units)
+        self.assertEqual(report, {"stale": [], "active": [],
+                                  "expired_running": []})
+
+    def test_pure_advisory_no_disk_write_no_input_mutation(self):
+        self._write_lease_map(
+            {"src/b/**": self._record("u2", LEASE_FUTURE)})
+        lease_path = lease_mod.lease_path(self.repo, TID)
+        raw_before = lease_path.read_bytes()
+        units_before = copy.deepcopy(self.units)
+        journal_mod.append_event(self.repo, TID,
+                                 {"event": "verification"})
+        events_before = journal_mod.read_events(self.repo, TID)
+        reconcile.reconcile_leases(self.repo, TID, self.units,
+                                   now=LEASE_NOW)
+        # 零落盘（租约与 journal 字节不变）、不修改传入 units
+        self.assertEqual(lease_path.read_bytes(), raw_before)
+        self.assertEqual(journal_mod.read_events(self.repo, TID),
+                         events_before)
+        self.assertEqual(self.units, units_before)
+
+    def test_non_list_units_tolerated_as_empty_graph(self):
+        self._write_lease_map(
+            {"src/g.ts": self._record("u2", LEASE_FUTURE)})
+        # units 非 list → 空图 → 全部 stale（图中无此单元）
+        report = reconcile.reconcile_leases(self.repo, TID, None,
+                                            now=LEASE_NOW)
+        self.assertEqual(len(report["stale"]), 1)
+        self.assertEqual(report["stale"][0]["reason"], "图中无此单元")
 
 
 if __name__ == "__main__":

@@ -40,12 +40,20 @@ new_work_unit 构造，非 mock state），不污染真实工作区。
       可重新 prepare）；
     - 事件词汇：RECOMMENDED_EVENTS 三条新增事件名 + 插入位置
       （implementation_started 之后 / checkpoint_written 之前），
-      真实 journal 行由各 API 用例断言。
+      真实 journal 行由各 API 用例断言；
+    - H5（租约崩溃恢复）：prepare 默认 TTL 落盘（expires_at/generation/
+      heartbeat_at/session_id + dispatch_prepared 的 ttl_seconds 字段）/
+      recover_leases（释放 stale + lease_recovered 事件、active 保留、
+      expired_running 不动仅上报、零释放不落事件、缺 state 报错）/
+      端到端崩溃场景 orphan_lease_reconciled_after_interrupted_running_unit
+      （running 单元 + 孤儿租约 → reconcile_interrupted 建议 ready →
+      应用转换 → recover_leases 闭环清理）。
 
 运行：
     cd <repo_root> && python3 -m unittest tests.test_task_manager -v
 """
 
+import json
 import sys
 import tempfile
 import unittest
@@ -54,12 +62,18 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "plugins" / "glm-conductor"))
 from runtime import journal
 from runtime import lease
+from runtime import reconcile
 from runtime import state
 from runtime import task_manager
 from runtime import work_unit
 
 TID = "tm-task-1a2b3c"
 VERIFY_CMD = "python3 -m unittest tests.test_task_manager"
+
+LEASE_T0 = "2026-01-01T00:00:00.000Z"
+LEASE_NOW = "2026-06-01T00:00:00.000Z"
+LEASE_FUTURE = "2099-01-01T00:00:00.000Z"
+LEASE_PAST = "2020-01-01T00:00:00.000Z"
 
 
 # —— 测试夹具 ——
@@ -514,6 +528,147 @@ class JournalVocabularyTest(unittest.TestCase):
                         names.index("dispatch_aborted"))
         self.assertLess(names.index("unit_finished"),
                         names.index("checkpoint_written"))
+
+
+# —— H5：prepare 默认 TTL / recover_leases / 端到端崩溃场景 ——
+
+def _write_lease_map(root, mapping):
+    """按落盘形态手工改写 leases.json（构造过期 / 指定 TTL 记录用）。"""
+    path = lease.lease_path(root, TID)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w", encoding="utf-8", newline="\n") as fh:
+        fh.write(json.dumps(mapping, ensure_ascii=False, indent=2,
+                            sort_keys=True))
+
+
+def _read_lease_map(root):
+    with open(lease.lease_path(root, TID), "r", encoding="utf-8") as fh:
+        return json.load(fh)
+
+
+class PrepareTtlTest(TaskManagerTestBase):
+    """prepare_dispatch 的保守 TTL 默认（H5）。"""
+
+    def test_prepare_acquires_with_default_ttl_and_journals_it(self):
+        make_task(self.root, [wu("u1")])
+        task_manager.prepare_dispatch(self.root, TID, "u1")
+        record = lease.lease_state(self.root, TID)["src/a/**"]
+        # H5 record 形状：TTL + generation + 心跳 + 会话标识
+        self.assertIn("expires_at", record)
+        self.assertEqual(record["generation"], 1)
+        self.assertIsNone(record["session_id"])
+        self.assertEqual(record["heartbeat_at"], record["acquired_at"])
+        span = (lease._parse_iso(record["expires_at"])
+                - lease._parse_iso(record["acquired_at"])).total_seconds()
+        self.assertEqual(span, float(lease.LEASE_DEFAULT_TTL_SECONDS))
+        # dispatch_prepared 事件补 ttl_seconds 字段
+        prepared = events(self.root, "dispatch_prepared")[0]
+        self.assertEqual(prepared["ttl_seconds"],
+                         lease.LEASE_DEFAULT_TTL_SECONDS)
+
+    def test_reprepare_keeps_unexpired_record(self):
+        # 同 owner 未过期幂等跳过：generation 与 acquired_at 不动
+        make_task(self.root, [wu("u1")])
+        task_manager.prepare_dispatch(self.root, TID, "u1")
+        before = _read_lease_map(self.root)["src/a/**"]
+        task_manager.prepare_dispatch(self.root, TID, "u1")
+        self.assertEqual(_read_lease_map(self.root)["src/a/**"], before)
+        self.assertEqual(before["generation"], 1)
+
+
+class RecoverLeasesTest(TaskManagerTestBase):
+
+    def _expire_paths(self, paths):
+        """把指定路径的租约记录拨到已过期（其余保持未过期）。"""
+        mapping = _read_lease_map(self.root)
+        for path in paths:
+            mapping[path]["expires_at"] = LEASE_PAST
+        _write_lease_map(self.root, mapping)
+
+    def test_recover_releases_stale_and_journals(self):
+        # 单元 completed（非活跃写相）仍持租约 → stale → 自动释放
+        make_task(self.root, [wu("u1", status="completed")])
+        lease.acquire_lease(self.root, TID, "u1", ["src/a/**"])
+        report = task_manager.recover_leases(self.root, TID)
+        self.assertEqual(report["released"], ["src/a/**"])
+        self.assertEqual([item["path"] for item in report["stale"]],
+                         ["src/a/**"])
+        self.assertEqual(report["expired_running"], [])
+        self.assertEqual(lease.lease_state(self.root, TID), {})
+        record = events(self.root, "lease_recovered")[0]
+        self.assertEqual(record["released"], ["src/a/**"])
+        self.assertEqual(record["kept_expired_running"], [])
+
+    def test_recover_keeps_active_and_expired_running(self):
+        make_task(self.root, [wu("u1", ("src/a/**",), status="running"),
+                              wu("u2", ("src/b/**",), status="running")])
+        lease.acquire_lease(self.root, TID, "u1", ["src/a/**"],
+                            ttl_seconds=3600)
+        lease.acquire_lease(self.root, TID, "u2", ["src/b/**"],
+                            ttl_seconds=3600)
+        self._expire_paths(["src/b/**"])
+        report = task_manager.recover_leases(self.root, TID)
+        # active 保留；expired_running（worker 可能仍在写）不动、仅上报
+        self.assertEqual([item["path"] for item in report["active"]],
+                         ["src/a/**"])
+        self.assertEqual([item["path"] for item in
+                          report["expired_running"]], ["src/b/**"])
+        # released 为空 → 不落 journal（只读对账不留噪声行）
+        self.assertEqual(report["released"], [])
+        self.assertEqual(journal.read_events(self.root, TID), [])
+        # 两条租约都未被 recover 动过
+        self.assertEqual(set(lease.lease_state(self.root, TID)),
+                         {"src/a/**", "src/b/**"})
+
+    def test_recover_mixed_releases_stale_keeps_expired_running(self):
+        make_task(self.root, [wu("u1", ("src/a/**",), status="failed"),
+                              wu("u2", ("src/b/**",), status="running")])
+        lease.acquire_lease(self.root, TID, "u1", ["src/a/**"],
+                            ttl_seconds=3600)
+        lease.acquire_lease(self.root, TID, "u2", ["src/b/**"],
+                            ttl_seconds=3600)
+        self._expire_paths(["src/a/**", "src/b/**"])
+        report = task_manager.recover_leases(self.root, TID)
+        self.assertEqual(report["released"], ["src/a/**"])
+        self.assertEqual(lease.lease_state(self.root, TID),
+                         {"src/b/**": lease.lease_state(
+                             self.root, TID)["src/b/**"]})
+        record = events(self.root, "lease_recovered")[0]
+        self.assertEqual(record["released"], ["src/a/**"])
+        self.assertEqual(record["kept_expired_running"], ["src/b/**"])
+
+    def test_recover_requires_task_state(self):
+        with self.assertRaises(task_manager.TaskManagerError):
+            task_manager.recover_leases(self.root, TID)
+
+
+class OrphanLeaseRecoveryTest(TaskManagerTestBase):
+    """端到端崩溃场景（appendix B：
+    orphan_lease_reconciled_after_interrupted_running_unit）。"""
+
+    def test_orphan_lease_reconciled_after_interrupted_running_unit(self):
+        make_task(self.root, [wu("u1")])
+        task_manager.prepare_dispatch(self.root, TID, "u1")
+        task_manager.commit_dispatch(self.root, TID, "u1")
+        # —— 崩溃：单元 running + 租约在位；无验证证据、工作区干净 ——
+        st = state.load_state(self.root, TID)
+        self.assertEqual(unit_of(st, "u1")["status"], "running")
+        self.assertEqual(lease.held_by(self.root, TID, "u1"),
+                         ["src/a/**"])
+        # §69 对账（注入 touched=[] 干净工作区 / events=[] 无验证证据）
+        report = reconcile.reconcile_interrupted(
+            self.root, TID, st["work_units"], touched=[], events=[])
+        self.assertEqual(report["suggestions"]["u1"]["to"], "ready")
+        # 应用建议（主会话侧：只对 suggestions 应用 transition）
+        work_unit.transition_work_unit(unit_of(st, "u1"), "ready")
+        state.save_state(self.root, st)
+        # 单元已回 ready（非活跃写相）→ 租约成孤儿 → recover 闭环清理
+        recovered = task_manager.recover_leases(self.root, TID)
+        self.assertEqual(recovered["released"], ["src/a/**"])
+        self.assertEqual(lease.lease_state(self.root, TID), {})
+        record = events(self.root, "lease_recovered")[0]
+        self.assertEqual(record["released"], ["src/a/**"])
+        self.assertEqual(record["kept_expired_running"], [])
 
 
 if __name__ == "__main__":

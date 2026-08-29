@@ -24,15 +24,24 @@
       OwnershipError；
     - 损坏 JSON / 顶层非对象 → ValueError（中文消息，不静默）；
     - 原子写：落盘后无 .tmp 残留；
-    - 并发冒烟（轻量）：两次连续 acquire→release 往返后 state 一致。
+    - 并发冒烟（轻量）：两次连续 acquire→release 往返后 state 一致；
+    - H5（TTL/generation/崩溃恢复）：新记录 TTL 字段形状与 expires_at
+      推算 / 永久边界 / 非法 ttl 拒绝 / 过期不豁免异 owner 冲突 /
+      expired_leases（只含已过期、排序、now 接受 datetime 与 ISO 串、
+      边界相等不过期、解析失败保守按未过期）/ generation（新获取=1、
+      过期重取=2、未过期幂等不变、刷新无 ttl 转永久）/ renew_lease
+      （显式 ttl、原窗宽重开、永久记录只更新心跳、他人持有跳过、
+      无续约不落盘、旧格式可续不虚构 expires_at）/ 旧格式重取幂等。
 
 运行：
     cd <repo_root> && python3 -m unittest tests.test_lease -v
 """
 
+import json
 import sys
 import tempfile
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "plugins" / "glm-conductor"))
@@ -40,6 +49,24 @@ from runtime import lease
 from runtime import ownership
 
 TID = "lease-task-1a2b3c"
+
+T0 = "2026-01-01T00:00:00.000Z"
+T1 = "2026-01-01T01:00:00.000Z"
+
+
+def write_lease_map(root, mapping):
+    """按落盘形态手工写入 leases.json（构造旧格式 / 过期记录用）。"""
+    path = lease.lease_path(root, TID)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w", encoding="utf-8", newline="\n") as fh:
+        fh.write(json.dumps(mapping, ensure_ascii=False, indent=2,
+                            sort_keys=True))
+
+
+def read_lease_map(root):
+    """直读 leases.json 的原始 JSON（断言落盘形状用）。"""
+    with open(lease.lease_path(root, TID), "r", encoding="utf-8") as fh:
+        return json.load(fh)
 
 
 class LeaseTestBase(unittest.TestCase):
@@ -273,6 +300,255 @@ class AtomicWriteTest(LeaseTestBase):
                              [pattern])
             lease.release_lease(self.root, TID, holder)
             self.assertEqual(lease.lease_state(self.root, TID), {})
+
+
+# —— H5：TTL 语义 / generation / 心跳续约 / 过期判定 / 向后兼容 ——
+
+def _span_seconds(record):
+    """record 的 (expires_at - acquired_at) 秒数（TTL 落盘断言用）。"""
+    return (lease._parse_iso(record["expires_at"])
+            - lease._parse_iso(record["acquired_at"])).total_seconds()
+
+
+class TtlAcquireTest(LeaseTestBase):
+
+    def test_new_record_carries_ttl_fields(self):
+        result = lease.acquire_lease(
+            self.root, TID, "unit-a", ["src/a/**"],
+            session_id="session-1", ttl_seconds=60)
+        record = result["src/a/**"]
+        self.assertEqual(
+            set(record),
+            {"owner", "acquired_at", "session_id", "generation",
+             "heartbeat_at", "expires_at"})
+        self.assertEqual(record["owner"], "unit-a")
+        self.assertEqual(record["session_id"], "session-1")
+        self.assertEqual(record["generation"], 1)
+        self.assertEqual(record["heartbeat_at"], record["acquired_at"])
+        self.assertEqual(_span_seconds(record), 60.0)
+
+    def test_no_ttl_is_permanent(self):
+        # ttl_seconds=None → 不写 expires_at = 永久，expired_leases 永不入选
+        result = lease.acquire_lease(self.root, TID, "unit-a", ["src/a/**"])
+        self.assertNotIn("expires_at", result["src/a/**"])
+        self.assertEqual(lease.expired_leases(self.root, TID), [])
+
+    def test_ttl_must_be_positive_or_none(self):
+        for bad in (0, -5, "60", True, False, 0.0):
+            with self.subTest(bad=bad):
+                with self.assertRaises(ValueError):
+                    lease.acquire_lease(self.root, TID, "unit-a",
+                                        ["src/a/**"], ttl_seconds=bad)
+        # 非法 ttl 零副作用
+        self.assertEqual(lease.lease_state(self.root, TID), {})
+
+    def test_foreign_expired_lease_still_conflicts(self):
+        # 过期不豁免冲突闸：释放归 recover_leases / 主会话，获取端保守
+        lease.acquire_lease(self.root, TID, "unit-a", ["src/a/**"],
+                            ttl_seconds=60)
+        write_lease_map(self.root, {
+            "src/a/**": {"owner": "unit-a", "acquired_at": T0,
+                         "expires_at": "2020-01-01T00:00:00.000Z"}})
+        with self.assertRaises(lease.LeaseConflictError):
+            lease.acquire_lease(self.root, TID, "unit-b", ["src/a/**"])
+
+
+class ExpiredLeasesTest(LeaseTestBase):
+
+    def test_reports_only_expired_sorted(self):
+        write_lease_map(self.root, {
+            "src/z.ts": {"owner": "u9", "acquired_at": T0,
+                         "expires_at": "2025-06-01T00:00:00.000Z"},
+            "src/a.ts": {"owner": "u1", "acquired_at": T0,
+                         "expires_at": "2026-01-01T00:00:00.000Z"},
+            "src/b.ts": {"owner": "u2", "acquired_at": T0,
+                         "expires_at": "2099-01-01T00:00:00.000Z"},
+            "src/c.ts": {"owner": "u3", "acquired_at": T0},
+        })
+        expired = lease.expired_leases(self.root, TID,
+                                       now="2026-06-01T00:00:00.000Z")
+        # 只含已过期者、按 path 排序、字段精确（永久记录永不入选）
+        self.assertEqual(expired,
+                         [{"path": "src/a.ts", "owner": "u1",
+                           "expires_at": "2026-01-01T00:00:00.000Z"},
+                          {"path": "src/z.ts", "owner": "u9",
+                           "expires_at": "2025-06-01T00:00:00.000Z"}])
+
+    def test_now_accepts_datetime_and_iso_string(self):
+        write_lease_map(self.root, {
+            "src/a.ts": {"owner": "u1", "acquired_at": T0,
+                         "expires_at": "2026-01-01T00:00:00.000Z"}})
+        as_string = lease.expired_leases(
+            self.root, TID, now="2026-01-01T00:00:01.000Z")
+        as_datetime = lease.expired_leases(
+            self.root, TID,
+            now=datetime(2026, 1, 1, 0, 0, 1, tzinfo=timezone.utc))
+        self.assertEqual(len(as_string), 1)
+        self.assertEqual(as_string, as_datetime)
+        # naive datetime 视为 UTC
+        naive = lease.expired_leases(
+            self.root, TID, now=datetime(2026, 1, 1, 0, 0, 2))
+        self.assertEqual(len(naive), 1)
+
+    def test_boundary_expires_equal_now_not_expired(self):
+        # expires_at < now 严格小于：恰好相等不算过期
+        write_lease_map(self.root, {
+            "src/a.ts": {"owner": "u1", "acquired_at": T0,
+                         "expires_at": "2026-06-01T00:00:00.000Z"}})
+        self.assertEqual(
+            lease.expired_leases(self.root, TID,
+                                 now="2026-06-01T00:00:00.000Z"), [])
+
+    def test_unparseable_expires_treated_permanent(self):
+        # 解析失败保守按未过期（容错不抛，绝不误清）
+        write_lease_map(self.root, {
+            "src/a.ts": {"owner": "u1", "acquired_at": T0,
+                         "expires_at": "not-a-date"}})
+        self.assertEqual(lease.expired_leases(self.root, TID), [])
+        # 同 owner 重取也因「未过期」幂等跳过（不触发刷新）
+        raw_before = self._raw_bytes()
+        lease.acquire_lease(self.root, TID, "u1", ["src/a.ts"])
+        self.assertEqual(self._raw_bytes(), raw_before)
+
+
+class GenerationTest(LeaseTestBase):
+
+    def test_generation_increments_on_expired_reacquire(self):
+        write_lease_map(self.root, {
+            "src/a/**": {"owner": "unit-a", "acquired_at": T0,
+                         "session_id": "s-old", "generation": 1,
+                         "heartbeat_at": T0,
+                         "expires_at": "2026-01-01T00:30:00.000Z"}})
+        result = lease.acquire_lease(self.root, TID, "unit-a",
+                                     ["src/a/**"],
+                                     session_id="s-new", ttl_seconds=60)
+        record = result["src/a/**"]
+        self.assertEqual(record["generation"], 2)
+        self.assertEqual(record["session_id"], "s-new")
+        self.assertEqual(record["heartbeat_at"], record["acquired_at"])
+        self.assertEqual(_span_seconds(record), 60.0)
+        self.assertGreater(record["acquired_at"], T0)  # ISO 串比较成立
+        # 落盘读回一致
+        self.assertEqual(read_lease_map(self.root)[ "src/a/**"], record)
+
+    def test_refresh_without_ttl_turns_permanent(self):
+        # 刷新按本次调用语义重写 expires_at（None → 移除，转永久）
+        write_lease_map(self.root, {
+            "src/a/**": {"owner": "unit-a", "acquired_at": T0,
+                         "session_id": "s-old", "generation": 3,
+                         "heartbeat_at": T0,
+                         "expires_at": "2020-01-01T00:00:00.000Z"}})
+        result = lease.acquire_lease(self.root, TID, "unit-a",
+                                     ["src/a/**"])
+        record = result["src/a/**"]
+        self.assertNotIn("expires_at", record)
+        self.assertEqual(record["generation"], 4)
+        self.assertEqual(record["session_id"], "s-old")  # None 保留旧值
+
+    def test_unexpired_reacquire_is_fully_idempotent(self):
+        lease.acquire_lease(self.root, TID, "unit-a", ["src/a/**"],
+                            session_id="s-1", ttl_seconds=3600)
+        raw_before = self._raw_bytes()
+        again = lease.acquire_lease(self.root, TID, "unit-a",
+                                    ["src/a/**"],
+                                    session_id="s-2", ttl_seconds=1)
+        # 未过期幂等跳过：不换 session、不重置 ttl、不 bump generation
+        self.assertEqual(self._raw_bytes(), raw_before)
+        self.assertEqual(again["src/a/**"]["generation"], 1)
+        self.assertEqual(again["src/a/**"]["session_id"], "s-1")
+
+    def test_legacy_record_reacquire_stays_idempotent(self):
+        # 2.0.0 旧格式（无 expires_at）永不过期：同 owner 重取一字不动
+        write_lease_map(self.root,
+                        {"src/a/**": {"owner": "unit-a",
+                                      "acquired_at": T0}})
+        raw_before = self._raw_bytes()
+        lease.acquire_lease(self.root, TID, "unit-a", ["src/a/**"])
+        self.assertEqual(self._raw_bytes(), raw_before)
+
+
+class RenewTest(LeaseTestBase):
+
+    def test_renew_extends_with_explicit_ttl(self):
+        lease.acquire_lease(self.root, TID, "unit-a",
+                            ["src/z.ts", "src/a/**"], ttl_seconds=60)
+        original_now = lease._utc_now_iso
+        lease._utc_now_iso = lambda: T1
+        try:
+            renewed = lease.renew_lease(self.root, TID, "unit-a",
+                                        ttl_seconds=120)
+        finally:
+            lease._utc_now_iso = original_now
+        # 返回排序；heartbeat/expires 全部按续约时刻重开
+        self.assertEqual(renewed, ["src/a/**", "src/z.ts"])
+        state_now = lease.lease_state(self.root, TID)
+        for path in ("src/a/**", "src/z.ts"):
+            self.assertEqual(state_now[path]["heartbeat_at"], T1)
+            self.assertEqual(
+                (lease._parse_iso(state_now[path]["expires_at"])
+                 - lease._parse_iso(T1)).total_seconds(), 120.0)
+
+    def test_renew_without_ttl_reuses_original_window(self):
+        lease.acquire_lease(self.root, TID, "unit-a", ["src/a/**"],
+                            ttl_seconds=60)
+        original_now = lease._utc_now_iso
+        lease._utc_now_iso = lambda: T1
+        try:
+            renewed = lease.renew_lease(self.root, TID, "unit-a")
+        finally:
+            lease._utc_now_iso = original_now
+        self.assertEqual(renewed, ["src/a/**"])
+        record = lease.lease_state(self.root, TID)["src/a/**"]
+        # 原有 TTL 窗宽（60s）从当前时刻重开
+        self.assertEqual(
+            (lease._parse_iso(record["expires_at"])
+             - lease._parse_iso(T1)).total_seconds(), 60.0)
+
+    def test_renew_permanent_record_updates_heartbeat_only(self):
+        lease.acquire_lease(self.root, TID, "unit-a", ["src/a/**"])
+        original_now = lease._utc_now_iso
+        lease._utc_now_iso = lambda: T1
+        try:
+            renewed = lease.renew_lease(self.root, TID, "unit-a")
+        finally:
+            lease._utc_now_iso = original_now
+        self.assertEqual(renewed, ["src/a/**"])
+        record = lease.lease_state(self.root, TID)["src/a/**"]
+        self.assertEqual(record["heartbeat_at"], T1)
+        self.assertNotIn("expires_at", record)  # 无原 TTL 且未给 → 不产生
+
+    def test_renew_skips_unheld_and_foreign_paths(self):
+        lease.acquire_lease(self.root, TID, "unit-a", ["src/a/**"])
+        lease.acquire_lease(self.root, TID, "unit-b", ["src/b/**"])
+        foreign_before = lease.lease_state(self.root, TID)["src/b/**"]
+        renewed = lease.renew_lease(self.root, TID, "unit-a",
+                                    ["src/a/**", "src/b/**"])
+        # 只续自己持有的；他人持有静默跳过（§78 异 owner 不可代动）
+        self.assertEqual(renewed, ["src/a/**"])
+        self.assertEqual(lease.lease_state(self.root, TID)["src/b/**"],
+                         foreign_before)  # 他人记录一字不动
+
+    def test_renew_nothing_held_writes_nothing(self):
+        renewed = lease.renew_lease(self.root, TID, "unit-a")
+        self.assertEqual(renewed, [])
+        self.assertFalse(lease.lease_path(self.root, TID).exists())
+        # 文件已存在但无续约 → 字节不变
+        lease.acquire_lease(self.root, TID, "unit-b", ["src/b/**"])
+        raw_before = self._raw_bytes()
+        self.assertEqual(lease.renew_lease(self.root, TID, "unit-a"), [])
+        self.assertEqual(self._raw_bytes(), raw_before)
+
+    def test_renew_legacy_record_adds_heartbeat_without_expiry(self):
+        # 旧格式可读可续：心跳写入，但不虚构 expires_at
+        write_lease_map(self.root,
+                        {"src/a/**": {"owner": "unit-a",
+                                      "acquired_at": T0}})
+        renewed = lease.renew_lease(self.root, TID, "unit-a")
+        self.assertEqual(renewed, ["src/a/**"])
+        record = lease.lease_state(self.root, TID)["src/a/**"]
+        self.assertIn("heartbeat_at", record)
+        self.assertNotIn("expires_at", record)
+        self.assertEqual(record["acquired_at"], T0)  # 旧字段不动
 
 
 if __name__ == "__main__":
