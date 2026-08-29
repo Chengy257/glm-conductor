@@ -34,8 +34,8 @@
       - violation 三元组从 (task_id, out_of_scope, patterns) 改为
         (task_id, check, detail)：check ∈ {"ownership",
         "verification_missing", "verification_stale", "review_missing",
-        "review_rejected", "review_stale", "visual_stale"}，detail 为
-        逐 check 的结构化字段 dict；
+        "review_rejected", "review_stale", "visual_stale",
+        "corrupt_state"}，detail 为逐 check 的结构化字段 dict；
       - block 报文按 check 分发（英文、可行动、逐行列出），其余违规
         任务以 "Also failing in task <id>: <check>" 附带列出；
       - 消费证据指纹层（runtime.fingerprint）：指纹每任务至多计算一次，
@@ -54,10 +54,27 @@ fail-open 策略：
         模式非法等 OwnershipError / FingerprintError）→ 同样降级放行，
         记 gate_degraded（reason=evaluation_error）。
     强制路径（唯一会 block 的情形）：
-      - 参与校验的任务在四重检查中有任一失败（七种 check）。这是有意
+      - 参与校验的任务在四重检查中有任一失败（八种 check）。这是有意
         决策，不算异常；block 走 stdout JSON，退出码仍为 0。
     stdout 纪律：运行时对钩子 stdout 做 Zod 严格校验，除 block 的单行
     JSON 外任何路径都不得写 stdout；一切报告只走 stderr。
+
+发现完整性（H3/P0-3）：
+    活动任务发现改用 state.discover_tasks 对 tasks_root 下全部子目录
+    四分类，state.json 损坏不再被解释成「没有任务需要强制」：
+      - active（state.json 可读且非终态）→ 照常走四重检查；
+      - terminal → 与完成门无关；
+      - orphaned（目录存在但无 state.json）→ 永不拦截：stderr 报警 +
+        向该目录 journal 记 gate_degraded（reason=orphaned_task）；
+      - corrupt（state.json 存在但解析 / 任务标识归一失败或读取
+        OSError）→ 读该目录 journal 找高保障证据（route_selected 的
+        mode ∈ (audit, full) 或 assurance=high，或 status_changed 的
+        to=finalizing）：有 → fail-closed 并入违规清单（check=
+        corrupt_state，走统一 block / exhaustion 机器，报文含恢复指引）；
+        无 → 降级放行（stderr 报警 + journal 记 gate_degraded，
+        reason=corrupt_state）。
+    由此区分 no task（静默零干预）与 unreadable task（结构化报警，
+    高保障时拦截）。
 
 完成提交（P0-1：completed 的唯一提交点）：
     任务收尾时模型把 status 写为 finalizing（= 请求完成；公共状态 API
@@ -81,7 +98,7 @@ fail-open 策略：
       - 否则 block（本次 block 后链上再加一条，下次 N+1）。
     「连续」= 逐条向前直到遇到任一非 gate_blocked 事件或耗尽——模型在
     两次 block 之间完成了真实工作（journal 出现其他事件，含 gate_passed）
-    → 连续链断开 → 重新计数。上限对全部七种 check 一视同仁。
+    → 连续链断开 → 重新计数。上限对全部八种 check 一视同仁。
 
 来源：
     docs/glm-conductor-v2-upgrade-guide-final.md §9（Ownership Gate
@@ -189,6 +206,30 @@ def count_trailing_gate_blocks(repo, task_id):
     return count
 
 
+def _corrupt_requires_fail_closed(repo, task_id):
+    """corrupt 任务的 fail-closed 证据判定（H3/P0-3），返回布尔值。
+
+    state.json 不可读时从任务 journal 找高保障证据（read_events 容错读，
+    坏行跳过）：任一 route_selected 事件 mode ∈ ("audit", "full") 或
+    assurance == "high"，或任一 status_changed 事件 to == "finalizing"
+    → True——该任务此前处于需要完成门强制的高保障 / 完成请求路径上，
+    状态损坏不得成为静默放行通道。journal 缺失 / 为空 / 无此类证据
+    → False（走降级放行：stderr 报警 + gate_degraded 记账）。
+    """
+    from runtime import journal
+
+    for item in journal.read_events(repo, task_id):
+        name = item.get("event")
+        if name == "route_selected":
+            if item.get("mode") in ("audit", "full") \
+                    or item.get("assurance") == "high":
+                return True
+        elif name == "status_changed":
+            if item.get("to") == "finalizing":
+                return True
+    return False
+
+
 # —— block 报文构造（§15：英文、可行动、逐行列出） ——
 
 def _fingerprint_short(value):
@@ -209,7 +250,7 @@ def build_block_reason(violation, other_violations):
     """构造 block 报文 reason（英文、可行动，指南 §15 风格；逐行可执行）。
 
     violation 为 (task_id, check, detail) 三元组，按 check 分发到对应
-    报文模板（七种 check，模板逐字锁定）；其余违规任务以
+    报文模板（八种 check，模板逐字锁定）；其余违规任务以
     "Also failing in task <id>: <check>" 附带列出（存在时）。
     """
     task_id, check, detail = violation
@@ -297,6 +338,16 @@ def build_block_reason(violation, other_violations):
         lines.append(
             "Re-capture the visual evidence, re-run visual review, then record via")
         lines.append("runtime.state.record_visual_evidence.")
+    elif check == "corrupt_state":
+        lines = [
+            "Completion blocked: unreadable task state (task %s)." % task_id,
+            "- %s" % detail["reason"],
+            "The task directory was kept. Recovery options:",
+            "- rebuild state.json from events.jsonl / checkpoint evidence"
+            " (repository state is authoritative), then re-run Stop;",
+            "- or archive the task directory (rename or remove) once the"
+            " user confirms it is obsolete.",
+        ]
     else:  # 防御：词汇表外的新 check 落到通用报文（词汇封闭后不可达）
         lines = ["Completion blocked: %s (task %s)." % (check, task_id)]
     for other_id, other_check, _other_detail in other_violations:
@@ -536,6 +587,11 @@ def main():
     注意：stop_hook_active=true（续行循环中的 Stop）**照常校验**——这正是
     运行时 3 次续行额度的工作方式（第 1/2 次 block、第 3 次由 journal
     计数放行）；提前放行会让续行中的完成声明免检。
+    发现段用 state.discover_tasks 四分类（H3/P0-3，见模块 docstring
+    「发现完整性」）：orphaned 永不拦截、无证据 corrupt 降级放行（均
+    stderr 报警 + journal gate_degraded 可见），有高保障证据的 corrupt
+    并入违规清单 fail-closed；无 corrupt/orphaned 目录时流程与四分类
+    引入前完全一致。
     全绿放行路径额外做完成提交：对全部 finalizing 任务原子提交
     completed 并记 completed 事件（见模块 docstring「完成提交」）。
     """
@@ -544,60 +600,96 @@ def main():
 
     # runtime 模块在函数内 import：其上的 sys.path 接线已就绪，
     # import 失败会被外层 fail-open 捕获
-    from runtime import fingerprint, ownership, state
+    from runtime import fingerprint, journal, ownership, state
 
     # 2) 被检仓库根
     repo = repo_root()
 
-    # 3) 发现活动任务：空 → 静默放行（普通会话零干预）
-    active = state.find_active_tasks(repo)
-    if not active:
+    # 3) 任务发现四分类（H3/P0-3）：state.json 损坏不再静默消失——
+    #    orphaned（无 state.json）永不拦截：报警 + 该目录 journal 记
+    #    gate_degraded(reason=orphaned_task)；corrupt 有高保障 journal
+    #    证据者收集为 deferred_corrupt（稍后并入违规清单 fail-closed），
+    #    无证据者降级放行：报警 + journal 记 gate_degraded(
+    #    reason=corrupt_state)。active 为空且无 deferred_corrupt →
+    #    静默放行（普通会话零干预语义不变）
+    discovery = state.discover_tasks(repo)
+    active = [name for name, _status in discovery["active"]]
+    for name, _reason in discovery["orphaned"]:
+        warn_stderr(
+            "ENFORCEMENT DEGRADED: task directory %s has no state.json "
+            "(orphaned); completion gate cannot enforce it" % name)
+        journal.append_event(
+            repo, name,
+            {"event": "gate_degraded", "reason": "orphaned_task"})
+    deferred_corrupt = []
+    for name, reason in discovery["corrupt"]:
+        if _corrupt_requires_fail_closed(repo, name):
+            deferred_corrupt.append((name, reason))
+        else:
+            warn_stderr(
+                "ENFORCEMENT DEGRADED: task %s state.json unreadable and "
+                "no high-assurance journal evidence (%s); gate degraded "
+                "for this task" % (name, reason))
+            journal.append_event(
+                repo, name,
+                {"event": "gate_degraded", "reason": "corrupt_state"})
+    if not active and not deferred_corrupt:
         return 0
 
-    # 4) touched 清单；git 失败 / 非 git 仓库 → 降级放行（fail-open），
-    #    向全部参与校验的任务记 gate_degraded（降级可见 + 断链可溯源）
-    try:
-        touched = ownership.git_touched_files(repo)
-    except ownership.OwnershipError as exc:
-        warn_stderr(
-            "ENFORCEMENT DEGRADED: cannot list touched files (%s); "
-            "ownership gate skipped" % (exc,))
-        from runtime import journal
-        record_for_tasks(
-            journal, repo,
-            participating_ids(state, repo, active) or [active[0]],
-            {"event": "gate_degraded", "reason": "git_unavailable"})
-        return 0
+    if active:
+        # 4) touched 清单；git 失败 / 非 git 仓库 → 降级放行（fail-open），
+        #    向全部参与校验的任务记 gate_degraded（降级可见 + 断链可溯源）
+        #    （git 仅在 active 非空时取：纯 corrupt 场景的证据判定只依赖
+        #    journal，不依赖 git）
+        try:
+            touched = ownership.git_touched_files(repo)
+        except ownership.OwnershipError as exc:
+            warn_stderr(
+                "ENFORCEMENT DEGRADED: cannot list touched files (%s); "
+                "ownership gate skipped" % (exc,))
+            record_for_tasks(
+                journal, repo,
+                participating_ids(state, repo, active) or [active[0]],
+                {"event": "gate_degraded", "reason": "git_unavailable"})
+            return 0
 
-    # 5) 基线修订号 + 逐任务 §15 四重检查：touched 与 base 单次 Stop 内
-    #    各取一次、跨任务复用（每次 Stop 恒为 2 次 git 子调用：1 次
-    #    status + 1 次 rev-parse，多任务不再叠加 rev-parse）；基线解析与
-    #    evaluate 阶段的结构性错误（rev-parse 突然失败 / 声明模式非法
-    #    等）并入同一降级路径——不静默放宽，也不卡会话
-    try:
-        base = fingerprint.resolve_base(repo)
-        violations, declared = collect_violations(state, repo, touched, base,
-                                                  active)
-    except (ownership.OwnershipError, fingerprint.FingerprintError) as exc:
-        warn_stderr(
-            "ENFORCEMENT DEGRADED: cannot evaluate completion gate (%s); "
-            "gate skipped" % (exc,))
-        from runtime import journal
-        record_for_tasks(
-            journal, repo,
-            participating_ids(state, repo, active) or [active[0]],
-            {"event": "gate_degraded", "reason": "evaluation_error"})
-        return 0
+        # 5) 基线修订号 + 逐任务 §15 四重检查：touched 与 base 单次 Stop
+        #    内各取一次、跨任务复用（每次 Stop 恒为 2 次 git 子调用：1 次
+        #    status + 1 次 rev-parse，多任务不再叠加 rev-parse）；基线解析
+        #    与 evaluate 阶段的结构性错误（rev-parse 突然失败 / 声明模式
+        #    非法等）并入同一降级路径——不静默放宽，也不卡会话
+        try:
+            base = fingerprint.resolve_base(repo)
+            violations, declared = collect_violations(
+                state, repo, touched, base, active)
+        except (ownership.OwnershipError, fingerprint.FingerprintError) as exc:
+            warn_stderr(
+                "ENFORCEMENT DEGRADED: cannot evaluate completion gate (%s); "
+                "gate skipped" % (exc,))
+            record_for_tasks(
+                journal, repo,
+                participating_ids(state, repo, active) or [active[0]],
+                {"event": "gate_degraded", "reason": "evaluation_error"})
+            return 0
+    else:
+        # 无 active 但存在高保障 corrupt：以空清单直接进入统一 block 机器
+        violations, declared = [], []
+
+    # 5.5) corrupt 高保障任务并入违规清单尾部（四重检查违规优先呈现；
+    #      check=corrupt_state 与其他违规同走下方 pass / block / exhausted
+    #      统一机器——含续行上限）
+    violations.extend(
+        (name, "corrupt_state", {"reason": reason})
+        for name, reason in deferred_corrupt)
 
     # 6) 无违规 → 放行：stdout/stderr 完全静默；对全部参与校验的任务记
     #    gate_passed（断链用——否则上一轮的 gate_blocked 残留会让下轮
     #    续行计数起点错位；同时留"何时通过完成门"的审计痕迹。无人参与
-    #    时不记——没有校验发生。无活动任务时已在第 3 步提前返回，普通
+    #    时不记——没有校验发生。无任务可查时已在第 3 步提前返回，普通
     #    会话零写入）。随后做完成提交：对全部 finalizing 任务原子提交
     #    completed（P0-1：completed 的唯一提交点在本门内；单任务失败
     #    逐任务降级放行，exhausted / degraded / block 路径不经过这里）
     if not violations:
-        from runtime import journal
         record_for_tasks(
             journal, repo, declared, {"event": "gate_passed", "tasks": declared})
         commit_finalizing_completions(
@@ -615,7 +707,6 @@ def main():
             "runtime 3-attempt limit reached, allowing stop. The model MUST "
             "report the blocked state to the user and MUST NOT claim "
             "completion." % first_task)
-        from runtime import journal
         journal.append_event(
             repo, first_task,
             dict({"event": "gate_exhausted", "check": first_check},
@@ -624,7 +715,6 @@ def main():
 
     # 7b) 未达上限 → block：stdout 单行 JSON 请求续跑 + 记 gate_blocked
     emit_block_json(build_block_reason(violations[0], violations[1:]))
-    from runtime import journal
     journal.append_event(
         repo, first_task,
         dict({"event": "gate_blocked", "check": first_check,

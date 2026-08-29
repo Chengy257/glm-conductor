@@ -20,7 +20,10 @@
       - 迁移 / 提交：transition_task_status() 公共状态迁移入口（记
         status_changed 事件）；commit_completion() 完成门专用提交通道；
       - 读取：load_state() 读取并归一 v1.x legacy 标识（CONTINUITY_ID 等）；
-      - 发现：find_active_tasks() 扫描全部非终态活动任务（健壮性优先）。
+      - 发现：discover_tasks() 对 tasks_root 全部子目录四分类
+        （active / terminal / corrupt / orphaned，H3/P0-3——损坏的
+        state.json 不再从发现阶段静默消失）；find_active_tasks() 保留为
+        兼容 helper（实现复用 discover_tasks，输出与四分类引入前一致）。
     本文件是 Stop 完成门钩子等强制状态源的确定性来源。
 
 路径布局：
@@ -84,7 +87,7 @@ TASK_STATUSES = (
     "created", "preflight", "routed", "decomposed", "executing",
     "joining", "verifying", "reviewing", "finalizing", "completed",
     "waiting_quota", "blocked", "cancelled", "failed")
-# 终态：find_active_tasks 不再返回
+# 终态：discover_tasks 归入 terminal 桶（find_active_tasks 不再返回）
 TERMINAL_STATUSES = ("completed", "cancelled", "failed")
 # 顶层状态转换表：键 = 旧 status，值 = 允许的直接后继（终态无表项 =
 # 不接受任何转换）。save_state 与 transition_task_status 据此拒绝非法
@@ -805,25 +808,72 @@ def transition_task_status(repo_root, task_id, new_status) -> dict:
     return st
 
 
-def find_active_tasks(repo_root) -> "list[str]":
-    """扫描 tasks_root，返回全部非终态活动任务的 task_id（按目录名排序）。
+# corrupt 分类的 reason 长度上限（异常消息简写，避免超长 JSON 错误
+# 撑爆 stderr / journal 记录）
+_CORRUPT_REASON_LIMIT = 80
 
-    单个任务目录解析失败（JSON 损坏 / 缺 task_id / 无 state.json / 读取时
-    OSError 等权限问题）→ 跳过该目录，不中断扫描（健壮性优先）。
+
+def _short_reason(text) -> str:
+    """把异常消息简写为不超过 _CORRUPT_REASON_LIMIT 字符的中文原因。"""
+    text = str(text)
+    if len(text) > _CORRUPT_REASON_LIMIT:
+        return text[:_CORRUPT_REASON_LIMIT]
+    return text
+
+
+def discover_tasks(repo_root) -> dict:
+    """扫描 tasks_root 下全部子目录，返回任务四分类 dict（H3/P0-3）。
+
+    返回结构（四个键恒存在，桶内条目均为 (目录名, reason) 二元组，
+    按目录名排序）：
+      - "active"：state.json 可读且 status 非终态（reason 为 status 字符串）；
+      - "terminal"：status ∈ TERMINAL_STATUSES（reason 为 status 字符串）；
+      - "corrupt"：state.json 存在但 JSON 损坏 / 任务标识归一失败
+        （ValueError）或读取时 OSError——reason 为异常消息简写
+        （「state.json 损坏：…」/「state.json 不可读：…」，截断到
+        80 字符内）；
+      - "orphaned"：目录存在但无 state.json（reason 为「无 state.json」）。
+
+    发现完整性语义：损坏的 state.json 不再被解释成「没有任务」——
+    corrupt 与 orphaned 都被显式报告，由调用方（Stop 完成门）决定
+    拦截或降级。tasks_root 不存在 → 四桶全空；tasks_root 下的非目录
+    项跳过；单目录解析失败不中断扫描（健壮性优先）。
     """
+    discovery = {"active": [], "terminal": [], "corrupt": [], "orphaned": []}
     root = tasks_root(repo_root)
     if not root.is_dir():
-        return []
-    active = []
+        return discovery
     for entry in sorted(root.iterdir(), key=lambda item: item.name):
         if not entry.is_dir():
             continue
         try:
             loaded = load_state(repo_root, entry.name)
-        except (ValueError, OSError):
+        except ValueError as exc:
+            discovery["corrupt"].append(
+                (entry.name, _short_reason("state.json 损坏：%s" % exc)))
+            continue
+        except OSError as exc:
+            discovery["corrupt"].append(
+                (entry.name, _short_reason("state.json 不可读：%s" % exc)))
             continue
         if loaded is None:
+            discovery["orphaned"].append((entry.name, "无 state.json"))
             continue
-        if loaded.get("status") not in TERMINAL_STATUSES:
-            active.append(entry.name)
-    return active
+        status = loaded.get("status")
+        if status in TERMINAL_STATUSES:
+            discovery["terminal"].append((entry.name, status))
+        else:
+            discovery["active"].append((entry.name, status))
+    return discovery
+
+
+def find_active_tasks(repo_root) -> "list[str]":
+    """兼容 helper：返回全部非终态活动任务的 task_id（按目录名排序）。
+
+    H3（P0-3）起 Stop 完成门改用 discover_tasks() 四分类发现（损坏目录
+    不再静默消失，见其 docstring），本函数保留为既有调用方的兼容出口
+    ——实现直接取 discover_tasks 的 active 桶目录名，输出与四分类引入前
+    完全一致：单个任务目录解析失败（JSON 损坏 / 缺 task_id / 无
+    state.json / 读取时 OSError）不进入 active，也不中断扫描。
+    """
+    return [name for name, _status in discover_tasks(repo_root)["active"]]

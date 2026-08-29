@@ -27,11 +27,26 @@ description: GLM Conductor v2 强制层运行时契约。解释 Stop 完成门�
 | 2 | 验证 | required 命令全部 completed，且 verification.fingerprint = 当前指纹 | `verification_missing` / `verification_stale` |
 | 3 | 审查（review.required=true 时） | verdict = ship，且 review.fingerprint = 当前指纹 | `review_missing` / `review_rejected`（fix-first/rethink）/ `review_stale` |
 | 4 | 视觉证据 | visual_evidence 每项文件字节 sha256 与记录一致 | `visual_stale` |
+| 5 | 状态完整性（H3/P0-3） | state.json 可读 | `corrupt_state`（state.json 损坏 + journal 高保障证据 → fail-closed 拦截；见下方「损坏状态的处置与恢复指引」） |
 
 - **证据指纹（stale 检测的核心）**：验证/审查证据通过 `runtime.fingerprint.task_fingerprint`（基线修订 + 相关文件集归一化内容状态的 sha256）绑定到记录时的仓库状态；完成门用**同一入口**重算当前指纹，与记录值不一致 = 证据过期。任何后续编辑（包括"顺手小改"）都会使 verification_stale / review_stale 拦截完成——这是「任何修复使先前验证/审查失效」的自动强制。记录时机契约见 continuity 技能「证据指纹的记录时机」
 - **完成提交（生命周期封口）**：收尾时把 status 写为 `finalizing` 即请求完成（`state.transition_task_status`，公共状态 API 无法直达 completed）；四重检查全绿放行时，钩子对全部 `finalizing` 任务经 `state.commit_completion` 原子提交 `completed` 并记 `completed` 事件（via=completion_gate）——有违规照常 block（状态保持 finalizing，修复后重新 Stop）；连续 block 达上限（gate_exhausted）放行或任何降级路径都**不会**提交完成
 - **无活动任务 / 任务不参与** → 静默放行，普通会话零干预
 - `.glm-conductor/` 运行时目录豁免（编排器自身账本不算仓库改动）
+
+### 损坏状态的处置与恢复指引（H3/P0-3）
+
+Stop 完成门用 `state.discover_tasks` 对任务目录四分类（active / terminal / corrupt / orphaned）——state.json 损坏不再被解释成「没有任务需要强制」，no task（静默零干预）与 unreadable task（结构化报警）从此可区分：
+
+- **orphaned**（任务目录存在但无 state.json）→ 永不拦截：stderr 报警（ENFORCEMENT DEGRADED）+ 该目录 journal 记 `gate_degraded`（reason=orphaned_task）
+- **corrupt**（state.json 存在但解析 / 任务标识归一失败或读取异常）→ 读该目录 journal 找高保障证据：
+  - 有 `route_selected`（mode 为 audit / full 或 assurance=high）或 `status_changed`（to=finalizing）证据 → **fail-closed 拦截**：`corrupt_state` 并入违规清单，与其他违规同走统一 block / gate_exhausted 机器，报文含恢复指引
+  - 无证据 → 降级放行：stderr 报警 + journal 记 `gate_degraded`（reason=corrupt_state）
+
+被 `corrupt_state` 拦截时的恢复方法（报文内含同样指引）：
+
+1. 从 `events.jsonl` 与 checkpoint 证据重建 `state.json`（仓库状态权威于运行时记录），重建后重新完成
+2. 或经用户确认任务已废弃后，归档（改名 / 移除）该任务目录
 
 ### Layer B — 派发时注入（提示级）
 
@@ -93,7 +108,8 @@ PreToolUse 钩子在每次 Agent/Task 派发前向主会话注入 ownership 契�
 4. **verification_stale / review_stale** → 证据已过期（文件在验证/审查后被改过）：重跑验证 / 重新审查并记录**新**指纹；禁止回写旧指纹"续命"
 5. **review_missing / review_rejected** → 派发审查者 / 按 fix-first·rethink 裁决修复后重新审查
 6. **visual_stale** → 截图被替换过：重新采集视觉证据并重新视觉验收，`record_visual_evidence` 落账
-7. **反复被拦且无法修复** → 向用户报告完整 block 报文，等待人工决策
+7. **corrupt_state** → state.json 损坏：按「损坏状态的处置与恢复指引」从 events.jsonl / checkpoint 证据重建 state.json，或经用户确认后归档任务目录
+8. **反复被拦且无法修复** → 向用户报告完整 block 报文，等待人工决策
 
 ## 边界（当前版本未强制的事项）
 

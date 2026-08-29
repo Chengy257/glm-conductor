@@ -268,6 +268,19 @@ R4 delegate/full 实质性：ownership.files 与 verification.required 必须非
 
 配套地，`new_task_state` 的 `review_required` 缺省值改为按 route 推导（audit/full 或 assurance:high → True；solo/delegate + standard → False；信息不足落 False；显式 True/False 照传——显式 False + 推导 True 的组合由 R3 在保存时拒绝）。门侧同步：`hooks/stop_gate.py` 的参与判定与检查 3 的条件从「只认 `review.required` 标志」改为「标志为 True 或 route 推导要求审查」——即使手写 state.json 绕过 `save_state` 校验漏写标志，high-assurance 任务也无法跳过独立 fresh ship 裁决的检查（报文与七种 check 词汇不变，仍按 review_missing / review_stale 拦截）。
 
+### 9.1.3 任务发现完整性（P0-3）
+
+完成门的强制对象先于四重检查——发现阶段若把「读不出的任务」当成「不存在的任务」，损坏即成为静默放行通道。v2.0.1 起 Stop 钩子改用 `runtime/state.py` 的 `discover_tasks` 对 `tasks_root` 下全部子目录做四分类（`find_active_tasks` 保留为兼容 helper，实现复用同一发现，输出不变）：
+
+| 分类 | 判定 | Stop 完成门处置 |
+| --- | --- | --- |
+| active | state.json 可读且 status 非终态 | 照常参与四重检查 |
+| terminal | status ∈ (completed, cancelled, failed) | 与完成门无关 |
+| orphaned | 目录存在但无 state.json | 永不拦截：stderr 报警 + 该目录 journal 记 `gate_degraded`（reason=orphaned_task） |
+| corrupt | state.json 存在但 JSON 损坏 / 任务标识归一失败（ValueError）或读取 OSError | 按 journal 证据二分（见下），不中断其余任务的扫描 |
+
+**corrupt 的 fail-closed 证据规则**：读该任务目录 journal（容错读，坏行跳过），任一 `route_selected` 事件 mode ∈ (audit, full) 或 assurance=high，或任一 `status_changed` 事件 to=finalizing → 判定该任务此前处于需要完成门强制的高保障 / 完成请求路径，状态损坏不得成为静默放行通道——并入违规清单（check=`corrupt_state`，为第八种 check）走统一 block / gate_exhausted 机器，报文含可行动恢复指引（从 events.jsonl / checkpoint 证据重建 state.json——仓库状态权威；或经用户确认后归档任务目录）。无此证据 → 降级放行：stderr 报警 + journal 记 `gate_degraded`（reason=corrupt_state）。corrupt 的证据判定只依赖 journal，不依赖 git——active 为空时 git touched 清单不再被取（两条既有降级路径 git_unavailable / evaluation_error 因此仅在 active 非空时可达）。由此状态损坏被结构化记录并可区分：no task（静默零干预）≠ unreadable task（报警，高保障时拦截）。
+
 ### 9.2 PreToolUse 双面：Layer B 注入（提示级）+ Bash 策略门控（决策级，beta1）
 
 同一钩子脚本 `hooks/pre_tool_use.py` 按载荷 tool_name 分流：

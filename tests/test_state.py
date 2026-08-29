@@ -794,6 +794,149 @@ class FindActiveTasksTest(unittest.TestCase):
                     ["a-active-111111", "z-later-333333"])
 
 
+# —— discover_tasks 四分类（H3/P0-3：发现完整性） ——
+
+class DiscoverTasksTest(unittest.TestCase):
+    """discover_tasks 四分类 + find_active_tasks 兼容等价（H3/P0-3）。
+
+    损坏 / 缺标识 / 读取异常的 state.json 不再从发现阶段静默消失：
+    归入 corrupt 桶并携带简短中文原因；无 state.json 的目录归入
+    orphaned 桶。
+    """
+
+    def save(self, repo_root, task_id, status):
+        # 与 FindActiveTasksTest.save 同链路：completed 走合法迁移链构造
+        st = make_state(task_id=task_id, status=status)
+        if status == "completed":
+            st["status"] = "executing"
+            state.save_state(repo_root, st)
+            st["status"] = "finalizing"
+            state.save_state(repo_root, st)
+            state.commit_completion(repo_root, task_id)
+            return
+        state.save_state(repo_root, st)
+
+    def test_four_classes_in_one_repo(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self.save(tmp, "a-active-111111", "executing")
+            self.save(tmp, "b-completed-222222", "completed")
+            self.save(tmp, "c-cancelled-333333", "cancelled")
+            self.save(tmp, "d-failed-444444", "failed")
+            # JSON 损坏 → corrupt（不再被跳过）
+            write_raw_state(tmp, "e-corrupt-555555", "{broken")
+            # JSON 合法但缺任务标识（normalize 抛 ValueError）→ corrupt
+            write_raw_state(
+                tmp, "f-no-id-666666", json.dumps({"goal": "缺标识"}))
+            # 目录存在但无 state.json → orphaned
+            state.task_dir(tmp, "g-empty-777777").mkdir(parents=True)
+            found = state.discover_tasks(tmp)
+            self.assertEqual(
+                list(found.keys()),
+                ["active", "terminal", "corrupt", "orphaned"])
+            # active / terminal 的 reason 为 status 字符串
+            self.assertEqual(found["active"], [("a-active-111111", "executing")])
+            self.assertEqual(
+                found["terminal"],
+                [("b-completed-222222", "completed"),
+                 ("c-cancelled-333333", "cancelled"),
+                 ("d-failed-444444", "failed")])
+            # corrupt / orphaned 的 reason 为简短中文原因
+            self.assertEqual(
+                [name for name, _ in found["corrupt"]],
+                ["e-corrupt-555555", "f-no-id-666666"])
+            for _name, reason in found["corrupt"]:
+                self.assertTrue(reason.startswith("state.json 损坏："), reason)
+            self.assertEqual(
+                found["orphaned"], [("g-empty-777777", "无 state.json")])
+
+    def test_tasks_root_missing_returns_all_empty(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            found = state.discover_tasks(tmp)
+            self.assertEqual(
+                found,
+                {"active": [], "terminal": [], "corrupt": [], "orphaned": []})
+
+    def test_plain_file_under_tasks_root_ignored(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self.save(tmp, "a-active-111111", "routed")
+            (state.tasks_root(tmp) / "not-a-dir.txt").write_text(
+                "杂项文件", encoding="utf-8")
+            found = state.discover_tasks(tmp)
+            self.assertEqual(
+                [name for name, _ in found["active"]], ["a-active-111111"])
+            self.assertEqual(found["corrupt"], [])
+            self.assertEqual(found["orphaned"], [])
+            self.assertEqual(found["terminal"], [])
+
+    def test_corrupt_reason_truncated_within_80_chars(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            state.task_dir(tmp, "x-corrupt-000000").mkdir(parents=True)
+            bloated = ValueError("异常" * 200)
+            with mock.patch.object(state, "load_state", side_effect=bloated):
+                found = state.discover_tasks(tmp)
+            self.assertEqual(
+                [name for name, _ in found["corrupt"]], ["x-corrupt-000000"])
+            reason = found["corrupt"][0][1]
+            self.assertLessEqual(len(reason), 80)
+            self.assertTrue(reason.startswith("state.json 损坏："), reason)
+
+    def test_oserror_reason_says_unreadable(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            state.task_dir(tmp, "y-denied-000000").mkdir(parents=True)
+            with mock.patch.object(
+                    state, "load_state",
+                    side_effect=OSError(13, "权限不足（模拟）")):
+                found = state.discover_tasks(tmp)
+            self.assertEqual(
+                [name for name, _ in found["corrupt"]], ["y-denied-000000"])
+            self.assertTrue(
+                found["corrupt"][0][1].startswith("state.json 不可读："),
+                found["corrupt"][0][1])
+
+    def test_find_active_tasks_equivalent_to_discover_active(self):
+        # 兼容等价：混合目录（active/terminal/corrupt/orphaned/非目录）
+        # 下 find_active_tasks 输出恒等于 discover_tasks 的 active 桶
+        with tempfile.TemporaryDirectory() as tmp:
+            self.save(tmp, "a-active-111111", "executing")
+            self.save(tmp, "b-completed-222222", "completed")
+            self.save(tmp, "z-later-333333", "blocked")
+            write_raw_state(tmp, "m-corrupt-444444", "{broken")
+            state.task_dir(tmp, "n-empty-555555").mkdir(parents=True)
+            (state.tasks_root(tmp) / "stray.txt").write_text("x", encoding="utf-8")
+            self.assertEqual(
+                state.find_active_tasks(tmp),
+                ["a-active-111111", "z-later-333333"])
+            self.assertEqual(
+                state.find_active_tasks(tmp),
+                [name for name, _status in state.discover_tasks(tmp)["active"]])
+
+    def test_find_active_tasks_equivalent_under_load_failure(self):
+        # OSError 目录在两套发现口径下同样一致：不进 active、不中断扫描
+        with tempfile.TemporaryDirectory() as tmp:
+            self.save(tmp, "a-active-111111", "executing")
+            self.save(tmp, "b-no-access-222222", "executing")
+            original_load = state.load_state
+
+            def load_with_denied_dir(repo_root, task_id):
+                if task_id == "b-no-access-222222":
+                    raise OSError(13, "权限不足（模拟）")
+                return original_load(repo_root, task_id)
+
+            with mock.patch.object(state, "load_state",
+                                   side_effect=load_with_denied_dir):
+                self.assertEqual(
+                    state.find_active_tasks(tmp),
+                    ["a-active-111111"])
+                self.assertEqual(
+                    state.find_active_tasks(tmp),
+                    [name for name, _status in
+                     state.discover_tasks(tmp)["active"]])
+                # OSError 目录被 discover_tasks 显式归入 corrupt 桶
+                self.assertEqual(
+                    [name for name, _ in state.discover_tasks(tmp)["corrupt"]],
+                    ["b-no-access-222222"])
+
+
 
 class DispatchMaxWorkersBoundTest(unittest.TestCase):
     """dispatch.max_workers 上界校验（§82 并行上限，R9 终审 P2 修复）。"""
