@@ -66,13 +66,18 @@ OWNED = ["plugins/glm-conductor/hooks/pre_tool_use.py",
 def run_hook(stdin_text, project_dir):
     """以子进程运行 pre_tool_use.py，返回 CompletedProcess。
 
-    text=True：Windows 下 stdin/stdout/stderr 按文本模式收发；
+    text=True + 显式 encoding="utf-8"：钩子按运行时契约恒以 UTF-8 字节
+    写 stdout/stderr（含中文报文），父进程必须按 UTF-8 解码——不指定
+    encoding 时按父进程 locale（如 en-US runner 的 cp1252）严格解码，
+    中文字节（如损坏 reason 的 0x8D）会 UnicodeDecodeError（CI Windows
+    矩阵实测）；errors="replace" 兜底异常字节。
     ZCODE_PROJECT_DIR 指向被检仓库（钩子据此发现活动任务），其余环境变量
     原样继承。
     """
     return subprocess.run(
         [sys.executable, str(PRE_TOOL_USE)],
         input=stdin_text, text=True, capture_output=True,
+        encoding="utf-8", errors="replace",
         env=dict(os.environ, ZCODE_PROJECT_DIR=str(project_dir)))
 
 

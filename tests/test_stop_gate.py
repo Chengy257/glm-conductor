@@ -81,13 +81,20 @@ ROUTE = {"mode": "solo", "delegability": "low", "assurance": "standard",
 def run_gate(stdin_text, project_dir):
     """以子进程运行 stop_gate.py，返回 CompletedProcess。
 
-    text=True：Windows 下 stdin/stdout/stderr 按文本模式收发；
+    text=True + 显式 encoding="utf-8"：钩子按运行时契约恒以 UTF-8 字节
+    写 stdout（emit_block_json，ensure_ascii=False）与 stderr
+    （warn_stderr 直写 buffer），父进程必须按 UTF-8 解码——不指定
+    encoding 时按父进程 locale（如 en-US runner 的 cp1252）严格解码，
+    中文字节（corrupt reason「损坏」的 0x8D 在 cp1252 未定义）会
+    UnicodeDecodeError（CI Windows 矩阵实测：8 个含中文流的用例全挂，
+    ASCII 流用例全过；errors="replace" 兜底异常字节）。
     ZCODE_PROJECT_DIR 指向被检仓库（钩子据此发现活动任务），其余环境变量
-    原样继承。断言只用 ASCII 子串，规避 locale 解码差异。
+    原样继承。断言只用 ASCII 子串，规避替换符干扰。
     """
     return subprocess.run(
         [sys.executable, str(STOP_GATE)],
         input=stdin_text, text=True, capture_output=True,
+        encoding="utf-8", errors="replace",
         env=dict(os.environ, ZCODE_PROJECT_DIR=str(project_dir)))
 
 
