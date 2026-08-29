@@ -1,0 +1,194 @@
+# GLM Conductor
+
+**English** | [简体中文](./README.md)
+
+![Version](https://img.shields.io/badge/version-2.0.0-blue.svg)
+![License](https://img.shields.io/badge/license-MIT-blue.svg)
+![ZCode Plugin](https://img.shields.io/badge/ZCode-plugin-green.svg)
+![Models](https://img.shields.io/badge/models-GLM--5.3%20%2F%20GLM--5.3--Flash-orange.svg)
+![CI](https://github.com/Chengy257/glm-conductor/actions/workflows/validate.yml/badge.svg)
+
+> **Selective orchestration for GLM coding agents in ZCode.**
+> GLM-5.3 conducts, GLM-5.3-Flash implements, independent read-only reviewers audit — and the key contracts are enforced deterministically by runtime hooks, not left to model self-discipline.
+
+## Introduction
+
+GLM Conductor is a ZCode plugin providing **selective routing** and **runtime enforcement** for coding agents on the GLM Coding Plan. The flagship model (GLM-5.3) acts as the architect — planning, verification, acceptance — while the cost-effective GLM-5.3-Flash executes bounded implementation specs, and fresh-context read-only reviewers deliver independent final audits.
+
+The motivation is straightforward: GLM-5.3 and GLM-5.3-Flash differ only slightly in intelligence, but Flash costs 10–20× less on API pricing and roughly ⅓ of the quota consumption under the Coding Plan. Instead of running everything on the flagship, work is routed along two independent axes — **is the remaining implementation bounded enough to delegate** (Delegability) and **does completion need an independent audit** (Assurance).
+
+Since v2, the plugin upgrades its key contracts from prompt text to **runtime enforcement**: out-of-scope changes can never silently pass the completion gate, completion claims without evidence are blocked, stale verification/review evidence expires automatically, and quota-exhausted tasks schedule wake-ups against exact reset times. All of this runs deterministically via plugin-distributed hooks and stdlib-only runtime modules.
+
+## Key Features
+
+**Routing & execution**
+
+- **Two-axis selective routing** — a machine-auditable `SELECTIVE ROUTE` declaration (solo / delegate / audit / full) before the first delegation; routes can be reassessed in either direction on new evidence
+- **Tiered execution** — judgment-dense work stays on the flagship; fully-specified high-throughput implementation goes to Flash (standard & visual channels), optimizing both cost and quota
+- **Routing preflight** — read-only recon (ROUTING PREFLIGHT) when key facts are unknown, instead of routing on weak evidence
+- **Task Context Pack** — a bounded, compressed context pack handed from flagship to executor: GLM-5.3 compresses, Flash executes
+
+**Quality & review**
+
+- **Independent read-only final audit** — high-assurance tasks get a `ship` / `fix-first` / `rethink` verdict from a fresh-context reviewer; any repair invalidates the prior verdict (automatically enforced via evidence fingerprints since v2)
+- **Visual channel** — visual-implementer (multimodal Flash) implements, visual-reviewer reads the screenshots; explicitly bridging the flagship's text-only boundary
+- **Structured contracts** — five-part implementation specs + IMPLEMENTATION REPORTs; a completion claim without evidence is invalid
+
+**Runtime enforcement (v2)**
+
+- **Four-check completion gate** — ① ownership: touched ⊆ declared; ② verification: every required command actually run by the parent session; ③ review: fresh `ship` verdict for high-assurance tasks; ④ evidence freshness: verification/review evidence is bound to the recorded repository state via `task_fingerprint`; any later edit makes it stale and blocks completion
+- **Bash policy gate** — table-driven allow/ask/deny: destructive commands (rm -rf, git reset --hard, force push) are always denied; pushes, migrations, releases, and permission changes escalate to *ask* under high assurance
+- **Visible degradation** — enforcement failures never block the session (fail-open) and report `ENFORCEMENT DEGRADED` on stderr
+
+**Long-horizon & quota**
+
+- **Task & work-unit management** — Work Unit dependency graphs (ten-state lifecycle, cycle rejection, deterministic topological order), five-gate dispatch admission, evidence-based resume reconciliation (completed units never replayed), and explicit joins that always require task-level global verification
+- **File leases & bounded parallelism** (experimental) — all-or-nothing acquisition, foreign-owner conflict rejection; parallel cap of 4, serial by default
+- **Quota-aware continuity** — query Coding Plan usage (zero credential persistence), four-state evaluation, EXHAUSTED schedules wake-ups against the latest blocking reset; falls back to periodic liveness probing when unavailable; `/glm-conductor:quota` for on-demand diagnostics
+- **Cross-session resume** — per-task checkpoints with an eight-step recovery check; repository truth always wins over recorded state
+
+## Routing Matrix
+
+| Delegability | Assurance | Route | Implementation | Independent review |
+| --- | --- | --- | --- | --- |
+| low | standard | `solo` | GLM-5.3 main session | No |
+| high | standard | `delegate` | executor subagent | No |
+| low | high | `audit` | GLM-5.3 main session | Yes |
+| high | high | `full` | executor subagent | Yes |
+
+`executor` (standard / visual) and `continuity` (foreground / resumable / idle) are declared as independent dimensions. See the [architecture doc](./docs/architecture.md) for the full workflow.
+
+## Roles
+
+| Role | Model | Tools | Responsibility |
+| --- | --- | --- | --- |
+| Main session (architect) | GLM-5.3 | All | Requirement clarification, architecture & routing, decomposition, specs, verification reruns, acceptance |
+| flash-implementer | GLM-5.3-Flash | Read/write | Executes bounded five-part implementation specs |
+| visual-implementer | GLM-5.3-Flash | Read/write + vision | Visual implementation; returns `VISUAL_CAPTURE_REQUEST` when screenshots are needed, parent captures and re-invokes |
+| visual-reviewer | GLM-5.3-Flash | Read-only + vision | Independent visual final audit (`VISUAL REVIEW`) |
+| glm-reviewer | GLM-5.3 | Read-only whitelist | Independent text final audit (`GLM REVIEW`) |
+
+## Prerequisites
+
+- [ZCode](https://zcode.z.ai) client (tested with 3.9.2; earlier versions may lack multimodal, scheduled-task, or custom-subagent capabilities)
+- GLM Coding Plan (or a Z.ai account) with both GLM-5.3 and GLM-5.3-Flash connected
+- **Python 3** (`python3` on PATH) — the runtime for v2 enforcement hooks. The official Windows installer adds it to PATH by default; self-check: `python3 --version` in a fresh terminal
+
+## Installation
+
+Open a workspace in ZCode first (the plugin management page requires one). After installing or updating, **create a new session** for subagents, skills, and hooks to load.
+
+### From the GitHub marketplace (recommended)
+
+1. Open **Settings → Plugins**, click **Create → Add plugin marketplace**
+2. Choose the GitHub repository source and enter:
+
+   ```
+   https://github.com/Chengy257/glm-conductor
+   ```
+
+3. Install glm-conductor from the **Personal** section
+
+### From a local directory (dev/testing)
+
+1. `git clone https://github.com/Chengy257/glm-conductor.git`
+2. **Settings → Plugins → Create → Add plugin marketplace**, choose "local manifest file or directory", point at the repository root (where `marketplace.json` lives), or drag the folder in
+3. Install from the **Personal** section
+
+> ⚠️ Do not select `plugins/glm-conductor/.zcode-plugin/plugin.json` — that is the *plugin* manifest, not the *marketplace* manifest. Selecting it yields an empty marketplace with 0 plugins.
+
+### Verifying the installation
+
+- The marketplace source panel shows glm-conductor with 1 plugin (0 means the wrong manifest was selected)
+- In a new session: role subagents appear under Settings → Subagents; `/orchestration`, `/continuity`, and `/glm-conductor:quota` are visible in the `/` menu
+- Hook self-check: `echo '{}' | python3 ~/.zcode/cli/plugins/cache/glm-conductor/glm-conductor/<version>/hooks/stop_gate.py` exits 0 (list the version directory with `ls ~/.zcode/cli/plugins/cache/glm-conductor/glm-conductor/`)
+
+### Updating & uninstalling
+
+- Update: refresh the glm-conductor marketplace in the marketplace-sources panel, then update the plugin; takes effect in new sessions
+- Uninstall: from the plugin detail page; remove the whole marketplace in the sources panel
+
+## Quick Start
+
+In a new session:
+
+```
+Plan and implement this feature with glm-conductor:orchestration — declare the route and complete verification
+```
+
+The main session emits the route declaration first, then executes accordingly:
+
+```
+SELECTIVE ROUTE
+mode: delegate
+delegability: high
+assurance: standard
+executor: flash-implementer
+continuity: foreground
+reason: implementation is bounded by explicit interfaces, owned files, and deterministic verification
+```
+
+Other examples:
+
+```
+# Visual task (UI rework needing independent visual review)
+SELECTIVE ROUTE
+mode: full / executor: visual-implementer / assurance: high
+reason: bounded UI implementation with broad user-facing impact requires independent visual review
+
+# Long task expected to cross quota windows
+SELECTIVE ROUTE
+mode: delegate / continuity: resumable
+reason: multi-hour migration may be interrupted by availability windows; checkpoint enables safe resume
+```
+
+Check Coding Plan usage and the four-state evaluation:
+
+```
+/glm-conductor:quota          # text report (window usage, reset countdown, scheduling advice)
+/glm-conductor:quota --json   # machine-readable output
+```
+
+## Commands & Skills
+
+| Command / skill | Purpose |
+| --- | --- |
+| `/orchestration` | Route declaration, delegation contracts, work-unit management, review flow |
+| `/continuity` | Long-horizon continuity: checkpoints, eight-step recovery, quota-aware scheduling |
+| `/glm-conductor:quota` | Quota diagnostics (text + JSON; credentials resolved automatically, never persisted) |
+| `enforcement` skill | User-facing enforcement reference: environment self-check, message meanings, recovery when blocked |
+
+## Runtime Limitations
+
+GLM Conductor builds on ZCode's native local session lifecycle — it is not a cloud scheduler or background daemon. Registered limitations:
+
+- **Local desktop**: the client must stay running and the machine awake; remote/headless workspaces are unsupported
+- **Enforcement scope**: hooks fire in the main session only (ZCode sub-sessions do not trigger hooks) — enforcement sits at the completion boundary, not at write time; the Bash policy gate likewise covers main-session calls only; a missing `python3` degrades fail-open with `ENFORCEMENT DEGRADED` on stderr
+- **Registered conservative false positives**: strings quoting destructive text and `git rm -r --cached` are conservatively denied by the Bash policy
+- **Bounded parallelism is experimental**: cap of 4; leases assume a single orchestrating main session — multiple sessions operating on the same task directory in parallel are unsupported
+- **Quota awareness**: uses verified provider-api monitoring endpoints (zero credential persistence); no fabricated native quota interfaces, no hardcoded 5-hour resets; endpoint failures fall back to periodic liveness probing
+- **Visual topology**: Browser/Computer Use are main-session-only — screenshots are captured by the parent and judged by Flash-based roles
+- **Subagents**: cannot spawn further subagents; only MCP services connected at session start are visible
+- **Scheduled/idle tasks**: constrained by ZCode automation mechanics and account capabilities
+
+See the [architecture doc](./docs/architecture.md) for the complete registered-limit list.
+
+## References & Acknowledgments
+
+This project stands on the shoulders of the following projects/ecosystems (ordered by depth of reference):
+
+| Project | What was referenced |
+| --- | --- |
+| [sol-advisor](https://github.com/DannyMac180/sol-advisor) (MIT) | The original inspiration: selective routing orchestration. glm-conductor formalized its one-dimensional risk ladder into the Delegability × Assurance two-axis model (under a two-tier model lineup, the "high-risk lane" equals delegability:low, implemented by the flagship), and uses subagents' naturally fresh contexts as the "fresh reviewer" semantics |
+| [zai-org/zai-coding-plugins](https://github.com/zai-org/zai-coding-plugins) (glm-plan-usage plugin) | Official reference for the quota monitoring endpoint (`/api/monitor/usage/quota/limit`) and auth format (`Authorization: <API Key>`, no Bearer prefix) — the v2 credential discipline (§37) was designed against it and verified live |
+| ZCode official plugin ecosystem (example-plugin, zcode-plugins-official) | Plugin manifest and `hooks/hooks.json` conventions (`${ZCODE_PLUGIN_ROOT}`, process hooks), Claude-compatible hook payloads and the `permissionDecision` output contract, skills/agents directory conventions |
+| [Claude Code](https://claude.com/claude-code) (Anthropic) | Contract reference for the hooks event model (PreToolUse/Stop, `stop_hook_active` continuation caps) and subagent orchestration patterns |
+| CodexBar and community quota monitors | One of the cross-validation sources for Coding Plan usage-endpoint behavior |
+
+## Contributing
+
+Issues and pull requests are welcome. Development notes: plugin files (subagent definitions, skills, manifests) only take effect in new sessions; run `python3 scripts/validate_plugin.py` and `python3 -m unittest discover -s tests` before committing, and keep `plugin.json` / `marketplace.json` valid JSON.
+
+## License
+
+[MIT](./LICENSE) © 2026 glm-conductor contributors
