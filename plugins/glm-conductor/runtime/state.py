@@ -23,7 +23,16 @@
       - 发现：discover_tasks() 对 tasks_root 全部子目录四分类
         （active / terminal / corrupt / orphaned，H3/P0-3——损坏的
         state.json 不再从发现阶段静默消失）；find_active_tasks() 保留为
-        兼容 helper（实现复用 discover_tasks，输出与四分类引入前一致）。
+        兼容 helper（实现复用 discover_tasks，输出与四分类引入前一致）；
+      - 仓库根绑定（RB-2，release hardening）：可选顶层 "repository"
+        块为任务绑定专属 Git 仓库根——bind_repository_root() 写入 /
+        new_task_state(repository_root=...) 构造期绑定 /
+        bound_repository_root() 容错读 / resolve_repository_root()
+        解析生效根（绑定优先，缺省回退账本根）。绑定后任务的 git 操作
+        （touched 清单 / 基线 / 证据指纹）按绑定根求值，而账本（
+        state.json / events.jsonl / 租约）恒在账本根——两根分离是多仓
+        隔离的基础；无 repository 键即 legacy 形态，行为与单仓时代
+        完全一致。
     本文件是 Stop 完成门钩子等强制状态源的确定性来源。
 
 路径布局：
@@ -419,11 +428,31 @@ def _validate_quota(quota):
     return errors
 
 
+def _validate_repository(repository):
+    """校验可选顶层 repository 块（RB-2 任务专属仓库根绑定）。
+
+    只做形状校验：
+      - repository 非 dict → 错误；
+      - root 缺失 / 非 str / 空串 → 错误（绑定后 root 是唯一必填子键）；
+      - 未知子键忽略（向前兼容）。
+    无 repository 键 → 完全合法（legacy 任务无绑定是合法形态，
+    validate_state 不要求绑定存在）。
+    """
+    if not isinstance(repository, dict):
+        return ["repository 必须是 JSON 对象"]
+    root = repository.get("root")
+    if not isinstance(root, str) or root == "":
+        return ["repository.root 必须是非空字符串"]
+    return []
+
+
 def validate_state(state) -> "list[str]":
     """校验状态 dict，返回错误消息列表（中文，含字段路径）；空列表 = 合法。
 
     不抛异常；state 非 dict → ["state 必须是 JSON 对象"]。
     未知顶层键忽略（向前兼容），不报错。
+    可选顶层 repository 块（RB-2）：存在时必须为 dict 且 root 为非空
+    字符串；缺失时完全合法（legacy 无绑定形态）。
     """
     if not isinstance(state, dict):
         return ["state 必须是 JSON 对象"]
@@ -491,6 +520,11 @@ def validate_state(state) -> "list[str]":
     if "quota" in state:
         errors.extend(_validate_quota(state["quota"]))
 
+    # 规则 8.6：repository（RB-2 可选顶层仓库根绑定；无该键完全合法
+    # ——legacy 形态，存在时 root 是唯一必填子键）
+    if "repository" in state:
+        errors.extend(_validate_repository(state["repository"]))
+
     # 规则 9：status ∈ TASK_STATUSES
     if "status" in state:
         status = state["status"]
@@ -508,7 +542,8 @@ def validate_state(state) -> "list[str]":
 
 def new_task_state(task_id, goal, route, *, ownership_files=(),
                    verification_required=(), review_required=None,
-                   reviewer=None, status="created") -> dict:
+                   reviewer=None, status="created",
+                   repository_root=None) -> dict:
     """构造带默认值的完整状态 dict。
 
     只做构造不做校验（调用方负责 validate_state）。route 接受 dict，
@@ -521,6 +556,11 @@ def new_task_state(task_id, goal, route, *, ownership_files=(),
     solo / delegate + standard → False，信息不足落 False；显式 True/False
     照传（显式 False + 派生 True 的组合由 validate_route_invariants 规则
     R3 在保存时拒绝；显式 True 恒合法——比推导更严）。
+
+    repository_root（RB-2，关键字专用）：非 None 时构造期绑定任务专属
+    Git 仓库根（经 bind_repository_root 归一为绝对路径写入顶层
+    "repository" 块）；None（缺省）→ 整键省略（legacy 无绑定形态）。
+    非法输入（空串 / 非路径类型）抛 ValueError。
     """
     if not isinstance(route, dict):
         raise TypeError(
@@ -529,7 +569,7 @@ def new_task_state(task_id, goal, route, *, ownership_files=(),
     if review_required is None:
         derived = derive_review_required(route)
         review_required = False if derived is None else derived
-    return {
+    st = {
         "task_id": task_id,
         "goal": goal,
         "route": {
@@ -556,6 +596,76 @@ def new_task_state(task_id, goal, route, *, ownership_files=(),
         "dispatch": {"max_workers": 1, "active": []},
         "status": status,
     }
+    if repository_root is not None:
+        bind_repository_root(st, repository_root)
+    return st
+
+
+# —— 任务仓库根绑定（RB-2，release hardening） ——
+
+def bind_repository_root(st, repo_root) -> dict:
+    """为任务绑定专属 Git 仓库根（RB-2），就地写入并返回同一 dict。
+
+    - 归一口径：root 恒存为 str(Path(repo_root).resolve())（相对路径
+      → 绝对路径；Windows 反斜杠原样保留，JSON 转义由落盘层负责）。
+      先 os.path.abspath 后 resolve：Python 3.7 的 Windows resolve()
+      对不存在的相对路径不做绝对化（3.8 起 bpo-37834 才修复），abspath
+      前置保证「相对 → 绝对」在 3.7/3.8+ 行为一致；对已存在的绝对路径
+      两者完全等价（resolve 仍做符号链接归一）。
+    - repository 块缺失 / 形状异常时按需重建（与 record_* 助手同风格）；
+    - 非法输入（空串、非 str/Path 路径类型）→ ValueError（先校验后
+      修改，失败零副作用）；
+    - 调用方负责 save_state（本函数不触碰磁盘）。
+
+    绑定语义：root 是该任务全部 git 操作（touched 清单 / 基线修订 /
+    证据指纹 / 视觉证据哈希）的求值根；账本（state.json / events.jsonl
+    / 租约）不跟随迁移，恒在账本根——两根分离由调用方（Stop 完成门 /
+    task_manager）按 resolve_repository_root 消费。
+    """
+    if isinstance(repo_root, pathlib.Path):
+        resolved = pathlib.Path(os.path.abspath(str(repo_root))).resolve()
+    elif isinstance(repo_root, str) and repo_root != "":
+        resolved = pathlib.Path(os.path.abspath(repo_root)).resolve()
+    else:
+        raise ValueError(
+            "bind_repository_root：repo_root 必须是非空字符串路径，得到 %r"
+            % (repo_root,))
+    repository = st.get("repository")
+    if not isinstance(repository, dict):
+        repository = {}
+        st["repository"] = repository
+    repository["root"] = str(resolved)
+    return st
+
+
+def bound_repository_root(task_state):
+    """读取任务绑定的专属仓库根（RB-2），返回字符串或 None。
+
+    合法绑定（repository.root 为非空 str）→ 返回该字符串；任务未绑定 /
+    repository 缺失或非 dict / root 缺失或形状非法 → None。本函数是
+    容错读（手写 state.json 的形状异常不炸消费方——门 / task_manager
+    据此走 legacy 回退或降级），形状纠错归 validate_state。
+    """
+    if not isinstance(task_state, dict):
+        return None
+    repository = task_state.get("repository")
+    if not isinstance(repository, dict):
+        return None
+    root = repository.get("root")
+    if isinstance(root, str) and root != "":
+        return root
+    return None
+
+
+def resolve_repository_root(task_state, fallback_root) -> str:
+    """解析任务的生效仓库根（RB-2）：绑定优先，未绑定回退 fallback_root。
+
+    fallback_root 通常是账本根（任务账本所在目录）——legacy 任务（无
+    repository 绑定）在其上求值 git，行为与单仓时代完全一致；绑定任务
+    返回其归一后的绑定根（原字符串，不做二次解析）。
+    """
+    bound = bound_repository_root(task_state)
+    return fallback_root if bound is None else bound
 
 
 # —— 指纹 / 证据写入助手（纯 dict 变换，不触碰磁盘） ——

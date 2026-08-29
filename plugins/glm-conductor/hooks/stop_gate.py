@@ -44,15 +44,42 @@
         等 OwnershipError / FingerprintError）并入降级路径
         （gate_degraded，reason=evaluation_error）。
 
-fail-open 策略：
+per-task 仓库求值（RB-2，release hardening）：
+    账本根（ledger_root：ZCODE_PROJECT_DIR 或 cwd，语义 = 任务账本根）
+    不再同时充当 git 根：每个参与校验的任务按 state.repository.root
+    解析其专属仓库根（绑定优先；无绑定 → legacy 回退账本根，行为与
+    单仓时代完全一致），ownership / 指纹 / 视觉检查全部在该根上求值；
+    账本（state.json / events.jsonl / gate 记账）恒在账本根，绝不换根。
+    同一仓库根的 touched + base 单次 Stop 内至多取一次（repo_cache，
+    每个不同仓库根恒为 2 次 git 子调用：1 次 status + 1 次 rev-parse），
+    同根多任务不重复 git。dogfood 动机：workspace 非 git 仓库而真实
+    仓库是其子目录时，旧实现的全局 git 早退使整个完成门 fail-open；
+    现按任务绑定求值，单任务仓库故障的爆炸半径从整次 Stop 缩为单 task。
+
+fail-open 策略（RB-2 起按任务隔离）：
     降级路径（绝不拦会话，stderr 报 ENFORCEMENT DEGRADED，exit 0）：
       - 钩子自身任何异常（import 失败、状态损坏等）→ 兜底放行；
-      - git 失败 / 非 git 仓库（touched 清单不可得）→ 跳过本轮校验，
-        并向全部参与校验的任务记 gate_degraded（reason=git_unavailable；
-        无人参与时记第一个活动任务留运行痕迹）——git 短暂故障不卡会话；
-      - evaluate 阶段的结构性错误（指纹 rev-parse 失败 / ownership 声明
-        模式非法等 OwnershipError / FingerprintError）→ 同样降级放行，
-        记 gate_degraded（reason=evaluation_error）。
+      - 仓库解析 / git 失败 → 只降级该任务（stderr 报警 + 该任务
+        journal gate_degraded），其余任务照常求值。降级 reason 结构化
+        词汇（gate_degraded 事件的 reason 字段，可精确断言）：
+          repository_unavailable——任务绑定 repository.root 但该根的
+            git 操作失败（非 git 目录 / git 故障）；
+          repository_root_missing——legacy 任务（无绑定）且账本根非
+            git 根、一级子目录扫描找不到任何 .git 候选；
+          repository_ambiguous——legacy 任务且账本根非 git 根、一级
+            子目录存在 ≥1 个 .git 候选（stderr 列出候选目录名；即使
+            只有 1 个也不自动猜、不自动绑定——绑定必须由 state.json
+            repository.root 显式声明）；
+          git_unavailable——legacy 任务且账本根本身是 git 根，但 git
+            操作瞬时失败（touched / rev-parse 不可得）；
+          evaluation_error——求值期结构性错误（指纹 rev-parse 失败 /
+            ownership 声明模式非法等 OwnershipError / FingerprintError，
+            原全局路径改按任务隔离）。
+      被降级任务不参与本轮 gate_passed 记账；全绿放行路径的完成提交
+      按任务各自仓库根取指纹——被降级任务的指纹同样取不到，天然保持
+      finalizing（H1：completed 只能来自门内全绿提交）。corrupt 高保障
+      任务的 fail-closed 证据只依赖 journal，不依赖任何 git 根，不再被
+      其他任务的仓库故障牵连（原全局早退拆除后的自然结果）。
     强制路径（唯一会 block 的情形）：
       - 参与校验的任务在四重检查中有任一失败（八种 check）。这是有意
         决策，不算异常；block 走 stdout JSON，退出码仍为 0。
@@ -71,9 +98,9 @@ fail-open 策略：
         mode ∈ (audit, full) 或 assurance=high，或 status_changed 的
         to=finalizing）：有 → fail-closed 并入违规清单（check=
         corrupt_state，走统一 block / exhaustion 机器，报文含恢复指引），
-        且在发现阶段即 stderr 报警（deferred for enforcement——保证
-        git_unavailable / evaluation_error 降级早退路径下高保障 corrupt
-        至少留下 stderr 痕迹；journal 记账仍在统一 block 机器）；
+        且在发现阶段即 stderr 报警（deferred for enforcement）；RB-2 起
+        corrupt 证据只依赖 journal、不依赖任何 git 根，恒进统一 block
+        机器，不再被其他任务的仓库故障降级早退牵连；
         无 → 降级放行（stderr 报警 + journal 记 gate_degraded，
         reason=corrupt_state）。
     由此区分 no task（静默零干预）与 unreadable task（结构化报警，
@@ -109,7 +136,10 @@ fail-open 策略：
     §16（Stop Hook loop safety，有界续行）/ §17-§20（证据指纹与验证 /
     审查 stale 拦截）/ §22（视觉证据）+ docs/glm-conductor-v2-implementation-
     plan.md §3.1（fail-open 降级可见契约）/ §3.5（Layer A 完成门）
-    + v2 升级计划工作块 B2.1 / B3.1 / B3.2 / B4.1。
+    + v2 升级计划工作块 B2.1 / B3.1 / B3.2 / B4.1
+    + docs/GLM-Conductor-v2.0.1-Release-Hardening-Patch-Agent-Implementation-Plan.md
+    （RB-2 / WU-P3：任务绑定专属仓库根，per-task 仓库求值 + 按任务隔离
+    降级，三 + 二个结构化 reason 词汇，歧义不猜）。
 """
 
 import json
@@ -126,10 +156,71 @@ sys.path.insert(0, str(PLUGIN_ROOT))
 GATE_BLOCK_LIMIT = 2
 
 
-def repo_root():
-    """返回被检查的仓库根：优先 ZCODE_PROJECT_DIR（ZCode 钩子进程注入，
-    Phase 0 实测），缺失时回退当前工作目录。"""
+def ledger_root():
+    """返回任务账本根：优先 ZCODE_PROJECT_DIR（ZCode 钩子进程注入，
+    Phase 0 实测），缺失时回退当前工作目录。
+
+    RB-2 起语义收窄为「账本根」（.glm-conductor/tasks 发现与 state /
+    journal I/O 恒在此根，绝不换根）；git 求值根按任务绑定解析
+    （state.resolve_repository_root：绑定 repository.root 优先，legacy
+    回退本根），不再默认两者同根。
+    """
     return os.environ.get("ZCODE_PROJECT_DIR") or os.getcwd()
+
+
+def _repo_snapshot(repo_cache, root):
+    """取仓库根的改动快照（touched 清单 + 基线修订号），单 Stop 内每个
+    不同仓库根至多 1 次 git status + 1 次 git rev-parse（RB-2 per-repo
+    缓存）。
+
+    repo_cache 形态 {root_str: {"touched": [...], "base": str} 或异常
+    实例}：命中快照直接返回；命中异常原样重抛（同根重复失败不重复调
+    git）；未命中才真正取 git 对（ownership.git_touched_files +
+    fingerprint.resolve_base，OwnershipError / FingerprintError 自然向上
+    抛，由调用方按任务降级并写入缓存）。
+    """
+    from runtime import fingerprint, ownership
+
+    key = str(root)
+    if key in repo_cache:
+        cached = repo_cache[key]
+        if isinstance(cached, Exception):
+            raise cached
+        return cached
+    try:
+        touched = ownership.git_touched_files(root)
+        base = fingerprint.resolve_base(root)
+    except (ownership.OwnershipError, fingerprint.FingerprintError) as exc:
+        repo_cache[key] = exc
+        raise
+    snapshot = {"touched": touched, "base": base}
+    repo_cache[key] = snapshot
+    return snapshot
+
+
+def _nested_repo_candidates(ledger, scan_cache):
+    """账本根一级子目录中的 .git 候选扫描（legacy 歧义判定用，RB-2）。
+
+    只扫一层：账本根的直接子目录中含 .git 条目者（目录或 worktree /
+    submodule 指针文件均算），返回候选目录名的排序列表。结果按账本根
+    缓存（scan_cache）——同一次 Stop 内多个 legacy 任务只扫一次；
+    listdir 失败容错为空列表（扫描不可得与无候选同语义：不猜仓库）。
+    """
+    key = str(ledger)
+    if key in scan_cache:
+        return scan_cache[key]
+    candidates = []
+    try:
+        names = sorted(os.listdir(ledger))
+    except OSError:
+        names = []
+    for name in names:
+        directory = os.path.join(ledger, name)
+        if os.path.isdir(directory) \
+                and os.path.exists(os.path.join(directory, ".git")):
+            candidates.append(name)
+    scan_cache[key] = candidates
+    return candidates
 
 
 def read_stop_event():
@@ -194,6 +285,8 @@ def emit_block_json(reason):
 def count_trailing_gate_blocks(repo, task_id):
     """从任务 journal 尾部向前数连续 gate_blocked 条数（无文件 → 0）。
 
+    首参语义（RB-2）：任务账本根——journal 恒在账本根，与 git 求值根
+    无关（参数名保留 repo 仅为签名兼容）。
     连续 = 逐条向前直到遇到任一非 gate_blocked 事件或耗尽。模型在两次
     block 之间完成真实工作（journal 出现其他事件）→ 链断 → 重新计数。
     read_events 的容错语义（坏行跳过）天然适配部分写入场景。
@@ -212,6 +305,8 @@ def count_trailing_gate_blocks(repo, task_id):
 def _corrupt_requires_fail_closed(repo, task_id):
     """corrupt 任务的 fail-closed 证据判定（H3/P0-3），返回布尔值。
 
+    首参语义（RB-2）：任务账本根——journal 恒在账本根，与 git 求值根
+    无关（参数名保留 repo 仅为签名兼容）。
     state.json 不可读时从任务 journal 找高保障证据（read_events 容错读，
     坏行跳过）：任一 route_selected 事件 mode ∈ ("audit", "full") 或
     assurance == "high"，或任一 status_changed 事件 to == "finalizing"
@@ -415,10 +510,13 @@ def evaluate_task(task_id, task_state, repo, touched, base):
     比对首次需要时才算，每任务至多一次，两处共用——ownership / 命令
     清单层面的失败不触发 git 指纹计算。
 
-    参数 touched / base 为调用方取好的 git 改动清单与基线修订号（单次
-    Stop 内各取一次、跨任务复用——每次 Stop 恒为 2 次 git 子调用），
-    透传给 fingerprint.task_fingerprint（与主会话记录证据同一入口，
-    属指纹层自身契约；主会话侧用缺省调用自取，两者语义等价）。
+    参数 repo / touched / base 的语义（RB-2 起）为「该任务自己的仓库
+    根」及其改动清单与基线修订号：调用方按任务的 state.repository.root
+    绑定解析求值根，touched / base 由 per-repo 缓存取好（单次 Stop 内
+    每个不同仓库根恒为 2 次 git 子调用：1 次 status + 1 次 rev-parse，
+    同根多任务复用不叠加），原样透传给 fingerprint.task_fingerprint
+    （与主会话记录证据同一入口，属指纹层自身契约；主会话侧用缺省调用
+    自取，两者语义等价）。
 
     review 检查条件：review.required 为 True 或 route 推导要求审查
     （_route_requires_review：audit/full 或 assurance:high）——不依赖
@@ -500,49 +598,112 @@ def evaluate_task(task_id, task_state, repo, touched, base):
     return None
 
 
-def collect_violations(state, repo, touched, base, active):
-    """逐任务做 §15 四重检查（ownership → verification → review → visual）。
+def collect_violations(state, journal, ownership, fingerprint, ledger,
+                       active, repo_cache, scan_cache):
+    """逐任务做 §15 四重检查（RB-2 per-task 仓库求值）。
 
     返回 (violations, declared)：
       - violations：违规列表 [(task_id, check, detail)]（每任务首失败即
         记，§15 顺序）；
-      - declared：参与校验的任务 ID 列表（§15 参与判定，见
-        task_participates）——gate_passed 的记账对象（断链只对被校验的
-        任务有意义）；gate_degraded 同记 declared，无人参与时由调用方
-        兜底记 active[0]（保留降级运行痕迹）。
+      - declared：本轮完成门**实际求值过**的任务 ID 列表——gate_passed
+        的记账对象；仓库解析 / git / 求值失败被降级的任务不在其中
+        （它们已各自记 gate_degraded，不得再领 gate_passed）。
 
-    - state.json 在发现后消失（load_state → None）同样按未参与跳过；
-    - touched / base 为调用方取好的单份清单与基线（跨任务复用，见
-      evaluate_task docstring），原样透传；
-    - classify_paths / task_fingerprint 的结构性错误自然向上抛，由调用方
-      并入降级路径（不静默放宽）。
+    逐任务流程（参与判定 → 仓库根解析 → per-repo 快照 → 四重检查）：
+      - state.json 在发现后消失（load_state → None）或四项声明全空
+        → 跳过（与此前一致，且不触发任何 git 调用）；
+      - 仓库根解析：绑定任务用 state.bound_repository_root 的绑定根；
+        legacy 任务回退账本根——账本根非 git 根（无 .git 条目）时按
+        一级子目录 .git 扫描结果降级：无候选 → reason=
+        repository_root_missing；有候选 → reason=repository_ambiguous
+        （stderr 列出候选目录名；不自动猜、不自动绑定）；
+      - git 快照失败（_repo_snapshot 抛 OwnershipError /
+        FingerprintError）：绑定根 → reason=repository_unavailable；
+        legacy 且账本根是 git 根 → reason=git_unavailable（瞬时 git
+        故障）；
+      - evaluate 阶段结构性错误（classify / task_fingerprint / visual
+        的 OwnershipError / FingerprintError）→ 该任务 reason=
+        evaluation_error（原全局路径改按任务隔离）。
+      降级只影响该任务：stderr 报警 + 该任务 journal gate_degraded
+      （账本根），其余任务照常求值——单任务仓库故障的爆炸半径为单
+      task。不修改 repo_cache / scan_cache 的所有权（引用透传，缓存
+      归调用方 main）。
     """
     violations = []
     declared = []
     for task_id in active:
-        task_state = state.load_state(repo, task_id)
+        task_state = state.load_state(ledger, task_id)
         if task_state is None:
             continue
         if not task_participates(task_state):
             continue
+        bound = state.bound_repository_root(task_state)
+        if bound is not None:
+            root = bound
+        else:
+            root = ledger
+            if not os.path.exists(os.path.join(root, ".git")):
+                # legacy 且账本根非 git 根：不猜仓库，结构化降级
+                candidates = _nested_repo_candidates(ledger, scan_cache)
+                if candidates:
+                    warn_stderr(
+                        "ENFORCEMENT DEGRADED: ledger %s is not a git "
+                        "repository root; candidate repositories: %s "
+                        "(reason=repository_ambiguous). Bind the task via "
+                        "state.json repository.root instead of guessing "
+                        "(task %s)" % (root, ", ".join(candidates), task_id))
+                    reason = "repository_ambiguous"
+                else:
+                    warn_stderr(
+                        "ENFORCEMENT DEGRADED: ledger %s is not a git "
+                        "repository and no candidate repository found in "
+                        "its first-level directories "
+                        "(reason=repository_root_missing); bind the task "
+                        "via state.json repository.root (task %s)"
+                        % (root, task_id))
+                    reason = "repository_root_missing"
+                journal.append_event(
+                    ledger, task_id,
+                    {"event": "gate_degraded", "reason": reason})
+                continue
+        try:
+            snapshot = _repo_snapshot(repo_cache, root)
+        except (ownership.OwnershipError,
+                fingerprint.FingerprintError) as exc:
+            if bound is not None:
+                warn_stderr(
+                    "ENFORCEMENT DEGRADED: bound repository %s unavailable"
+                    " for task %s (reason=repository_unavailable): %s; gate"
+                    " skipped for this task" % (root, task_id, exc))
+                reason = "repository_unavailable"
+            else:
+                warn_stderr(
+                    "ENFORCEMENT DEGRADED: git operations failed on ledger"
+                    " %s for task %s (reason=git_unavailable): %s; gate"
+                    " skipped for this task" % (root, task_id, exc))
+                reason = "git_unavailable"
+            journal.append_event(
+                ledger, task_id,
+                {"event": "gate_degraded", "reason": reason})
+            continue
+        try:
+            result = evaluate_task(task_id, task_state, root,
+                                   snapshot["touched"], snapshot["base"])
+        except (ownership.OwnershipError,
+                fingerprint.FingerprintError) as exc:
+            warn_stderr(
+                "ENFORCEMENT DEGRADED: cannot evaluate completion gate for"
+                " task %s (reason=evaluation_error): %s; gate skipped for"
+                " this task" % (task_id, exc))
+            journal.append_event(
+                ledger, task_id,
+                {"event": "gate_degraded", "reason": "evaluation_error"})
+            continue
         declared.append(task_id)
-        result = evaluate_task(task_id, task_state, repo, touched, base)
         if result is not None:
             check, detail = result
             violations.append((task_id, check, detail))
     return violations, declared
-
-
-def participating_ids(state, repo, active):
-    """返回参与完成门校验的活动任务 ID（§15 参与判定；降级路径记账用）。"""
-    ids = []
-    for task_id in active:
-        task_state = state.load_state(repo, task_id)
-        if task_state is None:
-            continue
-        if task_participates(task_state):
-            ids.append(task_id)
-    return ids
 
 
 def record_for_tasks(journal, repo, task_ids, event):
@@ -551,29 +712,36 @@ def record_for_tasks(journal, repo, task_ids, event):
         journal.append_event(repo, task_id, dict(event))
 
 
-def commit_finalizing_completions(state, fingerprint, journal, repo,
-                                  active, touched, base):
+def commit_finalizing_completions(state, fingerprint, journal, ledger,
+                                  active, repo_cache):
     """完成提交：把全部 status == finalizing 的活动任务原子提交 completed。
 
     仅在四重检查全绿的放行路径调用（block / exhausted / degraded 一律
     不到这里）——completed 的唯一提交点。遍历**全部**活动任务而非仅参与
     校验集合：finalizing 本身就是完成请求，无声明的 finalizing 任务同样
-    要在放行时被提交。逐任务流程：重算当前证据指纹（与门同一入口）→
-    state.commit_completion（内部经 _gate_commit 通道落盘 completed）→
-    journal 追加 completed 事件（via=completion_gate，绑定指纹）。单任务
-    失败（任何 Exception）warn_stderr 报警后继续下一任务：状态保持
-    finalizing，绝不因记账异常崩掉放行路径（fail-open）。
+    要在放行时被提交。逐任务流程：按该任务生效仓库根取 per-repo 快照
+    （RB-2：绑定 repository.root 优先，legacy 回退账本根；与求值阶段
+    共用 repo_cache——同根不重复 git）→ 重算当前证据指纹（与门同一
+    入口）→ state.commit_completion（内部经 _gate_commit 通道落盘
+    completed）→ journal 追加 completed 事件（via=completion_gate，绑定
+    指纹；journal 恒在账本根）。单任务失败（任何 Exception）warn_stderr
+    报警后继续下一任务：状态保持 finalizing，绝不因记账异常崩掉放行
+    路径（fail-open）——仓库不可用 / 求值降级任务的指纹取不到，自然
+    保持 finalizing（H1：completed 只能来自门内全绿提交）。
     """
     for task_id in active:
         try:
-            task_state = state.load_state(repo, task_id)
+            task_state = state.load_state(ledger, task_id)
             if task_state is None or task_state.get("status") != "finalizing":
                 continue
+            root = state.resolve_repository_root(task_state, ledger)
+            snapshot = _repo_snapshot(repo_cache, root)
             fp = fingerprint.task_fingerprint(
-                repo, task_state, touched=touched, base=base)
-            state.commit_completion(repo, task_id)
+                root, task_state,
+                touched=snapshot["touched"], base=snapshot["base"])
+            state.commit_completion(ledger, task_id)
             journal.append_event(
-                repo, task_id,
+                ledger, task_id,
                 {"event": "completed", "task_id": task_id,
                  "via": "completion_gate", "fingerprint": fp})
         except Exception as exc:
@@ -583,7 +751,7 @@ def commit_finalizing_completions(state, fingerprint, journal, repo,
 
 
 def main():
-    """§15 四重检查主流程（架构师锁定设计）。
+    """§15 四重检查主流程（架构师锁定设计；RB-2 起 per-task 仓库求值）。
 
     返回值恒为 0（block 是 stdout JSON 决策，不用退出码 2）；
     除 block 的单行 JSON 外不向 stdout 写任何内容。
@@ -594,10 +762,16 @@ def main():
     「发现完整性」）：orphaned 永不拦截、无证据 corrupt 降级放行（均
     stderr 报警 + journal gate_degraded 可见），有高保障证据的 corrupt
     在发现阶段即 stderr 报警（deferred for enforcement）后并入违规清单
-    fail-closed——即使本轮随后走入 git/求值降级早退，也留下可见痕迹；
-    无 corrupt/orphaned 目录时流程与四分类引入前完全一致。
-    全绿放行路径额外做完成提交：对全部 finalizing 任务原子提交
-    completed 并记 completed 事件（见模块 docstring「完成提交」）。
+    fail-closed——corrupt 证据只依赖 journal，不依赖任何 git 根，恒进
+    统一 block 机器；无 corrupt/orphaned 目录时流程与四分类引入前完全
+    一致。
+    求值段（RB-2）：账本根与 git 根分离——每个参与任务按其绑定的
+    repository.root 求值（legacy 回退账本根），per-repo 缓存使每个不同
+    仓库根至多 2 次 git 子调用；仓库解析 / git / 求值失败只降级该任务
+    （结构化 reason，见模块 docstring「fail-open 策略」），不再有全局
+    git 早退。全绿放行路径额外做完成提交：对全部 finalizing 任务按其
+    各自仓库根取指纹后原子提交 completed 并记 completed 事件（见模块
+    docstring「完成提交」）。
     """
     # 1) 读 stdin（容错；载荷当前不参与分支决策，保留解析以备扩展）
     read_stop_event()
@@ -606,8 +780,9 @@ def main():
     # import 失败会被外层 fail-open 捕获
     from runtime import fingerprint, journal, ownership, state
 
-    # 2) 被检仓库根
-    repo = repo_root()
+    # 2) 账本根（RB-2 改名：语义 = 任务账本根，不必然是 git 根；
+    #    state / journal I/O 恒在此根，git 求值根按任务绑定解析）
+    ledger = ledger_root()
 
     # 3) 任务发现四分类（H3/P0-3）：state.json 损坏不再静默消失——
     #    orphaned（无 state.json）永不拦截：报警 + 该目录 journal 记
@@ -616,22 +791,21 @@ def main():
     #    无证据者降级放行：报警 + journal 记 gate_degraded(
     #    reason=corrupt_state)。active 为空且无 deferred_corrupt →
     #    静默放行（普通会话零干预语义不变）
-    discovery = state.discover_tasks(repo)
+    discovery = state.discover_tasks(ledger)
     active = [name for name, _status in discovery["active"]]
     for name, _reason in discovery["orphaned"]:
         warn_stderr(
             "ENFORCEMENT DEGRADED: task directory %s has no state.json "
             "(orphaned); completion gate cannot enforce it" % name)
         journal.append_event(
-            repo, name,
+            ledger, name,
             {"event": "gate_degraded", "reason": "orphaned_task"})
     deferred_corrupt = []
     for name, reason in discovery["corrupt"]:
-        if _corrupt_requires_fail_closed(repo, name):
+        if _corrupt_requires_fail_closed(ledger, name):
             deferred_corrupt.append((name, reason))
-            # 发现阶段即报警：即便本轮后续走入 git / 求值降级早退
-            # （deferred 违规不进入统一 block 机器），高保障 corrupt
-            # 也已在 stderr 留下可见痕迹（journal 记账仍归 block 路径）
+            # 发现阶段即报警：高保障 corrupt 随后必然进统一 block 机器
+            # （RB-2 起无全局降级早退，不会被任何任务的仓库故障牵连）
             warn_stderr(
                 "ENFORCEMENT: unreadable high-assurance task state "
                 "deferred for enforcement (task %s): %s" % (name, reason))
@@ -641,69 +815,45 @@ def main():
                 "no high-assurance journal evidence (%s); gate degraded "
                 "for this task" % (name, reason))
             journal.append_event(
-                repo, name,
+                ledger, name,
                 {"event": "gate_degraded", "reason": "corrupt_state"})
     if not active and not deferred_corrupt:
         return 0
 
-    if active:
-        # 4) touched 清单；git 失败 / 非 git 仓库 → 降级放行（fail-open），
-        #    向全部参与校验的任务记 gate_degraded（降级可见 + 断链可溯源）
-        #    （git 仅在 active 非空时取：纯 corrupt 场景的证据判定只依赖
-        #    journal，不依赖 git）
-        try:
-            touched = ownership.git_touched_files(repo)
-        except ownership.OwnershipError as exc:
-            warn_stderr(
-                "ENFORCEMENT DEGRADED: cannot list touched files (%s); "
-                "ownership gate skipped" % (exc,))
-            record_for_tasks(
-                journal, repo,
-                participating_ids(state, repo, active) or [active[0]],
-                {"event": "gate_degraded", "reason": "git_unavailable"})
-            return 0
+    # 4) 逐参与任务求值（RB-2 per-task 仓库求值）：每个参与任务按其
+    #    绑定仓库根（legacy 回退账本根）做四重检查；per-repo 缓存
+    #    （repo_cache / scan_cache 由本函数持有，与完成提交阶段共用）
+    #    保证每个不同仓库根至多 1 次 status + 1 次 rev-parse。仓库解析 /
+    #    git / 求值失败只降级该任务（结构化 reason + stderr + journal），
+    #    其余任务照常——原「全局 touched/base + git 失败全局早退」拆除
+    repo_cache = {}
+    scan_cache = {}
+    violations, declared = collect_violations(
+        state, journal, ownership, fingerprint, ledger, active,
+        repo_cache, scan_cache)
 
-        # 5) 基线修订号 + 逐任务 §15 四重检查：touched 与 base 单次 Stop
-        #    内各取一次、跨任务复用（每次 Stop 恒为 2 次 git 子调用：1 次
-        #    status + 1 次 rev-parse，多任务不再叠加 rev-parse）；基线解析
-        #    与 evaluate 阶段的结构性错误（rev-parse 突然失败 / 声明模式
-        #    非法等）并入同一降级路径——不静默放宽，也不卡会话
-        try:
-            base = fingerprint.resolve_base(repo)
-            violations, declared = collect_violations(
-                state, repo, touched, base, active)
-        except (ownership.OwnershipError, fingerprint.FingerprintError) as exc:
-            warn_stderr(
-                "ENFORCEMENT DEGRADED: cannot evaluate completion gate (%s); "
-                "gate skipped" % (exc,))
-            record_for_tasks(
-                journal, repo,
-                participating_ids(state, repo, active) or [active[0]],
-                {"event": "gate_degraded", "reason": "evaluation_error"})
-            return 0
-    else:
-        # 无 active 但存在高保障 corrupt：以空清单直接进入统一 block 机器
-        violations, declared = [], []
-
-    # 5.5) corrupt 高保障任务并入违规清单尾部（四重检查违规优先呈现；
+    # 5) corrupt 高保障任务并入违规清单尾部（四重检查违规优先呈现；
     #      check=corrupt_state 与其他违规同走下方 pass / block / exhausted
     #      统一机器——含续行上限）
     violations.extend(
         (name, "corrupt_state", {"reason": reason})
         for name, reason in deferred_corrupt)
 
-    # 6) 无违规 → 放行：stdout/stderr 完全静默；对全部参与校验的任务记
+    # 6) 无违规 → 放行：stdout 完全静默；对本轮实际求值过的任务记
     #    gate_passed（断链用——否则上一轮的 gate_blocked 残留会让下轮
-    #    续行计数起点错位；同时留"何时通过完成门"的审计痕迹。无人参与
-    #    时不记——没有校验发生。无任务可查时已在第 3 步提前返回，普通
-    #    会话零写入）。随后做完成提交：对全部 finalizing 任务原子提交
-    #    completed（P0-1：completed 的唯一提交点在本门内；单任务失败
-    #    逐任务降级放行，exhausted / degraded / block 路径不经过这里）
+    #    续行计数起点错位；同时留"何时通过完成门"的审计痕迹。被降级
+    #    任务不在 declared 内（已各记 gate_degraded）；无人参与时不记
+    #    ——没有校验发生。无任务可查时已在第 3 步提前返回，普通会话
+    #    零写入）。随后做完成提交：对全部 finalizing 任务按其各自仓库
+    #    根取指纹后原子提交 completed（P0-1：completed 的唯一提交点在
+    #    本门内；单任务失败逐任务降级放行，exhausted / degraded / block
+    #    路径不经过这里）
     if not violations:
         record_for_tasks(
-            journal, repo, declared, {"event": "gate_passed", "tasks": declared})
+            journal, ledger, declared,
+            {"event": "gate_passed", "tasks": declared})
         commit_finalizing_completions(
-            state, fingerprint, journal, repo, active, touched, base)
+            state, fingerprint, journal, ledger, active, repo_cache)
         return 0
 
     # 7) 有违规：block 报文 / journal 记账以第一个违规任务为准
@@ -711,14 +861,14 @@ def main():
 
     # 7a) 续行上限：journal 尾部连续 gate_blocked 已达 GATE_BLOCK_LIMIT
     #     → 放行 + stderr 报警 + 记 gate_exhausted（第 3 次 Stop 不再 block）
-    if count_trailing_gate_blocks(repo, first_task) >= GATE_BLOCK_LIMIT:
+    if count_trailing_gate_blocks(ledger, first_task) >= GATE_BLOCK_LIMIT:
         warn_stderr(
             "ENFORCEMENT GATE EXHAUSTED: task %s blocked twice already; "
             "runtime 3-attempt limit reached, allowing stop. The model MUST "
             "report the blocked state to the user and MUST NOT claim "
             "completion." % first_task)
         journal.append_event(
-            repo, first_task,
+            ledger, first_task,
             dict({"event": "gate_exhausted", "check": first_check},
                  **first_detail))
         return 0
@@ -726,7 +876,7 @@ def main():
     # 7b) 未达上限 → block：stdout 单行 JSON 请求续跑 + 记 gate_blocked
     emit_block_json(build_block_reason(violations[0], violations[1:]))
     journal.append_event(
-        repo, first_task,
+        ledger, first_task,
         dict({"event": "gate_blocked", "check": first_check,
               "task_id": first_task}, **first_detail))
     return 0

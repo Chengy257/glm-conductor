@@ -52,6 +52,11 @@ validate_state 拒绝「无验证命令的单元」（不可派发），因此�
       租约释放 / active 移除 / unit_finished 落盘（unit + outcome）/
       全生命周期事件序（dispatch_prepared→implementation_started→
       verification→unit_finished）；
+    - RB-2 完成门双根分离（D1，BoundRepositoryFinishGateTest）：任务
+      repository.root 绑定独立 git 仓库、账本在非 git 目录——证据指纹
+      按 git 根计算、验证事件恒从账本根注入（dirty 在 git 仓内 →
+      finish 完成；record 后 git 仓内改动 → 拒绝零副作用；对照：无
+      绑定 legacy 回退非 git 账本根 → fail-closed）；
     - RB-1 × DAG 集成（计划 §2.5 C20-C21）：上游无证据被拒 → 单元仍
       running → refresh_readiness 不提升下游（不得 ready）；上游完整
       证据完成 → refresh_readiness 提升下游 ready；
@@ -954,6 +959,125 @@ class FinishGateFailClosedTest(TaskManagerTestBase):
         self.assertEqual(events(self.root, "unit_finished"), [])
         st = state.load_state(self.root, TID)
         self.assertEqual(unit_of(st, "u1")["status"], "running")
+
+
+# —— RB-2（D1）：任务绑定独立仓库根——账本根 ≠ git 根的完成证据门 ——
+
+@unittest.skipUnless(shutil.which("git"),
+                     "环境无 git 可执行，跳过 git fixture 测试")
+class BoundRepositoryFinishGateTest(TaskManagerTestBase):
+    """RB-2（D1）：任务 repository.root 绑定独立 git 仓库、账本在非 git
+    目录——证据指纹按绑定 git 根计算，验证事件（events）恒从账本根注入
+    （fresh_unit_verification 缺省从 git 根读 journal，多仓时会读错地方；
+    _require_completion_evidence 的双根分离由此锚定）。
+
+    对照（⑳）：同场景无绑定（legacy 回退账本根非 git）→ fail-closed
+    TaskManagerError——语义与 FinishGateFailClosedTest 的 A12b 一致，
+    此处给出 RB-2 场景下的显式对照面。
+    """
+
+    def setUp(self):
+        super().setUp()
+        # 账本根（非 git）与任务仓库（git）分离——账本纪律锚点：
+        # state / journal / 租约全部落在 ledger，只有 git 操作进 task_repo
+        self.ledger = Path(self.root) / "ledger"
+        self.ledger.mkdir()
+        self.task_repo = Path(self.root) / "task-repo"
+        self.task_repo.mkdir()
+        run_git(self.task_repo, "init")
+        run_git(self.task_repo, "config", "user.email",
+                "taskmgr@example.com")
+        run_git(self.task_repo, "config", "user.name", "Task Manager")
+        # 固定换行行为，避免全局 autocrlf 干扰指纹的换行归一口径
+        run_git(self.task_repo, "config", "core.autocrlf", "false")
+        (self.task_repo / "base.txt").write_bytes(b"v1\n")
+        run_git(self.task_repo, "add", ".")
+        run_git(self.task_repo, "commit", "-m", "init")
+        # 注册在基类 cleanup 之后（LIFO：先解除 .git 只读位再删目录）
+        self.addCleanup(self._force_cleanup)
+
+    def _force_cleanup(self):
+        """解除 .git 只读位后清理（git 仓库不在 tempdir 根，按 .git 目录
+        名全树定位；模式对齐 GitRepoFixture）。"""
+        for dirpath, dirnames, _filenames in os.walk(self.root):
+            if ".git" in dirnames:
+                git_dir = os.path.join(dirpath, ".git")
+                for sub, _sd, names in os.walk(git_dir):
+                    for name in names:
+                        try:
+                            os.chmod(os.path.join(sub, name), stat.S_IWRITE)
+                        except OSError:
+                            pass
+        self._tmp.cleanup()
+
+    def _bound_running_task(self):
+        """在账本根落盘一个绑定 task_repo 的 running 任务，返回 unit。"""
+        unit = wu("u1", ("src/**",))
+        make_task(str(self.ledger), [unit])
+        st = state.load_state(str(self.ledger), TID)
+        state.bind_repository_root(st, str(self.task_repo))
+        state.save_state(str(self.ledger), st)
+        task_manager.prepare_dispatch(str(self.ledger), TID, "u1")
+        task_manager.commit_dispatch(str(self.ledger), TID, "u1")
+        return unit
+
+    def _dirty_repo_fingerprint(self, unit):
+        """在 task_repo 内制造 owned 残留改动，并按完成门同一口径真算
+        单元指纹（touched / classify / compute 全部对绑定仓库根）。"""
+        dirty = self.task_repo / "src" / "a"
+        dirty.mkdir(parents=True, exist_ok=True)
+        (dirty / "feature.ts").write_bytes(b"feat-v1\n")
+        touched = ownership.git_touched_files(str(self.task_repo))
+        owned_hits, _ = ownership.classify_paths(touched, unit["ownership"])
+        return fingerprint_mod.compute_fingerprint(str(self.task_repo),
+                                                   owned_hits), dirty
+
+    def test_bound_repo_evidence_completes_with_ledger_journal(self):
+        # ⑲ dirty 文件在 git 仓内、证据指纹按 git 仓计算 → finish_unit
+        # 完成；journal 全链路（verification / unit_finished）恒在账本根
+        unit = self._bound_running_task()
+        fp, _dirty = self._dirty_repo_fingerprint(unit)
+        task_manager.record_unit_verification(
+            str(self.ledger), TID, "u1", VERIFY_CMD, fp)
+        st = task_manager.finish_unit(str(self.ledger), TID, "u1")
+        self.assertEqual(unit_of(st, "u1")["status"], "completed")
+        names = [e["event"] for e in
+                 journal.read_events(str(self.ledger), TID)]
+        self.assertEqual(names, ["dispatch_prepared",
+                                 "implementation_started",
+                                 "verification", "unit_finished"])
+        # 绑定根归一落盘，账本仍在非 git 目录
+        self.assertEqual(
+            state.load_state(str(self.ledger), TID)["repository"]["root"],
+            str(self.task_repo.resolve()))
+
+    def test_stale_bound_repo_evidence_rejected(self):
+        # D1 补充：record 后改动绑定仓库内 owned 文件 → 指纹漂移 →
+        # 拒绝（证据绑定任务仓库的当前状态，与账本目录无关），零副作用
+        unit = self._bound_running_task()
+        fp, dirty = self._dirty_repo_fingerprint(unit)
+        task_manager.record_unit_verification(
+            str(self.ledger), TID, "u1", VERIFY_CMD, fp)
+        (dirty / "feature.ts").write_bytes(b"feat-v2\n")
+        with self.assertRaises(task_manager.TaskManagerError):
+            task_manager.finish_unit(str(self.ledger), TID, "u1")
+        self.assertEqual(events(str(self.ledger), "unit_finished"), [])
+        st = state.load_state(str(self.ledger), TID)
+        self.assertEqual(unit_of(st, "u1")["status"], "running")
+
+    def test_unbound_task_on_nongit_ledger_fails_closed(self):
+        # ⑳ 对照：同场景无绑定（legacy 回退账本根非 git）→ fail-closed
+        # TaskManagerError（与 FinishGateFailClosedTest 的 A12b 同语义）
+        make_task(str(self.ledger), [wu("u1", ("src/**",))])
+        task_manager.prepare_dispatch(str(self.ledger), TID, "u1")
+        task_manager.commit_dispatch(str(self.ledger), TID, "u1")
+        with self.assertRaises(task_manager.TaskManagerError) as ctx:
+            task_manager.finish_unit(str(self.ledger), TID, "u1")
+        self.assertIn("fail-closed", str(ctx.exception))
+        self.assertEqual(events(str(self.ledger), "unit_finished"), [])
+        st = state.load_state(str(self.ledger), TID)
+        self.assertEqual(unit_of(st, "u1")["status"], "running")
+        self.assertNotIn("repository", st)  # 未绑定（legacy 形态）
 
 
 # —— RB-1 完成证据门：通过路径（计划 §2.5 B13-B19，git fixture） ——

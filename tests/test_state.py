@@ -10,7 +10,7 @@
 """
 
 import sys, unittest
-import json, tempfile
+import json, os, tempfile
 from unittest import mock
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "plugins" / "glm-conductor"))
@@ -1325,6 +1325,121 @@ class RouteInvariantTest(unittest.TestCase):
                           None, "solo", 42):
             self.assertIsNone(
                 state.derive_review_required(info_poor), repr(info_poor))
+
+
+# —— RB-2：任务专属仓库根绑定（可选顶层 repository 块） ——
+
+class RepositoryBindingTest(unittest.TestCase):
+    """repository.root 绑定 / 解析 / 校验 / 往返契约（RB-2，WU-P3）。
+
+    覆盖：绑定根保存加载往返（含 Windows 反斜杠根）/ root 非 str 与
+    空串与 repository 非 dict 的校验错误 / legacy 无 repository 完全
+    合法 / bind_repository_root 相对路径归一 / new_task_state 构造期
+    绑定与 None 省略 / bound_repository_root 容错读 +
+    resolve_repository_root 绑定优先回退账本根。
+    """
+
+    def test_repository_roundtrip_with_backslash_root(self):
+        # ① 绑定根保存 / 加载往返：Windows 反斜杠根原样落盘（JSON 转义
+        # 由落盘层负责），读回后仍通过校验
+        with tempfile.TemporaryDirectory() as tmp:
+            st = make_state()
+            state.bind_repository_root(st, str(Path(tmp) / "nested" / "repo"))
+            expected = st["repository"]["root"]
+            self.assertTrue(Path(expected).is_absolute())
+            state.save_state(tmp, st)
+            loaded = state.load_state(tmp, TID)
+            self.assertEqual(loaded["repository"]["root"], expected)
+            self.assertEqual(state.validate_state(loaded), [])
+
+    def test_repository_root_non_str_rejected(self):
+        # ② root 非 str → validate_state 报错（含字段路径 repository.root）
+        for bad in (123, None, ["x"], {"x": 1}, True):
+            st = make_state()
+            st["repository"] = {"root": bad}
+            errors = state.validate_state(st)
+            self.assertTrue(
+                any("repository.root" in e for e in errors), repr(bad))
+
+    def test_repository_root_empty_string_rejected(self):
+        # ③ root 空串 → 错误（save_state 以 validate_state 为闸同样拒绝）
+        st = make_state()
+        st["repository"] = {"root": ""}
+        errors = state.validate_state(st)
+        self.assertTrue(any("repository.root" in e for e in errors))
+        with tempfile.TemporaryDirectory() as tmp, \
+                self.assertRaises(ValueError):
+            state.save_state(tmp, st)
+
+    def test_repository_non_dict_rejected(self):
+        # ④ repository 非 dict → 错误
+        for bad in ("repo", ["repository"], 42):
+            st = make_state()
+            st["repository"] = bad
+            errors = state.validate_state(st)
+            self.assertTrue(
+                any("repository 必须是 JSON 对象" in e for e in errors),
+                repr(bad))
+
+    def test_legacy_state_without_repository_is_valid(self):
+        # ⑤ legacy：无 repository 键完全合法（校验通过 + 往返不出现该键
+        # + 容错读为 None）
+        st = make_state()
+        self.assertNotIn("repository", st)
+        self.assertEqual(state.validate_state(st), [])
+        with tempfile.TemporaryDirectory() as tmp:
+            state.save_state(tmp, st)
+            loaded = state.load_state(tmp, TID)
+            self.assertNotIn("repository", loaded)
+            self.assertEqual(state.validate_state(loaded), [])
+            self.assertIsNone(state.bound_repository_root(loaded))
+
+    def test_bind_repository_root_normalizes_relative_path(self):
+        # ⑥ 归一口径：相对路径 → 绝对 resolved；就地写入并返回同一 dict；
+        # 非法输入 ValueError（零副作用）
+        st = make_state()
+        returned = state.bind_repository_root(st, "some/rel/repo")
+        self.assertIs(returned, st)
+        self.assertEqual(
+            st["repository"]["root"],
+            str(Path(os.path.abspath("some/rel/repo")).resolve()))
+        self.assertTrue(Path(st["repository"]["root"]).is_absolute())
+        self.assertEqual(state.validate_state(st), [])
+        for bad in ("", 42, None, ["x"]):
+            fresh = make_state()
+            with self.assertRaises(ValueError, msg=repr(bad)):
+                state.bind_repository_root(fresh, bad)
+            self.assertNotIn("repository", fresh)  # 失败零副作用
+
+    def test_new_task_state_repository_root_written_or_omitted(self):
+        # ⑦ 构造期绑定：非 None → 归一写入且整状态合法；None → 整键省略
+        bound = state.new_task_state("t-1", "目标", {"mode": "solo"},
+                                     repository_root="rel/repo")
+        self.assertEqual(
+            bound["repository"]["root"],
+            str(Path(os.path.abspath("rel/repo")).resolve()))
+        self.assertEqual(state.validate_state(bound), [])
+        legacy = state.new_task_state("t-1", "目标", {"mode": "solo"})
+        self.assertNotIn("repository", legacy)
+
+    def test_bound_read_tolerant_and_resolve_prefers_bound(self):
+        # 解析口径：绑定优先，未绑定 / 形状异常回退 fallback_root
+        # （账本根）；容错读不炸消费方（形状纠错归 validate_state）
+        st = make_state()
+        self.assertEqual(
+            state.resolve_repository_root(st, "ledger-root"), "ledger-root")
+        state.bind_repository_root(st, "some/repo")
+        self.assertEqual(
+            state.resolve_repository_root(st, "ledger-root"),
+            str(Path(os.path.abspath("some/repo")).resolve()))
+        for broken in ({}, {"repository": {}}, {"repository": {"root": ""}},
+                       {"repository": {"root": 123}},
+                       {"repository": "nope"}, None, "x", 42):
+            self.assertIsNone(
+                state.bound_repository_root(broken), repr(broken))
+            self.assertEqual(
+                state.resolve_repository_root(broken, "ledger-root"),
+                "ledger-root", repr(broken))
 
 
 if __name__ == "__main__":

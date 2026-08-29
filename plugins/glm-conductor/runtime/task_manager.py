@@ -90,6 +90,15 @@
     完全绕过 record_unit_verification，验证缺失会经 refresh_readiness
     传播为错误解锁下游 DAG（release blocker RB-1）。
 
+    根解析（RB-2，release hardening WU-P3）：证据门的 git 求值根按任务
+    绑定解析——state.resolve_repository_root(st, repo_root)（绑定
+    repository.root 优先，legacy 回退账本根）；touched 清单与证据指纹按
+    git 根计算，验证事件（events）恒从账本根 repo_root 注入——
+    fresh_unit_verification 缺省会从 git 根读 journal，多仓场景（账本根
+    ≠ git 根）时会读错地方。账本（state.json / events.jsonl / 租约）
+    不随绑定迁移，纪律红线：state/journal/lease I/O 恒在账本根，只有
+    git 操作切任务仓库根。
+
 多单元就绪流转（v2.0.1 收尾，dogfood 缺口补齐）：
     finish_unit 使某单元到达 completed 后调用 refresh_readiness——
     依赖全部 completed 的 pending / waiting_dependency 单元提升为
@@ -119,7 +128,9 @@
     + docs/glm-conductor-v2-upgrade-guide-final.md §62（状态转换表）/
     §64-§67（准入）/ §70（父验证）/ §78（租约时点）/ §69（恢复对账）
     + docs/GLM-Conductor-v2.0.1-Release-Hardening-Patch-Agent-Implementation-Plan.md
-    （RB-1 / WU-P2：finish_unit 完成证据门，缺证据零副作用拒绝）。
+    （RB-1 / WU-P2：finish_unit 完成证据门，缺证据零副作用拒绝；
+    RB-2 / WU-P3：证据门双根分离，git 根按任务绑定解析、events 恒从
+    账本根注入）。
 """
 
 from runtime import dependency
@@ -387,7 +398,7 @@ def abort_dispatch(repo_root, task_id, uid) -> dict:
 
 # —— finish：running/verifying → 终态 + 释放 + 单次 save ——
 
-def _require_completion_evidence(repo_root, task_id, uid, unit) -> None:
+def _require_completion_evidence(repo_root, task_id, uid, unit, st) -> None:
     """RB-1 完成证据门（release hardening WU-P2）：completed 收尾前校验
     全部 required 验证命令的新鲜单元证据，不满足即 TaskManagerError。
 
@@ -395,10 +406,17 @@ def _require_completion_evidence(repo_root, task_id, uid, unit) -> None:
     release / save / journal 之前调用，拒绝路径不写任何 journal 事件
     （含拒绝事件，计划 §2.3.4：不扩大事件面）。
 
-    - 复用 reconcile.fresh_unit_verification（WU-P1 共享证据谓词，缺省
-      自取 touched / events；与恢复对账同一口径）；空 required 单元经
-      谓词快路径零 git 放行（生产单元受「无验证命令的单元不可派发」
-      的 validate_state 约束不会出现该形状，此性质是谓词共用口径）；
+    双根分离（RB-2）：git 求值根按任务绑定解析——
+    git_root = state.resolve_repository_root(st, repo_root)（绑定
+    repository.root 优先，legacy 回退账本根 repo_root）；touched 清单
+    与证据指纹按 git_root 计算，而验证事件（events）**必须从账本根
+    repo_root 注入**——fresh_unit_verification 缺省会从 git 根读
+    journal，多仓场景（账本根 ≠ git 根）时会读错地方。
+
+    - 复用 reconcile.fresh_unit_verification（WU-P1 共享证据谓词；
+      与恢复对账同一口径）；空 required 单元经谓词快路径零 git 放行
+      （生产单元受「无验证命令的单元不可派发」的 validate_state 约束
+      不会出现该形状，此性质是谓词共用口径）；
     - evidence["ok"] 为 False（missing / stale / partial / wrong-unit /
       legacy 无 unit 字段证据）→ TaskManagerError，消息含 api 名、uid、
       missing 命令清单（逐条）与补证指引；
@@ -407,9 +425,11 @@ def _require_completion_evidence(repo_root, task_id, uid, unit) -> None:
     """
     from runtime import fingerprint  # 局部导入：不新增模块级 import
     api = "finish_unit"
+    git_root = state.resolve_repository_root(st, repo_root)
     try:
-        evidence = reconcile.fresh_unit_verification(repo_root, task_id,
-                                                     unit)
+        evidence = reconcile.fresh_unit_verification(
+            git_root, task_id, unit,
+            events=journal.read_events(repo_root, task_id))
     except (ownership.OwnershipError, fingerprint.FingerprintError) as exc:
         raise TaskManagerError(
             "%s：单元 %s 完成被拒：无法判定证据新鲜性，fail-closed 拒绝"
@@ -434,17 +454,19 @@ def finish_unit(repo_root, task_id, uid, *, outcome="completed") -> dict:
       2. load_state；找不到 uid → TaskManagerError；
       3. 单元 status 须 ∈ ("running", "verifying")，否则 TaskManagerError
          （消息含当前状态）；
-      4. 【RB-1 完成证据门，WU-P2】仅 outcome == "completed" 时：调
-         reconcile.fresh_unit_verification(repo_root, task_id, unit)
-         （缺省自取 touched / events）——全部 required command 须各存在
-         一条绑定当前指纹的新鲜 pass 证据（all-match），才允许进入
-         转换；missing / stale / partial / wrong-unit / legacy 无 unit
-         字段证据一律 TaskManagerError（消息含 missing 清单与
-         record_unit_verification 补证指引），此时零副作用——state.json
-         字节、leases.json、dispatch.active、journal 全部不变；git /
-         指纹读取失败（OwnershipError / FingerprintError）同样拒绝
-         （fail-closed 包装为 TaskManagerError）。failed / cancelled
-         收尾不需要证据。空 required 单元经谓词快路径零 git 直接放行；
+      4. 【RB-1 完成证据门，WU-P2；RB-2 双根分离】仅 outcome ==
+         "completed" 时：git 求值根按任务绑定解析（绑定 repository.root
+         优先，legacy 回退账本根），调 reconcile.fresh_unit_verification(
+         git_root, task_id, unit, events=从账本根读取的事件)——全部
+         required command 须各存在一条绑定当前指纹的新鲜 pass 证据
+         （all-match），才允许进入转换；missing / stale / partial /
+         wrong-unit / legacy 无 unit 字段证据一律 TaskManagerError
+         （消息含 missing 清单与 record_unit_verification 补证指引），
+         此时零副作用——state.json 字节、leases.json、dispatch.active、
+         journal 全部不变；git / 指纹读取失败（OwnershipError /
+         FingerprintError）同样拒绝（fail-closed 包装为
+         TaskManagerError）。failed / cancelled 收尾不需要证据。空
+         required 单元经谓词快路径零 git 直接放行；
       5. 转换：running + completed → 先 verifying 再 completed（§70 父
          验证语义：worker 报告只是 claim，编码为两次表内转换）；其余
          单步直达（running→failed/cancelled、verifying→completed/
@@ -471,9 +493,10 @@ def finish_unit(repo_root, task_id, uid, *, outcome="completed") -> dict:
             "%s：单元 %s 当前状态为 %r，须为 running 或 verifying 才能"
             "收尾" % (api, uid, current))
     if outcome == "completed":
-        # RB-1 完成证据门（WU-P2）：先验证据后转换——拒绝发生在任何
-        # 变更之前（转换 / release / save / journal 均未发生）
-        _require_completion_evidence(repo_root, task_id, uid, unit)
+        # RB-1 完成证据门（WU-P2；RB-2 双根分离）：先验证据后转换——
+        # 拒绝发生在任何变更之前（转换 / release / save / journal 均
+        # 未发生）
+        _require_completion_evidence(repo_root, task_id, uid, unit, st)
     if current == "running" and outcome == "completed":
         # §70：正常完成必须经 verifying（worker 报告只是 claim，父会话
         # 验证后才算 completed）——两次表内转换，不越表直跳
