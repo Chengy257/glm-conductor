@@ -2,10 +2,18 @@
 # -*- coding: utf-8 -*-
 """runtime.task_manager 单元测试（v2.0.1 加固工作包 H4，审查项 P1-3）。
 
-仅 Python 3 标准库（unittest + tempfile），零第三方依赖、零 git 需求；
-state.json / leases.json / events.jsonl 全部落盘在
+仅 Python 3 标准库（unittest + tempfile + subprocess git fixture），
+零第三方依赖；state.json / leases.json / events.jsonl 全部落盘在
 tempfile.TemporaryDirectory 提供的临时目录（真实 new_task_state +
 new_work_unit 构造，非 mock state），不污染真实工作区。
+
+git fixture 分层：基础夹具（TaskManagerTestBase）保持零 git 特质——
+转换语义 / 租约 / 事件等测试不依赖 git；RB-1 完成证据门（WU-P2）的
+证据路径需要真实 git 仓库与真实指纹，归入 GitRepoFixture 系列类
+（做法对齐 tests/test_reconcile.py / tests/test_stop_gate.py，环境无
+git 可执行时自动 skipTest）。空 verification 单元不能作为夹具兜底：
+validate_state 拒绝「无验证命令的单元」（不可派发），因此完成路径
+必须走真实证据，这是门语义本身的要求而非夹具妥协。
 
 覆盖：
     - prepare_dispatch happy path：决策快照返回（dispatch 组含 uid）/
@@ -28,12 +36,25 @@ new_work_unit 构造，非 mock state），不污染真实工作区。
     - abort：running 拒绝（不得静默回退，租约未被动）/ happy（释放
       租约 + dispatch_aborted 事件 + state.json 零写入）/ active 残留
       清理（移除 + save）；
-    - finish：四条转换边（running→completed 双跳经 verifying——以
-      transition spy 断言恰好两次表内转换、running→failed、
-      verifying→completed、verifying→cancelled）+ 租约释放 + active
-      移除 + unit_finished 事件（含 outcome）/ 非法 outcome
-      ValueError（校验先于 I/O）/ 状态不符 TaskManagerError / 单元
-      缺失；
+    - finish：failed / cancelled / 非法 outcome ValueError（校验先于
+      I/O）/ 状态不符 TaskManagerError / 单元缺失（零 git 夹具）；
+    - RB-1 完成证据门拒绝（git fixture，计划 §2.5 A1-A12）：running/
+      verifying 无证据 / fail 事件 / wrong-unit / 非 required command /
+      partial（missing 恰为未验证那条）/ stale 指纹（record 后改动
+      owned 文件）/ legacy 无 unit 字段事件 → 一律 TaskManagerError；
+      拒绝零副作用四连断言（state.json 字节 / 租约 / dispatch.active /
+      journal 不变，无 unit_finished 也无拒绝事件）；非 git 目录 +
+      required 单元 fail-closed（零 git 夹具）；
+    - RB-1 完成门通过（git fixture，计划 §2.5 B13-B19）：真实指纹
+      （runtime.fingerprint.compute_fingerprint 对 owned_hits 真算）+
+      新鲜 pass 证据 → completed；单/双 required 全证据 / running 态
+      仍走双跳（transition spy 恰好两次表内转换）/ verifying 态完成 /
+      租约释放 / active 移除 / unit_finished 落盘（unit + outcome）/
+      全生命周期事件序（dispatch_prepared→implementation_started→
+      verification→unit_finished）；
+    - RB-1 × DAG 集成（计划 §2.5 C20-C21）：上游无证据被拒 → 单元仍
+      running → refresh_readiness 不提升下游（不得 ready）；上游完整
+      证据完成 → refresh_readiness 提升下游 ready；
     - 崩溃窗口模拟两条：prepare 后直接 commit 成功（事件序
       dispatch_prepared→implementation_started、running + active +
       租约在位）；prepare 后 abort 释放（租约清空、单元仍 ready、
@@ -50,8 +71,7 @@ new_work_unit 构造，非 mock state），不污染真实工作区。
       应用转换 → recover_leases 闭环清理）；
     - H6（验证证据归属绑定）：record_unit_verification 正常写入逐字段
       锚定 / fail 合法词汇 / 空 uid-command-fingerprint 与非法 status
-      各抛 ValueError（消息含字段名）/ prepare→commit→
-      record_unit_verification→finish_unit 全流程事件序；
+      各抛 ValueError（消息含字段名）；
     - RELEASE（refresh_readiness）：pending+依赖满足提升并返回 /
       waiting_dependency 提升 / 依赖未满足不提升零写入 / 全 ready 与
       空图零写入零返回零 journal / 提升序按 units 出现序 / 提升后
@@ -62,14 +82,20 @@ new_work_unit 构造，非 mock state），不污染真实工作区。
 """
 
 import json
+import os
+import shutil
+import stat
+import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "plugins" / "glm-conductor"))
+from runtime import fingerprint as fingerprint_mod
 from runtime import journal
 from runtime import lease
+from runtime import ownership
 from runtime import reconcile
 from runtime import state
 from runtime import task_manager
@@ -87,11 +113,19 @@ LEASE_PAST = "2020-01-01T00:00:00.000Z"
 # —— 测试夹具 ——
 
 def wu(uid, owned=("src/a/**",), deps=(), status="ready",
-       executor="flash-implementer"):
-    """构造 §61 形状的 work unit dict（new_work_unit 真实构造）。"""
+       executor="flash-implementer", verification=None):
+    """构造 §61 形状的 work unit dict（new_work_unit 真实构造）。
+
+    默认带 VERIFY_CMD 验证命令——不能用空 verification 兜底：validate_state
+    拒绝「无验证命令的单元」（不可派发），空 required 单元根本落不了盘。
+    无需证据的收尾路径用 outcome != "completed"（failed / cancelled 不过
+    RB-1 完成门）；完成路径的用例进 GitRepoFixture 系列类配真实证据。
+    """
     return work_unit.new_work_unit(
         uid, "目标 %s" % uid, executor=executor,
-        ownership=list(owned), verification=[VERIFY_CMD],
+        ownership=list(owned),
+        verification=([VERIFY_CMD] if verification is None
+                      else list(verification)),
         depends_on=list(deps), status=status)
 
 
@@ -136,6 +170,90 @@ class TaskManagerTestBase(unittest.TestCase):
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
         self.root = self._tmp.name
+
+
+def run_git(repo, *args):
+    """在 fixture 仓库里执行 git 子命令（测试装置专用，失败即断言错误）。"""
+    proc = subprocess.run(
+        ["git"] + list(args), cwd=str(repo),
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    if proc.returncode != 0:
+        raise AssertionError(
+            "测试装置 git %s 失败（returncode=%d）：%s"
+            % (" ".join(args), proc.returncode,
+               proc.stderr.decode("utf-8", errors="replace")))
+    return proc.stdout.decode("utf-8", errors="replace")
+
+
+class GitRepoFixture(TaskManagerTestBase):
+    """在 tempdir 基座上初始化真实 git 仓库（RB-1 完成证据门专用；
+    模式对齐 tests/test_reconcile.py / tests/test_stop_gate.py）。
+
+    无 git 可执行的环境请给派生类标注
+    @unittest.skipUnless(shutil.which("git"), …)（本文件的 git fixture
+    测试类均显式标注）。
+    """
+
+    def setUp(self):
+        super().setUp()
+        # 注册在基类 cleanup 之后（LIFO：先解除 .git 只读位再删目录）
+        self.addCleanup(self._force_cleanup)
+        self.repo = Path(self.root)
+        run_git(self.repo, "init")
+        run_git(self.repo, "config", "user.email", "taskmgr@example.com")
+        run_git(self.repo, "config", "user.name", "Task Manager")
+        # 固定换行行为，避免全局 autocrlf 干扰指纹的换行归一口径
+        run_git(self.repo, "config", "core.autocrlf", "false")
+        # 运行时目录（state.json / events.jsonl / leases.json）不入库：
+        # 否则它们作为未跟踪文件混入 touched 清单，污染证据指纹
+        self.dirty_file(".gitignore", b".glm-conductor/\n")
+        self.dirty_file("base.txt", b"v1\n")
+        run_git(self.repo, "add", ".")
+        run_git(self.repo, "commit", "-m", "init")
+
+    def _force_cleanup(self):
+        """解除 git 只读对象后清理临时目录（Windows 上 git 松散对象文件
+        带只读属性，TemporaryDirectory.cleanup 的 rmtree 会
+        PermissionError；先遍历 .git 清掉只读位再删除，模式复用
+        test_reconcile / test_stop_gate）。"""
+        git_dir = os.path.join(self.root, ".git")
+        if os.path.isdir(git_dir):
+            for dirpath, _dirnames, filenames in os.walk(git_dir):
+                for name in filenames:
+                    try:
+                        os.chmod(os.path.join(dirpath, name), stat.S_IWRITE)
+                    except OSError:
+                        pass
+        self._tmp.cleanup()
+
+    def dirty_file(self, rel, data):
+        """在 fixture 仓库内写 / 改一个文件（自动建父目录）——制造工作区
+        改动（touched），即验证证据指纹的绑定对象。"""
+        target = self.repo / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(data)
+        return rel
+
+    def unit_fingerprint(self, unit, *, touched=None):
+        """按完成门同一口径真算单元当前证据指纹（对 owned_hits）：
+        git_touched_files → classify_paths → compute_fingerprint。"""
+        if touched is None:
+            touched = ownership.git_touched_files(self.root)
+        owned_hits, _ = ownership.classify_paths(touched, unit["ownership"])
+        return fingerprint_mod.compute_fingerprint(self.root, owned_hits)
+
+    def record_evidence(self, unit, command=None, *, fp=None, status="pass",
+                        uid=None):
+        """为单元写一条单元级验证证据（record_unit_verification 缺省
+        通道）。测试只经本助手造证据，保证指纹口径与完成门一致：
+        指纹缺省按当前工作区真算（unit_fingerprint）。"""
+        if command is None:
+            command = unit["verification"][0]
+        if fp is None:
+            fp = self.unit_fingerprint(unit)
+        return task_manager.record_unit_verification(
+            self.root, TID, unit["id"] if uid is None else uid,
+            command, fp, status=status)
 
 
 # —— prepare happy path ——
@@ -392,44 +510,19 @@ class AbortTest(TaskManagerTestBase):
         self.assertEqual(len(events(self.root, "dispatch_aborted")), 1)
 
 
-# —— finish（四条转换边 + 租约释放 + active 移除 + 事件） ——
+# —— finish（failed / cancelled / 校验序；零 git 夹具） ——
 
 class FinishTest(TaskManagerTestBase):
+    """finish_unit 的零 git 子集：completed 收尾被 RB-1 完成证据门要求
+    真实证据（git fixture），因此 completed 路径用例全部归入
+    FinishGateCompletionTest / FinishGateRejectionTest；本类只覆盖
+    failed / cancelled 收尾与参数 / 状态校验序（均不过完成门）。"""
 
     def _run_to_running(self):
         """prepare + commit 到 running（带租约与 active 记账）。"""
         make_task(self.root, [wu("u1")])
         task_manager.prepare_dispatch(self.root, TID, "u1")
         task_manager.commit_dispatch(self.root, TID, "u1")
-
-    def test_running_to_completed_goes_through_verifying(self):
-        self._run_to_running()
-        calls = []
-        original = work_unit.transition_work_unit
-
-        def spy(w, new_status):
-            calls.append((w.get("status"), new_status))
-            return original(w, new_status)
-
-        work_unit.transition_work_unit = spy
-        try:
-            st = task_manager.finish_unit(self.root, TID, "u1",
-                                          outcome="completed")
-        finally:
-            work_unit.transition_work_unit = original
-        # §70 父验证语义：恰好两次表内转换（running→verifying→completed），
-        # 不越表直跳
-        self.assertEqual(calls, [("running", "verifying"),
-                                 ("verifying", "completed")])
-        self.assertEqual(unit_of(st, "u1")["status"], "completed")
-        # 租约释放 + active 移除 + 事件（落盘读回）
-        reloaded = state.load_state(self.root, TID)
-        self.assertEqual(reloaded["dispatch"]["active"], [])
-        self.assertEqual(lease.lease_state(self.root, TID), {})
-        records = events(self.root, "unit_finished")
-        self.assertEqual(len(records), 1)
-        self.assertEqual(records[0]["unit"], "u1")
-        self.assertEqual(records[0]["outcome"], "completed")
 
     def test_running_to_failed_single_step(self):
         self._run_to_running()
@@ -441,16 +534,6 @@ class FinishTest(TaskManagerTestBase):
         self.assertEqual(lease.lease_state(self.root, TID), {})
         self.assertEqual(events(self.root, "unit_finished")[0]["outcome"],
                          "failed")
-
-    def test_verifying_to_completed_releases_and_cleans(self):
-        make_task(self.root, [wu("u1", status="verifying")], active=["u1"])
-        lease.acquire_lease(self.root, TID, "u1", ["src/a/**"])
-        st = task_manager.finish_unit(self.root, TID, "u1")
-        self.assertEqual(unit_of(st, "u1")["status"], "completed")
-        self.assertEqual(st["dispatch"]["active"], [])
-        self.assertEqual(lease.lease_state(self.root, TID), {})
-        self.assertEqual(events(self.root, "unit_finished")[0]["outcome"],
-                         "completed")
 
     def test_verifying_to_cancelled(self):
         make_task(self.root, [wu("u1", status="verifying")], active=["u1"])
@@ -725,25 +808,302 @@ class RecordUnitVerificationTest(TaskManagerTestBase):
                         status=bad)
                 self.assertIn("status", str(ctx.exception))
 
-    def test_dispatch_flow_with_unit_bound_evidence(self):
-        # prepare→commit→record_unit_verification→finish_unit happy path
+    # prepare→commit→record_unit_verification→finish_unit 全流程用例
+    # （原 :729）已迁入 FinishGateCompletionTest：RB-1 完成证据门起
+    # completed 收尾要求绑定当前指纹的新鲜证据，假指纹（"cafebabe"）
+    # 与零 git 夹具不再构成合法完成路径——改用 git fixture + 真实指纹。
+
+
+# —— RB-1 完成证据门：拒绝路径（计划 §2.5 A1-A12，git fixture） ——
+
+@unittest.skipUnless(shutil.which("git"),
+                     "环境无 git 可执行，跳过 git fixture 测试")
+class FinishGateRejectionTest(GitRepoFixture):
+    """finish_unit(completed) 的 RB-1 完成门拒绝矩阵：missing / fail /
+    wrong-unit / 非 required command / partial / stale / legacy 证据一律
+    TaskManagerError；拒绝零副作用（state.json 字节 / 租约 /
+    dispatch.active / journal 全部不变，也不写拒绝事件——计划 §2.3.4）。"""
+
+    def _run_to_running(self, **wu_kwargs):
+        """make_task + prepare + commit 到 running，返回构造的 unit dict。"""
+        unit = wu("u1", **wu_kwargs)
+        make_task(self.root, [unit])
+        task_manager.prepare_dispatch(self.root, TID, "u1")
+        task_manager.commit_dispatch(self.root, TID, "u1")
+        return unit
+
+    def test_running_completed_without_evidence_rejected(self):
+        # A1：有 required 命令、无任何 verification 事件 → 拒绝
+        self._run_to_running()
+        with self.assertRaises(task_manager.TaskManagerError) as ctx:
+            task_manager.finish_unit(self.root, TID, "u1")
+        message = str(ctx.exception)
+        self.assertIn("finish_unit", message)
+        self.assertIn("u1", message)
+        self.assertIn(VERIFY_CMD, message)  # missing 清单逐条可见
+        self.assertIn("record_unit_verification", message)  # 补证指引
+        self.assertIn("record → finish_unit → commit", message)
+
+    def test_verifying_completed_without_evidence_rejected(self):
+        # A2：verifying 态同样要过证据门
+        make_task(self.root, [wu("u1", status="verifying")], active=["u1"])
+        with self.assertRaises(task_manager.TaskManagerError) as ctx:
+            task_manager.finish_unit(self.root, TID, "u1")
+        self.assertIn(VERIFY_CMD, str(ctx.exception))
+
+    def test_fail_status_evidence_rejected(self):
+        # A3：status="fail" 允许留痕但不构成完成证据
+        unit = self._run_to_running()
+        self.dirty_file("src/a/feature.ts", b"feat-v1\n")
+        self.record_evidence(unit, status="fail")
+        with self.assertRaises(task_manager.TaskManagerError) as ctx:
+            task_manager.finish_unit(self.root, TID, "u1")
+        self.assertIn(VERIFY_CMD, str(ctx.exception))
+
+    def test_other_unit_evidence_rejected(self):
+        # A4：事件 unit="other-unit" → 归属绑定不匹配 → 按无证据处理
+        unit = self._run_to_running()
+        self.dirty_file("src/a/feature.ts", b"feat-v1\n")
+        self.record_evidence(unit, uid="other-unit")
+        with self.assertRaises(task_manager.TaskManagerError) as ctx:
+            task_manager.finish_unit(self.root, TID, "u1")
+        self.assertIn(VERIFY_CMD, str(ctx.exception))
+
+    def test_non_required_command_evidence_rejected(self):
+        # A5：command 不在 unit.verification 内 → 不算证据
+        unit = self._run_to_running()
+        self.dirty_file("src/a/feature.ts", b"feat-v1\n")
+        self.record_evidence(unit, command="echo not-a-required-command")
+        with self.assertRaises(task_manager.TaskManagerError) as ctx:
+            task_manager.finish_unit(self.root, TID, "u1")
+        self.assertIn(VERIFY_CMD, str(ctx.exception))
+
+    def test_partial_evidence_rejected_with_exact_missing(self):
+        # A6：两条 required 只验证一条 → missing 恰为未验证那条（all-match）
+        cmd_b = "python3 -m unittest tests.test_other"
+        unit = self._run_to_running(verification=(VERIFY_CMD, cmd_b))
+        self.dirty_file("src/a/feature.ts", b"feat-v1\n")
+        self.record_evidence(unit, command=VERIFY_CMD)  # 只验证第一条
+        with self.assertRaises(task_manager.TaskManagerError) as ctx:
+            task_manager.finish_unit(self.root, TID, "u1")
+        message = str(ctx.exception)
+        self.assertIn("missing：%s）" % cmd_b, message)
+        self.assertNotIn(VERIFY_CMD, message)  # 已验证那条不在 missing 内
+
+    def test_stale_fingerprint_evidence_rejected(self):
+        # A7：record 后再改 owned 文件 → 指纹漂移 → 证据 stale → 拒绝
+        unit = self._run_to_running()
+        self.dirty_file("src/a/feature.ts", b"feat-v1\n")
+        self.record_evidence(unit)
+        self.dirty_file("src/a/feature.ts", b"feat-v2\n")
+        with self.assertRaises(task_manager.TaskManagerError) as ctx:
+            task_manager.finish_unit(self.root, TID, "u1")
+        self.assertIn(VERIFY_CMD, str(ctx.exception))
+
+    def test_legacy_event_without_unit_field_rejected(self):
+        # A8：legacy 无 unit 字段事件（H6 起不再采信）→ 按无证据处理
+        unit = self._run_to_running()
+        self.dirty_file("src/a/feature.ts", b"feat-v1\n")
+        journal.append_event(self.root, TID, {
+            "event": "verification", "command": VERIFY_CMD,
+            "status": "pass",
+            "fingerprint": self.unit_fingerprint(unit)})
+        with self.assertRaises(task_manager.TaskManagerError) as ctx:
+            task_manager.finish_unit(self.root, TID, "u1")
+        self.assertIn(VERIFY_CMD, str(ctx.exception))
+
+    def test_rejection_leaves_state_lease_active_journal_untouched(self):
+        # A9-A12 合并：拒绝零副作用四连断言 + 单元状态不变
+        self._run_to_running()
+        self.dirty_file("src/a/feature.ts", b"feat-v1\n")  # 有残留无证据
+        bytes_before = state_bytes(self.root)
+        lease_before = lease.lease_state(self.root, TID)
+        active_before = state.load_state(
+            self.root, TID)["dispatch"]["active"]
+        journal_before = journal.read_events(self.root, TID)
+        with self.assertRaises(task_manager.TaskManagerError):
+            task_manager.finish_unit(self.root, TID, "u1")
+        self.assertEqual(state_bytes(self.root), bytes_before)
+        self.assertEqual(lease.lease_state(self.root, TID), lease_before)
+        self.assertEqual(state.load_state(
+            self.root, TID)["dispatch"]["active"], active_before)
+        self.assertEqual(journal.read_events(self.root, TID),
+                         journal_before)
+        self.assertEqual(events(self.root, "unit_finished"), [])
+        st = state.load_state(self.root, TID)
+        self.assertEqual(unit_of(st, "u1")["status"], "running")
+
+
+# —— RB-1 完成证据门：fail-closed（非 git 目录，零 git 夹具） ——
+
+class FinishGateFailClosedTest(TaskManagerTestBase):
+    """非 git 目录 + 带 required 验证命令的单元：git / 指纹失败使证据
+    新鲜性不可判定 → 包装为 TaskManagerError fail-closed 拒绝完成。"""
+
+    def test_non_git_repo_with_required_commands_fails_closed(self):
+        # A12b：零 git 夹具即可——tempdir 未 git init
         make_task(self.root, [wu("u1")])
         task_manager.prepare_dispatch(self.root, TID, "u1")
         task_manager.commit_dispatch(self.root, TID, "u1")
+        with self.assertRaises(task_manager.TaskManagerError) as ctx:
+            task_manager.finish_unit(self.root, TID, "u1")
+        message = str(ctx.exception)
+        self.assertIn("fail-closed", message)
+        self.assertIn("git", message)
+        # 零副作用：无 unit_finished，单元仍 running
+        self.assertEqual(events(self.root, "unit_finished"), [])
+        st = state.load_state(self.root, TID)
+        self.assertEqual(unit_of(st, "u1")["status"], "running")
+
+
+# —— RB-1 完成证据门：通过路径（计划 §2.5 B13-B19，git fixture） ——
+
+@unittest.skipUnless(shutil.which("git"),
+                     "环境无 git 可执行，跳过 git fixture 测试")
+class FinishGateCompletionTest(GitRepoFixture):
+    """RB-1 完成门通过路径：真实指纹（compute_fingerprint 对 owned_hits
+    真算）+ 新鲜 pass 证据 → 正常收尾（转换 / 释放 / 记账 / 事件照旧）。"""
+
+    def _prepared(self, unit=None):
+        """make_task + prepare + commit 到 running，返回 unit dict。"""
+        unit = unit or wu("u1")
+        make_task(self.root, [unit])
+        task_manager.prepare_dispatch(self.root, TID, "u1")
+        task_manager.commit_dispatch(self.root, TID, "u1")
+        return unit
+
+    def _verifying_with_lease(self):
+        """verifying 态 + 租约 + active 记账 + 当前改动 + 新鲜证据。"""
+        unit = wu("u1", status="verifying")
+        make_task(self.root, [unit], active=["u1"])
+        lease.acquire_lease(self.root, TID, "u1", ["src/a/**"])
+        self.dirty_file("src/a/feature.ts", b"feat-v1\n")
+        self.record_evidence(unit)
+        return unit
+
+    def test_single_required_fresh_evidence_completes_with_sequence(self):
+        # B13 + D23（原 :729 迁移）：真实指纹证据 → completed +
+        # 全生命周期事件序（verification 夹在派发与收尾之间）
+        unit = self._prepared()
+        self.dirty_file("src/a/feature.ts", b"feat-v1\n")
+        fp = self.unit_fingerprint(unit)
         task_manager.record_unit_verification(
-            self.root, TID, "u1", VERIFY_CMD, "cafebabe")
+            self.root, TID, "u1", VERIFY_CMD, fp)
         st = task_manager.finish_unit(self.root, TID, "u1")
         self.assertEqual(unit_of(st, "u1")["status"], "completed")
         record = events(self.root, "verification")[0]
         self.assertEqual(record["unit"], "u1")
         self.assertEqual(record["command"], VERIFY_CMD)
         self.assertEqual(record["status"], "pass")
-        self.assertEqual(record["fingerprint"], "cafebabe")
-        # 全生命周期事件序（verification 夹在派发与收尾之间）
+        self.assertEqual(record["fingerprint"], fp)
         names = [e["event"] for e in journal.read_events(self.root, TID)]
         self.assertEqual(names, ["dispatch_prepared",
                                  "implementation_started",
                                  "verification", "unit_finished"])
+
+    def test_all_required_commands_evidenced_completes(self):
+        # B14：多 required 全部有新鲜证据 → completed（all-match 满足）
+        cmd_b = "python3 -m unittest tests.test_other"
+        unit = self._prepared(
+            wu("u1", verification=(VERIFY_CMD, cmd_b)))
+        self.dirty_file("src/a/feature.ts", b"feat-v1\n")
+        self.record_evidence(unit, command=VERIFY_CMD)
+        self.record_evidence(unit, command=cmd_b)
+        st = task_manager.finish_unit(self.root, TID, "u1")
+        self.assertEqual(unit_of(st, "u1")["status"], "completed")
+
+    def test_running_with_full_evidence_still_goes_through_verifying(self):
+        # B15（原 FinishTest spy 用例迁移）：证据门通过不改变 §70 双跳
+        unit = self._prepared()
+        self.dirty_file("src/a/feature.ts", b"feat-v1\n")
+        self.record_evidence(unit)
+        calls = []
+        original = work_unit.transition_work_unit
+
+        def spy(w, new_status):
+            calls.append((w.get("status"), new_status))
+            return original(w, new_status)
+
+        work_unit.transition_work_unit = spy
+        try:
+            task_manager.finish_unit(self.root, TID, "u1")
+        finally:
+            work_unit.transition_work_unit = original
+        # §70 父验证语义：恰好两次表内转换，不越表直跳
+        self.assertEqual(calls, [("running", "verifying"),
+                                 ("verifying", "completed")])
+
+    def test_verifying_with_full_evidence_completes(self):
+        # B16（原 FinishTest verifying→completed 用例迁移）
+        self._verifying_with_lease()
+        st = task_manager.finish_unit(self.root, TID, "u1")
+        self.assertEqual(unit_of(st, "u1")["status"], "completed")
+
+    def test_completed_unit_releases_lease(self):
+        # B17：completed 后租约已释放
+        self._verifying_with_lease()
+        task_manager.finish_unit(self.root, TID, "u1")
+        self.assertEqual(lease.lease_state(self.root, TID), {})
+
+    def test_completed_unit_removed_from_active(self):
+        # B18：completed 后 dispatch.active 已移除（返回值与落盘一致）
+        self._verifying_with_lease()
+        st = task_manager.finish_unit(self.root, TID, "u1")
+        self.assertEqual(st["dispatch"]["active"], [])
+        self.assertEqual(
+            state.load_state(self.root, TID)["dispatch"]["active"], [])
+
+    def test_unit_finished_event_persisted_with_outcome(self):
+        # B19：completed 后 unit_finished 落盘（unit + outcome）
+        self._verifying_with_lease()
+        task_manager.finish_unit(self.root, TID, "u1")
+        finished = events(self.root, "unit_finished")
+        self.assertEqual(len(finished), 1)
+        self.assertEqual(finished[0]["unit"], "u1")
+        self.assertEqual(finished[0]["outcome"], "completed")
+
+
+# —— RB-1 完成证据门 × DAG 集成（计划 §2.5 C20-C21，git fixture） ——
+
+@unittest.skipUnless(shutil.which("git"),
+                     "环境无 git 可执行，跳过 git fixture 测试")
+class FinishGateDagIntegrationTest(GitRepoFixture):
+    """验证缺失不得经 refresh_readiness 传播为错误解锁下游（RB-1 动机
+    本身）：上游完成门被拒 → 下游不得 ready；完整证据完成 → 照常提升。"""
+
+    def _task_with_downstream(self):
+        """u1（上游）prepare + commit 到 running；u2 pending 依赖 u1。"""
+        upstream = wu("u1")
+        make_task(self.root, [upstream,
+                              wu("u2", ("src/b/**",), deps=("u1",),
+                                 status="pending")])
+        task_manager.prepare_dispatch(self.root, TID, "u1")
+        task_manager.commit_dispatch(self.root, TID, "u1")
+        return upstream
+
+    def test_upstream_rejected_keeps_downstream_locked(self):
+        # C20：上游无证据 finish 被拒 → 仍 running → 下游不得 ready
+        self._task_with_downstream()
+        with self.assertRaises(task_manager.TaskManagerError):
+            task_manager.finish_unit(self.root, TID, "u1")
+        st = state.load_state(self.root, TID)
+        self.assertEqual(unit_of(st, "u1")["status"], "running")
+        self.assertEqual(task_manager.refresh_readiness(self.root, TID), [])
+        st = state.load_state(self.root, TID)
+        self.assertEqual(unit_of(st, "u2")["status"], "pending")
+        self.assertEqual(events(self.root, "unit_finished"), [])
+
+    def test_upstream_completed_with_evidence_promotes_downstream(self):
+        # C21：上游完整证据完成 → refresh_readiness 提升下游 ready
+        upstream = self._task_with_downstream()
+        self.dirty_file("src/a/feature.ts", b"feat-v1\n")
+        self.record_evidence(upstream)
+        st = task_manager.finish_unit(self.root, TID, "u1")
+        self.assertEqual(unit_of(st, "u1")["status"], "completed")
+        self.assertEqual(task_manager.refresh_readiness(self.root, TID),
+                         ["u2"])
+        st = state.load_state(self.root, TID)
+        self.assertEqual(unit_of(st, "u2")["status"], "ready")
 
 
 # —— RELEASE：就绪推导态提升（refresh_readiness，dogfood 缺口补齐） ——

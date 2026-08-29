@@ -33,12 +33,17 @@
       1 load_state                   1 outcome ∈ {completed,failed,cancelled}
       2 running → 拒绝（已提交，    2 load_state；单元须存在
         不得静默回退）               3 状态须 ∈ {running, verifying}
-      3 release_lease（全部释放）    4 running+completed → 先 verifying 再
-      4 active 残留 → 移除 + save      completed（§70 父验证语义 = 两次
-      5 journal dispatch_aborted       表内转换）；其余单步直达
-      6 返回 state dict              5 release_lease + active 移除
-                                     6 save_state（单次）
-                                     7 journal unit_finished
+      3 release_lease（全部释放）    4 completed → RB-1 完成证据门：
+      4 active 残留 → 移除 + save      fresh_unit_verification 须全部
+      5 journal dispatch_aborted       命中（missing/stale/partial →
+      6 返回 state dict                拒绝且零副作用；git/指纹失败
+                                       fail-closed 同拒）
+                                     5 running+completed → 先 verifying 再
+                                       completed（§70 父验证语义 = 两次
+                                       表内转换）；其余单步直达
+                                     6 release_lease + active 移除
+                                     7 save_state（单次）
+                                     8 journal unit_finished
                                        ↓ 返回 state dict
 
 崩溃窗口恢复映射（确定性，文档化契约）：
@@ -62,13 +67,28 @@
     expired_running（活跃写相但已过期——worker 可能仍在写）仅上报、
     裁决归主会话——崩溃后无需人工删除 leases.json。
 
-单元验证证据归属绑定（v2.0.1 加固 H6，审查项 P1-7）：
+单元验证证据归属绑定（v2.0.1 加固 H6，审查项 P1-7）+ RB-1 完成证据门
+（release hardening WU-P2，计划 §2 RB-1）：
     record_unit_verification 是单元级验证证据的唯一推荐写入口——主
     会话亲自跑完单元验证命令后调用（时序：commit_dispatch → [Agent
     实施] → record_unit_verification → finish_unit）。事件显式携带
     unit 字段，reconcile 恢复对账按 unit 逐字精确匹配：相同 command /
     重叠 ownership 的单元之间不存在错误复用证据的空间。任务级（完成
     门口径）证据仍走 runtime.state.record_verification，两者口径正交。
+
+    H6 起 evidence 不只是恢复口径，还是完成口径：finish_unit(outcome=
+    "completed") 进入转换前必须先过 reconcile.fresh_unit_verification
+    完成证据门——全部 required command 各存在一条绑定当前指纹的新鲜
+    pass 事件（all-match）才允许 completed；missing / stale / partial /
+    wrong-unit / legacy 无 unit 字段证据一律 TaskManagerError 且零副作用
+    （不写任何 journal 事件，含拒绝事件——计划 §2.3.4）；git / 指纹
+    读取失败同样 fail-closed 拒绝（无法判定新鲜即不能完成）。failed /
+    cancelled 收尾不需要证据。注意 record 与 finish 之间的任何 git 提交
+    都会改变基线修订使证据失效，须重验。空 required 单元经谓词快路径
+    零 git 放行（生产单元受「无验证命令的单元不可派发」的 validate_state
+    约束不会出现该形状）。RB-1 的动机：prepare→commit→finish 此前可
+    完全绕过 record_unit_verification，验证缺失会经 refresh_readiness
+    传播为错误解锁下游 DAG（release blocker RB-1）。
 
 多单元就绪流转（v2.0.1 收尾，dogfood 缺口补齐）：
     finish_unit 使某单元到达 completed 后调用 refresh_readiness——
@@ -97,7 +117,9 @@
 来源：
     docs/GLM-Conductor-v2.0.0-全面审查与v2.0.1加固建议.md §4.1 / P1-3
     + docs/glm-conductor-v2-upgrade-guide-final.md §62（状态转换表）/
-    §64-§67（准入）/ §70（父验证）/ §78（租约时点）/ §69（恢复对账）。
+    §64-§67（准入）/ §70（父验证）/ §78（租约时点）/ §69（恢复对账）
+    + docs/GLM-Conductor-v2.0.1-Release-Hardening-Patch-Agent-Implementation-Plan.md
+    （RB-1 / WU-P2：finish_unit 完成证据门，缺证据零副作用拒绝）。
 """
 
 from runtime import dependency
@@ -119,7 +141,8 @@ PRE_DISPATCH_TASK_STATUSES = ("created", "preflight", "routed", "decomposed")
 
 
 class TaskManagerError(Exception):
-    """task_manager 事务边界违背（单元缺失/状态不符/租约丢失/决策未批准）。"""
+    """task_manager 事务边界违背（单元缺失/状态不符/租约丢失/决策未批准
+    /RB-1 完成证据缺失或不可判定）。"""
 
 
 # —— 内部助手（容错读取，均不改入参语义） ——
@@ -364,9 +387,46 @@ def abort_dispatch(repo_root, task_id, uid) -> dict:
 
 # —— finish：running/verifying → 终态 + 释放 + 单次 save ——
 
+def _require_completion_evidence(repo_root, task_id, uid, unit) -> None:
+    """RB-1 完成证据门（release hardening WU-P2）：completed 收尾前校验
+    全部 required 验证命令的新鲜单元证据，不满足即 TaskManagerError。
+
+    零副作用由调用顺序保证——本助手只在 finish_unit 的任何转换 /
+    release / save / journal 之前调用，拒绝路径不写任何 journal 事件
+    （含拒绝事件，计划 §2.3.4：不扩大事件面）。
+
+    - 复用 reconcile.fresh_unit_verification（WU-P1 共享证据谓词，缺省
+      自取 touched / events；与恢复对账同一口径）；空 required 单元经
+      谓词快路径零 git 放行（生产单元受「无验证命令的单元不可派发」
+      的 validate_state 约束不会出现该形状，此性质是谓词共用口径）；
+    - evidence["ok"] 为 False（missing / stale / partial / wrong-unit /
+      legacy 无 unit 字段证据）→ TaskManagerError，消息含 api 名、uid、
+      missing 命令清单（逐条）与补证指引；
+    - ownership.OwnershipError / fingerprint.FingerprintError → 包装为
+      TaskManagerError（fail-closed：无法判定证据新鲜性即不能完成）。
+    """
+    from runtime import fingerprint  # 局部导入：不新增模块级 import
+    api = "finish_unit"
+    try:
+        evidence = reconcile.fresh_unit_verification(repo_root, task_id,
+                                                     unit)
+    except (ownership.OwnershipError, fingerprint.FingerprintError) as exc:
+        raise TaskManagerError(
+            "%s：单元 %s 完成被拒：无法判定证据新鲜性，fail-closed 拒绝"
+            "完成（原因：%s）" % (api, uid, exc)) from exc
+    if not evidence["ok"]:
+        raise TaskManagerError(
+            "%s：单元 %s 完成被拒（RB-1 完成证据门）：required 验证命令"
+            "缺少新鲜 pass 证据（missing：%s）——亲自运行单元验证命令后"
+            "用 record_unit_verification 记录（时序：record → "
+            "finish_unit → commit，record 与 finish 之间的任何 git 提交"
+            "都会使证据失效须重验）"
+            % (api, uid, "；".join(evidence["missing"])))
+
+
 def finish_unit(repo_root, task_id, uid, *, outcome="completed") -> dict:
-    """单元收尾：终态转换 → 释放租约 → active 移除 → 单次 save →
-    unit_finished 事件；返回 state dict。
+    """单元收尾：RB-1 完成证据门（completed 时）→ 终态转换 → 释放租约
+    → active 移除 → 单次 save → unit_finished 事件；返回 state dict。
 
     流程：
       1. outcome ∈ ("completed", "failed", "cancelled")，否则 ValueError
@@ -374,17 +434,29 @@ def finish_unit(repo_root, task_id, uid, *, outcome="completed") -> dict:
       2. load_state；找不到 uid → TaskManagerError；
       3. 单元 status 须 ∈ ("running", "verifying")，否则 TaskManagerError
          （消息含当前状态）；
-      4. 转换：running + completed → 先 verifying 再 completed（§70 父
+      4. 【RB-1 完成证据门，WU-P2】仅 outcome == "completed" 时：调
+         reconcile.fresh_unit_verification(repo_root, task_id, unit)
+         （缺省自取 touched / events）——全部 required command 须各存在
+         一条绑定当前指纹的新鲜 pass 证据（all-match），才允许进入
+         转换；missing / stale / partial / wrong-unit / legacy 无 unit
+         字段证据一律 TaskManagerError（消息含 missing 清单与
+         record_unit_verification 补证指引），此时零副作用——state.json
+         字节、leases.json、dispatch.active、journal 全部不变；git /
+         指纹读取失败（OwnershipError / FingerprintError）同样拒绝
+         （fail-closed 包装为 TaskManagerError）。failed / cancelled
+         收尾不需要证据。空 required 单元经谓词快路径零 git 直接放行；
+      5. 转换：running + completed → 先 verifying 再 completed（§70 父
          验证语义：worker 报告只是 claim，编码为两次表内转换）；其余
          单步直达（running→failed/cancelled、verifying→completed/
          failed/cancelled，均在 §62 表内）；
-      5. lease.release_lease + dispatch.active 移除 uid（在则删）；
-      6. save_state 一次；
-      7. journal unit_finished（unit + outcome）。
+      6. lease.release_lease + dispatch.active 移除 uid（在则删）；
+      7. save_state 一次；
+      8. journal unit_finished（unit + outcome）。
 
-    转 verifying 不落盘是刻意的：它只是 running+completed 双跳的中间
-    步，落盘与否不影响恢复语义——崩在双跳之间，盘上仍是 running，
-    reconcile 按 §69 对账的结果一致。
+    证据门先于转换是刻意的：拒绝发生在任何变更之前——被拒的收尾可
+    安全重试（补证后重调即可）。转 verifying 不落盘也是刻意的：它只是
+    running+completed 双跳的中间步，落盘与否不影响恢复语义——崩在双跳
+    之间，盘上仍是 running，reconcile 按 §69 对账的结果一致。
     """
     api = "finish_unit"
     if outcome not in FINISH_OUTCOMES:
@@ -398,6 +470,10 @@ def finish_unit(repo_root, task_id, uid, *, outcome="completed") -> dict:
         raise TaskManagerError(
             "%s：单元 %s 当前状态为 %r，须为 running 或 verifying 才能"
             "收尾" % (api, uid, current))
+    if outcome == "completed":
+        # RB-1 完成证据门（WU-P2）：先验证据后转换——拒绝发生在任何
+        # 变更之前（转换 / release / save / journal 均未发生）
+        _require_completion_evidence(repo_root, task_id, uid, unit)
     if current == "running" and outcome == "completed":
         # §70：正常完成必须经 verifying（worker 报告只是 claim，父会话
         # 验证后才算 completed）——两次表内转换，不越表直跳
