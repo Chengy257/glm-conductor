@@ -87,8 +87,11 @@ active task（continuity 为 resumable / idle 的任务，或需要 Stop 完成�
 | 证据 | 记录时机 | 记录动作 |
 | --- | --- | --- |
 | verification.fingerprint | 主会话**亲自**重跑全部 verification.required 命令且通过后，立即记录 | `state.record_verification(st, cmd, fingerprint.task_fingerprint(repo, st))` 后 save_state |
+| 单元级验证证据（work unit） | 主会话**亲自**跑完该单元验证命令且通过后、`finish_unit` 收尾前 | `task_manager.record_unit_verification(repo, task_id, uid, cmd, fingerprint)` 追加 journal verification 事件——事件显式携带 `unit`（work unit id）字段，reconcile 恢复对账按 `unit` 逐字精确匹配；**不含 `unit` 字段的旧格式事件不再被采信**（保守按无证据处理，主会话重新验证；v2.0.1 H6 有意的破坏性变更） |
 | review.fingerprint | 审查者返回裁决后、且裁决对应的 diff 未再变动时 | `state.record_review(st, verdict, fingerprint.task_fingerprint(repo, st))` 后 save_state |
 | visual_evidence | 视觉验收通过时，对每张截图按原始字节哈希记录 | `state.record_visual_evidence(st, path, sha256)` 后 save_state |
+
+口径正交（v2.0.1 H6）：单元级证据只写 journal（恢复对账用，reconcile 按 unit 匹配）；任务级完成门证据写 state.json（`state.record_verification`，Stop 完成门比对）——多单元任务两者都要记，互不替代。
 
 红线：
 

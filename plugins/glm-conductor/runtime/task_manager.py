@@ -62,6 +62,14 @@
     expired_running（活跃写相但已过期——worker 可能仍在写）仅上报、
     裁决归主会话——崩溃后无需人工删除 leases.json。
 
+单元验证证据归属绑定（v2.0.1 加固 H6，审查项 P1-7）：
+    record_unit_verification 是单元级验证证据的唯一推荐写入口——主
+    会话亲自跑完单元验证命令后调用（时序：commit_dispatch → [Agent
+    实施] → record_unit_verification → finish_unit）。事件显式携带
+    unit 字段，reconcile 恢复对账按 unit 逐字精确匹配：相同 command /
+    重叠 ownership 的单元之间不存在错误复用证据的空间。任务级（完成
+    门口径）证据仍走 runtime.state.record_verification，两者口径正交。
+
 分层关系：
     runtime.dispatcher —— 纯决策器：plan_dispatch 零 I/O，只产出「谁可
         派发 / 谁挂起及理由」的决策 dict；本层在 prepare 中消费它；
@@ -393,6 +401,53 @@ def finish_unit(repo_root, task_id, uid, *, outcome="completed") -> dict:
     journal.append_event(repo_root, task_id, {
         "event": "unit_finished", "unit": uid, "outcome": outcome})
     return st
+
+
+# —— 单元验证证据写入口（v2.0.1 加固 H6，审查项 P1-7） ——
+
+# 单元级 verification 事件的状态词汇（与 reconcile 证据匹配条件一致：
+# 只认 "pass"；"fail" 允许写入以留痕，但不构成完成证据）
+UNIT_VERIFICATION_STATUSES = ("pass", "fail")
+
+
+def record_unit_verification(repo_root, task_id, uid, command, fingerprint,
+                             *, status="pass") -> dict:
+    """单元级验证证据的唯一推荐写入口，返回写入的事件 dict。
+
+    主会话亲自跑完单元验证命令后调用（§70：worker 报告只是 claim）；
+    事件形状 {"event": "verification", "unit": uid, "command": command,
+    "status": status, "fingerprint": fingerprint}——unit 字段使
+    reconcile 恢复对账按单元精确匹配（H6）：相同 command / 重叠
+    ownership 的单元之间不再存在错误复用证据的空间；无 unit 字段的
+    旧格式事件自 H6 起不再被 reconcile 采信（保守按无证据处理）。
+
+    参数校验（先于任何 I/O，失败零副作用）：uid / command /
+    fingerprint 必须是非空 str，status ∈ UNIT_VERIFICATION_STATUSES
+    ("pass", "fail")，否则 ValueError（中文消息含字段名）。
+
+    分工锚定：本函数只写 journal（单元级恢复证据），不触碰
+    state.json——任务级（完成门口径）验证证据仍走
+    runtime.state.record_verification（写入 verification.completed /
+    fingerprint，供 Stop 完成门比对），两者口径正交、互不替代。
+    """
+    api = "record_unit_verification"
+    if not isinstance(uid, str) or uid == "":
+        raise ValueError(
+            "%s：uid 必须是非空字符串，得到 %r" % (api, uid))
+    if not isinstance(command, str) or command == "":
+        raise ValueError(
+            "%s：command 必须是非空字符串，得到 %r" % (api, command))
+    if not isinstance(fingerprint, str) or fingerprint == "":
+        raise ValueError(
+            "%s：fingerprint 必须是非空字符串，得到 %r"
+            % (api, fingerprint))
+    if status not in UNIT_VERIFICATION_STATUSES:
+        raise ValueError(
+            "%s：status %r 不在合法取值内（%s）"
+            % (api, status, ", ".join(UNIT_VERIFICATION_STATUSES)))
+    return journal.append_event(repo_root, task_id, {
+        "event": "verification", "unit": uid, "command": command,
+        "status": status, "fingerprint": fingerprint})
 
 
 # —— recover：崩溃后 stale 租约闭环清理（v2.0.1 加固 H5，P1-4/P1-5） ——

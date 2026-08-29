@@ -21,8 +21,9 @@ journal + 驱动 reconcile_interrupted）+ 纯函数容错用例：
     不携带转换，裁决归主会话）；
     - 纯函数用例：非 running/verifying 单元零建议（全状态词汇穷举）；
     events 注入空 / 非 list 容错；suggestions / advisories /
-    reconciled 键序均按 units 出现序；§69 证据匹配四条件逐项锚定
-    （event 名 / 指纹 / status=pass / command ∈ verification）；纯
+    reconciled 键序均按 units 出现序；§69 证据匹配五条件逐项锚定
+    （event 名 / unit==单元 id（H6 逐字精确，无 unit 旧格式不匹配）/ 指纹 /
+    status=pass / command ∈ verification）；纯
     建议纪律（零落盘、不改 units）；结构性错误（git 失败 / 非法
     ownership 模式 / 指纹目标为目录）自然上抛；
   - H5 reconcile_leases 三分（无 git 需求，tempdir + 手工租约）：
@@ -30,7 +31,12 @@ journal + 驱动 reconcile_interrupted）+ 纯函数容错用例：
     stale（图中无此单元）、running/verifying 未过期 → active、running
     已过期 → expired_running（不入 stale，不自动清）、桶内按 path
     排序、空租约空报告、非 list units 按空图容错、纯建议纪律
-    （零落盘、不改 units）。
+    （零落盘、不改 units）；
+  - H6 证据归属绑定（work_unit_verification_evidence_requires_matching_
+    unit_id，git 基座真算指纹）：同 command / 重叠 ownership 的 A/B
+    双 running 单元——unit=uA 的验证事件 → A 建议 completed、B 只得
+    verifying（不得复用）；事件归属对调对称成立；无 unit 字段的旧
+    格式事件不再匹配（双方 verifying，保守按无证据处理）。
 
 git fixture 做法（git init + config + commit、Windows 下 .git 只读位
 清理）对齐 tests/test_stop_gate.py 的 GitRepoFixture；环境无 git 可执行
@@ -163,8 +169,9 @@ class ReconcileFixture(GitRepoFixture):
         return fingerprint_mod.compute_fingerprint(str(self.repo), owned_hits)
 
     def verification_event(self, unit, fp):
-        """构造绑定指定指纹的 pass 验证事件（journal verification 形态）。"""
+        """构造绑定单元 id + 指纹的 pass 验证事件（H6 journal 形态）。"""
         return {"event": "verification",
+                "unit": unit["id"],
                 "command": unit["verification"][0],
                 "status": "pass",
                 "fingerprint": fp}
@@ -444,11 +451,11 @@ class ReconcileEventsToleranceTest(GitRepoFixture):
         self.assertEqual(report["suggestions"]["tol"]["to"], "verifying")
 
 
-# —— 纯函数：§69 证据匹配四条件逐项锚定 ——
+# —— 纯函数：§69 证据匹配五条件逐项锚定（H6 起含 unit 归属绑定） ——
 
 @unittest.skipUnless(shutil.which("git"), "环境无 git 可执行，跳过 git fixture 测试")
 class ReconcileEvidenceMatchingTest(ReconcileFixture):
-    """event 名 / 指纹相等 / status=pass / command ∈ verification 四条件。"""
+    """event 名 / unit==单元 id / 指纹相等 / status=pass / command ∈ verification 五条件。"""
 
     def residual_unit(self):
         self.write("src/ev/e.py", b"v1\n")
@@ -717,6 +724,62 @@ class ReconcileLeasesTest(TempDirFixture):
                                             now=LEASE_NOW)
         self.assertEqual(len(report["stale"]), 1)
         self.assertEqual(report["stale"][0]["reason"], "图中无此单元")
+
+
+# —— H6：验证证据归属绑定（unit 字段逐字精确匹配；指纹真算需 git 基座） ——
+
+@unittest.skipUnless(shutil.which("git"), "环境无 git 可执行，跳过 git fixture 测试")
+class ReconcileUnitBindingTest(GitRepoFixture):
+    """work_unit_verification_evidence_requires_matching_unit_id（appendix B）：
+    相同 command / 重叠 ownership 的单元之间不得复用验证证据
+    （fingerprint 以真实 git 仓库为基座、按 reconcile 同一口径真算）。"""
+
+    def setUp(self):
+        super().setUp()
+        self.cmd = "python3 -m unittest tests.test_feature_shared"
+        self.write("src/shared/a.py", b"unit implementation\n")
+        self.touched = ["src/shared/a.py"]
+        # A/B 同 command、ownership 完全重叠（都声明 src/**）、都 running
+        self.units = [
+            make_unit("uA", ("src/**",), status="running",
+                      verification=(self.cmd,)),
+            make_unit("uB", ("src/**",), status="running",
+                      verification=(self.cmd,)),
+        ]
+        # 与 reconcile 同一口径对 owned_hits 真算当前指纹
+        self.fp = fingerprint_mod.compute_fingerprint(str(self.repo),
+                                                      self.touched)
+
+    def _report(self, events):
+        return reconcile.reconcile_interrupted(
+            str(self.repo), TID, self.units, touched=self.touched,
+            events=events)
+
+    def test_work_unit_verification_evidence_requires_matching_unit_id(self):
+        evidence = {"event": "verification", "unit": "uA",
+                    "command": self.cmd, "status": "pass",
+                    "fingerprint": self.fp}
+        report = self._report([evidence])
+        # A 的证据证明 A 的改动 → completed；B 不得复用 A 的证据 → verifying
+        self.assertEqual(report["suggestions"]["uA"]["to"], "completed")
+        self.assertEqual(report["suggestions"]["uB"]["to"], "verifying")
+
+    def test_unit_binding_is_symmetric(self):
+        evidence = {"event": "verification", "unit": "uB",
+                    "command": self.cmd, "status": "pass",
+                    "fingerprint": self.fp}
+        report = self._report([evidence])
+        # 事件归属谁，谁才可被建议 completed（对称锚定）
+        self.assertEqual(report["suggestions"]["uA"]["to"], "verifying")
+        self.assertEqual(report["suggestions"]["uB"]["to"], "completed")
+
+    def test_legacy_event_without_unit_no_longer_matches(self):
+        # 旧格式（无 unit 字段）不再匹配任何单元——保守按无证据处理
+        legacy = {"event": "verification", "command": self.cmd,
+                  "status": "pass", "fingerprint": self.fp}
+        report = self._report([legacy])
+        self.assertEqual(report["suggestions"]["uA"]["to"], "verifying")
+        self.assertEqual(report["suggestions"]["uB"]["to"], "verifying")
 
 
 if __name__ == "__main__":

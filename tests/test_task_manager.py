@@ -47,7 +47,11 @@ new_work_unit 构造，非 mock state），不污染真实工作区。
       expired_running 不动仅上报、零释放不落事件、缺 state 报错）/
       端到端崩溃场景 orphan_lease_reconciled_after_interrupted_running_unit
       （running 单元 + 孤儿租约 → reconcile_interrupted 建议 ready →
-      应用转换 → recover_leases 闭环清理）。
+      应用转换 → recover_leases 闭环清理）；
+    - H6（验证证据归属绑定）：record_unit_verification 正常写入逐字段
+      锚定 / fail 合法词汇 / 空 uid-command-fingerprint 与非法 status
+      各抛 ValueError（消息含字段名）/ prepare→commit→
+      record_unit_verification→finish_unit 全流程事件序。
 
 运行：
     cd <repo_root> && python3 -m unittest tests.test_task_manager -v
@@ -669,6 +673,73 @@ class OrphanLeaseRecoveryTest(TaskManagerTestBase):
         record = events(self.root, "lease_recovered")[0]
         self.assertEqual(record["released"], ["src/a/**"])
         self.assertEqual(record["kept_expired_running"], [])
+
+
+# —— H6：单元级验证证据写入口（record_unit_verification） ——
+
+class RecordUnitVerificationTest(TaskManagerTestBase):
+
+    def test_writes_fully_bound_verification_event(self):
+        event = task_manager.record_unit_verification(
+            self.root, TID, "u1", VERIFY_CMD, "deadbeef", status="pass")
+        # 事件形状逐字段锚定（ts 由 append_event 管理）
+        self.assertEqual(event["event"], "verification")
+        self.assertEqual(event["unit"], "u1")
+        self.assertEqual(event["command"], VERIFY_CMD)
+        self.assertEqual(event["status"], "pass")
+        self.assertEqual(event["fingerprint"], "deadbeef")
+        self.assertIn("ts", event)
+        # 落盘读回一致
+        self.assertEqual(events(self.root, "verification"), [event])
+
+    def test_fail_status_is_legal_vocabulary(self):
+        # "fail" 允许写入留痕（但不构成完成证据——reconcile 只认 pass）
+        event = task_manager.record_unit_verification(
+            self.root, TID, "u1", VERIFY_CMD, "deadbeef", status="fail")
+        self.assertEqual(event["status"], "fail")
+
+    def test_empty_or_illegal_arguments_raise_value_error_with_field(self):
+        for field, args in (
+                ("uid", ("", VERIFY_CMD, "fp")),
+                ("uid", (None, VERIFY_CMD, "fp")),
+                ("command", ("u1", "", "fp")),
+                ("command", ("u1", 42, "fp")),
+                ("fingerprint", ("u1", VERIFY_CMD, "")),
+                ("fingerprint", ("u1", VERIFY_CMD, None))):
+            with self.subTest(field=field):
+                with self.assertRaises(ValueError) as ctx:
+                    task_manager.record_unit_verification(
+                        self.root, TID, *args)
+                self.assertIn(field, str(ctx.exception))
+
+    def test_illegal_status_raises_value_error(self):
+        for bad in ("PASS", "verified", "", None, 1):
+            with self.subTest(bad=bad):
+                with self.assertRaises(ValueError) as ctx:
+                    task_manager.record_unit_verification(
+                        self.root, TID, "u1", VERIFY_CMD, "fp",
+                        status=bad)
+                self.assertIn("status", str(ctx.exception))
+
+    def test_dispatch_flow_with_unit_bound_evidence(self):
+        # prepare→commit→record_unit_verification→finish_unit happy path
+        make_task(self.root, [wu("u1")])
+        task_manager.prepare_dispatch(self.root, TID, "u1")
+        task_manager.commit_dispatch(self.root, TID, "u1")
+        task_manager.record_unit_verification(
+            self.root, TID, "u1", VERIFY_CMD, "cafebabe")
+        st = task_manager.finish_unit(self.root, TID, "u1")
+        self.assertEqual(unit_of(st, "u1")["status"], "completed")
+        record = events(self.root, "verification")[0]
+        self.assertEqual(record["unit"], "u1")
+        self.assertEqual(record["command"], VERIFY_CMD)
+        self.assertEqual(record["status"], "pass")
+        self.assertEqual(record["fingerprint"], "cafebabe")
+        # 全生命周期事件序（verification 夹在派发与收尾之间）
+        names = [e["event"] for e in journal.read_events(self.root, TID)]
+        self.assertEqual(names, ["dispatch_prepared",
+                                 "implementation_started",
+                                 "verification", "unit_finished"])
 
 
 if __name__ == "__main__":

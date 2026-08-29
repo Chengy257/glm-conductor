@@ -31,8 +31,9 @@ completed 不重跑锚定（§68）：
     3. 有残留改动 → journal 指纹证据：fingerprint.compute_fingerprint
        对 owned_hits 真算当前指纹，再在 events 里从尾向头找第一条
        满足全部条件的 verification 事件：
-         event == "verification" 且 fingerprint == 当前指纹 且
-         status == "pass" 且 command 出现在 unit["verification"] 列表内
+         event == "verification" 且 unit == 该单元 id（逐字精确）且
+         fingerprint == 当前指纹 且 status == "pass" 且 command 出现在
+         unit["verification"] 列表内
        - 找到 → 建议 completed（存在绑定当前改动的新鲜验证证据——
          parent-observed 恢复解释，最终裁决待主会话确认）；running
          与 verifying 同此（verifying→completed 在转换表内）；
@@ -44,6 +45,16 @@ completed 不重跑锚定（§68）：
     4. blocked 不在本模块建议词汇内——「检查失败」的裁决（failed /
        blocked 等）是主会话的职责，模块只依据仓库 + journal 证据出
        建议，绝不替主会话判死。
+
+证据归属绑定（v2.0.1 加固 H6，审查项 P1-7）：
+    verification 事件必须显式携带 unit 字段（work unit id），且与被
+    对账单元逐字精确相等——相同 command / 重叠 ownership 的单元之间
+    不存在错误复用证据的空间（A 单元的证据不能证明 B 单元的改动）。
+    单元级证据的推荐写入口是 task_manager.record_unit_verification
+    （事件形状 {"event": "verification", "unit", "command", "status",
+    "fingerprint"}）。**不含 unit 字段的旧格式事件不再匹配**——保守：
+    证据无法证明归属时按无证据处理，主会话重新验证；这是 v2.0.1
+    有意的破坏性变更，已在 continuity SKILL 与架构文档明示。
 
 返回（确定性，suggestions / advisories / reconciled 键序均按 units
 出现序）：
@@ -103,7 +114,8 @@ completed 不重跑锚定（§68）：
 来源：
     docs/glm-conductor-v2-upgrade-guide-final.md §68（恢复后 completed
     不重跑）/ §69（中断单元恢复证据四步）+ v2 升级计划工作块 B8.4
-    + v2.0.1 加固工作包 H5（审查项 P1-4/P1-5）。
+    + v2.0.1 加固工作包 H5（P1-4/P1-5，租约对账）与 H6（P1-7，
+    verification 证据归属绑定 unit）。
 """
 
 from runtime import fingerprint
@@ -143,8 +155,12 @@ def _interrupted_advice(repo_root, unit, touched, events):
     表内合法），无残留 / 残留无新鲜两种表外情形改出 no-op 裁决提示
     （advisories，不携带转换——verifying→ready / verifying→verifying
     均不在 §62 转换表内，建议层不出表外建议）。
+    证据匹配五条件（H6 起）：event 名 / unit == 单元 id（逐字精确，
+    无 unit 字段的旧格式事件不匹配）/ 指纹相等 / status=pass /
+    command ∈ verification。
     """
     status = unit.get("status")
+    uid = unit.get("id")
     patterns = unit.get("ownership")
     if not isinstance(patterns, (list, tuple)):
         patterns = []
@@ -161,6 +177,7 @@ def _interrupted_advice(repo_root, unit, touched, events):
         if not isinstance(event, dict):
             continue
         if (event.get("event") == "verification"
+                and event.get("unit") == uid
                 and event.get("fingerprint") == fp
                 and event.get("status") == "pass"
                 and event.get("command") in command_pool):
