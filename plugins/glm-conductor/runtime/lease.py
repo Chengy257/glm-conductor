@@ -5,7 +5,8 @@
 职责：
     §78 的文件租约 owner map：Work Unit 派发前由 Task Manager 以单元 id
     为 owner 获取其 ownership 声明覆盖的路径租约；单元离开活跃写相后
-    释放。租约是安全并行派发（§81；B10.1 dispatcher 租约闸）的前提——
+    释放。租约是安全并行派发（§81；B10.1 dispatcher 租约闸）的两道
+    准入闸之一（另一道是 ownership 闸，§66；两闸均须通过）——
     它把「谁正在写哪些路径」从内存约定升级为落盘事实，使 plan_dispatch
     能拦下 active 清单之外的占用（跨批次 / 跨上下文）。
 
@@ -43,8 +44,8 @@
 
 来源：
     docs/glm-conductor-v2-upgrade-guide-final.md §78（文件租约）/
-    §81（并行安全 = ownership 不相交或有效租约保护）/ §82（并行上限
-    2-4，实验特性 experimental）+ v2 升级计划工作块 B9.1。
+    §81（并行安全 = ownership 声明判定可并行且无外来活跃租约冲突）/
+    §82（并行上限 2-4，实验特性 experimental）+ v2 升级计划工作块 B9.1。
 """
 
 import datetime

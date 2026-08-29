@@ -72,7 +72,7 @@ v2 起，插件把原本写在提示词里的关键契约升级为**运行时强
 
 - [ZCode](https://zcode.z.ai) 客户端（Tested with 3.9.2；更早版本可能缺少多模态、定时任务或自定义子智能体能力）
 - GLM Coding Plan（或 Z.ai 账号），已连接 GLM-5.3 与 GLM-5.3-Flash
-- **Python 3**（`python3` 在 PATH 中）——v2 强制层钩子的运行时。Windows 官方安装器默认加入 PATH；自检：新终端执行 `python3 --version` 有输出即满足
+- **Python 3.8+**（`python3` 在 PATH 中）——v2 强制层钩子的运行时。Windows 官方安装器默认加入 PATH；自检：新终端执行 `python3 --version` 有输出即满足
 
 ## 安装
 

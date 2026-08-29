@@ -215,7 +215,7 @@ Work Unit 是可独立派发的最小有界实施单元（§60-§73，`runtime/w
 
 - **状态模型**：十词状态词汇 + 26 条合法转换边（主链 pending→…→completed；quota/block 回退边；§69 恢复对账边；终态封锁）；单元必填 ownership 与 verification（无范围或无验证不可派发）；`attempt` 记录重试史，新调用不抹除失败史（§73 有界重试）
 - **依赖图**：`depends_on` 同任务内引用、环拒绝（报全部环成员）；就绪 = status ready 且依赖全部 completed；确定性拓扑序驱动派发顺序
-- **派发准入**（主会话仍是唯一编排者）：`plan_dispatch` 五道闸——quota 四态（EXHAUSTED→waiting_quota、UNKNOWN/PRESSURE 保守抑制，§67）→ ownership 不相交（保守近似：字面前缀相交即冲突，宁少并行不越界，§66）→ **租约闸（`runtime/lease.py`：任务专属 leases.json owner map、派发前全有或全无获取、同 owner 幂等、异 owner 冲突拒绝、写相结束释放，§78-§79）→ max_workers 预算（1-4，§82）→ 派发；默认串行，有界并行（上限 4，experimental）已启用——并行资格 = ownership 不相交或有效租约保护（§81）
+- **派发准入**（主会话仍是唯一编排者）：`plan_dispatch` 五道闸——quota 四态（EXHAUSTED→waiting_quota、UNKNOWN/PRESSURE 保守抑制，§67）→ ownership 不相交（保守近似：字面前缀相交即冲突，宁少并行不越界，§66）→ **租约闸（`runtime/lease.py`：任务专属 leases.json owner map、派发前全有或全无获取、同 owner 幂等、异 owner 冲突拒绝、写相结束释放，§78-§79）→ max_workers 预算（1-4，§82）→ 派发；默认串行，有界并行（上限 4，experimental）已启用——并行资格 = ownership 声明判定可并行 **且** 无外来活跃租约冲突（两道闸门均须通过，§66/§78；租约不豁免 ownership 闸）
 - **恢复对账**（§68-§69）：恢复绝不盲目重放——completed 不重跑；`running` 单元按证据三分为 ready（无残留）/ completed（残留 + 绑定当前指纹的新鲜验证事件）/ verifying（残留无新鲜证据，主会话必须亲自验证）；`verifying` 单元仅在存在新鲜验证证据时建议 completed，其余情形出 advisory（保持现状由主会话直接验证 / 无残留由主会话裁决），不做状态转换；仓库状态权威于运行时记录
 - **Join**（§71-§72）：全部单元 completed 后主会话显式 join——聚合 diff → 任务级全局验证（跨单元集成/构建/lint，局部验证永不自动替代）→ 终指纹 → 审查 → 完成门
 

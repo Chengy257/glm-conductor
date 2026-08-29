@@ -141,7 +141,7 @@ GLM-5.3 主会话与 glm-reviewer 均为纯文本模型：**主会话在视觉�
 - 委派必须使用五段式实施规格（OBJECTIVE / FILES AND OWNERSHIP / INTERFACES / CONSTRAINTS / VERIFICATION），返回后按 IMPLEMENTATION REPORT 接收；完整模板见 references/role-contracts.md（首次委派前必须阅读）。复杂或陌生代码域的委派在规格前附 TASK CONTEXT PACK（主会话压缩的有界上下文包，条目优先取自 ROUTING PREFLIGHT REPORT；模板与紧凑性规则见 role-contracts.md）
 - 工作者的报告仅视为声明（implementation claim）：主会话必须亲自检查完整 diff、核对改动范围、重跑验证命令，才能形成验证证据（verification evidence）
 
-active task 的状态同步义务：五段式规格中 FILES AND OWNERSHIP 声明的 owned 文件清单必须同步写入 state.json 的 ownership.files（完成门 Layer A 按"实际改动文件 ⊆ owned"校验，越界改动无法通过完成门）；派发实施者后追加 `implementation_started` 事件；主会话验证完成（含命令与结果）追加 `verification` 事件；审查裁决后追加 `review` 事件。验证与审查落账时必须同步记录证据指纹（`record_verification` / `record_review` + `fingerprint.task_fingerprint`，完成门按指纹比对拦截过期证据）——时机与红线见 continuity 技能「证据指纹的记录时机」节；任何修复使先前裁决失效（§11）由此自动强制。
+active task 的状态同步义务：五段式规格中 FILES AND OWNERSHIP 声明的 owned 文件清单必须同步写入 state.json 的 ownership.files（完成门 Layer A 按"实际改动文件 ⊆ owned"校验，越界改动无法通过完成门；连续两次 block 后按运行时续行上限放行——gate_exhausted，stderr 报警 + journal 记账——此时任务不进入 completed（完成提交仅在全绿门路径），且模型有向用户报告 blocked 的强制义务）；派发实施者后追加 `implementation_started` 事件；主会话验证完成（含命令与结果）追加 `verification` 事件；审查裁决后追加 `review` 事件。验证与审查落账时必须同步记录证据指纹（`record_verification` / `record_review` + `fingerprint.task_fingerprint`，完成门按指纹比对拦截过期证据）——时机与红线见 continuity 技能「证据指纹的记录时机」节；任何修复使先前裁决失效（§11）由此自动强制。
 
 ## 10. 工作单元与任务图（多单元任务）
 
@@ -149,7 +149,7 @@ active task 的状态同步义务：五段式规格中 FILES AND OWNERSHIP 声�
 
 **分解**（§60-§63）：单元间依赖用 `depends_on` 表达（同一任务内引用、禁止环）；单元不是工作流 DSL——十个状态词、显式依赖、就绪推导，仅此而已。
 
-**派发**（§64-§67）：主会话仍是唯一编排者（子智能体不得派发子智能体）。多单元派发走 `runtime/dispatcher.py` 的 `plan_dispatch` 准入——就绪（依赖全部 completed）→ quota 四态闸（EXHAUSTED 转 waiting_quota、UNKNOWN/PRESSURE 保守抑制）→ ownership 不相交 → 租约闸（他人持有的租约挡派发，`runtime/lease.py`）→ max_workers 预算。**默认串行（max_workers=1）；有界并行（上限 4，experimental）已启用**：并行资格 = ownership 不相交 或 有效租约保护（§81），接口已固定、验证可分离、无顺序依赖；不确定即不并行（串行永远合法）。派发前对单元 ownership 获取租约（全有或全无，同 owner 幂等），单元离开活跃写相（completed/failed/cancelled，或转 verifying 后由主会话裁决）即释放；把单元 id 记入 `dispatch.active`。
+**派发**（§64-§67）：主会话仍是唯一编排者（子智能体不得派发子智能体）。多单元派发走 `runtime/dispatcher.py` 的 `plan_dispatch` 准入——就绪（依赖全部 completed）→ quota 四态闸（EXHAUSTED 转 waiting_quota、UNKNOWN/PRESSURE 保守抑制）→ ownership 不相交 → 租约闸（他人持有的租约挡派发，`runtime/lease.py`）→ max_workers 预算。**默认串行（max_workers=1）；有界并行（上限 4，experimental）已启用**：并行资格 = ownership 声明判定可并行 **且** 无外来活跃租约冲突（两道闸门均须通过，§66/§78；租约不豁免 ownership 闸），接口已固定、验证可分离、无顺序依赖；不确定即不并行（串行永远合法）。派发前对单元 ownership 获取租约（全有或全无，同 owner 幂等），单元离开活跃写相（completed/failed/cancelled，或转 verifying 后由主会话裁决）即释放；把单元 id 记入 `dispatch.active`。
 
 **单元验证**（§70）：worker 的 IMPLEMENTATION REPORT 仍是声明——主会话亲自检查单元 diff、亲自跑单元 verification、记指纹（`record_verification` + `task_fingerprint` 口径），单元才算 `completed`；`attempt` 记录重试历史，新调用不抹除失败史（§73 有界重试）。
 

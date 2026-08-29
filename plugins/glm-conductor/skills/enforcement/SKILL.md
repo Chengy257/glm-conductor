@@ -98,6 +98,8 @@ PreToolUse 钩子在每次 Agent/Task 派发前向主会话注入 ownership 契�
 
 **此时模型必须向用户报告 blocked 状态，不得声称任务完成**——放行是循环安全机制，不是完成许可。模型在两次 block 之间完成真实修复（journal 出现其他事件）会重置计数。
 
+重申义务：gate_exhausted 放行时任务不进入 completed（完成提交仅在全绿门路径），向用户报告 blocked 的义务不因放行而免除。
+
 ## 恢复方法
 
 被 block 时按报文行动（报文自带恢复动作）：

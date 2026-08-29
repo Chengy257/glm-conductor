@@ -1,5 +1,6 @@
 # GLM Conductor 插件静态校验（整改规范 §25/§26）。
 # 唯一实质步骤是运行本地静态校验脚本：无 benchmark、无模型调用、无外部 API。
+# 矩阵覆盖 Linux+Windows × Python 最低(3.8)/最新。
 name: validate-plugin
 
 on:
@@ -8,19 +9,17 @@ on:
 
 jobs:
   validate:
-    name: Static plugin validation
-    runs-on: ubuntu-latest
+    name: Static plugin validation (${{ matrix.os }}, Python ${{ matrix.python-version }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python-version: ["3.8", "3.13"]
     steps:
-      - name: Check out repository
-        uses: actions/checkout@v4
-
-      - name: Set up Python 3
-        uses: actions/setup-python@v5
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
         with:
-          python-version: "3"
-
-      - name: Run validate_plugin.py
-        run: python3 scripts/validate_plugin.py
-
-      - name: Run unit tests
-        run: python3 -m unittest discover -s tests -v
+          python-version: ${{ matrix.python-version }}
+      - run: python scripts/validate_plugin.py
+      - run: python -m unittest discover -s tests -v

@@ -72,7 +72,7 @@ Since v2, the plugin upgrades its key contracts from prompt text to **runtime en
 
 - [ZCode](https://zcode.z.ai) client (tested with 3.9.2; earlier versions may lack multimodal, scheduled-task, or custom-subagent capabilities)
 - GLM Coding Plan (or a Z.ai account) with both GLM-5.3 and GLM-5.3-Flash connected
-- **Python 3** (`python3` on PATH) — the runtime for v2 enforcement hooks. The official Windows installer adds it to PATH by default; self-check: `python3 --version` in a fresh terminal
+- **Python 3.8+** (`python3` on PATH) — the runtime for v2 enforcement hooks. The official Windows installer adds it to PATH by default; self-check: `python3 --version` in a fresh terminal
 
 ## Installation
 
