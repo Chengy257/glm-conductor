@@ -2,7 +2,7 @@
 
 **English** | [简体中文](./README.md)
 
-![Version](https://img.shields.io/badge/version-2.0.0-blue.svg)
+![Version](https://img.shields.io/badge/version-2.0.1-blue.svg)
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
 ![ZCode Plugin](https://img.shields.io/badge/ZCode-plugin-green.svg)
 ![Models](https://img.shields.io/badge/models-GLM--5.3%20%2F%20GLM--5.3--Flash-orange.svg)
@@ -36,7 +36,8 @@ Since v2, the plugin upgrades its key contracts from prompt text to **runtime en
 
 **Runtime enforcement (v2)**
 
-- **Four-check completion gate** — ① ownership: touched ⊆ declared; ② verification: every required command actually run by the parent session; ③ review: fresh `ship` verdict for high-assurance tasks; ④ evidence freshness: verification/review evidence is bound to the recorded repository state via `task_fingerprint`; any later edit makes it stale and blocks completion
+- **Four-check completion gate** — ① ownership: touched ⊆ declared; ② verification: every required command actually run by the parent session and recorded as fresh evidence via `record_unit_verification` / `record_verification`; work-unit completion is subject to the same RB-1 evidence gate; ③ review: fresh `ship` verdict for high-assurance tasks; ④ evidence freshness: verification/review evidence is bound to the recorded repository state via `task_fingerprint`; any later edit makes it stale and blocks completion
+- **Multi-repository workspaces** — a task can bind its own Git repository root via state's `repository.root`; the Stop completion gate is evaluated against each task's repository, and the workspace root does not need to be a Git repository; the ledger (state / journal / lease) stays where it is
 - **Bash policy gate** — table-driven allow/ask/deny: destructive commands (rm -rf, git reset --hard, force push) are always denied; pushes, migrations, releases, and permission changes escalate to *ask* under high assurance
 - **Visible degradation** — enforcement failures never block the session (fail-open) and report `ENFORCEMENT DEGRADED` on stderr
 
@@ -46,6 +47,8 @@ Since v2, the plugin upgrades its key contracts from prompt text to **runtime en
 - **File leases & bounded parallelism** (experimental) — all-or-nothing acquisition, foreign-owner conflict rejection; parallel cap of 4, serial by default
 - **Quota-aware continuity** — query Coding Plan usage (zero credential persistence), four-state evaluation, EXHAUSTED schedules wake-ups against the latest blocking reset; falls back to periodic liveness probing when unavailable; `/glm-conductor:quota` for on-demand diagnostics
 - **Cross-session resume** — per-task checkpoints with an eight-step recovery check; repository truth always wins over recorded state
+
+**v2.0.1 runtime integrity hardening** — closing out H1-H8 from the v2.0.0 comprehensive review: a gated completion lifecycle (`finalizing` + a status transition table, with `completed` committable only through the Stop gate), cross-field route invariants, and four-way fail-closed task discovery (a corrupt state.json is no longer treated as "no task"). The `task_manager` transaction boundary fuses the dispatch lifecycle into four APIs (plan → lease → transition → bookkeeping → save → journal) with deterministic crash-window recovery. Leases gain TTL/generation/heartbeat renewal, and `recover_leases` automatically cleans up stale leases — no manual leases.json deletion after a crash. Verification evidence is explicitly bound to a work unit id (legacy events without a `unit` field are no longer trusted by resume reconciliation — an intentional breaking change; the main session re-verifies). The release-hardening patch (RB-1/RB-2) closes the last two gaps: work-unit completion (`completed`) is now gated on fresh unit-bound verification evidence up front (all-match, zero-side-effect rejection, fail-closed on git/fingerprint read failures), and tasks can bind their own Git repository root via state's `repository.root` — the Stop gate is evaluated per task (per-root snapshot cache, a single task's repository failure degrades only that task), so multi-repo workspaces no longer degrade the gate wholesale. CI covers ubuntu + windows × Python 3.8/3.13.
 
 ## Routing Matrix
 
@@ -72,7 +75,7 @@ Since v2, the plugin upgrades its key contracts from prompt text to **runtime en
 
 - [ZCode](https://zcode.z.ai) client (tested with 3.9.2; earlier versions may lack multimodal, scheduled-task, or custom-subagent capabilities)
 - GLM Coding Plan (or a Z.ai account) with both GLM-5.3 and GLM-5.3-Flash connected
-- **Python 3** (`python3` on PATH) — the runtime for v2 enforcement hooks. The official Windows installer adds it to PATH by default; self-check: `python3 --version` in a fresh terminal
+- **Python 3.8+** (`python3` on PATH) — the runtime for v2 enforcement hooks. The official Windows installer adds it to PATH by default; self-check: `python3 --version` in a fresh terminal
 
 ## Installation
 
@@ -166,6 +169,8 @@ GLM Conductor builds on ZCode's native local session lifecycle — it is not a c
 - **Enforcement scope**: hooks fire in the main session only (ZCode sub-sessions do not trigger hooks) — enforcement sits at the completion boundary, not at write time; the Bash policy gate likewise covers main-session calls only; a missing `python3` degrades fail-open with `ENFORCEMENT DEGRADED` on stderr
 - **Registered conservative false positives**: strings quoting destructive text and `git rm -r --cached` are conservatively denied by the Bash policy
 - **Bounded parallelism is experimental**: cap of 4; leases assume a single orchestrating main session — multiple sessions operating on the same task directory in parallel are unsupported
+- **Multi-repo workspace boundary**: per-task `repository.root` binding is supported (the completion gate evaluates against each task's repository); diff attribution for multiple top-level active tasks inside the same Git repository remains informally unsupported — keep one active top-level task per repository (bounded parallelism of multiple Work Units within a task works as before)
+- **Continuity & provenance remain advisory**: SessionStart recovery injection / automatic resume are v2.1 plans (recovery semantics currently require the main session to invoke them proactively); the quota observation feeding dispatch admission is still caller-supplied; `verify_unit()` / `verify_task()` provenance wrappers are deferred to v2.1
 - **Quota awareness**: uses verified provider-api monitoring endpoints (zero credential persistence); no fabricated native quota interfaces, no hardcoded 5-hour resets; endpoint failures fall back to periodic liveness probing
 - **Visual topology**: Browser/Computer Use are main-session-only — screenshots are captured by the parent and judged by Flash-based roles
 - **Subagents**: cannot spawn further subagents; only MCP services connected at session start are visible

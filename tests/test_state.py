@@ -10,19 +10,22 @@
 """
 
 import sys, unittest
-import json, tempfile
+import json, os, tempfile
 from unittest import mock
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "plugins" / "glm-conductor"))
-from runtime import state
+from runtime import journal, state
 
 # —— 测试夹具 ——
 
 TID = "demo-task-1a2b3c"
+# H2 夹具迁移：full 路由在路由矩阵下必须 assurance=high
+# （high+standard 应为 delegate）；规则 R3 由此要求 review.required=true，
+# new_task_state 缺省派生正好满足
 FULL_ROUTE = {
     "mode": "full",
     "delegability": "high",
-    "assurance": "standard",
+    "assurance": "high",
     "executor": "flash-implementer",
     "continuity": "foreground",
 }
@@ -30,9 +33,17 @@ FULL_ROUTE = {
 
 def make_state(task_id=TID, goal="重构认证中间件", route=None, status="created",
                **kwargs):
-    """构造一个默认合法的完整状态 dict（route 缺省用 FULL_ROUTE）。"""
+    """构造一个默认合法的完整状态 dict（route 缺省用 FULL_ROUTE）。
+
+    H2 规则 R4 要求 delegate/full 任务声明非空 ownership.files 与
+    verification.required：夹具缺省补占位声明，保证默认构造可过
+    validate_state；各用例关注的字段不受影响。
+    """
     if route is None:
         route = dict(FULL_ROUTE)
+    kwargs.setdefault("ownership_files", ("src/auth.ts",))
+    kwargs.setdefault(
+        "verification_required", ("python3 -m unittest tests.test_state",))
     return state.new_task_state(task_id, goal, route, status=status, **kwargs)
 
 
@@ -460,14 +471,41 @@ class SaveLoadRoundtripTest(unittest.TestCase):
             leftovers = list(state.task_dir(tmp, TID).glob("*.tmp"))
             self.assertEqual(leftovers, [])
 
-    def test_task_id_param_overrides(self):
+    def test_task_id_param_must_match_payload(self):
+        """显式 task_id 与内容 task_id 一致 → 正常写盘（P1-9 起
+        不一致组合被拒绝，见
+        test_state_directory_id_must_match_payload_task_id）。"""
         with tempfile.TemporaryDirectory() as tmp:
             st = make_state()
-            path = state.save_state(tmp, st, task_id="demo-task-9f8e7d")
-            self.assertEqual(path, state.state_path(tmp, "demo-task-9f8e7d"))
+            path = state.save_state(tmp, st, task_id=TID)
+            self.assertEqual(path, state.state_path(tmp, TID))
             self.assertTrue(path.is_file())
+            self.assertEqual(state.load_state(tmp, TID), st)
+
+    def test_state_directory_id_must_match_payload_task_id(self):
+        """P1-9：save_state 显式 task_id 与 state.task_id 不一致 →
+        ValueError 且不产生任何目录；一致时正常；缺省 task_id（None）
+        行为不变。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            st = make_state()
+            other = "demo-task-9f8e7d"
+            with self.assertRaises(ValueError) as ctx:
+                state.save_state(tmp, st, task_id=other)
+            self.assertIn("不一致", str(ctx.exception))
+            self.assertIn("P1-9", str(ctx.exception))
+            # 拒绝写入：目录 id 与内容 id 对应路径都不存在
+            self.assertFalse(state.state_path(tmp, other).exists())
             self.assertFalse(state.state_path(tmp, TID).exists())
-            self.assertEqual(state.load_state(tmp, "demo-task-9f8e7d"), st)
+            self.assertFalse(state.tasks_root(tmp).exists())
+            # 显式 task_id 与内容一致 → 正常保存
+            path = state.save_state(tmp, st, task_id=TID)
+            self.assertEqual(path, state.state_path(tmp, TID))
+            self.assertTrue(path.is_file())
+            # 缺省 task_id（None）行为不变：目录名取 state["task_id"]
+            st2 = make_state(status="preflight")
+            path2 = state.save_state(tmp, st2)
+            self.assertEqual(path2, state.state_path(tmp, TID))
+            self.assertEqual(state.load_state(tmp, TID), st2)
 
     def test_save_creates_missing_dirs(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -713,7 +751,20 @@ class LoadStateTest(unittest.TestCase):
 class FindActiveTasksTest(unittest.TestCase):
 
     def save(self, repo_root, task_id, status):
-        state.save_state(repo_root, make_state(task_id=task_id, status=status))
+        # save_state 自 H1 起带状态转换门：completed 不能经公共 API 直达
+        # （首存同样被拒）——completed 夹具走合法迁移链
+        # created→executing→finalizing→完成门内部提交，被测语义不变
+        # （盘上存在相应终态任务）；其余状态无盘上旧状态时首存不受
+        # 转换表约束，直接落盘即可
+        st = make_state(task_id=task_id, status=status)
+        if status == "completed":
+            st["status"] = "executing"
+            state.save_state(repo_root, st)
+            st["status"] = "finalizing"
+            state.save_state(repo_root, st)
+            state.commit_completion(repo_root, task_id)
+            return
+        state.save_state(repo_root, st)
 
     def test_mixed_active_terminal_and_broken_dirs(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -770,6 +821,149 @@ class FindActiveTasksTest(unittest.TestCase):
                     ["a-active-111111", "z-later-333333"])
 
 
+# —— discover_tasks 四分类（H3/P0-3：发现完整性） ——
+
+class DiscoverTasksTest(unittest.TestCase):
+    """discover_tasks 四分类 + find_active_tasks 兼容等价（H3/P0-3）。
+
+    损坏 / 缺标识 / 读取异常的 state.json 不再从发现阶段静默消失：
+    归入 corrupt 桶并携带简短中文原因；无 state.json 的目录归入
+    orphaned 桶。
+    """
+
+    def save(self, repo_root, task_id, status):
+        # 与 FindActiveTasksTest.save 同链路：completed 走合法迁移链构造
+        st = make_state(task_id=task_id, status=status)
+        if status == "completed":
+            st["status"] = "executing"
+            state.save_state(repo_root, st)
+            st["status"] = "finalizing"
+            state.save_state(repo_root, st)
+            state.commit_completion(repo_root, task_id)
+            return
+        state.save_state(repo_root, st)
+
+    def test_four_classes_in_one_repo(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self.save(tmp, "a-active-111111", "executing")
+            self.save(tmp, "b-completed-222222", "completed")
+            self.save(tmp, "c-cancelled-333333", "cancelled")
+            self.save(tmp, "d-failed-444444", "failed")
+            # JSON 损坏 → corrupt（不再被跳过）
+            write_raw_state(tmp, "e-corrupt-555555", "{broken")
+            # JSON 合法但缺任务标识（normalize 抛 ValueError）→ corrupt
+            write_raw_state(
+                tmp, "f-no-id-666666", json.dumps({"goal": "缺标识"}))
+            # 目录存在但无 state.json → orphaned
+            state.task_dir(tmp, "g-empty-777777").mkdir(parents=True)
+            found = state.discover_tasks(tmp)
+            self.assertEqual(
+                list(found.keys()),
+                ["active", "terminal", "corrupt", "orphaned"])
+            # active / terminal 的 reason 为 status 字符串
+            self.assertEqual(found["active"], [("a-active-111111", "executing")])
+            self.assertEqual(
+                found["terminal"],
+                [("b-completed-222222", "completed"),
+                 ("c-cancelled-333333", "cancelled"),
+                 ("d-failed-444444", "failed")])
+            # corrupt / orphaned 的 reason 为简短中文原因
+            self.assertEqual(
+                [name for name, _ in found["corrupt"]],
+                ["e-corrupt-555555", "f-no-id-666666"])
+            for _name, reason in found["corrupt"]:
+                self.assertTrue(reason.startswith("state.json 损坏："), reason)
+            self.assertEqual(
+                found["orphaned"], [("g-empty-777777", "无 state.json")])
+
+    def test_tasks_root_missing_returns_all_empty(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            found = state.discover_tasks(tmp)
+            self.assertEqual(
+                found,
+                {"active": [], "terminal": [], "corrupt": [], "orphaned": []})
+
+    def test_plain_file_under_tasks_root_ignored(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self.save(tmp, "a-active-111111", "routed")
+            (state.tasks_root(tmp) / "not-a-dir.txt").write_text(
+                "杂项文件", encoding="utf-8")
+            found = state.discover_tasks(tmp)
+            self.assertEqual(
+                [name for name, _ in found["active"]], ["a-active-111111"])
+            self.assertEqual(found["corrupt"], [])
+            self.assertEqual(found["orphaned"], [])
+            self.assertEqual(found["terminal"], [])
+
+    def test_corrupt_reason_truncated_within_80_chars(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            state.task_dir(tmp, "x-corrupt-000000").mkdir(parents=True)
+            bloated = ValueError("异常" * 200)
+            with mock.patch.object(state, "load_state", side_effect=bloated):
+                found = state.discover_tasks(tmp)
+            self.assertEqual(
+                [name for name, _ in found["corrupt"]], ["x-corrupt-000000"])
+            reason = found["corrupt"][0][1]
+            self.assertLessEqual(len(reason), 80)
+            self.assertTrue(reason.startswith("state.json 损坏："), reason)
+
+    def test_oserror_reason_says_unreadable(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            state.task_dir(tmp, "y-denied-000000").mkdir(parents=True)
+            with mock.patch.object(
+                    state, "load_state",
+                    side_effect=OSError(13, "权限不足（模拟）")):
+                found = state.discover_tasks(tmp)
+            self.assertEqual(
+                [name for name, _ in found["corrupt"]], ["y-denied-000000"])
+            self.assertTrue(
+                found["corrupt"][0][1].startswith("state.json 不可读："),
+                found["corrupt"][0][1])
+
+    def test_find_active_tasks_equivalent_to_discover_active(self):
+        # 兼容等价：混合目录（active/terminal/corrupt/orphaned/非目录）
+        # 下 find_active_tasks 输出恒等于 discover_tasks 的 active 桶
+        with tempfile.TemporaryDirectory() as tmp:
+            self.save(tmp, "a-active-111111", "executing")
+            self.save(tmp, "b-completed-222222", "completed")
+            self.save(tmp, "z-later-333333", "blocked")
+            write_raw_state(tmp, "m-corrupt-444444", "{broken")
+            state.task_dir(tmp, "n-empty-555555").mkdir(parents=True)
+            (state.tasks_root(tmp) / "stray.txt").write_text("x", encoding="utf-8")
+            self.assertEqual(
+                state.find_active_tasks(tmp),
+                ["a-active-111111", "z-later-333333"])
+            self.assertEqual(
+                state.find_active_tasks(tmp),
+                [name for name, _status in state.discover_tasks(tmp)["active"]])
+
+    def test_find_active_tasks_equivalent_under_load_failure(self):
+        # OSError 目录在两套发现口径下同样一致：不进 active、不中断扫描
+        with tempfile.TemporaryDirectory() as tmp:
+            self.save(tmp, "a-active-111111", "executing")
+            self.save(tmp, "b-no-access-222222", "executing")
+            original_load = state.load_state
+
+            def load_with_denied_dir(repo_root, task_id):
+                if task_id == "b-no-access-222222":
+                    raise OSError(13, "权限不足（模拟）")
+                return original_load(repo_root, task_id)
+
+            with mock.patch.object(state, "load_state",
+                                   side_effect=load_with_denied_dir):
+                self.assertEqual(
+                    state.find_active_tasks(tmp),
+                    ["a-active-111111"])
+                self.assertEqual(
+                    state.find_active_tasks(tmp),
+                    [name for name, _status in
+                     state.discover_tasks(tmp)["active"]])
+                # OSError 目录被 discover_tasks 显式归入 corrupt 桶
+                self.assertEqual(
+                    [name for name, _ in state.discover_tasks(tmp)["corrupt"]],
+                    ["b-no-access-222222"])
+
+
 
 class DispatchMaxWorkersBoundTest(unittest.TestCase):
     """dispatch.max_workers 上界校验（§82 并行上限，R9 终审 P2 修复）。"""
@@ -793,6 +987,459 @@ class DispatchMaxWorkersBoundTest(unittest.TestCase):
         for bad in (True, 0, -1):
             errors = self._dispatch_errors(bad)
             self.assertTrue(any("max_workers" in e for e in errors), errors)
+
+
+# —— 状态转换门（H1 生命周期封口，P0-1 修复） ——
+
+class TaskTransitionGateTest(unittest.TestCase):
+    """TASK_TRANSITIONS 转换表 + save_state / transition_task_status /
+    commit_completion 的生命周期封口契约：completed 只能由完成门提交，
+    finalizing 是唯一完成请求态。"""
+
+    def _save_as(self, repo_root, status, task_id=TID):
+        st = make_state(task_id=task_id, status=status)
+        state.save_state(repo_root, st)
+        return st
+
+    # —— 转换表闭包 ——
+
+    def test_transitions_table_closure(self):
+        # 每个状态要么有表项要么是终态（终态无表项 = 不接受任何转换）
+        for status in state.TASK_STATUSES:
+            self.assertTrue(
+                status in state.TASK_TRANSITIONS
+                or status in state.TERMINAL_STATUSES, status)
+        # 全部转换目标都是合法状态词汇
+        for source, targets in state.TASK_TRANSITIONS.items():
+            self.assertIn(source, state.TASK_STATUSES, source)
+            for target in targets:
+                self.assertIn(target, state.TASK_STATUSES, (source, target))
+
+    def test_finalizing_in_vocabulary_nonterminal_and_reachable(self):
+        self.assertIn("finalizing", state.TASK_STATUSES)
+        self.assertNotIn("finalizing", state.TERMINAL_STATUSES)
+        # 从全部执行/收尾态可达（blocked 解阻后同样可直达）
+        for source in ("executing", "joining", "verifying", "reviewing",
+                       "blocked"):
+            self.assertIn("finalizing", state.TASK_TRANSITIONS[source], source)
+
+    def test_completed_only_entry_edge_is_from_finalizing(self):
+        # completed 的唯一入边是 finalizing → completed
+        for source, targets in state.TASK_TRANSITIONS.items():
+            if source == "finalizing":
+                self.assertEqual(targets, ("completed", "failed", "cancelled"))
+            else:
+                self.assertNotIn("completed", targets, source)
+
+    # —— save_state 转换门 ——
+
+    def test_save_rejects_executing_to_completed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self._save_as(tmp, "executing")
+            st = state.load_state(tmp, TID)
+            st["status"] = "completed"
+            with self.assertRaises(ValueError) as ctx:
+                state.save_state(tmp, st)
+            # 消息说明 completed 只能由完成门提交、应改走 finalizing
+            self.assertIn("completed", str(ctx.exception))
+            self.assertIn("finalizing", str(ctx.exception))
+            # 盘上状态不变
+            self.assertEqual(
+                state.load_state(tmp, TID)["status"], "executing")
+
+    def test_save_rejects_finalizing_to_completed_without_gate_channel(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self._save_as(tmp, "finalizing")
+            st = state.load_state(tmp, TID)
+            st["status"] = "completed"
+            with self.assertRaises(ValueError):
+                state.save_state(tmp, st)  # 缺 _gate_commit（默认 False）
+            self.assertEqual(
+                state.load_state(tmp, TID)["status"], "finalizing")
+
+    def test_save_gate_commit_requires_finalizing_on_disk(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self._save_as(tmp, "executing")
+            st = state.load_state(tmp, TID)
+            st["status"] = "completed"
+            with self.assertRaises(ValueError):
+                state.save_state(tmp, st, _gate_commit=True)
+            self.assertEqual(
+                state.load_state(tmp, TID)["status"], "executing")
+
+    def test_first_save_completed_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaises(ValueError):
+                self._save_as(tmp, "completed")
+            self.assertFalse(state.state_path(tmp, TID).exists())
+            # 首存其他状态不受转换表约束（无盘上旧状态，无转换可言）
+            self._save_as(tmp, "finalizing")
+            self.assertEqual(
+                state.load_state(tmp, TID)["status"], "finalizing")
+
+    def test_same_status_resave_passes(self):
+        # 旧 == 新（无转换）放行：record_* 之后重存状态的常规路径
+        with tempfile.TemporaryDirectory() as tmp:
+            self._save_as(tmp, "executing")
+            st = state.load_state(tmp, TID)
+            st["goal"] = "改目标不改状态"
+            state.save_state(tmp, st)
+            self.assertEqual(
+                state.load_state(tmp, TID)["goal"], "改目标不改状态")
+
+    def test_terminal_status_accepts_no_transition(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            for terminal in state.TERMINAL_STATUSES:
+                tid = "term-%s-000000" % terminal[:4]
+                if terminal == "completed":
+                    # completed 不能经公共 API 首存——走合法迁移链构造
+                    # （executing→finalizing→完成门内部提交）
+                    self._save_as(tmp, "executing", task_id=tid)
+                    state.transition_task_status(tmp, tid, "finalizing")
+                    state.commit_completion(tmp, tid)
+                else:
+                    self._save_as(tmp, terminal, task_id=tid)
+                st = state.load_state(tmp, tid)
+                st["status"] = "executing"
+                with self.assertRaises(ValueError):
+                    state.save_state(tmp, st)
+                self.assertEqual(
+                    state.load_state(tmp, tid)["status"], terminal, tid)
+
+    def test_save_over_corrupt_file_propagates_value_error(self):
+        # 盘上文件损坏：load_state 的 ValueError 向上传播，不覆盖损坏文件
+        with tempfile.TemporaryDirectory() as tmp:
+            self._save_as(tmp, "executing")
+            path = state.state_path(tmp, TID)
+            path.write_text("{corrupt", encoding="utf-8")
+            with self.assertRaises(ValueError) as ctx:
+                state.save_state(tmp, make_state(status="executing"))
+            self.assertIn("损坏", str(ctx.exception))
+            self.assertEqual(path.read_text(encoding="utf-8"), "{corrupt")
+
+    # —— commit_completion（完成门专用提交通道） ——
+
+    def test_commit_completion_commits_finalizing_to_completed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self._save_as(tmp, "finalizing")
+            committed = state.commit_completion(tmp, TID)
+            self.assertEqual(committed["status"], "completed")
+            self.assertEqual(
+                state.load_state(tmp, TID)["status"], "completed")
+            # 本函数不写 journal（completed 事件由钩子记）
+            self.assertEqual(journal.read_events(tmp, TID), [])
+
+    def test_commit_completion_missing_task_raises(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaises(ValueError):
+                state.commit_completion(tmp, "no-such-task-000000")
+
+    def test_commit_completion_non_finalizing_raises_no_side_effect(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self._save_as(tmp, "executing")
+            with self.assertRaises(ValueError):
+                state.commit_completion(tmp, TID)
+            self.assertEqual(
+                state.load_state(tmp, TID)["status"], "executing")
+
+    # —— transition_task_status（公共迁移入口） ——
+
+    def test_transition_legal_records_status_changed_event(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self._save_as(tmp, "created")
+            st = state.transition_task_status(tmp, TID, "executing")
+            self.assertEqual(st["status"], "executing")
+            self.assertEqual(
+                state.load_state(tmp, TID)["status"], "executing")
+            events = journal.read_events(tmp, TID)
+            self.assertEqual(
+                [e["event"] for e in events], ["status_changed"])
+            self.assertEqual(events[0]["from"], "created")
+            self.assertEqual(events[0]["to"], "executing")
+
+    def test_transition_to_finalizing_requests_completion(self):
+        # 进入 finalizing = 请求完成（created→…→reviewing→finalizing 合法）
+        with tempfile.TemporaryDirectory() as tmp:
+            self._save_as(tmp, "reviewing")
+            state.transition_task_status(tmp, TID, "finalizing")
+            self.assertEqual(
+                state.load_state(tmp, TID)["status"], "finalizing")
+
+    def test_transition_illegal_no_disk_change_no_event(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self._save_as(tmp, "executing")
+            with self.assertRaises(ValueError):
+                state.transition_task_status(tmp, TID, "completed")
+            with self.assertRaises(ValueError):
+                state.transition_task_status(tmp, TID, "preflight")  # 逆向
+            self.assertEqual(
+                state.load_state(tmp, TID)["status"], "executing")
+            self.assertEqual(journal.read_events(tmp, TID), [])
+
+    def test_transition_missing_task_raises(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaises(ValueError):
+                state.transition_task_status(tmp, TID, "executing")
+
+
+# —— route 不变量（H2：跨字段一致性，P0-2 修复） ——
+
+class RouteInvariantTest(unittest.TestCase):
+    """validate_route_invariants 四条规则 + derive_review_required /
+    new_task_state 的审查义务推导（非法组合在 save_state 即被拒，
+    完成门不再依赖「模型记得把 review.required 写对」）。"""
+
+    SOLO_ROUTE = {"mode": "solo", "delegability": "low",
+                  "assurance": "standard", "executor": "main",
+                  "continuity": "foreground"}
+    DELEGATE_ROUTE = {"mode": "delegate", "delegability": "high",
+                      "assurance": "standard", "executor": "flash-implementer",
+                      "continuity": "foreground"}
+    AUDIT_ROUTE = {"mode": "audit", "delegability": "low",
+                   "assurance": "high", "executor": "main",
+                   "continuity": "foreground"}
+
+    def _substantive(self, **kwargs):
+        """delegate/full 用例所需的实质性声明（R4）。"""
+        kwargs.setdefault("ownership_files", ("src/auth.ts",))
+        kwargs.setdefault("verification_required", ("python3 -m unittest",))
+        return kwargs
+
+    # —— R3 review 绑定（含保存被拒） ——
+
+    def test_full_route_missing_review_invariant_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            st = state.new_task_state(TID, "目标", dict(FULL_ROUTE))
+            st["review"]["required"] = False  # full 路由漏写审查义务
+            errors = state.validate_state(st)
+            self.assertTrue(
+                any("review.required" in e for e in errors), errors)
+            # save_state 拒绝非法组合且不落盘
+            with self.assertRaises(ValueError) as ctx:
+                state.save_state(tmp, st)
+            self.assertIn("review.required", str(ctx.exception))
+            self.assertFalse(state.state_path(tmp, TID).exists())
+
+    def test_high_assurance_requires_review_required_true(self):
+        # audit 路由（low+high）review.required=false 同样被拒
+        st = state.new_task_state(TID, "目标", dict(self.AUDIT_ROUTE))
+        st["review"]["required"] = False
+        errors = state.validate_state(st)
+        self.assertTrue(any("review.required" in e for e in errors), errors)
+
+    # —— R1 矩阵一致性 ——
+
+    def test_delegate_with_high_assurance_matrix_rejected(self):
+        st = state.new_task_state(
+            TID, "目标", dict(self.DELEGATE_ROUTE, assurance="high"),
+            **self._substantive())
+        errors = state.validate_state(st)
+        self.assertTrue(
+            any("矩阵组合不一致" in e and "应为 'full'" in e
+                for e in errors), errors)
+
+    def test_all_matrix_combinations_validate_clean(self):
+        # 四个矩阵组合全部合法（validate_state 零错误）
+        cases = (
+            (self.SOLO_ROUTE, {}),
+            (self.DELEGATE_ROUTE, self._substantive()),
+            (self.AUDIT_ROUTE, {}),
+            (dict(FULL_ROUTE, executor="visual-implementer"),
+             self._substantive()),
+        )
+        for route, kwargs in cases:
+            st = state.new_task_state("t-1", "目标", route, **kwargs)
+            self.assertEqual(state.validate_state(st), [], route["mode"])
+
+    # —— R2 executor 绑定 ——
+
+    def test_solo_with_implementer_executor_rejected(self):
+        st = state.new_task_state(
+            TID, "目标", dict(self.SOLO_ROUTE, executor="flash-implementer"))
+        errors = state.validate_state(st)
+        self.assertTrue(any("route.executor" in e for e in errors), errors)
+
+    def test_full_with_main_executor_rejected(self):
+        st = state.new_task_state(
+            TID, "目标", dict(FULL_ROUTE, executor="main"),
+            **self._substantive())
+        errors = state.validate_state(st)
+        self.assertTrue(any("route.executor" in e for e in errors), errors)
+
+    # —— R4 delegate 实质性 ——
+
+    def test_delegate_requires_nonempty_ownership_and_verification(self):
+        st = state.new_task_state(TID, "目标", dict(self.DELEGATE_ROUTE))
+        errors = state.validate_state(st)
+        self.assertTrue(any("ownership.files" in e for e in errors), errors)
+        self.assertTrue(
+            any("verification.required" in e for e in errors), errors)
+        # ownership 块整体缺失同样按缺声明拒绝
+        del st["ownership"]
+        self.assertTrue(any(
+            "ownership.files" in e for e in state.validate_state(st)))
+        # 只补 ownership 仍缺 verification
+        st2 = state.new_task_state(
+            TID, "目标", dict(self.DELEGATE_ROUTE),
+            ownership_files=("src/auth.ts",))
+        self.assertTrue(any(
+            "verification.required" in e
+            for e in state.validate_state(st2)))
+
+    # —— new_task_state 派生审查义务 ——
+
+    def test_new_task_state_derives_review_required_default(self):
+        # full / audit → True（不显式传 review_required）
+        for route in (dict(FULL_ROUTE), dict(self.AUDIT_ROUTE)):
+            st = state.new_task_state("t-1", "目标", route)
+            self.assertIs(st["review"]["required"], True, route["mode"])
+        # delegate + standard 与 solo（信息不足）→ False
+        st = state.new_task_state("t-1", "目标", dict(self.DELEGATE_ROUTE))
+        self.assertIs(st["review"]["required"], False)
+        st = state.new_task_state("t-1", "目标", {"mode": "solo"})
+        self.assertIs(st["review"]["required"], False)
+
+    def test_explicit_review_required_true_legal_under_delegate_standard(self):
+        # 显式 True 恒合法——比推导更严
+        st = state.new_task_state(
+            TID, "目标", dict(self.DELEGATE_ROUTE),
+            ownership_files=("src/auth.ts",),
+            verification_required=("python3 -m unittest",),
+            review_required=True, reviewer="glm-reviewer")
+        self.assertEqual(state.validate_state(st), [])
+
+    # —— derive_review_required 直测 ——
+
+    def test_derive_review_required_truth_table(self):
+        self.assertIs(state.derive_review_required({"mode": "audit"}), True)
+        self.assertIs(state.derive_review_required({"mode": "full"}), True)
+        self.assertIs(state.derive_review_required(
+            {"mode": "solo", "assurance": "high"}), True)
+        self.assertIs(state.derive_review_required(
+            {"mode": "delegate", "assurance": "standard"}), False)
+        self.assertIs(state.derive_review_required(
+            {"mode": "solo", "assurance": "standard"}), False)
+        # 信息不足 / route 非 dict → None
+        for info_poor in ({"mode": "solo"}, {"mode": "delegate"},
+                          {"mode": "solo", "assurance": None}, {},
+                          None, "solo", 42):
+            self.assertIsNone(
+                state.derive_review_required(info_poor), repr(info_poor))
+
+
+# —— RB-2：任务专属仓库根绑定（可选顶层 repository 块） ——
+
+class RepositoryBindingTest(unittest.TestCase):
+    """repository.root 绑定 / 解析 / 校验 / 往返契约（RB-2，WU-P3）。
+
+    覆盖：绑定根保存加载往返（含 Windows 反斜杠根）/ root 非 str 与
+    空串与 repository 非 dict 的校验错误 / legacy 无 repository 完全
+    合法 / bind_repository_root 相对路径归一 / new_task_state 构造期
+    绑定与 None 省略 / bound_repository_root 容错读 +
+    resolve_repository_root 绑定优先回退账本根。
+    """
+
+    def test_repository_roundtrip_with_backslash_root(self):
+        # ① 绑定根保存 / 加载往返：Windows 反斜杠根原样落盘（JSON 转义
+        # 由落盘层负责），读回后仍通过校验
+        with tempfile.TemporaryDirectory() as tmp:
+            st = make_state()
+            state.bind_repository_root(st, str(Path(tmp) / "nested" / "repo"))
+            expected = st["repository"]["root"]
+            self.assertTrue(Path(expected).is_absolute())
+            state.save_state(tmp, st)
+            loaded = state.load_state(tmp, TID)
+            self.assertEqual(loaded["repository"]["root"], expected)
+            self.assertEqual(state.validate_state(loaded), [])
+
+    def test_repository_root_non_str_rejected(self):
+        # ② root 非 str → validate_state 报错（含字段路径 repository.root）
+        for bad in (123, None, ["x"], {"x": 1}, True):
+            st = make_state()
+            st["repository"] = {"root": bad}
+            errors = state.validate_state(st)
+            self.assertTrue(
+                any("repository.root" in e for e in errors), repr(bad))
+
+    def test_repository_root_empty_string_rejected(self):
+        # ③ root 空串 → 错误（save_state 以 validate_state 为闸同样拒绝）
+        st = make_state()
+        st["repository"] = {"root": ""}
+        errors = state.validate_state(st)
+        self.assertTrue(any("repository.root" in e for e in errors))
+        with tempfile.TemporaryDirectory() as tmp, \
+                self.assertRaises(ValueError):
+            state.save_state(tmp, st)
+
+    def test_repository_non_dict_rejected(self):
+        # ④ repository 非 dict → 错误
+        for bad in ("repo", ["repository"], 42):
+            st = make_state()
+            st["repository"] = bad
+            errors = state.validate_state(st)
+            self.assertTrue(
+                any("repository 必须是 JSON 对象" in e for e in errors),
+                repr(bad))
+
+    def test_legacy_state_without_repository_is_valid(self):
+        # ⑤ legacy：无 repository 键完全合法（校验通过 + 往返不出现该键
+        # + 容错读为 None）
+        st = make_state()
+        self.assertNotIn("repository", st)
+        self.assertEqual(state.validate_state(st), [])
+        with tempfile.TemporaryDirectory() as tmp:
+            state.save_state(tmp, st)
+            loaded = state.load_state(tmp, TID)
+            self.assertNotIn("repository", loaded)
+            self.assertEqual(state.validate_state(loaded), [])
+            self.assertIsNone(state.bound_repository_root(loaded))
+
+    def test_bind_repository_root_normalizes_relative_path(self):
+        # ⑥ 归一口径：相对路径 → 绝对 resolved；就地写入并返回同一 dict；
+        # 非法输入 ValueError（零副作用）
+        st = make_state()
+        returned = state.bind_repository_root(st, "some/rel/repo")
+        self.assertIs(returned, st)
+        self.assertEqual(
+            st["repository"]["root"],
+            str(Path(os.path.abspath("some/rel/repo")).resolve()))
+        self.assertTrue(Path(st["repository"]["root"]).is_absolute())
+        self.assertEqual(state.validate_state(st), [])
+        for bad in ("", 42, None, ["x"]):
+            fresh = make_state()
+            with self.assertRaises(ValueError, msg=repr(bad)):
+                state.bind_repository_root(fresh, bad)
+            self.assertNotIn("repository", fresh)  # 失败零副作用
+
+    def test_new_task_state_repository_root_written_or_omitted(self):
+        # ⑦ 构造期绑定：非 None → 归一写入且整状态合法；None → 整键省略
+        bound = state.new_task_state("t-1", "目标", {"mode": "solo"},
+                                     repository_root="rel/repo")
+        self.assertEqual(
+            bound["repository"]["root"],
+            str(Path(os.path.abspath("rel/repo")).resolve()))
+        self.assertEqual(state.validate_state(bound), [])
+        legacy = state.new_task_state("t-1", "目标", {"mode": "solo"})
+        self.assertNotIn("repository", legacy)
+
+    def test_bound_read_tolerant_and_resolve_prefers_bound(self):
+        # 解析口径：绑定优先，未绑定 / 形状异常回退 fallback_root
+        # （账本根）；容错读不炸消费方（形状纠错归 validate_state）
+        st = make_state()
+        self.assertEqual(
+            state.resolve_repository_root(st, "ledger-root"), "ledger-root")
+        state.bind_repository_root(st, "some/repo")
+        self.assertEqual(
+            state.resolve_repository_root(st, "ledger-root"),
+            str(Path(os.path.abspath("some/repo")).resolve()))
+        for broken in ({}, {"repository": {}}, {"repository": {"root": ""}},
+                       {"repository": {"root": 123}},
+                       {"repository": "nope"}, None, "x", 42):
+            self.assertIsNone(
+                state.bound_repository_root(broken), repr(broken))
+            self.assertEqual(
+                state.resolve_repository_root(broken, "ledger-root"),
+                "ledger-root", repr(broken))
 
 
 if __name__ == "__main__":

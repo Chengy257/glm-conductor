@@ -19,6 +19,22 @@
   - git 失败 / 非 git 仓库：降级放行（stderr ENFORCEMENT DEGRADED）
     + journal 记 gate_degraded；evaluate 阶段结构性错误同走降级
     （reason=evaluation_error）；
+  - H3/P0-3 发现完整性（discover_tasks 四分类）：state.json 损坏 +
+    journal 高保障证据（route_selected 的 mode 为 audit/full 或
+    assurance=high，或 status_changed 的 to=finalizing）→ fail-closed
+    block（check=corrupt_state，统一 exhaustion 机器同样生效）；损坏
+    无高保障证据 → 降级放行（stderr 报警 + gate_degraded
+    reason=corrupt_state）；orphaned（目录有 events.jsonl 但无
+    state.json）→ 永不拦截（stderr 报警 + gate_degraded
+    reason=orphaned_task）——损坏的 active state.json 不再静默消失；
+  - RB-2 per-task 仓库求值（workspace=非 git 账本根 + 嵌套真实 git
+    仓库夹具）：任务绑定 repository.root 后 ownership / 指纹 / 完成提交
+    全部在任务仓库根求值（repo root ≠ ZCODE_PROJECT_DIR 仍走真实门，
+    dogfood 场景 finalizing 照常提交 completed）；双仓互不越界；仓库
+    故障只降级该任务（journal gate_degraded 的结构化 reason 精确断言：
+    repository_unavailable / repository_root_missing /
+    repository_ambiguous），legacy 无绑定 + 账本根非 git 时按一级子
+    目录 .git 扫描区分 missing / ambiguous，歧义不猜、不自动绑定；
   - stop_hook_active=true（续行循环中）：照常校验（续行额度靠每次
     Stop 都校验来消费；行为与普通 Stop 相同）；
   - stdin 为空串 / 非法 JSON：按空对象容错，照常退出 0。
@@ -43,31 +59,50 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "plugins" / "glm-conductor"))
 from runtime import fingerprint as fingerprint_mod
 from runtime import journal as journal_mod
 from runtime import state
+# H1/H3：钩子模块直接导入——commit_finalizing_completions 的完成提交
+# 通道与失败隔离（H1）、_corrupt_requires_fail_closed 证据规则与
+# build_block_reason 的 corrupt_state 报文模板（H3）的模块级直测
+# （子进程冒烟之外的快速反馈）
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "plugins" / "glm-conductor" / "hooks"))
+import stop_gate
+from stop_gate import _corrupt_requires_fail_closed, build_block_reason
 
 # 被测钩子脚本：仓库根 plugins/glm-conductor/hooks/stop_gate.py
 STOP_GATE = (Path(__file__).resolve().parents[1]
              / "plugins/glm-conductor/hooks/stop_gate.py")
 
 TID = "demo-task-1a2b3c"
-ROUTE = {"mode": "delegate", "delegability": "high", "assurance": "standard",
-         "executor": "flash-implementer", "continuity": "foreground"}
+# H2 夹具迁移：delegate 路由在规则 R4 下要求非空 ownership/verification，
+# 而本文件的门行为用例大量依赖「空声明」基座（被测语义与路由无关）——
+# 基座改用矩阵合法的 solo 路由（solo+standard 推导无审查义务）；需要
+# delegate/audit/full 语义的场景各自显式构造 route
+ROUTE = {"mode": "solo", "delegability": "low", "assurance": "standard",
+         "executor": "main", "continuity": "foreground"}
 
 
 def run_gate(stdin_text, project_dir):
     """以子进程运行 stop_gate.py，返回 CompletedProcess。
 
-    text=True：Windows 下 stdin/stdout/stderr 按文本模式收发；
+    text=True + 显式 encoding="utf-8"：钩子按运行时契约恒以 UTF-8 字节
+    写 stdout（emit_block_json，ensure_ascii=False）与 stderr
+    （warn_stderr 直写 buffer），父进程必须按 UTF-8 解码——不指定
+    encoding 时按父进程 locale（如 en-US runner 的 cp1252）严格解码，
+    中文字节（corrupt reason「损坏」的 0x8D 在 cp1252 未定义）会
+    UnicodeDecodeError（CI Windows 矩阵实测：8 个含中文流的用例全挂，
+    ASCII 流用例全过；errors="replace" 兜底异常字节）。
     ZCODE_PROJECT_DIR 指向被检仓库（钩子据此发现活动任务），其余环境变量
-    原样继承。断言只用 ASCII 子串，规避 locale 解码差异。
+    原样继承。断言只用 ASCII 子串，规避替换符干扰。
     """
     return subprocess.run(
         [sys.executable, str(STOP_GATE)],
         input=stdin_text, text=True, capture_output=True,
+        encoding="utf-8", errors="replace",
         env=dict(os.environ, ZCODE_PROJECT_DIR=str(project_dir)))
 
 
@@ -96,15 +131,20 @@ class TempDirFixture(unittest.TestCase):
         """解除 git 只读对象后清理临时目录。
 
         Windows 上 git 松散对象文件带只读属性，TemporaryDirectory.cleanup()
-        的 rmtree 会 PermissionError；先遍历 .git 清掉只读位再删除
-        （模式复用 tests/test_ownership.py）。
+        的 rmtree 会 PermissionError；先遍历临时树内全部 .git 目录（RB-2
+        起夹具含嵌套真实 git 仓库）清掉只读位再删除（模式复用
+        tests/test_ownership.py）。
         """
-        git_dir = os.path.join(self._tmp.name, ".git")
-        if os.path.isdir(git_dir):
-            for dirpath, _dirnames, filenames in os.walk(git_dir):
+        git_dirs = []
+        for dirpath, dirnames, _filenames in os.walk(self._tmp.name):
+            if ".git" in dirnames:
+                git_dirs.append(os.path.join(dirpath, ".git"))
+        for git_dir in git_dirs:
+            for sub_dirpath, _sub_dirnames, filenames in os.walk(git_dir):
                 for name in filenames:
                     try:
-                        os.chmod(os.path.join(dirpath, name), stat.S_IWRITE)
+                        os.chmod(os.path.join(sub_dirpath, name),
+                                 stat.S_IWRITE)
                     except OSError:
                         pass
         self._tmp.cleanup()
@@ -162,6 +202,26 @@ class TempDirFixture(unittest.TestCase):
         """读取任务 journal 全部事件（无文件返回 []）。"""
         return journal_mod.read_events(self.repo, task_id)
 
+    def add_corrupt_task(self, task_id, state_text="{broken"):
+        """写入一个 state.json 损坏的任务目录（H3 四分类发现用）。"""
+        directory = state.task_dir(self.repo, task_id)
+        directory.mkdir(parents=True, exist_ok=True)
+        (directory / state.STATE_FILENAME).write_text(
+            state_text, encoding="utf-8")
+        return task_id
+
+    def add_orphaned_task(self, task_id):
+        """写入一个无 state.json 的孤儿任务目录（仅 events.jsonl）。
+
+        journal 有内容才能证明降级记账确实写进该目录而非凭空造文件。
+        """
+        state.task_dir(self.repo, task_id).mkdir(parents=True, exist_ok=True)
+        journal_mod.append_event(
+            self.repo, task_id,
+            {"event": "route_selected", "mode": "solo",
+             "delegability": "low", "assurance": "standard"})
+        return task_id
+
 
 class GitRepoFixture(TempDirFixture):
     """tempdir 内真实 git 仓库基座（Layer A 越界判定场景）。"""
@@ -181,6 +241,43 @@ class GitRepoFixture(TempDirFixture):
         run_git(self.repo, "commit", "-m", "init")
 
 
+class SplitLedgerFixture(TempDirFixture):
+    """RB-2 夹具基座：非 git 的账本根（workspace）+ 嵌套真实 git 仓库。
+
+    self.repo 即账本根（ZCODE_PROJECT_DIR 指向它，自身无 .git）；
+    make_inner_repo 在账本根下创建嵌套真实 git 仓库。任务经
+    add_active_task(repository_root=...) 绑定后，门在该仓库根上求值
+    git（touched / 指纹 / 完成提交），账本（state.json / events.jsonl）
+    恒在 self.repo——精确复现 dogfood 场景（workspace 非 git，真仓库
+    是其子目录）。
+    """
+
+    def make_inner_repo(self, name):
+        """在账本根下创建嵌套真实 git 仓库（含基线提交），返回其 Path。"""
+        inner = self.repo / name
+        inner.mkdir()
+        run_git(inner, "init")
+        run_git(inner, "config", "user.email", "gate@example.com")
+        run_git(inner, "config", "user.name", "Stop Gate")
+        # 固定换行行为，避免全局 autocrlf 干扰指纹的换行归一口径
+        run_git(inner, "config", "core.autocrlf", "false")
+        (inner / "base.txt").write_bytes(b"v1\n")
+        run_git(inner, "add", ".")
+        run_git(inner, "commit", "-m", "init")
+        return inner
+
+    def inner_fingerprint(self, inner, st):
+        """按门同一入口真算任务证据指纹（对指定任务仓库根）。"""
+        return fingerprint_mod.task_fingerprint(str(inner), st)
+
+    def write_in(self, root, rel, data):
+        """在指定根（如嵌套任务仓库）内写一个文件（自动建父目录）。"""
+        target = Path(root) / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(data)
+        return rel
+
+
 # —— 骨架契约保留（放行路径） ——
 
 class StopGateSilentPassTest(TempDirFixture):
@@ -197,8 +294,9 @@ class StopGateActiveTaskSilentPassTest(GitRepoFixture):
     """存在活动任务且无越界（未声明 ownership）：静默放行。
 
     v2 alpha1 骨架此时向 stderr 报 ENFORCEMENT SKELETON；Layer A 起该
-    观测报文废止——通过时 stdout/stderr 全空。注意 fixture 须是 git 仓库：
-    非 git 目录会在 touched 清单一步降级（stderr 非空），不构成本场景。
+    观测报文废止——通过时 stdout/stderr 全空。空声明任务不参与四重
+    检查（RB-2 起参与判定先于任何 git 调用），无 git 仓库也不会降级；
+    本夹具仍用 git 仓库以锚定「账本根=git 根」的 legacy 主路径。
     """
 
     def test_active_task_passes_silently_without_ownership(self):
@@ -409,23 +507,32 @@ class StopGateEmptyOwnershipTest(GitRepoFixture):
         self.assertEqual(self.journal_events(), [])
 
 
-# —— 用例 f：git 失败 → fail-open 降级放行 + gate_degraded 记账 ——
+# —— 用例 f（RB-2 改写）：legacy 无绑定 + 账本根非 git → 结构化降级 ——
+#
+# 语义改写说明（RB-2 / WU-P3，新语义即本单元目标）：本类原断言旧全局
+# 路径——git 失败 → 全部参与任务记 gate_degraded(reason=git_unavailable)
+# → 全局早退。RB-2 拆除全局早退：legacy 任务（无 repository 绑定）在
+# 账本根非 git 根时按一级子目录 .git 扫描结果降级——无候选 →
+# repository_root_missing（本类）；有候选 → repository_ambiguous
+# （LegacyLedgerAmbiguousTest）；git_unavailable 词汇保留给「账本根
+# 本身是 git 根但 git 操作瞬时失败」的 legacy 场景。
 
-class StopGateGitFailureDegradeTest(TempDirFixture):
-    """ZCODE_PROJECT_DIR 指向非 git 目录：touched 清单不可得 → 降级放行。"""
+class LegacyLedgerMissingRepositoryTest(TempDirFixture):
+    """legacy 无绑定 + 账本根非 git + 无嵌套候选 → repository_root_missing。"""
 
-    def test_git_unavailable_degrades_open(self):
-        # 非 git 仓库 + 活动任务（state 建在 tempdir）
+    def test_legacy_non_git_ledger_without_candidate_degrades_missing(self):
+        # 非 git 账本根（无 .git、一级子目录无候选）+ 参与任务 → 降级放行
         self.add_active_task(ownership_files=["src/owned/**"])
         result = run_gate("{}", self.repo)
         self.assertEqual(result.returncode, 0)
         self.assertEqual(result.stdout, "")
         self.assertIn("ENFORCEMENT DEGRADED", result.stderr)
-        self.assertIn("ownership gate skipped", result.stderr)
+        self.assertIn("repository_root_missing", result.stderr)
+        # 降级只记该任务一条，reason 为结构化词汇的精确字符串
         events = self.journal_events()
         self.assertEqual(len(events), 1)
         self.assertEqual(events[0]["event"], "gate_degraded")
-        self.assertEqual(events[0]["reason"], "git_unavailable")
+        self.assertEqual(events[0]["reason"], "repository_root_missing")
 
 
 @unittest.skipUnless(shutil.which("git"), "环境无 git 可执行，跳过 git fixture 测试")
@@ -800,21 +907,37 @@ class StopGateExhaustedOnVerificationTest(GitRepoFixture):
 
 @unittest.skipUnless(shutil.which("git"), "环境无 git 可执行，跳过 git fixture 测试")
 class StopGateEvaluationErrorDegradeTest(GitRepoFixture):
-    """evaluate 阶段结构性错误（ownership 声明模式非法 → classify_paths
-    抛 OwnershipError）→ 降级放行 + gate_degraded（reason=evaluation_error），
-    与 git_unavailable 同走 fail-open，不卡会话。"""
+    """evaluate 阶段结构性错误按任务隔离（RB-2 改写，原全局
+    evaluation_error 降级早退拆除）：ownership 声明模式非法的任务只
+    降级自身（gate_degraded，reason=evaluation_error 精确字符串），
+    其余任务照常求值—— healthy 任务有违规时 block 报文只含 healthy。"""
 
-    def test_illegal_pattern_degrades_with_evaluation_error(self):
-        self.add_active_task(ownership_files=["src//bad/**"])  # 空路径段
+    def test_evaluation_error_isolated_to_offending_task(self):
+        bad = self.add_active_task(
+            ownership_files=["src//bad/**"], task_id="eval-err-aaa")  # 空路径段
+        good = self.add_active_task(
+            verification_required=["pytest tests/a.py"],
+            task_id="eval-ok-bbb")
         self.write("src/x.ts", b"x\n")
         result = run_gate("{}", self.repo)
         self.assertEqual(result.returncode, 0)
-        self.assertEqual(result.stdout, "")
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["decision"], "block")
+        reason = payload["reason"]
+        # block 报文只含 healthy 任务的违规；被降级任务不进违规清单
+        self.assertIn("required parent verification is incomplete"
+                      " (task %s)." % good, reason)
+        self.assertNotIn(bad, reason)
         self.assertIn("ENFORCEMENT DEGRADED", result.stderr)
-        self.assertIn("gate skipped", result.stderr)
-        events = self.journal_events()
-        self.assertEqual([e["event"] for e in events], ["gate_degraded"])
-        self.assertEqual(events[0]["reason"], "evaluation_error")
+        # 非法模式任务：恰好一条按任务降级记账（reason 精确断言）
+        bad_events = self.journal_events(bad)
+        self.assertEqual(
+            [e["event"] for e in bad_events], ["gate_degraded"])
+        self.assertEqual(bad_events[0]["reason"], "evaluation_error")
+        # healthy 任务：照常 block 记账
+        good_events = self.journal_events(good)
+        self.assertEqual([e["event"] for e in good_events], ["gate_blocked"])
+        self.assertEqual(good_events[0]["check"], "verification_missing")
 
 
 # —— B4.3 集成冒烟：§98 场景 3-6（多次 Stop 驱动的端到端流） ——
@@ -876,9 +999,13 @@ class StopGateIntegrationSmokeTest(GitRepoFixture):
             review_required=True, reviewer="glm-reviewer")
         self._write_owned(b"v1\n")
         # verification 全备且指纹新鲜；§98 场景 4 名义为 high assurance
-        # （完成门行为不依赖 assurance，提升只为场景语义忠实）
+        # （H2 起矩阵/不变量在保存时强制：solo+high 非法，改用矩阵合法的
+        # audit 路由表达同一 high-assurance 语义；review_required 已显式
+        # True，完成门行为不变）
         st = state.load_state(self.repo, TID)
-        st["route"]["assurance"] = "high"
+        st["route"] = {"mode": "audit", "delegability": "low",
+                       "assurance": "high", "executor": "main",
+                       "continuity": "foreground"}
         state.record_verification(st, self.CMD, self.task_fingerprint(st))
         self.set_state(st)
         # 第一次 Stop：verification 新鲜、仅 review 未完成 → review_missing
@@ -977,6 +1104,834 @@ class StopGateIntegrationSmokeTest(GitRepoFixture):
         self.assertEqual(
             [e["event"] for e in self.journal_events()],
             ["gate_blocked", "gate_passed"])
+
+
+# —— H1 完成提交：finalizing → [完成门] → completed（P0-1 生命周期封口） ——
+
+@unittest.skipUnless(shutil.which("git"), "环境无 git 可执行，跳过 git fixture 测试")
+class StopGateCompletionCommitTest(GitRepoFixture):
+    """放行路径的完成提交契约（completed 的唯一提交点在门内）：
+      - finalizing + 全绿 → 放行且盘上提交 completed + journal 记 completed；
+      - finalizing + 违规 → block 且盘上保持 finalizing；
+      - finalizing + 达续行上限 → exhausted 放行但**不**提交 completed；
+      - 无声明的 finalizing 任务（不参与四重检查）→ 放行且提交 completed；
+      - 非 finalizing 活动任务全绿 → 放行且状态不被改写。
+    """
+
+    CMD = "pytest tests/a.py"
+
+    def _fresh_evidence_task(self, status):
+        """建一个 verification+review 全绿且证据新鲜的指定状态任务。"""
+        self.write("src/a.py", b"v1\n")
+        self.add_active_task(status=status, verification_required=[self.CMD],
+                             review_required=True, reviewer="reviewer-a")
+        st = state.load_state(self.repo, TID)
+        current = self.task_fingerprint(st)
+        state.record_verification(st, self.CMD, current)
+        state.record_review(st, "ship", current)
+        self.set_state(st)
+        return current
+
+    def test_all_green_finalizing_committed_to_completed(self):
+        current = self._fresh_evidence_task("finalizing")
+        result = run_gate("{}", self.repo)
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stdout, "")
+        self.assertEqual(result.stderr, "")
+        # 盘上状态被门提交为 completed（模型/公共 API 无法直达，钩子提交）
+        self.assertEqual(
+            state.load_state(self.repo, TID)["status"], "completed")
+        events = self.journal_events()
+        self.assertEqual(
+            [e["event"] for e in events], ["gate_passed", "completed"])
+        done = events[-1]
+        self.assertEqual(done["task_id"], TID)
+        self.assertEqual(done["via"], "completion_gate")
+        # 审计事件绑定提交时的当前证据指纹（与门同一入口算出的值）
+        self.assertEqual(done["fingerprint"], current)
+
+    def test_verification_missing_finalizing_blocked_stays_finalizing(self):
+        self.add_active_task(status="finalizing",
+                             verification_required=[self.CMD])
+        result = run_gate("{}", self.repo)
+        self.assertEqual(result.returncode, 0)
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["decision"], "block")
+        self.assertIn("required parent verification is incomplete",
+                      payload["reason"])
+        # block 后盘上保持 finalizing（修复后重新 Stop），无 completed 事件
+        self.assertEqual(
+            state.load_state(self.repo, TID)["status"], "finalizing")
+        events = self.journal_events()
+        self.assertEqual([e["event"] for e in events], ["gate_blocked"])
+        self.assertEqual(events[0]["check"], "verification_missing")
+
+    def test_gate_exhausted_passes_without_committing_completion(self):
+        self.add_active_task(status="finalizing",
+                             verification_required=[self.CMD])
+        first = run_gate("{}", self.repo)
+        second = run_gate("{}", self.repo)
+        self.assertEqual(json.loads(first.stdout)["decision"], "block")
+        self.assertEqual(json.loads(second.stdout)["decision"], "block")
+        third = run_gate("{}", self.repo)
+        self.assertEqual(third.returncode, 0)
+        self.assertEqual(third.stdout, "")
+        self.assertIn("ENFORCEMENT GATE EXHAUSTED", third.stderr)
+        # exhausted 放行是循环安全机制、不是完成许可：不提交 completed
+        self.assertEqual(
+            state.load_state(self.repo, TID)["status"], "finalizing")
+        self.assertEqual(
+            [e["event"] for e in self.journal_events()],
+            ["gate_blocked", "gate_blocked", "gate_exhausted"])
+
+    def test_undeclared_finalizing_task_committed_on_pass(self):
+        # 四项声明全空 → 不参与四重检查；但 finalizing 本身就是完成请求，
+        # 放行路径照样提交 completed（提交集合不限于参与校验集合）
+        self.add_active_task(status="finalizing")
+        result = run_gate("{}", self.repo)
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stdout, "")
+        self.assertEqual(result.stderr, "")
+        self.assertEqual(
+            state.load_state(self.repo, TID)["status"], "completed")
+        # 不参与 → 无 gate_passed 记账；completed 事件由提交步骤记录
+        events = self.journal_events()
+        self.assertEqual([e["event"] for e in events], ["completed"])
+        self.assertEqual(events[0]["via"], "completion_gate")
+        self.assertEqual(events[0]["task_id"], TID)
+
+    def test_non_finalizing_all_green_task_not_rewritten(self):
+        self._fresh_evidence_task("executing")
+        result = run_gate("{}", self.repo)
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stdout, "")
+        self.assertEqual(result.stderr, "")
+        # 非 finalizing 活动任务：放行但状态不被改写、无 completed 事件
+        self.assertEqual(
+            state.load_state(self.repo, TID)["status"], "executing")
+        self.assertEqual(
+            [e["event"] for e in self.journal_events()], ["gate_passed"])
+
+
+# —— H2 路由不变量：门侧按 route 推导审查义务（手写 state 也逃不过） ——
+
+@unittest.skipUnless(shutil.which("git"), "环境无 git 可执行，跳过 git fixture 测试")
+class StopGateRouteDerivedReviewTest(GitRepoFixture):
+    """检查 3 的条件不依赖 review.required 标志（H2/P0-2）：手写 full 路由
+    + review.required=false + verdict 缺失 → block review_missing；同状态
+    补 ship 裁决 + 新鲜指纹 → 放行。漏写标志无法绕过 high-assurance 审查
+    约束（state.json 直接打补丁构造，绕过 save_state 校验）。"""
+
+    FULL_ROUTE = {"mode": "full", "delegability": "high", "assurance": "high",
+                  "executor": "flash-implementer", "continuity": "foreground"}
+
+    def _handwritten_full_route_task(self):
+        # 先经 save_state 落合法 solo 基座，再绕过校验把 route 补丁为
+        # full——精确复现「手写 state.json 绕过 save_state 校验」场景
+        self.add_active_task()
+        self.patch_state_file_raw(
+            TID, lambda raw: raw.update({"route": dict(self.FULL_ROUTE)}))
+
+    def test_full_route_derived_review_blocks_then_fresh_ship_passes(self):
+        self._handwritten_full_route_task()
+        # 第一次 Stop：review.required 仍为 false，但 full 路由推导要求
+        # 审查且 verdict 缺失 → review_missing 拦截（参与判定同样按推导）
+        first = run_gate("{}", self.repo)
+        self.assertEqual(first.returncode, 0)
+        payload = json.loads(first.stdout)
+        self.assertEqual(payload["decision"], "block")
+        reason = payload["reason"]
+        self.assertIn("review required but not completed", reason)
+        self.assertIn("Reviewer: unassigned", reason)
+        self.assertIn("runtime.state.record_review", reason)
+        events = self.journal_events()
+        self.assertEqual([e["event"] for e in events], ["gate_blocked"])
+        self.assertEqual(events[0]["check"], "review_missing")
+        self.assertEqual(events[0]["task_id"], TID)
+        self.assertIsNone(events[0]["reviewer"])
+        # 同状态补 ship 裁决 + 新鲜指纹（仍绕过 save_state：required 保持
+        # false——放行凭 route 推导 + 证据，而非凭标志）
+        st = state.load_state(self.repo, TID)
+        current = self.task_fingerprint(st)
+
+        def mutate(raw):
+            raw["review"]["verdict"] = "ship"
+            raw["review"]["fingerprint"] = current
+        self.patch_state_file_raw(TID, mutate)
+        second = run_gate("{}", self.repo)
+        self.assertEqual(second.returncode, 0)
+        self.assertEqual(second.stdout, "")
+        self.assertEqual(second.stderr, "")
+        self.assertEqual(
+            [e["event"] for e in self.journal_events()],
+            ["gate_blocked", "gate_passed"])
+
+
+# —— H3/P0-3 发现完整性：corrupt 证据规则与报文模板（单测） ——
+
+class StopGateCorruptEvidenceUnitTest(TempDirFixture):
+    """_corrupt_requires_fail_closed 证据规则 + corrupt_state 报文模板。"""
+
+    def _write_journal(self, task_id, events):
+        for item in events:
+            journal_mod.append_event(self.repo, task_id, item)
+
+    def test_missing_journal_returns_false(self):
+        self.assertFalse(
+            _corrupt_requires_fail_closed(str(self.repo), "no-such-task-00"))
+
+    def test_route_selected_evidence_truth_table(self):
+        tid = "ev-route-000001"
+        self.add_corrupt_task(tid)
+        # solo / delegate + standard 无高保障证据
+        self._write_journal(tid, [
+            {"event": "task_created", "task_id": tid},
+            {"event": "route_selected", "mode": "solo",
+             "delegability": "low", "assurance": "standard"},
+        ])
+        self.assertFalse(_corrupt_requires_fail_closed(str(self.repo), tid))
+        # mode 为 audit / full，或 assurance=high → True
+        for index, route in enumerate((
+                {"mode": "audit", "assurance": "high"},
+                {"mode": "full", "assurance": "high"},
+                {"mode": "solo", "delegability": "low",
+                 "assurance": "high"})):
+            tid_case = "ev-route-%06d" % (index + 2)
+            self.add_corrupt_task(tid_case)
+            self._write_journal(
+                tid_case, [{"event": "route_selected", **route}])
+            self.assertTrue(
+                _corrupt_requires_fail_closed(str(self.repo), tid_case),
+                route)
+
+    def test_status_changed_to_finalizing_is_evidence(self):
+        tid = "ev-final-000001"
+        self.add_corrupt_task(tid)
+        self._write_journal(tid, [
+            {"event": "status_changed", "from": "reviewing",
+             "to": "finalizing"},
+        ])
+        self.assertTrue(_corrupt_requires_fail_closed(str(self.repo), tid))
+        # 非 finalizing 的迁移不算证据
+        tid2 = "ev-final-000002"
+        self.add_corrupt_task(tid2)
+        self._write_journal(tid2, [
+            {"event": "status_changed", "from": "created", "to": "executing"},
+        ])
+        self.assertFalse(_corrupt_requires_fail_closed(str(self.repo), tid2))
+
+    def test_corrupt_journal_lines_skipped_evidence_still_found(self):
+        # read_events 容错读：坏行跳过，后续合法证据行仍被看见
+        tid = "ev-raw-0000001"
+        directory = state.task_dir(self.repo, tid)
+        directory.mkdir(parents=True)
+        path = directory / journal_mod.JOURNAL_FILENAME
+        good = json.dumps({"ts": "2026-01-01T00:00:00.000Z",
+                           "event": "route_selected", "mode": "full"},
+                          ensure_ascii=False)
+        path.write_text("{torn line\n" + good + "\n", encoding="utf-8")
+        self.assertTrue(_corrupt_requires_fail_closed(str(self.repo), tid))
+
+    def test_block_reason_corrupt_state_template(self):
+        reason = build_block_reason(
+            ("corrupt-task-999", "corrupt_state",
+             {"reason": "state.json 损坏：Expecting value"}),
+            [("other-task-1", "ownership", {})])
+        lines = reason.split("\n")
+        self.assertEqual(
+            lines[0], "Completion blocked: unreadable task state"
+                      " (task corrupt-task-999).")
+        self.assertEqual(lines[1], "- state.json 损坏：Expecting value")
+        self.assertIn("The task directory was kept. Recovery options:", lines)
+        self.assertTrue(any(
+            line.startswith("- rebuild state.json from events.jsonl /"
+                            " checkpoint evidence")
+            for line in lines), lines)
+        self.assertTrue(any(
+            "archive the task directory" in line for line in lines), lines)
+        # 其余违规任务照旧以附带行列出
+        self.assertIn("Also failing in task other-task-1: ownership", lines)
+
+
+# —— H3/P0-3 发现完整性：corrupt / orphaned 子进程冒烟 ——
+
+class StopGateCorruptStateDiscoveryTest(TempDirFixture):
+    """损坏 state.json 不再静默消失（无需 git：纯 corrupt 场景的
+    fail-closed 证据判定只依赖 journal，发现阶段不取 touched 清单）。"""
+
+    CORRUPT = "corrupt-task-aaa"
+
+    def test_corrupt_active_state_does_not_silently_disappear(self):
+        # 损坏 state.json + journal route_selected(mode=full) → block
+        #（旧实现：发现阶段跳过 → 无其他活动任务 → 静默放行）
+        self.add_corrupt_task(self.CORRUPT)
+        journal_mod.append_event(
+            self.repo, self.CORRUPT,
+            {"event": "route_selected", "mode": "full",
+             "delegability": "high", "assurance": "high"})
+        result = run_gate("{}", self.repo)
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stdout.count("\n"), 1)
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["decision"], "block")
+        reason = payload["reason"]
+        self.assertIn(
+            "unreadable task state (task %s)." % self.CORRUPT, reason)
+        self.assertIn("state.json", reason)  # 损坏原因简写随报文可见
+        self.assertIn("Recovery options:", reason)
+        # journal 记 gate_blocked：check=corrupt_state + 损坏原因
+        #（此前写入的 route_selected 证据事件仍在 journal 头部）
+        events = self.journal_events(self.CORRUPT)
+        self.assertEqual(
+            [e["event"] for e in events], ["route_selected", "gate_blocked"])
+        self.assertEqual(events[-1]["check"], "corrupt_state")
+        self.assertEqual(events[-1]["task_id"], self.CORRUPT)
+        self.assertTrue(events[-1]["reason"].startswith("state.json 损坏："))
+
+    def test_corrupt_with_finalizing_evidence_blocks(self):
+        self.add_corrupt_task(self.CORRUPT)
+        journal_mod.append_event(
+            self.repo, self.CORRUPT,
+            {"event": "status_changed", "from": "reviewing",
+             "to": "finalizing"})
+        result = run_gate("{}", self.repo)
+        self.assertEqual(result.returncode, 0)
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["decision"], "block")
+        self.assertIn(
+            "unreadable task state (task %s)." % self.CORRUPT,
+            payload["reason"])
+        events = self.journal_events(self.CORRUPT)
+        self.assertEqual(
+            [e["event"] for e in events],
+            ["status_changed", "gate_blocked"])
+        self.assertEqual(events[-1]["check"], "corrupt_state")
+
+    def test_corrupt_without_high_assurance_evidence_degrades_open(self):
+        # 损坏 + 无高保障证据 → exit 0 + stderr 报警 + gate_degraded
+        #（reason=corrupt_state），不拦截会话
+        self.add_corrupt_task(self.CORRUPT)
+        result = run_gate("{}", self.repo)
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stdout, "")
+        self.assertIn("ENFORCEMENT DEGRADED", result.stderr)
+        self.assertIn(self.CORRUPT, result.stderr)
+        events = self.journal_events(self.CORRUPT)
+        self.assertEqual([e["event"] for e in events], ["gate_degraded"])
+        self.assertEqual(events[0]["reason"], "corrupt_state")
+
+    def test_orphaned_task_never_blocks_only_warns(self):
+        # 目录有 events.jsonl 但无 state.json → 永不拦截：exit 0 + 报警
+        # + 该目录 journal 记 gate_degraded（reason=orphaned_task）
+        orphan = self.add_orphaned_task("orphan-task-bbb")
+        result = run_gate("{}", self.repo)
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stdout, "")
+        self.assertIn("ENFORCEMENT DEGRADED", result.stderr)
+        self.assertIn(orphan, result.stderr)
+        events = self.journal_events(orphan)
+        self.assertEqual(
+            [e["event"] for e in events],
+            ["route_selected", "gate_degraded"])
+        self.assertEqual(events[-1]["reason"], "orphaned_task")
+
+    def test_corrupt_high_assurance_exhausted_after_two_blocks(self):
+        # exhausted 机器对新 check 同样生效：corrupt 连续两次 block 后
+        # 第三次 Stop 放行 + EXHAUSTED 报警 + gate_exhausted 记账
+        self.add_corrupt_task(self.CORRUPT)
+        journal_mod.append_event(
+            self.repo, self.CORRUPT,
+            {"event": "route_selected", "mode": "full",
+             "delegability": "high", "assurance": "high"})
+        first = run_gate("{}", self.repo)
+        second = run_gate("{}", self.repo)
+        self.assertEqual(json.loads(first.stdout)["decision"], "block")
+        self.assertEqual(json.loads(second.stdout)["decision"], "block")
+        self.assertEqual(
+            [e["event"] for e in self.journal_events(self.CORRUPT)],
+            ["route_selected", "gate_blocked", "gate_blocked"])
+        third = run_gate("{}", self.repo)
+        self.assertEqual(third.returncode, 0)
+        self.assertEqual(third.stdout, "")
+        self.assertIn("ENFORCEMENT GATE EXHAUSTED", third.stderr)
+        events = self.journal_events(self.CORRUPT)
+        self.assertEqual(
+            [e["event"] for e in events],
+            ["route_selected", "gate_blocked", "gate_blocked",
+             "gate_exhausted"])
+        self.assertEqual(events[-1]["check"], "corrupt_state")
+
+
+@unittest.skipUnless(shutil.which("git"), "环境无 git 可执行，跳过 git fixture 测试")
+class StopGateCorruptWithActiveTaskTest(GitRepoFixture):
+    """active 与 corrupt 混合：四重检查违规优先，corrupt 追加在违规清单。"""
+
+    CORRUPT = "corrupt-task-aaa"
+
+    def _add_high_assurance_corrupt(self):
+        self.add_corrupt_task(self.CORRUPT)
+        journal_mod.append_event(
+            self.repo, self.CORRUPT,
+            {"event": "route_selected", "mode": "full",
+             "delegability": "high", "assurance": "high"})
+
+    def test_all_green_active_plus_low_assurance_corrupt_passes(self):
+        # active 全绿 + corrupt 无高保障证据 → 放行（有报警 + 降级记账）
+        self.add_active_task()  # 空声明：不参与四重检查
+        self.add_corrupt_task(self.CORRUPT)
+        result = run_gate("{}", self.repo)
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stdout, "")
+        self.assertIn("ENFORCEMENT DEGRADED", result.stderr)
+        self.assertIn(self.CORRUPT, result.stderr)
+        # active 无声明不参与 → 无 gate_passed 记账；corrupt 记 gate_degraded
+        self.assertEqual(self.journal_events(), [])
+        corrupt_events = self.journal_events(self.CORRUPT)
+        self.assertEqual(
+            [e["event"] for e in corrupt_events], ["gate_degraded"])
+        self.assertEqual(corrupt_events[0]["reason"], "corrupt_state")
+
+    def test_all_green_active_plus_high_assurance_corrupt_blocks(self):
+        # active 全绿 + corrupt 高保障 → block：corrupt 违规追加在
+        # 四重检查违规（此处为空）之后，成为主报文
+        self.add_active_task()
+        self._add_high_assurance_corrupt()
+        result = run_gate("{}", self.repo)
+        self.assertEqual(result.returncode, 0)
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["decision"], "block")
+        self.assertIn(
+            "unreadable task state (task %s)." % self.CORRUPT,
+            payload["reason"])
+        self.assertIn("Recovery options:", payload["reason"])
+        # block 记账落在 corrupt 任务；active 任务零记账（无违规也无放行）
+        self.assertEqual(
+            [e["event"] for e in self.journal_events(self.CORRUPT)],
+            ["route_selected", "gate_blocked"])
+        self.assertEqual(self.journal_events(), [])
+
+    def test_corrupt_appended_after_active_violations(self):
+        # active 任务自身违规时为主报文，corrupt 以附带行列出且
+        # 记账仍落在第一个违规任务（四重检查违规先收集，corrupt 追加尾部）
+        active = self.add_active_task(
+            verification_required=["pytest tests/a.py"])
+        self._add_high_assurance_corrupt()
+        result = run_gate("{}", self.repo)
+        self.assertEqual(result.returncode, 0)
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["decision"], "block")
+        reason = payload["reason"]
+        self.assertIn(
+            "required parent verification is incomplete (task %s)." % active,
+            reason)
+        self.assertIn(
+            "Also failing in task %s: corrupt_state" % self.CORRUPT, reason)
+        events = self.journal_events(active)
+        self.assertEqual([e["event"] for e in events], ["gate_blocked"])
+        self.assertEqual(events[0]["check"], "verification_missing")
+        # corrupt 任务仅保留证据事件本身，无 block 记账（非第一个违规）
+        self.assertEqual(
+            [e["event"] for e in self.journal_events(self.CORRUPT)],
+            ["route_selected"])
+
+
+# —— H1 补充：commit_finalizing_completions 单任务失败隔离（fail-open） ——
+
+@unittest.skipUnless(shutil.which("git"), "环境无 git 可执行，跳过 git fixture 测试")
+class StopGateCommitFailureIsolationTest(GitRepoFixture):
+    """提交步骤单任务失败只降级该任务：stderr 报警 + 保持 finalizing，
+    后续任务照常提交 completed + completed 事件（记账异常绝不崩放行路径）。"""
+
+    def test_single_commit_failure_does_not_block_next_task(self):
+        first = self.add_active_task(
+            status="finalizing", task_id="commit-fail-aaa")
+        second = self.add_active_task(
+            status="finalizing", task_id="commit-ok-bbb")
+        real_commit = state.commit_completion
+
+        def flaky_commit(repo_root, task_id):
+            if task_id == first:
+                raise RuntimeError("模拟记账失败")
+            return real_commit(repo_root, task_id)
+
+        with mock.patch.object(state, "commit_completion",
+                               side_effect=flaky_commit), \
+                mock.patch.object(stop_gate, "warn_stderr") as warn_mock:
+            stop_gate.commit_finalizing_completions(
+                state, fingerprint_mod, journal_mod, str(self.repo),
+                [first, second], {})
+        # 第一个任务：恰好一次 DEGRADED 报警（含任务 ID）+ 状态保持
+        # finalizing + 无 completed 事件
+        self.assertEqual(warn_mock.call_count, 1)
+        warn_message = warn_mock.call_args[0][0]
+        self.assertIn("ENFORCEMENT DEGRADED", warn_message)
+        self.assertIn(first, warn_message)
+        self.assertIn("left in finalizing", warn_message)
+        self.assertEqual(
+            state.load_state(self.repo, first)["status"], "finalizing")
+        self.assertEqual(self.journal_events(first), [])
+        # 第二个任务：不受牵连，正常提交 completed + completed 事件
+        self.assertEqual(
+            state.load_state(self.repo, second)["status"], "completed")
+        events = self.journal_events(second)
+        self.assertEqual([e["event"] for e in events], ["completed"])
+        self.assertEqual(events[0]["via"], "completion_gate")
+        self.assertEqual(events[0]["task_id"], second)
+
+
+# —— H3 补充：corrupt 高保障 × 任务仓库故障交叉路径（RB-2 改写） ——
+
+class StopGateCorruptWithGitFailureTest(TempDirFixture):
+    """任务仓库故障不再压制 corrupt 高保障 block（RB-2 改写：原全局
+    git_unavailable 早退拆除）。active 任务的仓库故障只降级该任务
+    （reason=repository_root_missing）；deferred 高保障 corrupt 的证据
+    只依赖 journal、不依赖任何 git 根，恒进统一 block 机器。"""
+
+    CORRUPT = "corrupt-task-aaa"
+
+    def test_repo_failure_degrades_only_active_task_corrupt_still_blocks(self):
+        self.add_corrupt_task(self.CORRUPT)
+        journal_mod.append_event(
+            self.repo, self.CORRUPT,
+            {"event": "route_selected", "mode": "full",
+             "delegability": "high", "assurance": "high"})
+        # 非 git 账本根（TempDirFixture 无 git init）+ 声明 ownership 的
+        # active 任务 → 该任务仓库不可解析 → 按任务降级（非全局早退）
+        self.add_active_task(ownership_files=["src/owned/**"])
+        result = run_gate("{}", self.repo)
+        self.assertEqual(result.returncode, 0)
+        # corrupt 高保障照常 block（不再被仓库故障牵连）
+        self.assertEqual(result.stdout.count("\n"), 1)
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["decision"], "block")
+        self.assertIn(
+            "unreadable task state (task %s)." % self.CORRUPT,
+            payload["reason"])
+        # stderr 同时含任务仓库降级报警与 deferred corrupt 报警
+        self.assertIn("ENFORCEMENT DEGRADED", result.stderr)
+        self.assertIn(
+            "deferred for enforcement (task %s)" % self.CORRUPT,
+            result.stderr)
+        # journal：active 任务恰好一条按任务降级（结构化 reason），
+        # corrupt 任务照常进统一 block 机器（gate_blocked）
+        active_events = self.journal_events()
+        self.assertEqual(
+            [e["event"] for e in active_events], ["gate_degraded"])
+        self.assertEqual(
+            active_events[0]["reason"], "repository_root_missing")
+        self.assertEqual(
+            [e["event"] for e in self.journal_events(self.CORRUPT)],
+            ["route_selected", "gate_blocked"])
+        self.assertEqual(
+            self.journal_events(self.CORRUPT)[-1]["check"], "corrupt_state")
+
+
+# —— RB-2 per-task 仓库求值：绑定仓库根上的真实门（⑧⑨⑩） ——
+
+@unittest.skipUnless(shutil.which("git"), "环境无 git 可执行，跳过 git fixture 测试")
+class BoundRepositoryGateTest(SplitLedgerFixture):
+    """任务绑定 repository.root 后，门在该仓库根上求值（账本根非 git
+    也不降级）：ownership 越界 block、静默放行、指纹绑定任务仓库。"""
+
+    CMD = "pytest tests/a.py"
+
+    def test_out_of_scope_in_bound_repo_blocks(self):
+        # ⑧ 越界判定按任务仓库：ZCODE_PROJECT_DIR（非 git workspace）
+        # 不参与求值，block 报文列任务仓库内的越界文件
+        inner = self.make_inner_repo("inner-repo")
+        self.add_active_task(
+            ownership_files=["src/owned/**"], repository_root=str(inner))
+        self.write_in(inner, "src/owned/a.ts", b"owned\n")
+        self.write_in(inner, "src/other/rogue.ts", b"rogue\n")
+        result = run_gate("{}", self.repo)
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stdout.count("\n"), 1)
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["decision"], "block")
+        reason = payload["reason"]
+        self.assertIn(TID, reason)
+        self.assertIn("src/other/rogue.ts", reason)
+        self.assertNotIn("src/owned/a.ts", reason)
+        events = self.journal_events()
+        self.assertEqual([e["event"] for e in events], ["gate_blocked"])
+        self.assertEqual(events[0]["check"], "ownership")
+        self.assertEqual(events[0]["out_of_scope"], ["src/other/rogue.ts"])
+
+    def test_real_gate_silent_pass_despite_nongit_project_dir(self):
+        # ⑩ repo root ≠ ZCODE_PROJECT_DIR 仍走真实门：workspace 非 git
+        # 不产生任何降级（旧实现此处全局 git_unavailable 早退）
+        inner = self.make_inner_repo("inner-repo")
+        self.add_active_task(
+            ownership_files=["src/owned/**"], repository_root=str(inner))
+        self.write_in(inner, "src/owned/a.ts", b"owned\n")
+        result = run_gate("{}", self.repo)
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stdout, "")
+        self.assertEqual(result.stderr, "")
+        events = self.journal_events()
+        self.assertEqual([e["event"] for e in events], ["gate_passed"])
+        self.assertEqual(events[0]["tasks"], [TID])
+
+    def test_verification_fingerprint_binds_to_task_repo(self):
+        # ⑨ 指纹按任务仓库计算：任务仓库内验证后改动 → verification_stale
+        inner = self.make_inner_repo("inner-repo")
+        self.write_in(inner, "src/a.py", b"v1\n")
+        self.add_active_task(
+            verification_required=[self.CMD], repository_root=str(inner))
+        st = state.load_state(self.repo, TID)
+        current = self.inner_fingerprint(inner, st)
+        state.record_verification(st, self.CMD, current)
+        self.set_state(st)
+        fresh = run_gate("{}", self.repo)
+        self.assertEqual(fresh.returncode, 0)
+        self.assertEqual(fresh.stdout, "")
+        self.assertEqual(fresh.stderr, "")
+        self.assertEqual([e["event"] for e in self.journal_events()],
+                         ["gate_passed"])
+        # 任务仓库内文件变化 → 旧指纹失效（workspace 侧无 git，无法影响）
+        self.write_in(inner, "src/a.py", b"v2\n")
+        result = run_gate("{}", self.repo)
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["decision"], "block")
+        self.assertIn("verification evidence is stale", payload["reason"])
+        events = self.journal_events()
+        self.assertEqual(events[-1]["check"], "verification_stale")
+        self.assertEqual(events[-1]["recorded"], current)
+        self.assertNotEqual(events[-1]["current"], current)
+
+
+# —— RB-2：dogfood 场景（⑪）——非 git workspace + 绑定仓库全绿提交 ——
+
+@unittest.skipUnless(shutil.which("git"), "环境无 git 可执行，跳过 git fixture 测试")
+class DogfoodCompletionTest(SplitLedgerFixture):
+    """dogfood 实证场景回归：workspace 非 git、真仓库为嵌套目录、任务
+    绑定后 finalizing 全绿 → 照常提交 completed（不得出现全局
+    git_unavailable 降级）。"""
+
+    CMD = "pytest tests/a.py"
+
+    def test_finalizing_bound_task_completes_on_nongit_workspace(self):
+        inner = self.make_inner_repo("inner-repo")
+        self.write_in(inner, "src/a.py", b"v1\n")
+        self.add_active_task(
+            status="finalizing", verification_required=[self.CMD],
+            review_required=True, reviewer="reviewer-a",
+            repository_root=str(inner))
+        st = state.load_state(self.repo, TID)
+        current = self.inner_fingerprint(inner, st)
+        state.record_verification(st, self.CMD, current)
+        state.record_review(st, "ship", current)
+        self.set_state(st)
+        result = run_gate("{}", self.repo)
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stdout, "")
+        # 无任何降级报文（旧实现：全局 git_unavailable → 整个门 fail-open）
+        self.assertEqual(result.stderr, "")
+        # 盘上提交 completed + journal 记 gate_passed 与 completed
+        self.assertEqual(
+            state.load_state(self.repo, TID)["status"], "completed")
+        events = self.journal_events()
+        self.assertEqual(
+            [e["event"] for e in events], ["gate_passed", "completed"])
+        done = events[-1]
+        self.assertEqual(done["task_id"], TID)
+        self.assertEqual(done["via"], "completion_gate")
+        self.assertEqual(done["fingerprint"], current)
+
+
+# —— RB-2：双仓隔离（⑫） ——
+
+@unittest.skipUnless(shutil.which("git"), "环境无 git 可执行，跳过 git fixture 测试")
+class DualRepoIsolationTest(SplitLedgerFixture):
+    """双仓各绑各仓：A 仓 dirty 文件不被 B 判 out-of-scope，反之亦然
+    （若任一任务被按他仓求值，他仓文件必成越界 → block；全绿即隔离证明）。"""
+
+    def test_dirty_files_confined_to_own_repo(self):
+        repo_a = self.make_inner_repo("repo-a")
+        repo_b = self.make_inner_repo("repo-b")
+        task_a = self.add_active_task(
+            ownership_files=["src/a/**"], task_id="iso-task-aaa",
+            repository_root=str(repo_a))
+        task_b = self.add_active_task(
+            ownership_files=["src/b/**"], task_id="iso-task-bbb",
+            repository_root=str(repo_b))
+        self.write_in(repo_a, "src/a/x.ts", b"a\n")
+        self.write_in(repo_b, "src/b/y.ts", b"b\n")
+        result = run_gate("{}", self.repo)
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stdout, "")
+        self.assertEqual(result.stderr, "")
+        # 两任务各自记 gate_passed，零降级、零越界
+        self.assertEqual([e["event"] for e in self.journal_events(task_a)],
+                         ["gate_passed"])
+        self.assertEqual([e["event"] for e in self.journal_events(task_b)],
+                         ["gate_passed"])
+
+
+# —— RB-2：仓库故障按任务隔离（⑬⑭） ——
+
+@unittest.skipUnless(shutil.which("git"), "环境无 git 可执行，跳过 git fixture 测试")
+class RepositoryUnavailableIsolationTest(SplitLedgerFixture):
+    """绑定根 git 操作失败只降级该任务（reason=repository_unavailable），
+    其余任务照常：block 报文只含违规任务，journal 记账各归各。"""
+
+    def _make_broken_bound_task(self, task_id):
+        """绑定到非 git 目录的任务（绑定根存在但 git 求值必失败）。"""
+        plain = self.repo / ("plain-" + task_id)
+        plain.mkdir()
+        return self.add_active_task(
+            ownership_files=["src/**"], task_id=task_id,
+            repository_root=str(plain))
+
+    def test_block_report_contains_only_healthy_violating_task(self):
+        # ⑬ B 仓库故障降级，A 照常违规 block——报文只含 A
+        repo_a = self.make_inner_repo("repo-a")
+        task_a = self.add_active_task(
+            ownership_files=["src/owned/**"], task_id="fail-iso-aaa",
+            repository_root=str(repo_a))
+        task_b = self._make_broken_bound_task("fail-iso-bbb")
+        self.write_in(repo_a, "src/other/rogue.ts", b"rogue\n")
+        result = run_gate("{}", self.repo)
+        self.assertEqual(result.returncode, 0)
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["decision"], "block")
+        reason = payload["reason"]
+        self.assertIn("ownership violation (task %s)." % task_a, reason)
+        self.assertIn("src/other/rogue.ts", reason)
+        self.assertNotIn(task_b, reason)
+        self.assertIn("ENFORCEMENT DEGRADED", result.stderr)
+        self.assertIn("repository_unavailable", result.stderr)
+        # journal：A 记 gate_blocked，B 记一条 gate_degraded
+        self.assertEqual([e["event"] for e in self.journal_events(task_a)],
+                         ["gate_blocked"])
+        degraded = self.journal_events(task_b)
+        self.assertEqual([e["event"] for e in degraded], ["gate_degraded"])
+        self.assertEqual(degraded[0]["reason"], "repository_unavailable")
+
+    def test_degradation_journal_recorded_only_for_failed_task(self):
+        # ⑭ 降级记账各归各：B 恰一条 gate_degraded，A 零条（全绿记
+        # gate_passed）
+        repo_a = self.make_inner_repo("repo-a")
+        task_a = self.add_active_task(
+            ownership_files=["src/**"], task_id="jrnl-iso-aaa",
+            repository_root=str(repo_a))
+        task_b = self._make_broken_bound_task("jrnl-iso-bbb")
+        self.write_in(repo_a, "src/owned.ts", b"owned\n")
+        result = run_gate("{}", self.repo)
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stdout, "")
+        events_a = self.journal_events(task_a)
+        self.assertEqual([e["event"] for e in events_a], ["gate_passed"])
+        self.assertNotIn("gate_degraded", [e["event"] for e in events_a])
+        events_b = self.journal_events(task_b)
+        self.assertEqual(len(events_b), 1)
+        self.assertEqual(events_b[0]["event"], "gate_degraded")
+        self.assertEqual(events_b[0]["reason"], "repository_unavailable")
+
+
+# —— RB-2：legacy 锚定与歧义不猜（⑮⑰） ——
+
+@unittest.skipUnless(shutil.which("git"), "环境无 git 可执行，跳过 git fixture 测试")
+class LegacyLedgerGitRootAnchorTest(GitRepoFixture):
+    """legacy 显式锚定（⑮）：无 repository 绑定 + 账本根本身是 git 仓库
+    → 行为与单仓时代完全一致（RB-2 前的全部既有用例即回归证明，此处
+    显式锚定一条）。"""
+
+    def test_unbound_task_on_git_ledger_keeps_legacy_behavior(self):
+        self.add_active_task(ownership_files=["src/owned/**"])
+        st = state.load_state(self.repo, TID)
+        self.assertNotIn("repository", st)  # legacy 形态：整键不存在
+        self.assertIsNone(state.bound_repository_root(st))
+        self.assertEqual(
+            state.resolve_repository_root(st, str(self.repo)),
+            str(self.repo))  # 回退账本根
+        self.write("src/other/rogue.ts", b"rogue\n")
+        result = run_gate("{}", self.repo)
+        self.assertEqual(result.returncode, 0)
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["decision"], "block")
+        self.assertIn("src/other/rogue.ts", payload["reason"])
+        events = self.journal_events()
+        self.assertEqual([e["event"] for e in events], ["gate_blocked"])
+        self.assertEqual(events[0]["check"], "ownership")
+
+    def test_legacy_git_ledger_transient_git_failure_keeps_git_unavailable(self):
+        # RB-2 词汇锚定：legacy + 账本根是 git 根 + git 操作瞬时失败
+        # → 保留 git_unavailable 词汇（repository_unavailable 专属绑定根）。
+        # 进程内直测 collect_violations（git 故障以 mock 注入，无法经
+        # 子进程 fixture 稳定复现）
+        task_id = self.add_active_task(ownership_files=["src/owned/**"])
+        from runtime import ownership as ownership_mod
+        with mock.patch.object(
+                ownership_mod, "git_touched_files",
+                side_effect=ownership_mod.OwnershipError(
+                    "模拟 git 瞬时故障")), \
+                mock.patch.object(stop_gate, "warn_stderr"):
+            violations, declared = stop_gate.collect_violations(
+                state, journal_mod, ownership_mod, fingerprint_mod,
+                str(self.repo), [task_id], {}, {})
+        self.assertEqual(violations, [])
+        self.assertEqual(declared, [])  # 降级任务不进 declared
+        events = self.journal_events()
+        self.assertEqual([e["event"] for e in events], ["gate_degraded"])
+        self.assertEqual(events[0]["reason"], "git_unavailable")
+
+
+@unittest.skipUnless(shutil.which("git"), "环境无 git 可执行，跳过 git fixture 测试")
+class LegacyLedgerAmbiguousTest(SplitLedgerFixture):
+    """legacy 无绑定 + 账本根非 git + 一级子目录存在嵌套仓库 →
+    repository_ambiguous：stderr 列候选目录名，不自动猜、不自动绑定
+    （即使只有 1 个候选），也绝不对候选仓库执行 git 求值。"""
+
+    def test_nested_candidate_not_evaluated_degrades_ambiguous(self):
+        # 嵌套仓库内故意放置「若被求值必越界」的改动：保持降级即证明
+        # 未对任何嵌套仓库执行 git 求值
+        nested = self.make_inner_repo("some-repo")
+        self.write_in(nested, "src/rogue.ts", b"rogue\n")
+        self.add_active_task(ownership_files=["src/**"])
+        result = run_gate("{}", self.repo)
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stdout, "")  # 降级放行（未 block）
+        self.assertIn("ENFORCEMENT DEGRADED", result.stderr)
+        self.assertIn("some-repo", result.stderr)  # stderr 列出候选
+        self.assertIn("repository_ambiguous", result.stderr)
+        events = self.journal_events()
+        self.assertEqual([e["event"] for e in events], ["gate_degraded"])
+        self.assertEqual(events[0]["reason"], "repository_ambiguous")
+
+
+# —— RB-2：降级 reason 词汇结构化精确断言（⑱） ——
+
+@unittest.skipUnless(shutil.which("git"), "环境无 git 可执行，跳过 git fixture 测试")
+class DegradedReasonVocabularyTest(SplitLedgerFixture):
+    """gate_degraded 的 reason 字段是结构化词汇：三仓库降级路径逐字
+    锁定（门与运维 / 文档侧共用同一词汇；evaluation_error / git_unavailable
+    的精确断言见 StopGateEvaluationErrorDegradeTest 与既有 legacy 用例）。"""
+
+    def _reasons(self):
+        return [e["reason"] for e in self.journal_events()]
+
+    def test_reason_repository_unavailable_exact(self):
+        plain = self.repo / "plain-dir"
+        plain.mkdir()
+        self.add_active_task(ownership_files=["src/**"],
+                             repository_root=str(plain))
+        result = run_gate("{}", self.repo)
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(self._reasons(), ["repository_unavailable"])
+
+    def test_reason_repository_root_missing_exact(self):
+        self.add_active_task(ownership_files=["src/**"])
+        result = run_gate("{}", self.repo)
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(self._reasons(), ["repository_root_missing"])
+
+    def test_reason_repository_ambiguous_exact(self):
+        self.make_inner_repo("some-repo")
+        self.add_active_task(ownership_files=["src/**"])
+        result = run_gate("{}", self.repo)
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(self._reasons(), ["repository_ambiguous"])
 
 
 if __name__ == "__main__":

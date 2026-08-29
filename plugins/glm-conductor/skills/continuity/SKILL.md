@@ -61,7 +61,8 @@ active task（continuity 为 resumable / idle 的任务，或需要 Stop 完成�
 
 - 创建即受跟踪：state.json 存在且 status 非终态（completed / cancelled / failed）= active task，Stop 完成门将跟踪其完成条件
 - foreground 普通短任务不创建 state.json——无状态文件时完成门零干预
-- 原子写（先写临时文件再替换）；status 只能按任务生命周期推进，不回退
+- 原子写（先写临时文件再替换）；status 只能按任务生命周期推进，不回退（`runtime/state.py` 的 `TASK_TRANSITIONS` 转换表逐次校验）
+- 生命周期封口：进入 `finalizing` 即请求完成（用 `state.transition_task_status(repo, task_id, "finalizing")`，自动记 `status_changed` 事件）；`completed` 仅由完成门在四重检查全部通过后原子提交（钩子记 `completed` 事件）——任何运行时写入路径都不能直接把任务置为 completed（`save_state` / `transition_task_status` 按转换表无条件拒绝）
 - repository 文件仍是代码状态真相源，state.json 只是运行时任务状态
 
 **events.jsonl**：append-only 执行日志，只在实质性节点追加一行结构化事实，禁止重写或截断。事件时点：
@@ -73,6 +74,7 @@ active task（continuity 为 resumable / idle 的任务，或需要 Stop 完成�
 | implementation_started | 实施者派发后 |
 | verification / review | 主会话验证完成 / 审查者裁决后 |
 | checkpoint_written | checkpoint 落盘后 |
+| status_changed | 任务状态迁移后（`transition_task_status` 自动记录） |
 | gate_passed / gate_blocked / gate_degraded / gate_exhausted | 完成门放行 / 拦截 / 降级跳过 / 达上限放行（由 Stop 钩子记录） |
 | completed / cancelled / failed | 进入终态时 |
 
@@ -85,8 +87,11 @@ active task（continuity 为 resumable / idle 的任务，或需要 Stop 完成�
 | 证据 | 记录时机 | 记录动作 |
 | --- | --- | --- |
 | verification.fingerprint | 主会话**亲自**重跑全部 verification.required 命令且通过后，立即记录 | `state.record_verification(st, cmd, fingerprint.task_fingerprint(repo, st))` 后 save_state |
+| 单元级验证证据（work unit） | 主会话**亲自**跑完该单元验证命令且通过后、`finish_unit` 收尾前 | `task_manager.record_unit_verification(repo, task_id, uid, cmd, fingerprint)` 追加 journal verification 事件——事件显式携带 `unit`（work unit id）字段，reconcile 恢复对账按 `unit` 逐字精确匹配；**不含 `unit` 字段的旧格式事件不再被采信**（保守按无证据处理，主会话重新验证；v2.0.1 H6 有意的破坏性变更） |
 | review.fingerprint | 审查者返回裁决后、且裁决对应的 diff 未再变动时 | `state.record_review(st, verdict, fingerprint.task_fingerprint(repo, st))` 后 save_state |
 | visual_evidence | 视觉验收通过时，对每张截图按原始字节哈希记录 | `state.record_visual_evidence(st, path, sha256)` 后 save_state |
+
+口径正交（v2.0.1 H6）：单元级证据只写 journal（恢复对账用，reconcile 按 unit 匹配）；任务级完成门证据写 state.json（`state.record_verification`，Stop 完成门比对）——多单元任务两者都要记，互不替代。
 
 红线：
 

@@ -1,6 +1,6 @@
 # GLM Conductor 架构（权威文档）
 
-> 本文档是 GLM Conductor 的**唯一架构真相源**，描述 v2.0.0（v2-dev 开发线）的实际运行时行为。
+> 本文档是 GLM Conductor 的**唯一架构真相源**，描述 v2.0.1（v2-dev 开发线）的实际运行时行为。
 > 契约细节以插件目录为准（`plugins/glm-conductor/` 下的 agents 与 skills）；本文档与其保持一致，冲突时以修复到一致为准，不得偏离开源文档单独演化。
 > 历史提案存于 `docs/history/`，仅作参考，不构成当前实现依据。
 
@@ -215,8 +215,11 @@ Work Unit 是可独立派发的最小有界实施单元（§60-§73，`runtime/w
 
 - **状态模型**：十词状态词汇 + 26 条合法转换边（主链 pending→…→completed；quota/block 回退边；§69 恢复对账边；终态封锁）；单元必填 ownership 与 verification（无范围或无验证不可派发）；`attempt` 记录重试史，新调用不抹除失败史（§73 有界重试）
 - **依赖图**：`depends_on` 同任务内引用、环拒绝（报全部环成员）；就绪 = status ready 且依赖全部 completed；确定性拓扑序驱动派发顺序
-- **派发准入**（主会话仍是唯一编排者）：`plan_dispatch` 五道闸——quota 四态（EXHAUSTED→waiting_quota、UNKNOWN/PRESSURE 保守抑制，§67）→ ownership 不相交（保守近似：字面前缀相交即冲突，宁少并行不越界，§66）→ **租约闸（`runtime/lease.py`：任务专属 leases.json owner map、派发前全有或全无获取、同 owner 幂等、异 owner 冲突拒绝、写相结束释放，§78-§79）→ max_workers 预算（1-4，§82）→ 派发；默认串行，有界并行（上限 4，experimental）已启用——并行资格 = ownership 不相交或有效租约保护（§81）
-- **恢复对账**（§68-§69）：恢复绝不盲目重放——completed 不重跑；`running` 单元按证据三分为 ready（无残留）/ completed（残留 + 绑定当前指纹的新鲜验证事件）/ verifying（残留无新鲜证据，主会话必须亲自验证）；`verifying` 单元仅在存在新鲜验证证据时建议 completed，其余情形出 advisory（保持现状由主会话直接验证 / 无残留由主会话裁决），不做状态转换；仓库状态权威于运行时记录
+- **派发准入**（主会话仍是唯一编排者）：`plan_dispatch` 五道闸——quota 四态（EXHAUSTED→waiting_quota、UNKNOWN/PRESSURE 保守抑制，§67）→ ownership 不相交（保守近似：字面前缀相交即冲突，宁少并行不越界，§66）→ **租约闸（`runtime/lease.py`：任务专属 leases.json owner map、派发前全有或全无获取、同 owner 幂等、异 owner 冲突拒绝、写相结束释放，§78-§79）→ max_workers 预算（1-4，§82）→ 派发；默认串行，有界并行（上限 4，experimental）已启用——并行资格 = ownership 声明判定可并行 **且** 无外来活跃租约冲突（两道闸门均须通过，§66/§78；租约不豁免 ownership 闸）
+- **事务边界（`runtime/task_manager.py`，v2.0.1 H4）**：派发生命周期的手工拼接（plan→租约→状态转换→`dispatch.active` 记账→save→事件）固化为四个高层 API——`prepare_dispatch`（决策 + 获取租约 + `dispatch_prepared` 事件；不动单元状态、不落盘，决策未批准时零副作用）→ `commit_dispatch`（租约在位校验 → ready→running → active 记账（幂等防御）→ 单次 save → `implementation_started`）→ `finish_unit`（终态转换——running+completed 双跳经 verifying 编码 §70 父验证语义——→ 释放租约 → active 移除 → 单次 save → `unit_finished`）；`abort_dispatch` 回退未提交的准备（running 已提交不得静默回退）。崩溃窗口映射（确定性恢复路径）：prepare 后中断 → 单元仍 ready + 租约在位（同 owner 租约不挡后续 plan）→ 可安全 commit 或 abort；commit 后中断 → running 且无验证证据 → 由既有 reconcile 按 §69 证据三分恢复。分层纪律：dispatcher 保持纯决策器（零 I/O），task_manager 是唯一做派发 I/O 编排的事务层
+- **单元完成证据门（v2.0.1 release hardening RB-1）**：`finish_unit(outcome="completed")` 在任何状态转换**之前**先过 `reconcile.fresh_unit_verification` 共享证据谓词（与恢复对账同一口径，all-match）——`verification` 内每个 required command 各需至少一条五条件全满足的事件：`event == "verification"`、`unit` 与单元 id 逐字精确、`fingerprint` 等于当前指纹、`status == "pass"`、`command` 等于该命令；missing / stale / partial / wrong-unit / 无 `unit` 字段的 legacy 证据一律拒绝，且拒绝**零副作用**（不写任何 journal 事件、不落盘）；检查过程中 git / 指纹读取失败 fail-closed（`TaskManagerError`——新鲜度无法判定即拒绝完成）；`failed` / `cancelled` 出口不需要证据；空 required 走零 git 快路径（生产单元经 state 校验必带 ≥1 命令，该形状仅为谓词直调方的防御语义）。谓词侧形状防御：id 非非空字符串的单元任何事件都不匹配（`None` 不构成 legacy 无 unit 事件的匹配通道）。恢复对账（上条）同步收紧 all-match——多 command 单元部分证据不再建议 `completed`（建议 `verifying`）；证据写入口为 `task_manager.record_unit_verification`（单元级），与任务级 `state.record_verification` 分工
+- **租约崩溃恢复（v2.0.1 H5，P1-4/P1-5）**：lease record 扩展 session_id / generation / heartbeat_at / expires_at——`prepare_dispatch` 按 `runtime/lease.py` 的保守默认 TTL（`LEASE_DEFAULT_TTL_SECONDS = 1800` 秒：覆盖单个 work unit 一次有界实施的正常写相并留足余量；`ttl_seconds=None` = 永久）落盘 expires_at，长期实施由 `renew_lease` 心跳续约，同 owner 重取已过期记录 generation + 1；2.0.0 旧格式记录（无 expires_at）永不过期、可读可续，靠 stale 判定兜底。恢复对账闭环：`reconcile.reconcile_leases` 纯建议三分——stale（owner 不是图中 running/verifying 单元：单元已完成/失败或图中无此单元）、active（活跃写相且未过期）、expired_running（活跃写相但已过期——worker 可能仍在写，**不建议自动释放**，归主会话裁决）；`task_manager.recover_leases` 是清理入口：仅释放 stale 组 + journal `lease_recovered` 事件（零释放不落事件），expired_running 仅上报。崩溃后无需人工删除 leases.json
+- **恢复对账**（§68-§69）：恢复绝不盲目重放——completed 不重跑；`running` 单元按证据三分为 ready（无残留）/ completed（残留 + 绑定当前指纹的新鲜验证事件）/ verifying（残留无新鲜证据，主会话必须亲自验证）；`verifying` 单元仅在存在新鲜验证证据时建议 completed，其余情形出 advisory（保持现状由主会话直接验证 / 无残留由主会话裁决），不做状态转换；仓库状态权威于运行时记录。**验证证据归属绑定（v2.0.1 H6）**：journal verification 事件显式携带 `unit`（work unit id）字段，reconcile 按单元逐字精确匹配——相同 command / 重叠 ownership 的单元之间不存在错误复用证据的空间；单元级证据经 `task_manager.record_unit_verification` 写入，无 `unit` 字段的旧格式事件不再匹配（保守按无证据处理，主会话重新验证）
 - **Join**（§71-§72）：全部单元 completed 后主会话显式 join——聚合 diff → 任务级全局验证（跨单元集成/构建/lint，局部验证永不自动替代）→ 终指纹 → 审查 → 完成门
 
 ## 9. 强制层（alpha2 起，四重检查）
@@ -246,7 +249,42 @@ v2 把关键运行时契约从提示词升级为确定性强制。强制层由�
 - ownership 声明三种形式：精确文件、目录前缀（`src/auth` 等价 `src/auth/**`，按路径段匹配）、glob（`**` 跨段 / `*` 与 `?` 不跨段）；拒绝隐式扩张（`src/auth` 不覆盖 `src/authentication.ts`）
 - **证据指纹**（`runtime/fingerprint.py`）：`task_fingerprint` = sha256(基线修订 + 相关文件集归一化内容状态)（CRLF/LF 归一、路径归一）；范围 = 声明 ownership 时的「改动 ∩ 声明」，未声明时 = 全部改动。主会话记录证据（`record_verification` / `record_review`，时机契约见 continuity 技能）与完成门比对用**同一入口**——任何记录后的文件编辑都使指纹不一致，证据判 stale，完成被拦（「任何修复使先前验证/审查失效」的自动强制）
 - `.glm-conductor/` 运行时目录豁免——编排器自身账本不算用户仓库改动（否则创建 state.json 即自指拦截）
+- **per-task 仓库求值（RB-2）**：账本根（`ZCODE_PROJECT_DIR` / cwd，state.json / events.jsonl / lease 所在地）不再同时充当 git 根——每个参与任务按 state 顶层可选 `repository.root` 解析其专属仓库根（`bind_repository_root` / `bound_repository_root` / `resolve_repository_root`；无绑定 = legacy，回退账本根，单仓行为不变），ownership / 指纹 / 视觉检查全部在该根上求值；同一仓库根的 touched + base 单次 Stop 内至多取一次（per-repo 快照缓存：每根 1 次 `status` + 1 次 `rev-parse`，同根多任务不重复 git）。workspace 根无需是 Git 仓库——任务绑定嵌套仓即可受门强制；多嵌套仓歧义不猜：报出候选目录并要求显式绑定，绝不自动猜根。账本恒在账本根，绝不换根
+- **降级按任务隔离（RB-2）**：仓库解析 / git 失败只降级该任务（stderr 报警 + 该任务 journal 记 `gate_degraded`），其余任务照常求值——旧实现的全局 git 早退拆除。降级 reason 结构化词汇（`gate_degraded` 事件的 `reason` 字段）：`repository_unavailable`（任务绑定的 repository.root 上 git 操作失败）、`git_unavailable`（legacy 任务且账本根本身是 git 根、git 瞬时故障）、`repository_root_missing`（legacy 任务、账本根非 git 根且一级子目录无任何 `.git` 候选）、`repository_ambiguous`（legacy 任务、账本根非 git 根但存在候选——即使只有一个也不自动绑定）、`evaluation_error`（求值期结构性错误：指纹 rev-parse 失败 / ownership 声明模式非法等），另有发现完整性路径的 `orphaned_task` / `corrupt_state`。被降级任务不参与本轮 `gate_passed` 记账，其指纹取不到 → 天然保持 `finalizing`（`completed` 只能来自门内全绿提交）；corrupt 高保障任务的 fail-closed 证据只依赖 journal，不被任何任务的仓库故障牵连
 - 子代理工具调用不触发钩子（Phase 0 实证：子会话不携带 hook runner），故写前拦截不可实现——**越界改动不被阻止发生，但不可能静默通过完成门**
+
+### 9.1.1 完成生命周期（finalizing → [完成门] → completed）
+
+状态词汇含完成请求态 `finalizing`（介于 reviewing 与 completed 之间，非终态）；`runtime/state.py` 的顶层转换表 `TASK_TRANSITIONS` 约束每一次 status 迁移——终态无表项（不接受任何转换），`completed` 的唯一入边是 `finalizing → completed`，且只对完成门内部通道（`state.commit_completion`，经 `save_state` 的 `_gate_commit` 私有参数）放行，`save_state` / `transition_task_status` 等公共写入路径一律拒绝。收尾流：模型把 status 推进为 `finalizing`（= 请求完成，`transition_task_status` 自动记 `status_changed` 事件）→ Stop 完成门四重检查：有违规照常 block（状态保持 finalizing，修复后重新 Stop）；全部通过时钩子在放行路径对**全部** `finalizing` 任务（不限于参与校验集合）原子提交 `completed` 并记 `completed` 事件（via=completion_gate，绑定当前证据指纹）——gate_exhausted 放行与任何降级路径都不提交。由此 `completed` 成为完成门的唯一提交点，主会话无法在完成门前经公共状态 API 把任务写成 completed 绕过四重检查（P0-1 修复）。
+
+### 9.1.2 路由不变量（P0-2）
+
+`route.assurance` 与 `review.required` 是两个独立字段——只靠「模型记得写对」不构成强制。v2.0.1 起 `runtime/state.py` 的 `validate_route_invariants` 在 `validate_state` 既有枚举校验之后追加四条跨字段规则，非法组合在 `save_state` 即被拒（错误消息中文、含字段路径；规则仅在涉及字段为合法枚举值时生效，route 非 dict 或 mode 非法交由基线枚举错误处理）：
+
+```
+R1 矩阵一致性：mode 必须等于路由矩阵 [delegability][assurance]
+   （low/standard→solo，high/standard→delegate，low/high→audit，high/high→full）
+R2 executor 绑定：solo/audit ↔ executor=main；
+   delegate/full ↔ executor ∈ (flash-implementer, visual-implementer)
+R3 review 绑定：mode ∈ (audit, full) 或 assurance=high（derive_review_required
+   推导为 True）时 review.required 必须为 true（review 块缺失按非 true 处理）
+R4 delegate/full 实质性：ownership.files 与 verification.required 必须非空数组
+```
+
+配套地，`new_task_state` 的 `review_required` 缺省值改为按 route 推导（audit/full 或 assurance:high → True；solo/delegate + standard → False；信息不足落 False；显式 True/False 照传——显式 False + 推导 True 的组合由 R3 在保存时拒绝）。门侧同步：`hooks/stop_gate.py` 的参与判定与检查 3 的条件从「只认 `review.required` 标志」改为「标志为 True 或 route 推导要求审查」——即使手写 state.json 绕过 `save_state` 校验漏写标志，high-assurance 任务也无法跳过独立 fresh ship 裁决的检查（不新增 check 词汇，仍按 review_missing / review_stale 拦截）。
+
+### 9.1.3 任务发现完整性（P0-3）
+
+完成门的强制对象先于四重检查——发现阶段若把「读不出的任务」当成「不存在的任务」，损坏即成为静默放行通道。v2.0.1 起 Stop 钩子改用 `runtime/state.py` 的 `discover_tasks` 对 `tasks_root` 下全部子目录做四分类（`find_active_tasks` 保留为兼容 helper，实现复用同一发现，输出不变）：
+
+| 分类 | 判定 | Stop 完成门处置 |
+| --- | --- | --- |
+| active | state.json 可读且 status 非终态 | 照常参与四重检查 |
+| terminal | status ∈ (completed, cancelled, failed) | 与完成门无关 |
+| orphaned | 目录存在但无 state.json | 永不拦截：stderr 报警 + 该目录 journal 记 `gate_degraded`（reason=orphaned_task） |
+| corrupt | state.json 存在但 JSON 损坏 / 任务标识归一失败（ValueError）或读取 OSError | 按 journal 证据二分（见下），不中断其余任务的扫描 |
+
+**corrupt 的 fail-closed 证据规则**：读该任务目录 journal（容错读，坏行跳过），任一 `route_selected` 事件 mode ∈ (audit, full) 或 assurance=high，或任一 `status_changed` 事件 to=finalizing → 判定该任务此前处于需要完成门强制的高保障 / 完成请求路径，状态损坏不得成为静默放行通道——并入违规清单（check=`corrupt_state`，为第八种 check）走统一 block / gate_exhausted 机器，报文含可行动恢复指引（从 events.jsonl / checkpoint 证据重建 state.json——仓库状态权威；或经用户确认后归档任务目录）。无此证据 → 降级放行：stderr 报警 + journal 记 `gate_degraded`（reason=corrupt_state）。corrupt 的证据判定只依赖 journal，不依赖 git——active 为空时 git touched 清单不再被取；RB-2 起仓库求值按任务隔离（见 §9.1 per-task 仓库求值），corrupt 的 fail-closed 判定恒读 journal，不再被其他任务的仓库故障降级早退牵连。由此状态损坏被结构化记录并可区分：no task（静默零干预）≠ unreadable task（报警，高保障时拦截）。
 
 ### 9.2 PreToolUse 双面：Layer B 注入（提示级）+ Bash 策略门控（决策级，beta1）
 
@@ -257,7 +295,7 @@ v2 把关键运行时契约从提示词升级为确定性强制。强制层由�
 
 ### 9.3 失败处理与循环安全
 
-- **fail-open 降级可见**：三种降级路径全部放行并在 stderr 报 `ENFORCEMENT DEGRADED`，但记账不同——前两类（git 失败 / 求值阶段结构性错误）会向参与任务 journal 记 `gate_degraded`，进程级崩溃兜底仅 stderr 可见、不写 journal（崩溃可能正是 journal 故障所致）——钩子起不来时 fail-closed 会卡死所有会话，降级可见优于假强制
+- **fail-open 降级可见**：降级路径全部放行并在 stderr 报 `ENFORCEMENT DEGRADED`，但记账不同——仓库降级（RB-2 起**按任务隔离**：只降级解析/git 失败的那个任务，其余任务照常求值，不再全局早退）与求值阶段结构性错误会向该任务 journal 记 `gate_degraded`（reason 词汇表见 §9.1），进程级崩溃兜底仅 stderr 可见、不写 journal（崩溃可能正是 journal 故障所致）——钩子起不来时 fail-closed 会卡死所有会话，降级可见优于假强制
 - **续行有界**：运行时对 Stop block 的续行内建上限（每 turn 最多 3 次）；钩子侧连续两次 block 后第三次放行（stderr 报 `ENFORCEMENT GATE EXHAUSTED`、journal 记 `gate_exhausted`）——**此时模型必须向用户报告 blocked，不得声称完成**；两次 block 间出现真实工作事件即重置计数（活体实测：四重检查全路径单次 Stop 约 0.2s，正常仓库远低于 5s 钩子预算）
 - **强制面（alpha2）**：ownership 越界 + 验证完成 + 审查有效 + 证据新鲜度（含视觉证据），四者同门按序检查
 
@@ -276,9 +314,9 @@ v2 把关键运行时契约从提示词升级为确定性强制。强制层由�
 
 - `scripts/validate_plugin.py`（纯标准库，14 项检查）+ CI（`.github/workflows/validate.yml`，静态校验 + 单元测试）维护契约一致性：扫描 `plugins/`、`README.md`、`marketplace.json` 与本文档，`docs/history/` 不参与当前契约校验
 - 检查覆盖：旧名清理、禁词、quota 否定式声明、任务专属 checkpoint 路径、视觉协议标记、TASK_ID 必含、视觉新调用规范措辞、`plugin.json` 与 CHANGELOG 的版本一致性、钩子清单完整性（含脚本存在性）、runtime 状态层与技能契约标记
-- 运行时模块（`runtime/`）、钩子（`hooks/`）与 quota 子系统各配单元测试与子进程冒烟（`tests/`，635 用例：状态层 90、日志 26、ownership 38、指纹 59、stop_gate 32、pre_tool_use 18、policy 20、work_unit 57、dependency 52、dispatcher 55、reconcile 21、lease 19、quota 解析 29/抽象 12/适配器 28/调度器 37/凭证 25/诊断 17，含 §98 集成冒烟、§45 调度场景、§68-§69 恢复对账三场景与策略/传输端到端），随 CI 执行
+- 运行时模块（`runtime/`）、钩子（`hooks/`）与 quota 子系统各配单元测试与子进程冒烟（`tests/`，828 用例：状态层 133、日志 26、ownership 38、指纹 59、stop_gate 66、pre_tool_use 18、policy 20、work_unit 57、dependency 52、dispatcher 55、task_manager 72、reconcile 46、lease 37、quota 解析 29/抽象 12/适配器 29/调度器 37/凭证 25/诊断 17，含 §98 集成冒烟、§45 调度场景、§68-§69 恢复对账三场景与策略/传输端到端），随 CI 执行
 - 版本策略：`plugin.json` 版本、CHANGELOG 最新条目、git tag / GitHub Release 三者保持一致
 
 ## 12. 演化边界
 
-v2 开发在 `v2-dev` 分支进行（`main` 保持在 v1.1.0 发布态，里程碑完成后再合入）。当前处于 **2.0.0 stable**——强制层（状态/四重完成门/指纹/策略门控）+ 额度感知连续性 + 任务与工作单元管理 + 租约保护的有界并行（上限 4，experimental——§101 允许 stable 保留 experimental 标记）全部落地；§103 Definition of Done 全条目达成。除非实际使用暴露出具体能力缺口，不新增路由维度或角色；强制层只针对高置信不变量（越界、缺失证据、过期证据），不做语义解释型拦截。
+v2 开发在 `v2-dev` 分支进行（`main` 保持在 v1.1.0 发布态，里程碑完成后再合入）。当前处于 **2.0.1 stable**——强制层（状态/四重完成门/指纹/策略门控）+ 额度感知连续性 + 任务与工作单元管理 + 租约保护的有界并行（上限 4，experimental——§101 允许 stable 保留 experimental 标记）+ v2.0.1 运行时完整性加固（完成生命周期门控、路由不变量、发现四分类、task_manager 事务边界、租约崩溃恢复、证据归属绑定）+ release hardening（RB-1 单元完成证据门 all-match 收紧、RB-2 repository.root 绑定 + per-task 完成门求值）全部落地；§103 Definition of Done 全条目达成。除非实际使用暴露出具体能力缺口，不新增路由维度或角色；强制层只针对高置信不变量（越界、缺失证据、过期证据），不做语义解释型拦截。

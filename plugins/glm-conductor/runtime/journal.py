@@ -45,9 +45,14 @@ RECOMMENDED_EVENTS = (
     "route_selected",      # SELECTIVE ROUTE 声明
     "route_reassessment",  # 路由重估
     "implementation_started",  # 实施者派发
+    "dispatch_prepared",   # task_manager.prepare_dispatch（决策通过 + 租约在位）
+    "dispatch_aborted",    # task_manager.abort_dispatch（未提交准备的回退）
+    "lease_recovered",     # task_manager.recover_leases（崩溃后 stale 租约释放）
     "verification",        # 主会话验证（含 command/status）
     "review",              # 审查者裁决（含 verdict）
+    "unit_finished",       # task_manager.finish_unit（单元终态 + 租约释放）
     "checkpoint_written",  # checkpoint 落盘
+    "status_changed",      # 任务状态迁移（transition_task_status 记录）
     "gate_blocked",        # Stop 完成门拦截
     "gate_passed",         # 完成门校验通过放行（断链 + 审计）
     "gate_exhausted",      # 完成门连续 block 达运行时上限后放行

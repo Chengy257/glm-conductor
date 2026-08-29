@@ -102,6 +102,8 @@ active task（continuity 为 resumable / idle，或需 Stop 完成门保护的 d
 | low | high | `audit` | GLM-5.3 主会话 | 是 |
 | high | high | `full` | 实施者子智能体 | 是 |
 
+矩阵与 review/ownership/verification/executor 绑定自 v2.0.1 起由 runtime.state.validate_route_invariants 在保存时强制，Stop 完成门按 route 推导审查义务——漏写 review.required 无法绕过。
+
 语义要点：
 
 - **delegate 不是 solo 的"升级"**。solo = 旗舰实施，delegate = Flash 实施，两者只是实施者不同；delegate 表达的是"该实施已足够有界，可由执行模型完成"，并不天然更安全或更高级。
@@ -139,7 +141,7 @@ GLM-5.3 主会话与 glm-reviewer 均为纯文本模型：**主会话在视觉�
 - 委派必须使用五段式实施规格（OBJECTIVE / FILES AND OWNERSHIP / INTERFACES / CONSTRAINTS / VERIFICATION），返回后按 IMPLEMENTATION REPORT 接收；完整模板见 references/role-contracts.md（首次委派前必须阅读）。复杂或陌生代码域的委派在规格前附 TASK CONTEXT PACK（主会话压缩的有界上下文包，条目优先取自 ROUTING PREFLIGHT REPORT；模板与紧凑性规则见 role-contracts.md）
 - 工作者的报告仅视为声明（implementation claim）：主会话必须亲自检查完整 diff、核对改动范围、重跑验证命令，才能形成验证证据（verification evidence）
 
-active task 的状态同步义务：五段式规格中 FILES AND OWNERSHIP 声明的 owned 文件清单必须同步写入 state.json 的 ownership.files（完成门 Layer A 按"实际改动文件 ⊆ owned"校验，越界改动无法通过完成门）；派发实施者后追加 `implementation_started` 事件；主会话验证完成（含命令与结果）追加 `verification` 事件；审查裁决后追加 `review` 事件。验证与审查落账时必须同步记录证据指纹（`record_verification` / `record_review` + `fingerprint.task_fingerprint`，完成门按指纹比对拦截过期证据）——时机与红线见 continuity 技能「证据指纹的记录时机」节；任何修复使先前裁决失效（§11）由此自动强制。
+active task 的状态同步义务：五段式规格中 FILES AND OWNERSHIP 声明的 owned 文件清单必须同步写入 state.json 的 ownership.files（完成门 Layer A 按"实际改动文件 ⊆ owned"校验，越界改动无法通过完成门；连续两次 block 后按运行时续行上限放行——gate_exhausted，stderr 报警 + journal 记账——此时任务不进入 completed（完成提交仅在全绿门路径），且模型有向用户报告 blocked 的强制义务）；派发实施者后追加 `implementation_started` 事件；主会话验证完成（含命令与结果）追加 `verification` 事件；审查裁决后追加 `review` 事件。验证与审查落账时必须同步记录证据指纹（`record_verification` / `record_review` + `fingerprint.task_fingerprint`，完成门按指纹比对拦截过期证据）——时机与红线见 continuity 技能「证据指纹的记录时机」节；任何修复使先前裁决失效（§11）由此自动强制。
 
 ## 10. 工作单元与任务图（多单元任务）
 
@@ -147,9 +149,9 @@ active task 的状态同步义务：五段式规格中 FILES AND OWNERSHIP 声�
 
 **分解**（§60-§63）：单元间依赖用 `depends_on` 表达（同一任务内引用、禁止环）；单元不是工作流 DSL——十个状态词、显式依赖、就绪推导，仅此而已。
 
-**派发**（§64-§67）：主会话仍是唯一编排者（子智能体不得派发子智能体）。多单元派发走 `runtime/dispatcher.py` 的 `plan_dispatch` 准入——就绪（依赖全部 completed）→ quota 四态闸（EXHAUSTED 转 waiting_quota、UNKNOWN/PRESSURE 保守抑制）→ ownership 不相交 → 租约闸（他人持有的租约挡派发，`runtime/lease.py`）→ max_workers 预算。**默认串行（max_workers=1）；有界并行（上限 4，experimental）已启用**：并行资格 = ownership 不相交 或 有效租约保护（§81），接口已固定、验证可分离、无顺序依赖；不确定即不并行（串行永远合法）。派发前对单元 ownership 获取租约（全有或全无，同 owner 幂等），单元离开活跃写相（completed/failed/cancelled，或转 verifying 后由主会话裁决）即释放；把单元 id 记入 `dispatch.active`。
+**派发**（§64-§67）：主会话仍是唯一编排者（子智能体不得派发子智能体）。多单元派发的准入决策走 `runtime/dispatcher.py` 的 `plan_dispatch`（纯决策器，零 I/O，只产出决策）——就绪（依赖全部 completed）→ quota 四态闸（EXHAUSTED 转 waiting_quota、UNKNOWN/PRESSURE 保守抑制）→ ownership 不相交 → 租约闸（他人持有的租约挡派发，`runtime/lease.py`）→ max_workers 预算。**默认串行（max_workers=1）；有界并行（上限 4，experimental）已启用**：并行资格 = ownership 声明判定可并行 **且** 无外来活跃租约冲突（两道闸门均须通过，§66/§78；租约不豁免 ownership 闸），接口已固定、验证可分离、无顺序依赖；不确定即不并行（串行永远合法）。决策之后的派发生命周期不要手工拼接「plan→租约→状态转换→`dispatch.active` 记账→save→事件」——走 `runtime/task_manager.py` 的事务边界：`prepare_dispatch`（决策 + 获取租约（全有或全无，同 owner 幂等）+ `dispatch_prepared` 事件，不动单元状态）→ `commit_dispatch`（ready→running + 单元 id 记入 `dispatch.active` + 单次 save + `implementation_started` 事件）→ [Agent 实施] → `finish_unit`（终态转换 + 释放租约 + active 移除 + `unit_finished` 事件）；`abort_dispatch` 可回退未提交的准备（running 不可 abort）。崩溃窗口有确定性恢复路径：prepare 后中断可安全 commit 或 abort（自有租约不挡重派）；commit 后中断按 §69 由 `runtime/reconcile.py` 三分恢复。单元离开活跃写相（completed/failed/cancelled，或转 verifying 后由主会话裁决）即释放租约——`finish_unit` / `abort_dispatch` 已固化该时点。
 
-**单元验证**（§70）：worker 的 IMPLEMENTATION REPORT 仍是声明——主会话亲自检查单元 diff、亲自跑单元 verification、记指纹（`record_verification` + `task_fingerprint` 口径），单元才算 `completed`；`attempt` 记录重试历史，新调用不抹除失败史（§73 有界重试）。
+**单元验证**（§70）：worker 的 IMPLEMENTATION REPORT 仍是声明——主会话亲自检查单元 diff、亲自跑单元 verification、经 `task_manager.record_unit_verification` 记录**单元级**证据（事件绑定单元 id + `task_fingerprint` 指纹），单元才算 `completed`（RB-1 起 `finish_unit` 前置 all-match 证据门：每个 required command 各需一条单元绑定、指纹新鲜、status=pass 的事件，缺一即拒绝且零副作用）；既有**任务级** `state.record_verification` 口径保留给 join 后的任务级全局验证（§71-§72）与完成门证据——单元级与任务级两种写入口不可混用。时序纪律：`record_unit_verification` → `finish_unit` → git commit——record 与 finish 之间任何 git 提交都会改变基线修订、使已记录证据失效，须重跑验证并重新记录。`attempt` 记录重试历史，新调用不抹除失败史（§73 有界重试）。
 
 **Join**（§71-§72）：全部单元 completed 后主会话执行显式 join——检查聚合 diff → 跑**任务级全局验证**（跨单元交互的集成/构建/lint——单元局部验证永不自动替代全局验证）→ 终指纹 → assurance 审查（若需要）→ Stop 完成门。并行 worker 不得集体声明父任务完成。
 

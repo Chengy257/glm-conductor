@@ -45,11 +45,11 @@
 
 fetch 流程（§38）：
     缓存检查（§34：force=False 且距上次成功 < ttl_seconds → 返回
-    缓存 snapshot 浅拷贝；失败永不写缓存）→ 传输层 → 状态分类
+    缓存 snapshot 深拷贝；失败永不写缓存）→ 传输层 → 状态分类
     （401/403 → auth；3xx → network（重定向被禁）；其余非 2xx →
     unavailable；URLError / timeout / OSError → network）→ 限长
     检查（malformed）→ JSON 解析（malformed）→ parse_quota_body
-    （§27 标准化）→ 写缓存 → 返回浅拷贝。
+    （§27 标准化）→ 写缓存 → 返回深拷贝。
 
 传输层注入点（测试锚定；全部测试走注入，零真实网络）：
     transport(url, headers, timeout) -> (status_code:int, body:bytes)
@@ -66,6 +66,7 @@ fetch 流程（§38）：
     docs/glm-conductor-v2-phase0-runtime-verification.md。
 """
 
+import copy
 import json
 import socket
 import urllib.error
@@ -239,7 +240,7 @@ class HttpQuotaProvider(QuotaProvider):
         """抓取标准化 quota snapshot（§27 形状）。
 
         - force=False 且距上次成功抓取不足 ttl_seconds 秒 → 返回
-          缓存 snapshot 的浅拷贝，不发起请求（§34）；
+          缓存 snapshot 的深拷贝，不发起请求（§34）；
         - force=True 或缓存过期 → 真实请求；
         - 任何失败都不写缓存、不清缓存；
         - 失败抛 QuotaProviderError（分类见模块 docstring），不返回
@@ -249,7 +250,7 @@ class HttpQuotaProvider(QuotaProvider):
             elapsed = (datetime.now(timezone.utc)
                        - self._cache_at).total_seconds()
             if elapsed < self.ttl_seconds:
-                return dict(self._cache)  # 浅拷贝：调用方改动不污染缓存
+                return copy.deepcopy(self._cache)  # 深拷贝：嵌套对象（windows 等）的调用方修改不污染缓存
 
         headers = {
             # 实测格式：Authorization: <API Key>，无 Bearer 前缀（§37 条款 8）
@@ -289,7 +290,7 @@ class HttpQuotaProvider(QuotaProvider):
             parsed, provider=self.name, fetched_at=_utc_now_iso_ms())
         self._cache = snapshot          # 失败路径到不了这里（§34）
         self._cache_at = datetime.now(timezone.utc)
-        return dict(snapshot)           # 浅拷贝（§34）
+        return copy.deepcopy(snapshot)  # 深拷贝：嵌套对象（windows 等）的调用方修改不污染缓存
 
     # —— 错误构造（消息只含 host/path/状态码/异常类型名，绝不拼 key，§37） ——
 

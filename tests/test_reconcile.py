@@ -19,12 +19,33 @@ journal + 驱动 reconcile_interrupted）+ 纯函数容错用例：
   - verifying 态建议限定（P1#1）：新鲜证据 → suggestions completed；
     无残留无新鲜 / 有残留无新鲜两种表外情形 → advisories（无 to、
     不携带转换，裁决归主会话）；
-  - 纯函数用例：非 running/verifying 单元零建议（全状态词汇穷举）；
+    - 纯函数用例：非 running/verifying 单元零建议（全状态词汇穷举）；
     events 注入空 / 非 list 容错；suggestions / advisories /
-    reconciled 键序均按 units 出现序；§69 证据匹配四条件逐项锚定
-    （event 名 / 指纹 / status=pass / command ∈ verification）；纯
+    reconciled 键序均按 units 出现序；§69 证据匹配五条件逐项锚定
+    （event 名 / unit==单元 id（H6 逐字精确，无 unit 旧格式不匹配）/ 指纹 /
+    status=pass / command ∈ verification）；纯
     建议纪律（零落盘、不改 units）；结构性错误（git 失败 / 非法
-    ownership 模式 / 指纹目标为目录）自然上抛。
+    ownership 模式 / 指纹目标为目录）自然上抛；
+  - H5 reconcile_leases 三分（无 git 需求，tempdir + 手工租约）：
+    completed/ready owner → stale（reason 注明状态）、图中无 owner →
+    stale（图中无此单元）、running/verifying 未过期 → active、running
+    已过期 → expired_running（不入 stale，不自动清）、桶内按 path
+    排序、空租约空报告、非 list units 按空图容错、纯建议纪律
+    （零落盘、不改 units）；
+  - H6 证据归属绑定（work_unit_verification_evidence_requires_matching_
+    unit_id，git 基座真算指纹）：同 command / 重叠 ownership 的 A/B
+    双 running 单元——unit=uA 的验证事件 → A 建议 completed、B 只得
+    verifying（不得复用）；事件归属对调对称成立；无 unit 字段的旧
+    格式事件不再匹配（双方 verifying，保守按无证据处理）；
+  - WU-P1 共享证据谓词（fresh_unit_verification，all-match 口径）：
+    直测——2 条 required 仅 1 条有证据 → ok=False 且 missing 恰为
+    未验证那条（all-match，D2 收紧）；空 required 快路径（无 git 的
+    普通 tempdir 可调用，零 git 零读盘；非 list/tuple required 同
+    口径）；unit=other / status=fail / stale 指纹 / command 不在
+    required 内 / 无 unit 字段旧格式五类事件均不算；events 注入非
+    list 容错为 []；恢复集成（经 reconcile_interrupted）——多
+    command 部分证据 + 残留改动 → running 得 verifying（不再
+    completed）、verifying 得 stay advisory，全部证据才双双 completed。
 
 git fixture 做法（git init + config + commit、Windows 下 .git 只读位
 清理）对齐 tests/test_stop_gate.py 的 GitRepoFixture；环境无 git 可执行
@@ -36,6 +57,7 @@ git fixture 做法（git init + config + commit、Windows 下 .git 只读位
 """
 
 import copy
+import json
 import os
 import shutil
 import stat
@@ -50,14 +72,18 @@ from runtime import dependency
 from runtime import dispatcher
 from runtime import fingerprint as fingerprint_mod
 from runtime import journal as journal_mod
+from runtime import lease as lease_mod
 from runtime import ownership
 from runtime import reconcile
 from runtime import state
 from runtime import work_unit
 
 TID = "recon-task-1a2b3c"
-ROUTE = {"mode": "delegate", "delegability": "high", "assurance": "standard",
-         "executor": "flash-implementer", "continuity": "foreground"}
+# H2 夹具迁移：delegate 路由在规则 R4 下要求非空 ownership/verification，
+# 而本文件的指纹口径依赖「未声明 ownership = 全部改动」基座——改用矩阵
+# 合法的 solo 路由（被测的对账行为与路由模式无关，ownership 保持未声明）
+ROUTE = {"mode": "solo", "delegability": "low", "assurance": "standard",
+         "executor": "main", "continuity": "foreground"}
 
 CMD_A = "python3 -m unittest tests.test_feature_a"
 CMD_B = "python3 -m unittest tests.test_feature_b"
@@ -152,8 +178,9 @@ class ReconcileFixture(GitRepoFixture):
         return fingerprint_mod.compute_fingerprint(str(self.repo), owned_hits)
 
     def verification_event(self, unit, fp):
-        """构造绑定指定指纹的 pass 验证事件（journal verification 形态）。"""
+        """构造绑定单元 id + 指纹的 pass 验证事件（H6 journal 形态）。"""
         return {"event": "verification",
+                "unit": unit["id"],
                 "command": unit["verification"][0],
                 "status": "pass",
                 "fingerprint": fp}
@@ -433,11 +460,11 @@ class ReconcileEventsToleranceTest(GitRepoFixture):
         self.assertEqual(report["suggestions"]["tol"]["to"], "verifying")
 
 
-# —— 纯函数：§69 证据匹配四条件逐项锚定 ——
+# —— 纯函数：§69 证据匹配五条件逐项锚定（H6 起含 unit 归属绑定） ——
 
 @unittest.skipUnless(shutil.which("git"), "环境无 git 可执行，跳过 git fixture 测试")
 class ReconcileEvidenceMatchingTest(ReconcileFixture):
-    """event 名 / 指纹相等 / status=pass / command ∈ verification 四条件。"""
+    """event 名 / unit==单元 id / 指纹相等 / status=pass / command ∈ verification 五条件。"""
 
     def residual_unit(self):
         self.write("src/ev/e.py", b"v1\n")
@@ -488,6 +515,217 @@ class ReconcileEvidenceMatchingTest(ReconcileFixture):
         report = reconcile.reconcile_interrupted(
             str(self.repo), TID, [unit])  # events 走缺省通道（真 journal）
         self.assertEqual(report["suggestions"]["ev"]["to"], "verifying")
+
+
+# —— WU-P1：fresh_unit_verification 共享证据谓词（all-match 口径直测） ——
+
+@unittest.skipUnless(shutil.which("git"), "环境无 git 可执行，跳过 git fixture 测试")
+class FreshUnitVerificationPredicateTest(ReconcileFixture):
+    """fresh_unit_verification 直测：五条件逐项 + all-match 收紧 +
+    events 注入容错（touched 显式注入，指纹与 reconcile 同口径真算）。"""
+
+    TOUCHED = ["src/multi/m.py"]
+
+    def multi_unit(self):
+        """双 required command 的 running 单元（all-match 的最小载体）。"""
+        self.write("src/multi/m.py", b"v1\n")
+        return make_unit("multi", ("src/multi/**",), status="running",
+                         verification=(CMD_A, CMD_B))
+
+    def evidence(self, unit, fp, *, command=None, unit_id=None,
+                 status="pass", event_name="verification"):
+        """构造一条可逐字段变异的验证事件（H6 journal 形态）。"""
+        return {"event": event_name,
+                "unit": unit["id"] if unit_id is None else unit_id,
+                "command": unit["verification"][0] if command is None
+                else command,
+                "status": status,
+                "fingerprint": fp}
+
+    def verdict(self, unit, events):
+        return reconcile.fresh_unit_verification(
+            str(self.repo), TID, unit, touched=self.TOUCHED, events=events)
+
+    def test_partial_required_evidence_is_not_ok(self):
+        # ① 2 条 required 仅 1 条有证据 → ok=False，missing 恰为未验证那条
+        unit = self.multi_unit()
+        fp = self.current_fingerprint(unit, self.TOUCHED)
+        report = self.verdict(unit, [self.evidence(unit, fp)])  # 仅 CMD_A
+        self.assertEqual(
+            report,
+            {"ok": False, "fingerprint": fp,
+             "required": [CMD_A, CMD_B], "matched": [CMD_A],
+             "missing": [CMD_B]})
+
+    def test_other_unit_event_does_not_count(self):
+        # ③ unit=other 的事件不算（H6 归属绑定）
+        unit = self.multi_unit()
+        fp = self.current_fingerprint(unit, self.TOUCHED)
+        events = [self.evidence(unit, fp),
+                  self.evidence(unit, fp, command=CMD_B, unit_id="other")]
+        report = self.verdict(unit, events)
+        self.assertFalse(report["ok"])
+        self.assertEqual(report["matched"], [CMD_A])
+        self.assertEqual(report["missing"], [CMD_B])
+
+    def test_fail_status_does_not_count(self):
+        # ④ status="fail" 不算 pass 证据
+        unit = self.multi_unit()
+        fp = self.current_fingerprint(unit, self.TOUCHED)
+        events = [self.evidence(unit, fp),
+                  self.evidence(unit, fp, command=CMD_B, status="fail")]
+        report = self.verdict(unit, events)
+        self.assertFalse(report["ok"])
+        self.assertEqual(report["matched"], [CMD_A])
+        self.assertEqual(report["missing"], [CMD_B])
+
+    def test_stale_fingerprint_does_not_count(self):
+        # ⑤ 指纹不匹配（stale）不算：事件先记、文件后改
+        unit = self.multi_unit()
+        fp_stale = self.current_fingerprint(unit, self.TOUCHED)
+        self.write("src/multi/m.py", b"v2\n")
+        events = [self.evidence(unit, fp_stale),
+                  self.evidence(unit, fp_stale, command=CMD_B)]
+        report = self.verdict(unit, events)
+        self.assertFalse(report["ok"])
+        self.assertEqual(report["matched"], [])
+        self.assertEqual(report["missing"], [CMD_A, CMD_B])
+
+    def test_command_outside_required_does_not_count(self):
+        # ⑥ command 不在 required 内不算（喂饱 required 之外的命令无用）
+        unit = self.multi_unit()
+        fp = self.current_fingerprint(unit, self.TOUCHED)
+        report = self.verdict(unit, [self.evidence(unit, fp, command=CMD_C)])
+        self.assertFalse(report["ok"])
+        self.assertEqual(report["matched"], [])
+        self.assertEqual(report["missing"], [CMD_A, CMD_B])
+
+    def test_legacy_event_without_unit_field_does_not_count(self):
+        # ⑦ 无 unit 字段的旧格式事件不算（H6 破坏性决策不回退）
+        unit = self.multi_unit()
+        fp = self.current_fingerprint(unit, self.TOUCHED)
+        events = [{"event": "verification", "command": CMD_A,
+                   "status": "pass", "fingerprint": fp}]
+        report = self.verdict(unit, events)
+        self.assertFalse(report["ok"])
+        self.assertEqual(report["matched"], [])
+
+    def test_non_list_events_tolerated_as_empty(self):
+        # ⑧ events 注入非 list → 按 [] 容错（全部 required 归 missing）
+        unit = self.multi_unit()
+        for events in ("not-a-list", {"event": "verification"}, 42):
+            with self.subTest(events=events):
+                report = self.verdict(unit, events)
+                self.assertFalse(report["ok"])
+                self.assertEqual(report["required"], [CMD_A, CMD_B])
+                self.assertEqual(report["matched"], [])
+                self.assertEqual(report["missing"], [CMD_A, CMD_B])
+
+    def test_unit_without_valid_id_never_matches_legacy_events(self):
+        # ⑧b 无合法 id 的单元（缺 id / None / 空串）：legacy 无 unit 字段
+        # 事件的 event.get("unit")==None 不得经 None==None 匹配（审查
+        # 检查点 #1 发现的形状防御缺口）——全部 required 归 missing
+        unit = self.multi_unit()
+        fp = self.current_fingerprint(unit, self.TOUCHED)
+        for bad_unit in (dict(unit, id=None), dict(unit, id=""),
+                         {"verification": unit["verification"],
+                          "ownership": unit["ownership"]}):
+            with self.subTest(unit=bad_unit):
+                legacy = {"event": "verification", "command": CMD_A,
+                          "status": "pass", "fingerprint": fp}
+                report = self.verdict(bad_unit, [legacy])
+                self.assertFalse(report["ok"])
+                self.assertEqual(report["matched"], [])
+                self.assertEqual(report["missing"], [CMD_A, CMD_B])
+
+
+class FreshUnitVerificationFastPathTest(TempDirFixture):
+    """空 required 快路径：无 git 的普通 tempdir 可调用（零 git 零读盘）。"""
+
+    def test_empty_required_returns_ok_without_git(self):
+        # ② verification 为空 → 平凡 ok；touched / events 缺省也不碰 git
+        # （若误触缺省通道，git_touched_files 会在非 git tempdir 上抛
+        # OwnershipError，本用例即失败——快路径性质的机械证明）
+        unit = make_unit("nofix", ("src/nofix/**",), status="completed")
+        result = reconcile.fresh_unit_verification(str(self.repo), TID, unit)
+        self.assertEqual(
+            result,
+            {"ok": True, "fingerprint": None, "required": [],
+             "matched": [], "missing": []})
+
+    def test_non_list_required_tolerated_as_empty_fast_path(self):
+        # required 非 list/tuple（缺字段 / 标量）同走快路径，不碰 git
+        raw_unit = {"id": "raw-legacy", "ownership": ["src/raw/**"],
+                    "status": "running"}
+        result = reconcile.fresh_unit_verification(
+            str(self.repo), TID, raw_unit, touched=["src/raw/x.py"],
+            events=[{"event": "verification"}])
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["required"], [])
+
+    def test_non_empty_required_without_git_raises_ownership_error(self):
+        # 对照：required 非空才走缺省 touched 通道 → 非 git 仓库上抛
+        unit = make_unit("g", ("src/g/**",), status="running",
+                         verification=(CMD_A,))
+        with self.assertRaises(ownership.OwnershipError):
+            reconcile.fresh_unit_verification(str(self.repo), TID, unit)
+
+
+# —— WU-P1：恢复集成（D2 收紧经 reconcile_interrupted 生效） ——
+
+@unittest.skipUnless(shutil.which("git"), "环境无 git 可执行，跳过 git fixture 测试")
+class ReconcileAllMatchRecoveryTest(ReconcileFixture):
+    """多 command 单元部分证据不得 completed（D2 收紧）：
+    running → verifying（非 completed）、verifying → stay advisory；
+    全部 required 各有新鲜证据才恢复 completed 建议。"""
+
+    TOUCHED = ["src/duo/d.py"]
+
+    def duo_units(self):
+        """同 ownership 的 running / verifying 双单元（各双 required）。"""
+        self.write("src/duo/d.py", b"v1\n")
+        running = make_unit("duo-run", ("src/duo/**",), status="running",
+                            verification=(CMD_A, CMD_B))
+        verifying = make_unit("duo-ver", ("src/duo/**",), status="verifying",
+                              verification=(CMD_A, CMD_B))
+        return running, verifying
+
+    def test_partial_evidence_no_longer_suggests_completed(self):
+        # ⑨ 仅 CMD_A 有证据 → running 得 verifying、verifying 得 stay
+        running, verifying = self.duo_units()
+        fp = self.current_fingerprint(running, self.TOUCHED)
+        events = [self.verification_event(running, fp)]  # 夹具默认首 command
+        events.append({"event": "verification", "unit": "duo-ver",
+                       "command": CMD_A, "status": "pass",
+                       "fingerprint": fp})
+        report = reconcile.reconcile_interrupted(
+            str(self.repo), TID, [running, verifying],
+            touched=self.TOUCHED, events=events)
+        self.assertEqual(report["suggestions"], {
+            "duo-run": {"to": "verifying",
+                        "reason": "残留改动无新鲜验证证据：主会话必须"
+                                  "亲自检查 diff 并运行单元验证"}})
+        self.assertEqual(report["advisories"], {
+            "duo-ver": {"reason": "verifying 保持现状：主会话直接运行"
+                                  "单元验证后完成或失败"}})
+        self.assertEqual(report["reconciled"], ["duo-run", "duo-ver"])
+
+    def test_full_evidence_still_suggests_completed(self):
+        # ⑩ 全部 required 各有新鲜证据 → 双双 completed（D2 全量口径）
+        running, verifying = self.duo_units()
+        fp = self.current_fingerprint(running, self.TOUCHED)
+        events = []
+        for unit in (running, verifying):
+            for command in (CMD_A, CMD_B):
+                events.append({"event": "verification",
+                               "unit": unit["id"], "command": command,
+                               "status": "pass", "fingerprint": fp})
+        report = reconcile.reconcile_interrupted(
+            str(self.repo), TID, [running, verifying],
+            touched=self.TOUCHED, events=events)
+        self.assertEqual(report["suggestions"]["duo-run"]["to"], "completed")
+        self.assertEqual(report["suggestions"]["duo-ver"]["to"], "completed")
+        self.assertEqual(report["advisories"], {})
 
 
 # —— 纯函数：建议 / 咨询键序按 units 出现序 ——
@@ -567,6 +805,201 @@ class ReconcileErrorPropagationTest(TempDirFixture):
         with self.assertRaises(fingerprint_mod.FingerprintError):
             reconcile.reconcile_interrupted(str(self.repo), TID, [unit],
                                             touched=["src/dir"], events=[])
+
+
+# —— H5：reconcile_leases 租约三分对账（纯建议、零落盘、无 git 需求） ——
+
+LEASE_T0 = "2026-01-01T00:00:00.000Z"
+LEASE_NOW = "2026-06-01T00:00:00.000Z"
+LEASE_FUTURE = "2099-01-01T00:00:00.000Z"
+LEASE_PAST = "2020-01-01T00:00:00.000Z"
+
+
+class ReconcileLeasesTest(TempDirFixture):
+    """reconcile_leases 三分裁决：tempdir + 手工落盘租约，无 git 需求。"""
+
+    def setUp(self):
+        super().setUp()
+        self.units = [
+            make_unit("u1", ("src/a/**",), status="completed"),
+            make_unit("u2", ("src/b/**",), status="running"),
+            make_unit("u3", ("src/c/**",), status="verifying"),
+            make_unit("u4", ("src/d/**",), status="ready"),
+        ]
+
+    def _write_lease_map(self, mapping):
+        path = lease_mod.lease_path(self.repo, TID)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "w", encoding="utf-8", newline="\n") as fh:
+            fh.write(json.dumps(mapping, ensure_ascii=False, indent=2,
+                                sort_keys=True))
+
+    def _record(self, owner, expires_at=None):
+        record = {"owner": owner, "acquired_at": LEASE_T0}
+        if expires_at is not None:
+            record["expires_at"] = expires_at
+        return record
+
+    def test_completed_owner_is_stale(self):
+        self._write_lease_map(
+            {"src/a/**": self._record("u1", LEASE_FUTURE)})
+        report = reconcile.reconcile_leases(self.repo, TID, self.units,
+                                            now=LEASE_NOW)
+        # 单元在非活跃写相（completed）→ stale，reason 注明归属状态
+        self.assertEqual(report["stale"],
+                         [{"path": "src/a/**", "owner": "u1",
+                           "reason": "归属单元状态为 completed"
+                                     "（非活跃写相）"}])
+        self.assertEqual(report["active"], [])
+        self.assertEqual(report["expired_running"], [])
+
+    def test_owner_absent_from_graph_is_stale(self):
+        self._write_lease_map({"src/g.ts": self._record("ghost")})
+        report = reconcile.reconcile_leases(self.repo, TID, self.units,
+                                            now=LEASE_NOW)
+        self.assertEqual(len(report["stale"]), 1)
+        self.assertEqual(report["stale"][0]["path"], "src/g.ts")
+        self.assertEqual(report["stale"][0]["owner"], "ghost")
+        self.assertEqual(report["stale"][0]["reason"], "图中无此单元")
+
+    def test_ready_owner_is_stale(self):
+        # ready 未进入活跃写相：孤儿租约可见（端到端崩溃场景的裁决依据）
+        self._write_lease_map({"src/d/**": self._record("u4", LEASE_FUTURE)})
+        report = reconcile.reconcile_leases(self.repo, TID, self.units,
+                                            now=LEASE_NOW)
+        self.assertEqual(len(report["stale"]), 1)
+        self.assertIn("ready", report["stale"][0]["reason"])
+
+    def test_running_and_verifying_unexpired_are_active(self):
+        self._write_lease_map({
+            "src/c/**": self._record("u3", LEASE_FUTURE),
+            "src/b/**": self._record("u2", LEASE_FUTURE)})
+        report = reconcile.reconcile_leases(self.repo, TID, self.units,
+                                            now=LEASE_NOW)
+        # 桶内按 path 排序（确定性）
+        self.assertEqual(report["active"],
+                         [{"path": "src/b/**", "owner": "u2"},
+                          {"path": "src/c/**", "owner": "u3"}])
+        self.assertEqual(report["stale"], [])
+        self.assertEqual(report["expired_running"], [])
+
+    def test_running_expired_goes_to_expired_running_not_stale(self):
+        # running 但已过期：worker 可能仍在写 → 不入 stale（不自动清）
+        self._write_lease_map(
+            {"src/b/**": self._record("u2", LEASE_PAST)})
+        report = reconcile.reconcile_leases(self.repo, TID, self.units,
+                                            now=LEASE_NOW)
+        self.assertEqual(report["stale"], [])
+        self.assertEqual(report["active"], [])
+        self.assertEqual(report["expired_running"],
+                         [{"path": "src/b/**", "owner": "u2",
+                           "expires_at": LEASE_PAST}])
+
+    def test_buckets_sorted_and_report_shape(self):
+        self._write_lease_map({
+            "src/z.ts": self._record("ghost"),
+            "src/a/**": self._record("u2", LEASE_PAST),
+            "src/b/**": self._record("u2", LEASE_PAST),
+            "src/c/**": self._record("u3", LEASE_FUTURE)})
+        report = reconcile.reconcile_leases(self.repo, TID, self.units,
+                                            now=LEASE_NOW)
+        self.assertEqual(set(report),
+                         {"stale", "active", "expired_running"})
+        self.assertEqual([item["path"] for item in report["stale"]],
+                         ["src/z.ts"])
+        self.assertEqual([item["path"] for item in report["active"]],
+                         ["src/c/**"])
+        # expired_running 按桶内 path 排序
+        self.assertEqual([item["path"] for item in
+                          report["expired_running"]],
+                         ["src/a/**", "src/b/**"])
+
+    def test_no_leases_yields_empty_report(self):
+        report = reconcile.reconcile_leases(self.repo, TID, self.units)
+        self.assertEqual(report, {"stale": [], "active": [],
+                                  "expired_running": []})
+
+    def test_pure_advisory_no_disk_write_no_input_mutation(self):
+        self._write_lease_map(
+            {"src/b/**": self._record("u2", LEASE_FUTURE)})
+        lease_path = lease_mod.lease_path(self.repo, TID)
+        raw_before = lease_path.read_bytes()
+        units_before = copy.deepcopy(self.units)
+        journal_mod.append_event(self.repo, TID,
+                                 {"event": "verification"})
+        events_before = journal_mod.read_events(self.repo, TID)
+        reconcile.reconcile_leases(self.repo, TID, self.units,
+                                   now=LEASE_NOW)
+        # 零落盘（租约与 journal 字节不变）、不修改传入 units
+        self.assertEqual(lease_path.read_bytes(), raw_before)
+        self.assertEqual(journal_mod.read_events(self.repo, TID),
+                         events_before)
+        self.assertEqual(self.units, units_before)
+
+    def test_non_list_units_tolerated_as_empty_graph(self):
+        self._write_lease_map(
+            {"src/g.ts": self._record("u2", LEASE_FUTURE)})
+        # units 非 list → 空图 → 全部 stale（图中无此单元）
+        report = reconcile.reconcile_leases(self.repo, TID, None,
+                                            now=LEASE_NOW)
+        self.assertEqual(len(report["stale"]), 1)
+        self.assertEqual(report["stale"][0]["reason"], "图中无此单元")
+
+
+# —— H6：验证证据归属绑定（unit 字段逐字精确匹配；指纹真算需 git 基座） ——
+
+@unittest.skipUnless(shutil.which("git"), "环境无 git 可执行，跳过 git fixture 测试")
+class ReconcileUnitBindingTest(GitRepoFixture):
+    """work_unit_verification_evidence_requires_matching_unit_id（appendix B）：
+    相同 command / 重叠 ownership 的单元之间不得复用验证证据
+    （fingerprint 以真实 git 仓库为基座、按 reconcile 同一口径真算）。"""
+
+    def setUp(self):
+        super().setUp()
+        self.cmd = "python3 -m unittest tests.test_feature_shared"
+        self.write("src/shared/a.py", b"unit implementation\n")
+        self.touched = ["src/shared/a.py"]
+        # A/B 同 command、ownership 完全重叠（都声明 src/**）、都 running
+        self.units = [
+            make_unit("uA", ("src/**",), status="running",
+                      verification=(self.cmd,)),
+            make_unit("uB", ("src/**",), status="running",
+                      verification=(self.cmd,)),
+        ]
+        # 与 reconcile 同一口径对 owned_hits 真算当前指纹
+        self.fp = fingerprint_mod.compute_fingerprint(str(self.repo),
+                                                      self.touched)
+
+    def _report(self, events):
+        return reconcile.reconcile_interrupted(
+            str(self.repo), TID, self.units, touched=self.touched,
+            events=events)
+
+    def test_work_unit_verification_evidence_requires_matching_unit_id(self):
+        evidence = {"event": "verification", "unit": "uA",
+                    "command": self.cmd, "status": "pass",
+                    "fingerprint": self.fp}
+        report = self._report([evidence])
+        # A 的证据证明 A 的改动 → completed；B 不得复用 A 的证据 → verifying
+        self.assertEqual(report["suggestions"]["uA"]["to"], "completed")
+        self.assertEqual(report["suggestions"]["uB"]["to"], "verifying")
+
+    def test_unit_binding_is_symmetric(self):
+        evidence = {"event": "verification", "unit": "uB",
+                    "command": self.cmd, "status": "pass",
+                    "fingerprint": self.fp}
+        report = self._report([evidence])
+        # 事件归属谁，谁才可被建议 completed（对称锚定）
+        self.assertEqual(report["suggestions"]["uA"]["to"], "verifying")
+        self.assertEqual(report["suggestions"]["uB"]["to"], "completed")
+
+    def test_legacy_event_without_unit_no_longer_matches(self):
+        # 旧格式（无 unit 字段）不再匹配任何单元——保守按无证据处理
+        legacy = {"event": "verification", "command": self.cmd,
+                  "status": "pass", "fingerprint": self.fp}
+        report = self._report([legacy])
+        self.assertEqual(report["suggestions"]["uA"]["to"], "verifying")
+        self.assertEqual(report["suggestions"]["uB"]["to"], "verifying")
 
 
 if __name__ == "__main__":

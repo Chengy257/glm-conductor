@@ -37,8 +37,9 @@ B10.1 租约集成）。
       6. 通过 → dispatch 组，其 ownership 并入已批准集合。
 
 租约闸（B10.1，§78/§81/§82）：
-    并行启用的安全前提是「ownership 不相交（§66）或有效租约保护
-    （§81）」。plan_dispatch 的 leases 参数（{path/pattern: owner}
+    并行启用的安全前提是「ownership 声明判定可并行（§66）且无外
+    来活跃租约冲突（§78/§81）」——两闸正交叠加、均须通过。
+    plan_dispatch 的 leases 参数（{path/pattern: owner}
     dict；Task Manager 从 runtime.lease 读出租约后传入；lease_state
     的直读形状 {path: {"owner", ...}} 亦容错——取其 "owner"）把已
     落盘的租约事实纳入准入：§78 同 owner（owner == 候选 id）放行、

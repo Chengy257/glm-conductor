@@ -50,10 +50,15 @@ HOOKS_JSON = (Path(__file__).resolve().parents[1]
               / "plugins/glm-conductor/hooks/hooks.json")
 
 TID = "demo-task-1a2b3c"
-ROUTE = {"mode": "delegate", "delegability": "high", "assurance": "standard",
-         "executor": "flash-implementer", "continuity": "foreground"}
-# Bash 策略 ask 升级场景用的高保障 route（其余字段与 ROUTE 一致）
-HIGH_ROUTE = dict(ROUTE, assurance="high")
+# H2 夹具迁移：delegate 路由在规则 R4 下要求非空 ownership/verification，
+# 本文件被测的注入 / 策略门控行为与路由模式无关——基座改用矩阵合法的
+# solo 路由；ask 升级场景用矩阵合法的 audit 路由表达 assurance=high
+ROUTE = {"mode": "solo", "delegability": "low", "assurance": "standard",
+         "executor": "main", "continuity": "foreground"}
+# Bash 策略 ask 升级场景用的高保障 route（assurance=high；矩阵一致 → audit，
+# new_task_state 缺省推导 review.required=true，满足规则 R3）
+HIGH_ROUTE = {"mode": "audit", "delegability": "low", "assurance": "high",
+              "executor": "main", "continuity": "foreground"}
 OWNED = ["plugins/glm-conductor/hooks/pre_tool_use.py",
          "tests/test_pre_tool_use.py"]
 
@@ -61,13 +66,18 @@ OWNED = ["plugins/glm-conductor/hooks/pre_tool_use.py",
 def run_hook(stdin_text, project_dir):
     """以子进程运行 pre_tool_use.py，返回 CompletedProcess。
 
-    text=True：Windows 下 stdin/stdout/stderr 按文本模式收发；
+    text=True + 显式 encoding="utf-8"：钩子按运行时契约恒以 UTF-8 字节
+    写 stdout/stderr（含中文报文），父进程必须按 UTF-8 解码——不指定
+    encoding 时按父进程 locale（如 en-US runner 的 cp1252）严格解码，
+    中文字节（如损坏 reason 的 0x8D）会 UnicodeDecodeError（CI Windows
+    矩阵实测）；errors="replace" 兜底异常字节。
     ZCODE_PROJECT_DIR 指向被检仓库（钩子据此发现活动任务），其余环境变量
     原样继承。
     """
     return subprocess.run(
         [sys.executable, str(PRE_TOOL_USE)],
         input=stdin_text, text=True, capture_output=True,
+        encoding="utf-8", errors="replace",
         env=dict(os.environ, ZCODE_PROJECT_DIR=str(project_dir)))
 
 
@@ -80,6 +90,15 @@ def save_task(repo, task_id=TID, ownership_files=OWNED, status="executing",
     active = state.new_task_state(
         task_id, "Layer B 注入冒烟测试目标", dict(route or ROUTE),
         ownership_files=ownership_files, status=status)
+    if status == "completed":
+        # H1 状态转换门（P0-1）：completed 不能经公共 API 首存/直达——
+        # 夹具改走合法迁移链 executing→finalizing→完成门内部提交，
+        # 被测语义不变（盘上存在终态任务 = 非活动任务 → 不注入）
+        for step in ("executing", "finalizing"):
+            active["status"] = step
+            state.save_state(repo, active)
+        state.commit_completion(repo, task_id)
+        return
     state.save_state(repo, active)
 
 
