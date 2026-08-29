@@ -36,7 +36,7 @@ v2.0.1 实施会话（active task `v201-hardening-a3f8d2`，route 声明 `contin
 | R1 | quota 观测只在模型在场的时点发生，无 turn 之外的连续观测 | 运行时 | 证据 1 |
 | R2 | 缺少新会话的恢复入口注入，恢复语义只有 API 没有触发面 | 运行时 | 证据 2、4 |
 | R3 | continuity 协议（checkpoint / 唤醒）是提示层约定，无运行时落点 | 协议 | 证据 3 |
-| R4 | 完成门按单一根目录定位，多仓工作区整体降级 | 运行时 | 证据 5 |
+| R4 | 完成门按单一根目录定位，多仓工作区整体降级。**已在 v2.0.1 release hardening 修复**（804e3f8：repository.root 绑定 + per-task 求值） | 运行时 | 证据 5 |
 | R5 | 派发准入的额度判断依赖调用方手传 | 运行时 | 证据 6 |
 
 共性主题：**连续性能力全部是 advisory（建议 / 约定 / 手动调用），没有一个进入 v2 已建立的 enforcement 通道（钩子 / 事务边界 / 状态机）。**
@@ -65,6 +65,8 @@ Stop 钩子在 5s 预算内做一次「缓存优先、带超时」的 quota 检�
 **B2. 任务级 repo 指针 / 根发现改进**
 state.json 增可选 repo 路径字段，或钩子根发现改为「自 `ZCODE_PROJECT_DIR` 起向上/向下查找含 `.glm-conductor` 的 git 根」，消除 R4——本会话收官被迫移动账本即其直接代价。
 
+> **已在 v2.0.1 release hardening 修复**（804e3f8）：state.json 增可选顶层 `repository.root` 绑定（`bind_repository_root` / `bound_repository_root` / `resolve_repository_root`），Stop 完成门按任务逐个解析其绑定仓库根求值（legacy 无绑定回退账本根，行为不变）；账本根与 git 根分离，账本（state/journal/lease）恒在账本根，多仓工作区不再需要移动账本、也不再整体降级（单任务仓库故障按任务隔离降级）。
+
 ### C. 协议层
 
 **C1. continuity 技能检查单化**
@@ -77,7 +79,7 @@ state.json 增可选 repo 路径字段，或钩子根发现改为「自 `ZCODE_P
 | 1 | A1 SessionStart 恢复钩子 | 低（一个工作包，纯本地） | R2（兼收 R1/R3 的兜底） |
 | 2 | A2 事务边界自动检查点 | 低 | R3 |
 | 3 | B1 resume 命令桥 | 中 | R1/R3 |
-| 4 | B2 repo 指针/根发现 | 中 | R4 |
+| 4 | B2 repo 指针/根发现（已在 v2.0.1 release hardening 落地，见 B2 注） | 中 | R4 |
 | 5 | A3 派发内置取数 | 低 | R5 |
 | 6 | A4 Stop 探针 | 中（含超时纪律） | R1 |
 | 7 | C1 技能检查单 | 低 | R3（与 A2 互补） |
@@ -102,3 +104,4 @@ v2.0.0 审查文档 §9 为 v2.1 规划的主线是 evidence provenance（统一
 2. **`prepare_dispatch` 就绪提升缺口**：依赖满足后单元停留在 pending，task_manager 缺「就绪提升」入口，靠调用方手工 `transition_work_unit(pending→ready)`（dogfood 当场暴露，已在 v2.0.1 以 `refresh_readiness` 修复）。
 3. **journal 事件 schema 早期漂移**：H4 之前主会话手写 verification 事件使用 `commands/passed` 字段，与 `reconcile` 证据扫描口径（`command/pass/unit`）不一致——单元级证据若无唯一写入口（`record_unit_verification`）极易再次漂移，验证了 H6 设计。
 4. **本机（zh-CN locale）与 en-US CI 的编码差异曾致 CI Windows 矩阵失败**：钩子按契约恒写 UTF-8，测试父进程若不显式指定 `encoding="utf-8"` 会按父进程 locale 严格解码中文报文（cp1252 下 `损坏` 的 0x8D 未定义直接 UnicodeDecodeError）——已修复测试辅助函数，属测试基建教训：**凡捕获钩子输出的测试必须显式 UTF-8 解码**。
+5. **RB-2 修复的收官活体验证**：本 release hardening 补丁任务自身即以拆分账本形态收官——workspace 非 git 仓库、任务经 `repository.root` 绑定嵌套的插件仓库，Stop 完成门按任务绑定仓库求值、账本留在 workspace 根，finalizing → gate → completed 全链路真实走通——即证据 5 所述结构性缺口修复后的形态。

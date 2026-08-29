@@ -33,6 +33,8 @@ description: GLM Conductor v2 强制层运行时契约。解释 Stop 完成门�
 - **完成提交（生命周期封口）**：收尾时把 status 写为 `finalizing` 即请求完成（`state.transition_task_status`，公共状态 API 无法直达 completed）；四重检查全绿放行时，钩子对全部 `finalizing` 任务经 `state.commit_completion` 原子提交 `completed` 并记 `completed` 事件（via=completion_gate）——有违规照常 block（状态保持 finalizing，修复后重新 Stop）；连续 block 达上限（gate_exhausted）放行或任何降级路径都**不会**提交完成
 - **无活动任务 / 任务不参与** → 静默放行，普通会话零干预
 - `.glm-conductor/` 运行时目录豁免（编排器自身账本不算仓库改动）
+- **per-task 仓库求值（RB-2）**：账本根不再同时充当 git 根——每个参与任务按 state 顶层可选 `repository.root` 解析其专属仓库根（无绑定 = legacy，回退账本根，单仓行为不变），ownership / 指纹 / 视觉检查全部在该根上求值；同一仓库根的 touched + base 单次 Stop 至多取一次（per-repo 快照缓存：每根 1 次 status + 1 次 rev-parse）；账本（state.json / events.jsonl / 完成门记账）恒在账本根。workspace 根无需是 Git 仓库——任务绑定嵌套仓即可受门强制；多嵌套仓歧义不猜：报出候选并要求显式绑定，绝不自动猜根
+- **单元完成证据门与时序纪律（RB-1）**：Work Unit 以 `completed` 出 `finish_unit` 前，每个 required command 必须各有一条单元绑定（`unit` 逐字精确）、指纹新鲜、status=pass 的验证事件（all-match）——拒绝零副作用，git/指纹读取失败 fail-closed。时序恒为 `record_unit_verification` → `finish_unit` → git commit：**record 与 finish 之间任何 git 提交都会改变基线修订、使已记录证据失效（verification_stale）**，须重跑验证并重新记录
 
 ### 损坏状态的处置与恢复指引（H3/P0-3）
 
@@ -86,9 +88,20 @@ PreToolUse 钩子在每次 Agent/Task 派发前向主会话注入 ownership 契�
 | 情形 | 行为 | 报文 |
 | --- | --- | --- |
 | 钩子进程崩溃 / import 失败 | 放行 + 报警 | stderr `ENFORCEMENT DEGRADED: stop_gate failed: ...` |
-| git 不可用 / 非 git 仓库 | 跳过 ownership 校验 + 记 `gate_degraded`（reason=git_unavailable） | stderr `ENFORCEMENT DEGRADED: cannot list touched files ...` |
-| 求值阶段结构性错误（rev-parse 失败 / 声明模式非法） | 跳过校验 + 记 `gate_degraded`（reason=evaluation_error） | stderr `ENFORCEMENT DEGRADED: cannot evaluate completion gate ...` |
+| 任务仓库解析 / git 失败（RB-2 起**只降级该任务**，其余任务照常求值） | 跳过该任务校验 + 该任务 journal 记 `gate_degraded`（reason 见下方词汇表） | stderr `ENFORCEMENT DEGRADED: ...`（按 reason 分行） |
+| 求值阶段结构性错误（指纹 rev-parse 失败 / 声明模式非法，同样按任务隔离） | 跳过该任务校验 + 记 `gate_degraded`（reason=evaluation_error） | stderr `ENFORCEMENT DEGRADED: cannot evaluate completion gate ...` |
 | python3 不在 PATH | 钩子无法启动（ZCode 侧报 hook 运行失败） | 见环境自检；文档前置要求已声明 |
+
+**降级 reason 词汇（RB-2 起 `gate_degraded` 事件的 `reason` 字段，按任务隔离、可精确断言）**：
+
+- `repository_unavailable`——任务绑定的 `repository.root` 上 git 操作失败（非 git 目录 / git 故障）
+- `git_unavailable`——legacy 任务（无绑定）且账本根本身是 git 根，但 git 瞬时故障（touched / rev-parse 不可得）
+- `repository_root_missing`——legacy 任务、账本根非 git 根且一级子目录扫描无任何 `.git` 候选
+- `repository_ambiguous`——legacy 任务、账本根非 git 根但存在嵌套仓候选（列出候选目录名；即使只有一个也不自动猜、不自动绑定——绑定必须由 state.json `repository.root` 显式声明）
+- `evaluation_error`——求值期结构性错误（指纹 rev-parse 失败 / ownership 声明模式非法等）
+- 另有发现完整性路径的 `orphaned_task` / `corrupt_state`（见上方「损坏状态的处置与恢复指引」）
+
+被降级任务不参与本轮 `gate_passed` 记账，也不会被提交完成（指纹取不到 → 保持 `finalizing`）。
 
 **模型侧义务**：观察到任何 ENFORCEMENT DEGRADED 时，必须如实向用户报告"强制层处于降级态"，不得默认强制仍在生效。
 
@@ -117,4 +130,4 @@ PreToolUse 钩子在每次 Agent/Task 派发前向主会话注入 ownership 契�
 
 - **审查者只读**：由 agent 定义的只读工具白名单保证（确定性），非钩子强制；reviewer 的越界写入最终会被完成门捕获（纵深防御）
 - **子会话内写操作**：ZCode 运行时子代理不触发钩子（Phase 0 实证），写前拦截不可实现——这正是完成门 + Layer B 设计的由来
-- **指纹时延注记**：完成门每次 Stop 执行 1 次 git status + 每个需指纹比对的参与任务 ≤2 次短 git 子调用（各 3s 超时上限，钩子总预算 5s）；正常仓库毫秒级完成，git 病态缓慢时可能触发运行时超时（按降级处理）
+- **指纹时延注记**：完成门每次 Stop 对每个**不同仓库根**至多执行 1 次 git status + 1 次 rev-parse（per-repo 快照缓存，同根多任务不重复 git；各 3s 超时上限，钩子总预算 5s）；正常仓库毫秒级完成，git 病态缓慢时按降级处理（RB-2 起只降级对应任务）
