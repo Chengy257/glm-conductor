@@ -471,14 +471,41 @@ class SaveLoadRoundtripTest(unittest.TestCase):
             leftovers = list(state.task_dir(tmp, TID).glob("*.tmp"))
             self.assertEqual(leftovers, [])
 
-    def test_task_id_param_overrides(self):
+    def test_task_id_param_must_match_payload(self):
+        """显式 task_id 与内容 task_id 一致 → 正常写盘（P1-9 起
+        不一致组合被拒绝，见
+        test_state_directory_id_must_match_payload_task_id）。"""
         with tempfile.TemporaryDirectory() as tmp:
             st = make_state()
-            path = state.save_state(tmp, st, task_id="demo-task-9f8e7d")
-            self.assertEqual(path, state.state_path(tmp, "demo-task-9f8e7d"))
+            path = state.save_state(tmp, st, task_id=TID)
+            self.assertEqual(path, state.state_path(tmp, TID))
             self.assertTrue(path.is_file())
+            self.assertEqual(state.load_state(tmp, TID), st)
+
+    def test_state_directory_id_must_match_payload_task_id(self):
+        """P1-9：save_state 显式 task_id 与 state.task_id 不一致 →
+        ValueError 且不产生任何目录；一致时正常；缺省 task_id（None）
+        行为不变。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            st = make_state()
+            other = "demo-task-9f8e7d"
+            with self.assertRaises(ValueError) as ctx:
+                state.save_state(tmp, st, task_id=other)
+            self.assertIn("不一致", str(ctx.exception))
+            self.assertIn("P1-9", str(ctx.exception))
+            # 拒绝写入：目录 id 与内容 id 对应路径都不存在
+            self.assertFalse(state.state_path(tmp, other).exists())
             self.assertFalse(state.state_path(tmp, TID).exists())
-            self.assertEqual(state.load_state(tmp, "demo-task-9f8e7d"), st)
+            self.assertFalse(state.tasks_root(tmp).exists())
+            # 显式 task_id 与内容一致 → 正常保存
+            path = state.save_state(tmp, st, task_id=TID)
+            self.assertEqual(path, state.state_path(tmp, TID))
+            self.assertTrue(path.is_file())
+            # 缺省 task_id（None）行为不变：目录名取 state["task_id"]
+            st2 = make_state(status="preflight")
+            path2 = state.save_state(tmp, st2)
+            self.assertEqual(path2, state.state_path(tmp, TID))
+            self.assertEqual(state.load_state(tmp, TID), st2)
 
     def test_save_creates_missing_dirs(self):
         with tempfile.TemporaryDirectory() as tmp:

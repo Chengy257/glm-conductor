@@ -412,6 +412,33 @@ class TestCacheSemantics(unittest.TestCase):
         self.assertEqual(second["status"], None)
         self.assertEqual(second["provider"], "zai")
 
+    def test_cache_nested_mutation_isolated(self):
+        """P1-8：修改返回 snapshot 的嵌套对象（windows 等）不污染 TTL
+        缓存——缓存命中与 force 重取两条路径都返回深拷贝。"""
+        transport = StubTransport(
+            status=200, body=fixture_bytes("five_hour_only.json"))
+        provider = self._zai(transport)
+        first = provider.fetch()
+        # 嵌套对象就地修改：浅拷贝时代会穿透进缓存
+        first["windows"][0]["used_percent"] = 999.0
+        first["windows"].append({"kind": "TAMPERED"})
+        # 缓存命中路径：嵌套对象与首取完全独立，内容原样
+        second = provider.fetch()
+        self.assertEqual(transport.count, 1)
+        self.assertIsNot(second["windows"], first["windows"])
+        self.assertIsNot(second["windows"][0], first["windows"][0])
+        self.assertEqual(second["windows"][0]["used_percent"], 12.5)
+        self.assertEqual([w["kind"] for w in second["windows"]],
+                         ["five_hour"])
+        # force 重取路径：改嵌套后 force fetch 返回全新对象，缓存不污染
+        forced = provider.fetch(force=True)
+        self.assertEqual(transport.count, 2)
+        forced["windows"][0]["used_percent"] = 777.0
+        third = provider.fetch()  # force 后再次命中缓存
+        self.assertEqual(transport.count, 2)
+        self.assertEqual(third["windows"][0]["used_percent"], 12.5)
+        self.assertIsNot(third["windows"][0], forced["windows"][0])
+
     def test_instances_do_not_share_cache(self):
         """缓存是实例态：两个 provider 各自真实请求。"""
         transport = StubTransport(

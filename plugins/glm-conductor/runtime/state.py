@@ -692,7 +692,10 @@ def save_state(repo_root, state, *, task_id=None, _gate_commit=False) -> pathlib
     """校验并原子保存状态文件，返回最终路径。
 
     - validate_state 有错误 → ValueError（错误清单拼接）；
-    - 写入路径的 task_id 优先取参数 task_id，否则取 state["task_id"]；
+    - 写入路径的 task_id 取参数 task_id，否则取 state["task_id"]；
+    - 目录/内容一致性（P1-9）：显式 task_id 参数非 None 时必须等于
+      state["task_id"]，不一致 → ValueError（目录与内容的任务标识
+      必须一致；如需迁移请以内容 ID 为准重建目录）；
     - 状态转换门（P0-1）：写盘前读盘上现有 state.json（不存在视为首存），
       status 变化必须落在 TASK_TRANSITIONS 内；completed 一律不接受公共
       写入——只能由 Stop 完成门以内部通道提交（_gate_commit=True，且仅
@@ -709,6 +712,13 @@ def save_state(repo_root, state, *, task_id=None, _gate_commit=False) -> pathlib
     if errors:
         raise ValueError("state 非法，无法保存：%s" % "；".join(errors))
     tid = task_id if task_id is not None else state["task_id"]
+    # P1-9：目录 task_id 与内容 task_id 必须一致——显式 task_id 与
+    # state["task_id"] 不一致即拒绝，防止任务目录与 state.json 内容错位
+    if task_id is not None and task_id != state.get("task_id"):
+        raise ValueError(
+            "save_state：目录 task_id %r 与 state.task_id %r 不一致"
+            "（P1-9：目录与内容的任务标识必须一致；如需迁移请以内容 ID "
+            "为准重建目录）" % (task_id, state.get("task_id")))
     path = state_path(repo_root, tid)
     # 转换门先于落盘：盘上损坏文件在此抛 ValueError，不会被覆盖
     _transition_errors(load_state(repo_root, tid), state.get("status"),
