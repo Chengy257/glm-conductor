@@ -211,18 +211,23 @@ def fresh_unit_verification(repo_root, task_id, unit, *, touched=None,
     owned_hits, _ = ownership.classify_paths(touched, patterns)
     fp = fingerprint.compute_fingerprint(repo_root, owned_hits)
     matched = []
-    for command in required:
-        # 从尾向头找第一条五条件全满足的事件（与原对账口径同序）
-        for event in reversed(events):
-            if not isinstance(event, dict):
-                continue
-            if (event.get("event") == "verification"
-                    and event.get("unit") == uid
-                    and event.get("fingerprint") == fp
-                    and event.get("status") == "pass"
-                    and event.get("command") == command):
-                matched.append(command)
-                break
+    # 无合法 id 的单元：任何事件都无法通过 unit 逐字匹配（None==None
+    # 不得成为 legacy 无 unit 字段事件的匹配通道——H6 口径的形状防御；
+    # 持久化 state 经 validate_work_unit 不会出现该形状，此处兜底
+    # 谓词作为公开 API 的直接调用方）
+    if isinstance(uid, str) and uid != "":
+        for command in required:
+            # 从尾向头找第一条五条件全满足的事件（与原对账口径同序）
+            for event in reversed(events):
+                if not isinstance(event, dict):
+                    continue
+                if (event.get("event") == "verification"
+                        and event.get("unit") == uid
+                        and event.get("fingerprint") == fp
+                        and event.get("status") == "pass"
+                        and event.get("command") == command):
+                    matched.append(command)
+                    break
     missing = [c for c in required if c not in matched]
     return {"ok": not missing, "fingerprint": fp,
             "required": list(required), "matched": matched,

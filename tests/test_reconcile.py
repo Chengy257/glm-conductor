@@ -621,6 +621,23 @@ class FreshUnitVerificationPredicateTest(ReconcileFixture):
                 self.assertEqual(report["matched"], [])
                 self.assertEqual(report["missing"], [CMD_A, CMD_B])
 
+    def test_unit_without_valid_id_never_matches_legacy_events(self):
+        # ⑧b 无合法 id 的单元（缺 id / None / 空串）：legacy 无 unit 字段
+        # 事件的 event.get("unit")==None 不得经 None==None 匹配（审查
+        # 检查点 #1 发现的形状防御缺口）——全部 required 归 missing
+        unit = self.multi_unit()
+        fp = self.current_fingerprint(unit, self.TOUCHED)
+        for bad_unit in (dict(unit, id=None), dict(unit, id=""),
+                         {"verification": unit["verification"],
+                          "ownership": unit["ownership"]}):
+            with self.subTest(unit=bad_unit):
+                legacy = {"event": "verification", "command": CMD_A,
+                          "status": "pass", "fingerprint": fp}
+                report = self.verdict(bad_unit, [legacy])
+                self.assertFalse(report["ok"])
+                self.assertEqual(report["matched"], [])
+                self.assertEqual(report["missing"], [CMD_A, CMD_B])
+
 
 class FreshUnitVerificationFastPathTest(TempDirFixture):
     """空 required 快路径：无 git 的普通 tempdir 可调用（零 git 零读盘）。"""
