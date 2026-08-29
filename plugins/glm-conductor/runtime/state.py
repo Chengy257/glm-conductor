@@ -11,7 +11,11 @@
         同一 dict，不触碰磁盘，调用方负责 save_state）——记录验证命令 /
         审查裁决的证据指纹与视觉证据 sha256（升级指南 §19/§20/§22）；
       - 校验：validate_state() 返回中文错误列表（空列表 = 合法），不抛异常；
-      - 保存：save_state() 先校验再原子写（同目录 tmp + os.replace）；
+      - 保存：save_state() 先校验再原子写（同目录 tmp + os.replace），并按
+        顶层状态转换表（TASK_TRANSITIONS）拒绝非法 status 迁移——
+        completed 只能由完成门经内部通道（commit_completion）提交；
+      - 迁移 / 提交：transition_task_status() 公共状态迁移入口（记
+        status_changed 事件）；commit_completion() 完成门专用提交通道；
       - 读取：load_state() 读取并归一 v1.x legacy 标识（CONTINUITY_ID 等）；
       - 发现：find_active_tasks() 扫描全部非终态活动任务（健壮性优先）。
     本文件是 Stop 完成门钩子等强制状态源的确定性来源。
@@ -63,13 +67,39 @@ ASSURANCE_LEVELS = ("standard", "high")
 EXECUTORS = ("main", "flash-implementer", "visual-implementer")
 # 连续性三模式
 CONTINUITY_MODES = ("foreground", "resumable", "idle")
-# 任务全生命周期状态
+# 任务全生命周期状态（finalizing = 完成请求态：进入即请求完成，
+# completed 只能由 Stop 完成门在其四重检查全部通过后提交）
 TASK_STATUSES = (
     "created", "preflight", "routed", "decomposed", "executing",
-    "joining", "verifying", "reviewing", "completed",
+    "joining", "verifying", "reviewing", "finalizing", "completed",
     "waiting_quota", "blocked", "cancelled", "failed")
 # 终态：find_active_tasks 不再返回
 TERMINAL_STATUSES = ("completed", "cancelled", "failed")
+# 顶层状态转换表：键 = 旧 status，值 = 允许的直接后继（终态无表项 =
+# 不接受任何转换）。save_state 与 transition_task_status 据此拒绝非法
+# 迁移；completed 唯一入边 finalizing→completed 只对完成门内部通道
+# （save_state 的 _gate_commit=True）放行，公共 API 一律拒绝。
+TASK_TRANSITIONS = {
+    "created": ("preflight", "routed", "decomposed", "executing",
+                "blocked", "failed", "cancelled"),
+    "preflight": ("routed", "decomposed", "executing", "blocked",
+                  "failed", "cancelled"),
+    "routed": ("decomposed", "executing", "blocked", "failed", "cancelled"),
+    "decomposed": ("executing", "blocked", "failed", "cancelled"),
+    "executing": ("joining", "verifying", "reviewing", "waiting_quota",
+                  "finalizing", "blocked", "failed", "cancelled"),
+    "joining": ("executing", "verifying", "reviewing", "finalizing",
+                "blocked", "failed", "cancelled"),
+    "verifying": ("reviewing", "finalizing", "executing", "blocked",
+                  "failed", "cancelled"),
+    "reviewing": ("finalizing", "executing", "blocked", "failed",
+                  "cancelled"),
+    "waiting_quota": ("executing", "blocked", "failed", "cancelled"),
+    "blocked": ("preflight", "routed", "decomposed", "executing",
+                "joining", "verifying", "reviewing", "waiting_quota",
+                "finalizing", "failed", "cancelled"),
+    "finalizing": ("completed", "failed", "cancelled"),
+}
 # 验证结果词汇
 VERIFICATION_STATUSES = ("missing", "valid", "stale", "failed")
 # 审查裁决词汇
@@ -498,20 +528,68 @@ def record_visual_evidence(st, path, sha256) -> dict:
 
 # —— 保存 / 读取 / 发现 ——
 
-def save_state(repo_root, state, *, task_id=None) -> pathlib.Path:
+def _transition_errors(previous, new_status, *, _gate_commit=False):
+    """按 TASK_TRANSITIONS 校验一次 status 迁移，非法时抛 ValueError。
+
+    规则（save_state 与 transition_task_status 共用）：
+      - 新 status 为 completed 且非完成门内部通道（_gate_commit=False）
+        → 无条件拒绝（completed 只能由 Stop 完成门提交，请将状态置为
+        finalizing 请求完成）；
+      - 完成门内部通道（_gate_commit=True）要求盘上旧 status 恰为
+        finalizing（首存无盘上状态，同样拒绝）；
+      - 盘上旧 status（previous 为 None = 首存，无转换可言）与新 status
+        不同 → 新 status 必须在 TASK_TRANSITIONS.get(旧 status, ()) 内；
+        终态无表项，任何变化自然拒绝；旧 == 新（无转换）放行。
+    previous 为盘上已加载的状态 dict（不存在为 None）；其 JSON 损坏由
+    load_state 抛 ValueError，自然向上传播，不覆盖损坏文件。
+    """
+    old_status = previous.get("status") if previous is not None else None
+    if new_status == "completed" and not _gate_commit:
+        raise ValueError(
+            "status 转换被拒绝：%r 不经完成门不得写入（completed 只能由 "
+            "Stop 完成门提交，请将状态置为 finalizing 请求完成）" % new_status)
+    if _gate_commit and old_status != "finalizing":
+        raise ValueError(
+            "完成门提交被拒绝：_gate_commit 要求盘上旧 status 为 finalizing，"
+            "得到 %r（completed 只能由 Stop 完成门对 finalizing 任务提交）"
+            % old_status)
+    if previous is None:
+        return  # 首存：无盘上旧状态，无转换可言
+    if old_status != new_status:
+        allowed = TASK_TRANSITIONS.get(old_status, ())
+        if new_status not in allowed:
+            targets = ", ".join(allowed) if allowed else "无（终态不接受任何转换）"
+            raise ValueError(
+                "status 转换被拒绝：%r → %r 不在合法转换内"
+                "（%s 的合法目标：%s；完整转换表见 TASK_TRANSITIONS）"
+                % (old_status, new_status, old_status, targets))
+
+
+def save_state(repo_root, state, *, task_id=None, _gate_commit=False) -> pathlib.Path:
     """校验并原子保存状态文件，返回最终路径。
 
     - validate_state 有错误 → ValueError（错误清单拼接）；
     - 写入路径的 task_id 优先取参数 task_id，否则取 state["task_id"]；
+    - 状态转换门（P0-1）：写盘前读盘上现有 state.json（不存在视为首存），
+      status 变化必须落在 TASK_TRANSITIONS 内；completed 一律不接受公共
+      写入——只能由 Stop 完成门以内部通道提交（_gate_commit=True，且仅
+      对盘上 status == finalizing 的任务）；盘上文件损坏（load_state 抛
+      ValueError）自然向上传播，不覆盖损坏文件；
     - 目录不存在自动创建；
     - 原子写：先写同目录 <name>.tmp（UTF-8、ensure_ascii=False、缩进 2），
       再 os.replace 覆盖；任何失败路径清理 tmp，成功后确保 tmp 不存在。
+
+    _gate_commit 为私有参数：仅供 Stop 完成门钩子（hooks/stop_gate.py，
+    经 state.commit_completion）使用，其他调用方不得传。
     """
     errors = validate_state(state)
     if errors:
         raise ValueError("state 非法，无法保存：%s" % "；".join(errors))
     tid = task_id if task_id is not None else state["task_id"]
     path = state_path(repo_root, tid)
+    # 转换门先于落盘：盘上损坏文件在此抛 ValueError，不会被覆盖
+    _transition_errors(load_state(repo_root, tid), state.get("status"),
+                       _gate_commit=_gate_commit)
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp_path = path.parent / (path.name + ".tmp")
     try:
@@ -550,6 +628,61 @@ def load_state(repo_root, task_id) -> "dict | None":
             del raw[key]
     raw["task_id"] = tid
     return raw
+
+
+def commit_completion(repo_root, task_id) -> dict:
+    """完成门专用：把 finalizing 任务原子提交为 completed，返回提交后状态。
+
+    仅 Stop 完成门钩子在四重检查全部通过后调用：
+      - load_state 缺失（None）→ ValueError；JSON 损坏由 load_state 抛
+        ValueError，自然向上传播；
+      - 盘上 status 非 finalizing → ValueError（finalizing 是唯一完成
+        请求态，completed 只能从它提交）；
+      - 内部经 save_state(..., _gate_commit=True) 落盘（唯一的 completed
+        写入通道）。
+    本函数不写 journal——completed 审计事件由钩子在提交成功后追加。
+    """
+    st = load_state(repo_root, task_id)
+    if st is None:
+        raise ValueError(
+            "commit_completion：任务 %s 不存在（无 state.json），无法提交完成"
+            % task_id)
+    if st.get("status") != "finalizing":
+        raise ValueError(
+            "commit_completion：任务 %s 的 status 为 %r 而非 finalizing，"
+            "拒绝提交 completed（先进入 finalizing 请求完成）"
+            % (task_id, st.get("status")))
+    st["status"] = "completed"
+    save_state(repo_root, st, _gate_commit=True)
+    return st
+
+
+def transition_task_status(repo_root, task_id, new_status) -> dict:
+    """按 TASK_TRANSITIONS 把任务状态迁移到 new_status，返回迁移后的状态。
+
+    公共运行时迁移入口（如收尾时进入 finalizing 请求完成）：
+      - load_state 缺失（None）→ ValueError；JSON 损坏自然向上传播；
+      - 迁移校验与 save_state 同规则（终态无表项、completed 无条件拒绝
+        ——completed 只能由完成门提交）；
+      - 成功后向任务 journal 追加一条 status_changed 事件
+        （{"event": "status_changed", "from": 旧, "to": 新}），journal
+        在函数内 import（与钩子的延迟 import 风格一致）。
+    """
+    from runtime import journal
+
+    st = load_state(repo_root, task_id)
+    if st is None:
+        raise ValueError(
+            "transition_task_status：任务 %s 不存在（无 state.json），"
+            "无法迁移状态" % task_id)
+    old_status = st.get("status")
+    _transition_errors(st, new_status)
+    st["status"] = new_status
+    save_state(repo_root, st)
+    journal.append_event(
+        repo_root, task_id,
+        {"event": "status_changed", "from": old_status, "to": new_status})
+    return st
 
 
 def find_active_tasks(repo_root) -> "list[str]":

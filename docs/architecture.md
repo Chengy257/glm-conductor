@@ -248,6 +248,10 @@ v2 把关键运行时契约从提示词升级为确定性强制。强制层由�
 - `.glm-conductor/` 运行时目录豁免——编排器自身账本不算用户仓库改动（否则创建 state.json 即自指拦截）
 - 子代理工具调用不触发钩子（Phase 0 实证：子会话不携带 hook runner），故写前拦截不可实现——**越界改动不被阻止发生，但不可能静默通过完成门**
 
+### 9.1.1 完成生命周期（finalizing → [完成门] → completed）
+
+状态词汇含完成请求态 `finalizing`（介于 reviewing 与 completed 之间，非终态）；`runtime/state.py` 的顶层转换表 `TASK_TRANSITIONS` 约束每一次 status 迁移——终态无表项（不接受任何转换），`completed` 的唯一入边是 `finalizing → completed`，且只对完成门内部通道（`state.commit_completion`，经 `save_state` 的 `_gate_commit` 私有参数）放行，`save_state` / `transition_task_status` 等公共写入路径一律拒绝。收尾流：模型把 status 推进为 `finalizing`（= 请求完成，`transition_task_status` 自动记 `status_changed` 事件）→ Stop 完成门四重检查：有违规照常 block（状态保持 finalizing，修复后重新 Stop）；全部通过时钩子在放行路径对**全部** `finalizing` 任务（不限于参与校验集合）原子提交 `completed` 并记 `completed` 事件（via=completion_gate，绑定当前证据指纹）——gate_exhausted 放行与任何降级路径都不提交。由此 `completed` 成为完成门的唯一提交点，主会话无法在完成门前经公共状态 API 把任务写成 completed 绕过四重检查（P0-1 修复）。
+
 ### 9.2 PreToolUse 双面：Layer B 注入（提示级）+ Bash 策略门控（决策级，beta1）
 
 同一钩子脚本 `hooks/pre_tool_use.py` 按载荷 tool_name 分流：

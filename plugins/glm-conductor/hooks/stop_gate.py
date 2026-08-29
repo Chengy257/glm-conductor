@@ -56,6 +56,17 @@ fail-open 策略：
     stdout 纪律：运行时对钩子 stdout 做 Zod 严格校验，除 block 的单行
     JSON 外任何路径都不得写 stdout；一切报告只走 stderr。
 
+完成提交（P0-1：completed 的唯一提交点）：
+    任务收尾时模型把 status 写为 finalizing（= 请求完成；公共状态 API
+    拒绝直达 completed，见 runtime.state.TASK_TRANSITIONS）。Stop 事件
+    触发本钩子四重检查：有违规照常 block（状态保持 finalizing，修复后
+    重新 Stop）；全部通过时本钩子在放行路径上代表 runtime 对**全部**
+    status == finalizing 的活动任务（不限于参与校验集合）调用
+    state.commit_completion 原子提交 completed，并向任务 journal 追加
+    completed 事件（via=completion_gate，绑定当前证据指纹）。单任务提交
+    失败（任何异常）仅 stderr 报警并继续下一任务——记账异常绝不崩放行
+    路径（fail-open）；exhausted / degraded / block 路径一律不提交。
+
 续行上限机制（无额外状态文件，用任务 journal 做跨调用计数）：
     运行时对 Stop block 续行内建上限：每 turn 最多 3 次（钩子无法关闭）。
     续行循环中的 Stop（stop_hook_active=true）**照常校验**——运行时的
@@ -461,6 +472,37 @@ def record_for_tasks(journal, repo, task_ids, event):
         journal.append_event(repo, task_id, dict(event))
 
 
+def commit_finalizing_completions(state, fingerprint, journal, repo,
+                                  active, touched, base):
+    """完成提交：把全部 status == finalizing 的活动任务原子提交 completed。
+
+    仅在四重检查全绿的放行路径调用（block / exhausted / degraded 一律
+    不到这里）——completed 的唯一提交点。遍历**全部**活动任务而非仅参与
+    校验集合：finalizing 本身就是完成请求，无声明的 finalizing 任务同样
+    要在放行时被提交。逐任务流程：重算当前证据指纹（与门同一入口）→
+    state.commit_completion（内部经 _gate_commit 通道落盘 completed）→
+    journal 追加 completed 事件（via=completion_gate，绑定指纹）。单任务
+    失败（任何 Exception）warn_stderr 报警后继续下一任务：状态保持
+    finalizing，绝不因记账异常崩掉放行路径（fail-open）。
+    """
+    for task_id in active:
+        try:
+            task_state = state.load_state(repo, task_id)
+            if task_state is None or task_state.get("status") != "finalizing":
+                continue
+            fp = fingerprint.task_fingerprint(
+                repo, task_state, touched=touched, base=base)
+            state.commit_completion(repo, task_id)
+            journal.append_event(
+                repo, task_id,
+                {"event": "completed", "task_id": task_id,
+                 "via": "completion_gate", "fingerprint": fp})
+        except Exception as exc:
+            warn_stderr(
+                "ENFORCEMENT DEGRADED: cannot commit completion for task "
+                "%s (%r); task left in finalizing" % (task_id, exc))
+
+
 def main():
     """§15 四重检查主流程（架构师锁定设计）。
 
@@ -469,6 +511,8 @@ def main():
     注意：stop_hook_active=true（续行循环中的 Stop）**照常校验**——这正是
     运行时 3 次续行额度的工作方式（第 1/2 次 block、第 3 次由 journal
     计数放行）；提前放行会让续行中的完成声明免检。
+    全绿放行路径额外做完成提交：对全部 finalizing 任务原子提交
+    completed 并记 completed 事件（见模块 docstring「完成提交」）。
     """
     # 1) 读 stdin（容错；载荷当前不参与分支决策，保留解析以备扩展）
     read_stop_event()
@@ -524,11 +568,15 @@ def main():
     #    gate_passed（断链用——否则上一轮的 gate_blocked 残留会让下轮
     #    续行计数起点错位；同时留"何时通过完成门"的审计痕迹。无人参与
     #    时不记——没有校验发生。无活动任务时已在第 3 步提前返回，普通
-    #    会话零写入）
+    #    会话零写入）。随后做完成提交：对全部 finalizing 任务原子提交
+    #    completed（P0-1：completed 的唯一提交点在本门内；单任务失败
+    #    逐任务降级放行，exhausted / degraded / block 路径不经过这里）
     if not violations:
         from runtime import journal
         record_for_tasks(
             journal, repo, declared, {"event": "gate_passed", "tasks": declared})
+        commit_finalizing_completions(
+            state, fingerprint, journal, repo, active, touched, base)
         return 0
 
     # 7) 有违规：block 报文 / journal 记账以第一个违规任务为准

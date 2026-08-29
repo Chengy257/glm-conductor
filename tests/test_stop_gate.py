@@ -979,5 +979,112 @@ class StopGateIntegrationSmokeTest(GitRepoFixture):
             ["gate_blocked", "gate_passed"])
 
 
+# —— H1 完成提交：finalizing → [完成门] → completed（P0-1 生命周期封口） ——
+
+@unittest.skipUnless(shutil.which("git"), "环境无 git 可执行，跳过 git fixture 测试")
+class StopGateCompletionCommitTest(GitRepoFixture):
+    """放行路径的完成提交契约（completed 的唯一提交点在门内）：
+      - finalizing + 全绿 → 放行且盘上提交 completed + journal 记 completed；
+      - finalizing + 违规 → block 且盘上保持 finalizing；
+      - finalizing + 达续行上限 → exhausted 放行但**不**提交 completed；
+      - 无声明的 finalizing 任务（不参与四重检查）→ 放行且提交 completed；
+      - 非 finalizing 活动任务全绿 → 放行且状态不被改写。
+    """
+
+    CMD = "pytest tests/a.py"
+
+    def _fresh_evidence_task(self, status):
+        """建一个 verification+review 全绿且证据新鲜的指定状态任务。"""
+        self.write("src/a.py", b"v1\n")
+        self.add_active_task(status=status, verification_required=[self.CMD],
+                             review_required=True, reviewer="reviewer-a")
+        st = state.load_state(self.repo, TID)
+        current = self.task_fingerprint(st)
+        state.record_verification(st, self.CMD, current)
+        state.record_review(st, "ship", current)
+        self.set_state(st)
+        return current
+
+    def test_all_green_finalizing_committed_to_completed(self):
+        current = self._fresh_evidence_task("finalizing")
+        result = run_gate("{}", self.repo)
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stdout, "")
+        self.assertEqual(result.stderr, "")
+        # 盘上状态被门提交为 completed（模型/公共 API 无法直达，钩子提交）
+        self.assertEqual(
+            state.load_state(self.repo, TID)["status"], "completed")
+        events = self.journal_events()
+        self.assertEqual(
+            [e["event"] for e in events], ["gate_passed", "completed"])
+        done = events[-1]
+        self.assertEqual(done["task_id"], TID)
+        self.assertEqual(done["via"], "completion_gate")
+        # 审计事件绑定提交时的当前证据指纹（与门同一入口算出的值）
+        self.assertEqual(done["fingerprint"], current)
+
+    def test_verification_missing_finalizing_blocked_stays_finalizing(self):
+        self.add_active_task(status="finalizing",
+                             verification_required=[self.CMD])
+        result = run_gate("{}", self.repo)
+        self.assertEqual(result.returncode, 0)
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["decision"], "block")
+        self.assertIn("required parent verification is incomplete",
+                      payload["reason"])
+        # block 后盘上保持 finalizing（修复后重新 Stop），无 completed 事件
+        self.assertEqual(
+            state.load_state(self.repo, TID)["status"], "finalizing")
+        events = self.journal_events()
+        self.assertEqual([e["event"] for e in events], ["gate_blocked"])
+        self.assertEqual(events[0]["check"], "verification_missing")
+
+    def test_gate_exhausted_passes_without_committing_completion(self):
+        self.add_active_task(status="finalizing",
+                             verification_required=[self.CMD])
+        first = run_gate("{}", self.repo)
+        second = run_gate("{}", self.repo)
+        self.assertEqual(json.loads(first.stdout)["decision"], "block")
+        self.assertEqual(json.loads(second.stdout)["decision"], "block")
+        third = run_gate("{}", self.repo)
+        self.assertEqual(third.returncode, 0)
+        self.assertEqual(third.stdout, "")
+        self.assertIn("ENFORCEMENT GATE EXHAUSTED", third.stderr)
+        # exhausted 放行是循环安全机制、不是完成许可：不提交 completed
+        self.assertEqual(
+            state.load_state(self.repo, TID)["status"], "finalizing")
+        self.assertEqual(
+            [e["event"] for e in self.journal_events()],
+            ["gate_blocked", "gate_blocked", "gate_exhausted"])
+
+    def test_undeclared_finalizing_task_committed_on_pass(self):
+        # 四项声明全空 → 不参与四重检查；但 finalizing 本身就是完成请求，
+        # 放行路径照样提交 completed（提交集合不限于参与校验集合）
+        self.add_active_task(status="finalizing")
+        result = run_gate("{}", self.repo)
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stdout, "")
+        self.assertEqual(result.stderr, "")
+        self.assertEqual(
+            state.load_state(self.repo, TID)["status"], "completed")
+        # 不参与 → 无 gate_passed 记账；completed 事件由提交步骤记录
+        events = self.journal_events()
+        self.assertEqual([e["event"] for e in events], ["completed"])
+        self.assertEqual(events[0]["via"], "completion_gate")
+        self.assertEqual(events[0]["task_id"], TID)
+
+    def test_non_finalizing_all_green_task_not_rewritten(self):
+        self._fresh_evidence_task("executing")
+        result = run_gate("{}", self.repo)
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stdout, "")
+        self.assertEqual(result.stderr, "")
+        # 非 finalizing 活动任务：放行但状态不被改写、无 completed 事件
+        self.assertEqual(
+            state.load_state(self.repo, TID)["status"], "executing")
+        self.assertEqual(
+            [e["event"] for e in self.journal_events()], ["gate_passed"])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -14,7 +14,7 @@ import json, tempfile
 from unittest import mock
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "plugins" / "glm-conductor"))
-from runtime import state
+from runtime import journal, state
 
 # —— 测试夹具 ——
 
@@ -713,7 +713,20 @@ class LoadStateTest(unittest.TestCase):
 class FindActiveTasksTest(unittest.TestCase):
 
     def save(self, repo_root, task_id, status):
-        state.save_state(repo_root, make_state(task_id=task_id, status=status))
+        # save_state 自 H1 起带状态转换门：completed 不能经公共 API 直达
+        # （首存同样被拒）——completed 夹具走合法迁移链
+        # created→executing→finalizing→完成门内部提交，被测语义不变
+        # （盘上存在相应终态任务）；其余状态无盘上旧状态时首存不受
+        # 转换表约束，直接落盘即可
+        st = make_state(task_id=task_id, status=status)
+        if status == "completed":
+            st["status"] = "executing"
+            state.save_state(repo_root, st)
+            st["status"] = "finalizing"
+            state.save_state(repo_root, st)
+            state.commit_completion(repo_root, task_id)
+            return
+        state.save_state(repo_root, st)
 
     def test_mixed_active_terminal_and_broken_dirs(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -793,6 +806,199 @@ class DispatchMaxWorkersBoundTest(unittest.TestCase):
         for bad in (True, 0, -1):
             errors = self._dispatch_errors(bad)
             self.assertTrue(any("max_workers" in e for e in errors), errors)
+
+
+# —— 状态转换门（H1 生命周期封口，P0-1 修复） ——
+
+class TaskTransitionGateTest(unittest.TestCase):
+    """TASK_TRANSITIONS 转换表 + save_state / transition_task_status /
+    commit_completion 的生命周期封口契约：completed 只能由完成门提交，
+    finalizing 是唯一完成请求态。"""
+
+    def _save_as(self, repo_root, status, task_id=TID):
+        st = make_state(task_id=task_id, status=status)
+        state.save_state(repo_root, st)
+        return st
+
+    # —— 转换表闭包 ——
+
+    def test_transitions_table_closure(self):
+        # 每个状态要么有表项要么是终态（终态无表项 = 不接受任何转换）
+        for status in state.TASK_STATUSES:
+            self.assertTrue(
+                status in state.TASK_TRANSITIONS
+                or status in state.TERMINAL_STATUSES, status)
+        # 全部转换目标都是合法状态词汇
+        for source, targets in state.TASK_TRANSITIONS.items():
+            self.assertIn(source, state.TASK_STATUSES, source)
+            for target in targets:
+                self.assertIn(target, state.TASK_STATUSES, (source, target))
+
+    def test_finalizing_in_vocabulary_nonterminal_and_reachable(self):
+        self.assertIn("finalizing", state.TASK_STATUSES)
+        self.assertNotIn("finalizing", state.TERMINAL_STATUSES)
+        # 从全部执行/收尾态可达（blocked 解阻后同样可直达）
+        for source in ("executing", "joining", "verifying", "reviewing",
+                       "blocked"):
+            self.assertIn("finalizing", state.TASK_TRANSITIONS[source], source)
+
+    def test_completed_only_entry_edge_is_from_finalizing(self):
+        # completed 的唯一入边是 finalizing → completed
+        for source, targets in state.TASK_TRANSITIONS.items():
+            if source == "finalizing":
+                self.assertEqual(targets, ("completed", "failed", "cancelled"))
+            else:
+                self.assertNotIn("completed", targets, source)
+
+    # —— save_state 转换门 ——
+
+    def test_save_rejects_executing_to_completed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self._save_as(tmp, "executing")
+            st = state.load_state(tmp, TID)
+            st["status"] = "completed"
+            with self.assertRaises(ValueError) as ctx:
+                state.save_state(tmp, st)
+            # 消息说明 completed 只能由完成门提交、应改走 finalizing
+            self.assertIn("completed", str(ctx.exception))
+            self.assertIn("finalizing", str(ctx.exception))
+            # 盘上状态不变
+            self.assertEqual(
+                state.load_state(tmp, TID)["status"], "executing")
+
+    def test_save_rejects_finalizing_to_completed_without_gate_channel(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self._save_as(tmp, "finalizing")
+            st = state.load_state(tmp, TID)
+            st["status"] = "completed"
+            with self.assertRaises(ValueError):
+                state.save_state(tmp, st)  # 缺 _gate_commit（默认 False）
+            self.assertEqual(
+                state.load_state(tmp, TID)["status"], "finalizing")
+
+    def test_save_gate_commit_requires_finalizing_on_disk(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self._save_as(tmp, "executing")
+            st = state.load_state(tmp, TID)
+            st["status"] = "completed"
+            with self.assertRaises(ValueError):
+                state.save_state(tmp, st, _gate_commit=True)
+            self.assertEqual(
+                state.load_state(tmp, TID)["status"], "executing")
+
+    def test_first_save_completed_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaises(ValueError):
+                self._save_as(tmp, "completed")
+            self.assertFalse(state.state_path(tmp, TID).exists())
+            # 首存其他状态不受转换表约束（无盘上旧状态，无转换可言）
+            self._save_as(tmp, "finalizing")
+            self.assertEqual(
+                state.load_state(tmp, TID)["status"], "finalizing")
+
+    def test_same_status_resave_passes(self):
+        # 旧 == 新（无转换）放行：record_* 之后重存状态的常规路径
+        with tempfile.TemporaryDirectory() as tmp:
+            self._save_as(tmp, "executing")
+            st = state.load_state(tmp, TID)
+            st["goal"] = "改目标不改状态"
+            state.save_state(tmp, st)
+            self.assertEqual(
+                state.load_state(tmp, TID)["goal"], "改目标不改状态")
+
+    def test_terminal_status_accepts_no_transition(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            for terminal in state.TERMINAL_STATUSES:
+                tid = "term-%s-000000" % terminal[:4]
+                if terminal == "completed":
+                    # completed 不能经公共 API 首存——走合法迁移链构造
+                    # （executing→finalizing→完成门内部提交）
+                    self._save_as(tmp, "executing", task_id=tid)
+                    state.transition_task_status(tmp, tid, "finalizing")
+                    state.commit_completion(tmp, tid)
+                else:
+                    self._save_as(tmp, terminal, task_id=tid)
+                st = state.load_state(tmp, tid)
+                st["status"] = "executing"
+                with self.assertRaises(ValueError):
+                    state.save_state(tmp, st)
+                self.assertEqual(
+                    state.load_state(tmp, tid)["status"], terminal, tid)
+
+    def test_save_over_corrupt_file_propagates_value_error(self):
+        # 盘上文件损坏：load_state 的 ValueError 向上传播，不覆盖损坏文件
+        with tempfile.TemporaryDirectory() as tmp:
+            self._save_as(tmp, "executing")
+            path = state.state_path(tmp, TID)
+            path.write_text("{corrupt", encoding="utf-8")
+            with self.assertRaises(ValueError) as ctx:
+                state.save_state(tmp, make_state(status="executing"))
+            self.assertIn("损坏", str(ctx.exception))
+            self.assertEqual(path.read_text(encoding="utf-8"), "{corrupt")
+
+    # —— commit_completion（完成门专用提交通道） ——
+
+    def test_commit_completion_commits_finalizing_to_completed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self._save_as(tmp, "finalizing")
+            committed = state.commit_completion(tmp, TID)
+            self.assertEqual(committed["status"], "completed")
+            self.assertEqual(
+                state.load_state(tmp, TID)["status"], "completed")
+            # 本函数不写 journal（completed 事件由钩子记）
+            self.assertEqual(journal.read_events(tmp, TID), [])
+
+    def test_commit_completion_missing_task_raises(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaises(ValueError):
+                state.commit_completion(tmp, "no-such-task-000000")
+
+    def test_commit_completion_non_finalizing_raises_no_side_effect(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self._save_as(tmp, "executing")
+            with self.assertRaises(ValueError):
+                state.commit_completion(tmp, TID)
+            self.assertEqual(
+                state.load_state(tmp, TID)["status"], "executing")
+
+    # —— transition_task_status（公共迁移入口） ——
+
+    def test_transition_legal_records_status_changed_event(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self._save_as(tmp, "created")
+            st = state.transition_task_status(tmp, TID, "executing")
+            self.assertEqual(st["status"], "executing")
+            self.assertEqual(
+                state.load_state(tmp, TID)["status"], "executing")
+            events = journal.read_events(tmp, TID)
+            self.assertEqual(
+                [e["event"] for e in events], ["status_changed"])
+            self.assertEqual(events[0]["from"], "created")
+            self.assertEqual(events[0]["to"], "executing")
+
+    def test_transition_to_finalizing_requests_completion(self):
+        # 进入 finalizing = 请求完成（created→…→reviewing→finalizing 合法）
+        with tempfile.TemporaryDirectory() as tmp:
+            self._save_as(tmp, "reviewing")
+            state.transition_task_status(tmp, TID, "finalizing")
+            self.assertEqual(
+                state.load_state(tmp, TID)["status"], "finalizing")
+
+    def test_transition_illegal_no_disk_change_no_event(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self._save_as(tmp, "executing")
+            with self.assertRaises(ValueError):
+                state.transition_task_status(tmp, TID, "completed")
+            with self.assertRaises(ValueError):
+                state.transition_task_status(tmp, TID, "preflight")  # 逆向
+            self.assertEqual(
+                state.load_state(tmp, TID)["status"], "executing")
+            self.assertEqual(journal.read_events(tmp, TID), [])
+
+    def test_transition_missing_task_raises(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaises(ValueError):
+                state.transition_task_status(tmp, TID, "executing")
 
 
 if __name__ == "__main__":

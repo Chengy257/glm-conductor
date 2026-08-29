@@ -29,6 +29,7 @@ description: GLM Conductor v2 强制层运行时契约。解释 Stop 完成门�
 | 4 | 视觉证据 | visual_evidence 每项文件字节 sha256 与记录一致 | `visual_stale` |
 
 - **证据指纹（stale 检测的核心）**：验证/审查证据通过 `runtime.fingerprint.task_fingerprint`（基线修订 + 相关文件集归一化内容状态的 sha256）绑定到记录时的仓库状态；完成门用**同一入口**重算当前指纹，与记录值不一致 = 证据过期。任何后续编辑（包括"顺手小改"）都会使 verification_stale / review_stale 拦截完成——这是「任何修复使先前验证/审查失效」的自动强制。记录时机契约见 continuity 技能「证据指纹的记录时机」
+- **完成提交（生命周期封口）**：收尾时把 status 写为 `finalizing` 即请求完成（`state.transition_task_status`，公共状态 API 无法直达 completed）；四重检查全绿放行时，钩子对全部 `finalizing` 任务经 `state.commit_completion` 原子提交 `completed` 并记 `completed` 事件（via=completion_gate）——有违规照常 block（状态保持 finalizing，修复后重新 Stop）；连续 block 达上限（gate_exhausted）放行或任何降级路径都**不会**提交完成
 - **无活动任务 / 任务不参与** → 静默放行，普通会话零干预
 - `.glm-conductor/` 运行时目录豁免（编排器自身账本不算仓库改动）
 

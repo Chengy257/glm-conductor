@@ -80,6 +80,15 @@ def save_task(repo, task_id=TID, ownership_files=OWNED, status="executing",
     active = state.new_task_state(
         task_id, "Layer B 注入冒烟测试目标", dict(route or ROUTE),
         ownership_files=ownership_files, status=status)
+    if status == "completed":
+        # H1 状态转换门（P0-1）：completed 不能经公共 API 首存/直达——
+        # 夹具改走合法迁移链 executing→finalizing→完成门内部提交，
+        # 被测语义不变（盘上存在终态任务 = 非活动任务 → 不注入）
+        for step in ("executing", "finalizing"):
+            active["status"] = step
+            state.save_state(repo, active)
+        state.commit_completion(repo, task_id)
+        return
     state.save_state(repo, active)
 
 
