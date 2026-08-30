@@ -58,8 +58,9 @@
          version 字段必须等于 CHANGELOG.md 第一个 `## ` 标题行中的版本记号；
      13. 钩子清单完整性：plugins/glm-conductor/hooks/hooks.json 存在、合法
          JSON、顶层为对象且含非空 `hooks` 对象；事件键限于 SessionStart /
-         UserPromptSubmit / PreToolUse / PostToolUse / PermissionRequest /
-         Stop，且必须含 Stop 事件键（v2 完成门要求声明 Stop 钩子，缺失即
+         UserPromptSubmit / PreToolUse / PostToolUse / PostToolUseFailure
+         （v2.1 M2 官方七事件全表）、PermissionRequest / Stop，且必须含
+         Stop 事件键（v2 完成门要求声明 Stop 钩子，缺失即
          FAIL）；每个事件值为数组，数组每项为对象且含 `hooks` 数组；内层
          hook 对象 type 限于 process / command，type=process 时 command
          必须为 python3，timeoutMs 若存在必须为 >0 的整数，matcher 若存在
@@ -205,7 +206,7 @@ PLUGIN_ROOT_REL = "plugins/glm-conductor"  # ${ZCODE_PLUGIN_ROOT} 对应的插�
 PLUGIN_ROOT_PREFIX = "${ZCODE_PLUGIN_ROOT}/"
 ALLOWED_HOOK_EVENTS = (
     "SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse",
-    "PermissionRequest", "Stop")
+    "PostToolUseFailure", "PermissionRequest", "Stop")
 ALLOWED_HOOK_TYPES = ("process", "command")
 HOOK_COMMAND = "python3"
 
