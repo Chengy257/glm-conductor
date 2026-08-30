@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""GLM Conductor v2.1 runtime CLI（M1 policy 骨架 + M2 permit 子命令）。
+"""GLM Conductor v2.1 runtime CLI（M1 policy + M2 permit + M3 agent-runs）。
 
 职责：
-    以单行 JSON stdout 提供 execution_policy 三个子命令（M1）与
+    以单行 JSON stdout 提供 execution_policy 三个子命令（M1）、
     dispatch permit 三个子命令（M2 前半，runtime.dispatch_wave 的人工
-    操作面）。M1 只落数据层与 CLI 骨架——policy 部分不接线任何 hook /
+    操作面）与 agent run 账本只读查询（M3 前半，runtime.agent_run 纯读
+    账本面）。M1 只落数据层与 CLI 骨架——policy 部分不接线任何 hook /
     task_manager 消费方（那是 M2+ 的事）；permit 部分是原语层的薄壳
     （签发仍归 task_manager.prepare_dispatch，这里只做 list / show /
-    consume）。
+    consume）；agent-runs 是账本/档案的纯读薄壳（零写副作用，任务不
+    存在时账本为空数组——journal 是唯一真相源，不做任务存在闸）。
 
 子命令：
     policy-show <repo_root> <task_id>
@@ -37,6 +39,15 @@
     permit-consume <repo_root> <task_id> <permit_id>
         消费 permit（原子 rename 防重放）；成功输出 consumed=true，
         无活跃 permit 可消费 → 退出码 1（fail-closed，不做静默空操作）。
+    agent-runs <repo_root> <task_id> [unit]
+        agent run 账本只读查询（v2.1 M3 前半，runtime.agent_run）。
+        缺省 unit → 输出 list_agent_runs 的 run 记录数组（journal 聚合，
+        文件时间序；无 agent_launched/agent_dispatch_failed 事件输出
+        空数组）；给定 unit → 输出 run_lifecycle 单元视角汇总 dict
+        （launch/失败计数 + 最后已知 agent_id 的原生档案观察 +
+        possibly_zombie/archived_terminal 僵尸语义二标注，§7.3：
+        status=="running" 绝不解读为存活）。纯读：不写 journal /
+        state / 档案；任务不存在同空账本（退出码仍 0）。
 
 输出与退出码契约：
     stdout 恒为单行 JSON（json.dumps(..., ensure_ascii=True)，中文以
@@ -71,7 +82,7 @@ PLUGIN_ROOT = pathlib.Path(__file__).resolve().parents[1]
 if str(PLUGIN_ROOT) not in sys.path:
     sys.path.insert(0, str(PLUGIN_ROOT))
 
-from runtime import dispatch_wave, execution_policy, state  # noqa: E402
+from runtime import agent_run, dispatch_wave, execution_policy, state  # noqa: E402
 
 USAGE = (
     "用法: python3 plugins/glm-conductor/runtime/cli.py "
@@ -81,7 +92,8 @@ USAGE = (
     "[max_quota_windows] | "
     "permits <repo_root> <task_id> | "
     "permit-show <repo_root> <task_id> <permit_id> | "
-    "permit-consume <repo_root> <task_id> <permit_id>")
+    "permit-consume <repo_root> <task_id> <permit_id> | "
+    "agent-runs <repo_root> <task_id> [unit]")
 
 # policy-set-resume 的 max_quota_windows 缺省推导表（§5.4 耦合的
 # 最小合法值：until_done 取下界 1，保守不放大）
@@ -245,6 +257,20 @@ def _permit_consume(repo_root, task_id, permit_id) -> int:
     return 0
 
 
+def _agent_runs(repo_root, task_id, unit=None) -> int:
+    """agent-runs：agent run 账本只读查询（薄壳，零写副作用）。
+
+    unit 缺省 → 输出 list_agent_runs 数组（journal 聚合，空账本即空
+    数组——任务不存在不是错误，journal 是账本唯一真相源）；unit 给定
+    → 输出 run_lifecycle 汇总 dict（含 §7.3 僵尸语义二标注）。
+    """
+    if unit is None:
+        _emit(agent_run.list_agent_runs(repo_root, task_id))
+    else:
+        _emit(agent_run.run_lifecycle(repo_root, task_id, unit))
+    return 0
+
+
 def _dispatch(args) -> int:
     """argv 分发；子命令 / 参数个数错误抛 _UsageError（退出码 2）。"""
     if not args:
@@ -285,6 +311,13 @@ def _dispatch(args) -> int:
                 "permit-consume 需要 <repo_root> <task_id> <permit_id> "
                 "三个参数。" + USAGE)
         return _permit_consume(rest[0], rest[1], rest[2])
+    if cmd == "agent-runs":
+        if len(rest) not in (2, 3):
+            raise _UsageError(
+                "agent-runs 需要 <repo_root> <task_id> [unit] 两或三个"
+                "参数。" + USAGE)
+        return _agent_runs(
+            rest[0], rest[1], rest[2] if len(rest) == 3 else None)
     raise _UsageError("未知子命令 %r。" % cmd + USAGE)
 
 
