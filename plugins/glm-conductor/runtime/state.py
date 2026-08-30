@@ -33,6 +33,12 @@
         state.json / events.jsonl / 租约）恒在账本根——两根分离是多仓
         隔离的基础；无 repository 键即 legacy 形态，行为与单仓时代
         完全一致。
+      - 执行策略（v2.1 M1，自动化强度授权事实源）：可选顶层
+        "execution_policy" 块——new_task_state() 构造默认块
+        （runtime.execution_policy.default_execution_policy），
+        validate_state 规则 8.7 复用 runtime.execution_policy 校验
+        （错误路径前缀 execution_policy.）；无该键即 legacy 形态，
+        完全合法，由消费方按保守默认块解释。
     本文件是 Stop 完成门钩子等强制状态源的确定性来源。
 
 路径布局：
@@ -51,8 +57,10 @@ legacy 标识归一：
     仅 Python 3 标准库（json / os / pathlib / re）+ runtime.quota.parser
     （quota 状态词汇 QUOTA_STATUSES，§39；quota/* 不 import 本模块，
     无循环导入）+ runtime.work_unit（work unit 逐项校验，B8.1；
-    本模块单向导入它，它不导入本模块，无循环导入），零第三方依赖，
-    `python3 -S` 可运行（无 site-packages）。
+    本模块单向导入它，它不导入本模块，无循环导入）+
+    runtime.execution_policy（v2.1 M1 授权事实源：默认块构造与块内
+    校验；它只依赖 runtime.quota.parser，不导入本模块，无循环导入），
+    零第三方依赖，`python3 -S` 可运行（无 site-packages）。
 """
 
 import json
@@ -60,6 +68,8 @@ import os
 import pathlib
 import re
 
+from runtime.execution_policy import (default_execution_policy,
+                                      validate_execution_policy)
 from runtime.quota.parser import QUOTA_STATUSES
 from runtime.work_unit import validate_work_unit
 
@@ -453,6 +463,10 @@ def validate_state(state) -> "list[str]":
     未知顶层键忽略（向前兼容），不报错。
     可选顶层 repository 块（RB-2）：存在时必须为 dict 且 root 为非空
     字符串；缺失时完全合法（legacy 无绑定形态）。
+    可选顶层 execution_policy 块（v2.1 M1 授权事实源）：存在时必须为
+    dict 且复用 validate_execution_policy（§3 冻结 schema + §5.4
+    授权不变量，错误路径前缀 execution_policy.）；缺失时完全合法
+    （legacy 保守默认形态，R7）。
     """
     if not isinstance(state, dict):
         return ["state 必须是 JSON 对象"]
@@ -525,6 +539,20 @@ def validate_state(state) -> "list[str]":
     if "repository" in state:
         errors.extend(_validate_repository(state["repository"]))
 
+    # 规则 8.7：execution_policy（v2.1 M1 可选顶层授权事实源块；无该键
+    # 完全合法——legacy 保守默认形态，消费方按 default_execution_policy
+    # 解释；存在时复用 runtime.execution_policy 全量校验（§3 冻结
+    # schema + §5.4 授权不变量），错误路径前缀 execution_policy.，
+    # 聚合不短路——与规则 7 的 work_units[i] 前缀同风格）
+    if "execution_policy" in state:
+        policy_block = state["execution_policy"]
+        if not isinstance(policy_block, dict):
+            errors.append("execution_policy 必须是 JSON 对象")
+        else:
+            errors.extend(
+                "execution_policy.%s" % policy_error
+                for policy_error in validate_execution_policy(policy_block))
+
     # 规则 9：status ∈ TASK_STATUSES
     if "status" in state:
         status = state["status"]
@@ -561,6 +589,10 @@ def new_task_state(task_id, goal, route, *, ownership_files=(),
     Git 仓库根（经 bind_repository_root 归一为绝对路径写入顶层
     "repository" 块）；None（缺省）→ 整键省略（legacy 无绑定形态）。
     非法输入（空串 / 非路径类型）抛 ValueError。
+
+    v2.1 M1：构造结果恒含顶层 "execution_policy" 默认块
+    （runtime.execution_policy.default_execution_policy() 的保守
+    默认——授权事实源的初始形状；升档经 set_*_authorization 变换）。
     """
     if not isinstance(route, dict):
         raise TypeError(
@@ -595,6 +627,9 @@ def new_task_state(task_id, goal, route, *, ownership_files=(),
         "work_units": [],
         "dispatch": {"max_workers": 1, "active": []},
         "status": status,
+        # v2.1 M1：执行策略授权事实源（§3 冻结 schema 的保守默认块；
+        # 授权升档经 execution_policy.set_*_authorization 变换后写入）
+        "execution_policy": default_execution_policy(),
     }
     if repository_root is not None:
         bind_repository_root(st, repository_root)
