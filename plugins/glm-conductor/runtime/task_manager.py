@@ -23,10 +23,12 @@
       3 plan_dispatch（纯决策）      3 租约在位校验（归一路径 ∧ owner==u）
       4 落选 → TaskManagerError     4 ready→running（§62 表内转换）
       5 acquire_lease（§78 幂等）    5 active 记账（幂等防御）+
-      6 journal dispatch_prepared      任务级非执行态顺手转 executing
-      7 返回决策快照（不落盘）       6 save_state（单次）
-        ↓ 不改单元状态、不 save      7 journal implementation_started
-        ↓                              ↓ 返回提交后的 state dict
+      6 create_permit（v2.1 M2）       任务级非执行态顺手转 executing
+      7 journal dispatch_prepared   6 save_state（单次）
+        + dispatch_permit_created   7 journal implementation_started
+      8 返回决策快照 + permit          ↓ 返回提交后的 state dict
+        ↓ 不改单元状态、不 save
+        ↓
     ──────────── [Agent 实施] ────────────
         ↓                              ↓
     abort_dispatch(u)              finish_unit(u, outcome=…)
@@ -36,10 +38,10 @@
       3 release_lease（全部释放）    4 completed → RB-1 完成证据门：
       4 active 残留 → 移除 + save      fresh_unit_verification 须全部
       5 journal dispatch_aborted       命中（missing/stale/partial →
-      6 返回 state dict                拒绝且零副作用；git/指纹失败
-                                       fail-closed 同拒）
-                                     5 running+completed → 先 verifying 再
-                                       completed（§70 父验证语义 = 两次
+      6 invalidate 未消费 permit +     拒绝且零副作用；git/指纹失败
+        journal dispatch_permit_       fail-closed 同拒）
+        invalidated                  5 running+completed → 先 verifying 再
+      7 返回 state dict                completed（§70 父验证语义 = 两次
                                        表内转换）；其余单步直达
                                      6 release_lease + active 移除
                                      7 save_state（单次）
@@ -66,6 +68,22 @@
     已不在活跃写相）自动释放 + lease_recovered 事件（零释放不落事件），
     expired_running（活跃写相但已过期——worker 可能仍在写）仅上报、
     裁决归主会话——崩溃后无需人工删除 leases.json。
+
+派发 permit 接线（v2.1 M2 前半，wu-21-02，计划 §6.3/§6.6）：
+    真实 dogfood 中主会话曾完全绕过 prepare/commit 手工派发 Agent；
+    v2.1 用「无 permit 即 deny」的 PreToolUse 门（wu-21-03 实施 hook
+    侧）堵住 bypass，本模块是该门的数据层接线：prepare_dispatch 在
+    租约获取之后为该单元签发一张落盘 permit（runtime.dispatch_wave
+    的每 permit 一文件 + rename 消费防重放原语），mode 取 state
+    execution_policy.worker_execution.default_mode（缺块 / 坏形状按
+    default_execution_policy() 兜底），返回决策快照新增 "permit" 键
+    （向后兼容增量，现有键全部保留）并落 journal
+    dispatch_permit_created；主会话用 dispatch_wave.marker_for(
+    permit_id) 构造 marker 放进 Agent prompt 派发，hook 侧 consume
+    （本层不代消费——commit_dispatch / finish_unit 行为不变，未消费
+    permit 随 DEFAULT_TTL_SECONDS 自然过期兜底）；abort_dispatch 在
+    现有回退逻辑之后对该单元全部未消费 permit invalidate 并落
+    dispatch_permit_invalidated（零失效不落事件）。
 
 单元验证证据归属绑定（v2.0.1 加固 H6，审查项 P1-7）+ RB-1 完成证据门
 （release hardening WU-P2，计划 §2 RB-1）：
@@ -111,6 +129,9 @@
         派发 / 谁挂起及理由」的决策 dict；本层在 prepare 中消费它；
     runtime.lease —— 落盘 owner map：acquire/release 原语，获取时点
         （prepare）与释放时点（finish/abort）由本层锚定；
+    runtime.dispatch_wave —— 落盘派发许可（v2.1 M2）：create/invalidate
+        原语，签发时点（prepare）与作废时点（abort）由本层锚定；消费
+        留给 wu-21-03 的 hook 侧（未消费 permit 随 TTL 自然过期兜底）；
     runtime.state / runtime.journal —— 状态与事件持久化；save_state 的
         任务级转换门照常生效（本层只动 work_units/dispatch 与合法的
         executing 直达边，不触碰终态任务级状态）；
@@ -119,7 +140,9 @@
 
 依赖：
     runtime.state（load/save）、runtime.dispatcher（纯决策）、
-    runtime.lease（租约原语）、runtime.work_unit（§62 表内转换）、
+    runtime.lease（租约原语）、runtime.dispatch_wave（permit 原语）、
+    runtime.execution_policy（default_execution_policy——permit mode
+    策略兜底）、runtime.work_unit（§62 表内转换）、
     runtime.ownership（路径归一）、runtime.journal（事件追加）。
     仅 Python 3 标准库，`python3 -S` 可运行。
 
@@ -134,6 +157,7 @@
 """
 
 from runtime import dependency
+from runtime import dispatch_wave
 from runtime import dispatcher
 from runtime import journal
 from runtime import lease
@@ -141,6 +165,7 @@ from runtime import ownership
 from runtime import reconcile
 from runtime import state
 from runtime import work_unit
+from runtime.execution_policy import default_execution_policy
 from runtime.lease import LEASE_DEFAULT_TTL_SECONDS
 
 # finish_unit 的合法结局词汇（work unit 终态全集，§62）
@@ -219,36 +244,71 @@ def _remove_active(st, uid) -> bool:
     return True
 
 
-# —— prepare：plan 决策 + 租约 + 事件（无 state 副作用） ——
+def _default_dispatch_mode(st) -> str:
+    """派发 permit 的 mode 默认值：state execution_policy 的
+    worker_execution.default_mode（v2.1 M2 接线）；legacy 缺块 / 块形
+    状坏 / 叶子值非法时按 execution_policy.default_execution_policy()
+    的保守默认（"background"）兜底——mode 永远是 PERMIT_MODES 内的
+    合法值，create_permit 不会因策略形状炸。"""
+    policy = st.get("execution_policy")
+    worker_execution = (
+        policy.get("worker_execution")
+        if isinstance(policy, dict) else None)
+    mode = (worker_execution.get("default_mode")
+            if isinstance(worker_execution, dict) else None)
+    if mode in dispatch_wave.PERMIT_MODES:
+        return mode
+    return default_execution_policy()["worker_execution"]["default_mode"]
+
+
+# —— prepare：plan 决策 + 租约 + permit + 事件（无 state 副作用） ——
 
 def prepare_dispatch(repo_root, task_id, uid, *, quota_status="AVAILABLE",
-                     allow_small_under_pressure=False, max_workers=None) -> dict:
-    """派发准备：准入决策 → 租约 → dispatch_prepared 事件；不改单元状态、
-    不 save——prepare 对 state.json 零副作用（可安全重试）。
+                     allow_small_under_pressure=False, max_workers=None,
+                     mode=None, reason=None) -> dict:
+    """派发准备：准入决策 → 租约 → permit 签发 → 事件；不改单元状态、
+    不 save state——prepare 对 state.json 零副作用（可安全重试）。
 
     流程：
       1. load_state（任务缺失 TaskManagerError；损坏 ValueError 上抛），
          找不到 uid → TaskManagerError；
       2. 单元 status 必须为 "ready"，否则 TaskManagerError（消息含当前
          状态）；
-      3. max_workers 缺省取 state["dispatch"]["max_workers"]（缺失按 1；
+      3. permit mode/reason 先于任何副作用全量校验（与「落选零副作用」
+         同口径——非法 mode/reason 不得留下半张租约）：显式 mode 参数
+         优先，缺省取 state execution_policy 的 worker_execution.
+         default_mode（缺块/坏形状按默认块兜底，见
+         _default_dispatch_mode）；mode="foreground" 必须显式给出
+         reason ∈ dispatch_wave.FOREGROUND_REASONS（§6.6），缺给出
+         TaskManagerError、值非法 ValueError；background 恒 reason
+         null（显式传了 reason 也拒绝）；
+      4. max_workers 缺省取 state["dispatch"]["max_workers"]（缺失按 1；
          显式传参覆盖）；
-      4. 读出已落盘租约（lease.lease_state，损坏 ValueError 上抛）交给
+      5. 读出已落盘租约（lease.lease_state，损坏 ValueError 上抛）交给
          plan_dispatch 的租约闸——自有租约不挡自己（§78 同 owner 放行），
          因此 prepare 后崩溃重试安全；
-      5. plan = dispatcher.plan_dispatch(...)（纯决策器，零 I/O）；
-      6. uid 不在 plan["dispatch"] → TaskManagerError，消息含落选原因
+      6. plan = dispatcher.plan_dispatch(...)（纯决策器，零 I/O）；
+      7. uid 不在 plan["dispatch"] → TaskManagerError，消息含落选原因
          （waiting_quota 组 → quota EXHAUSTED；deferred 组 → 对应
          reason；未进候选 → 依赖未满足等）；
-      7. lease.acquire_lease（全有或全无，同 owner 幂等；ownership 非
+      8. lease.acquire_lease（全有或全无，同 owner 幂等；ownership 非
          list 容错为 []；按 LEASE_DEFAULT_TTL_SECONDS 保守 TTL 落盘
          expires_at，长期实施由 runtime.lease.renew_lease 心跳续约）；
-      8. journal dispatch_prepared（unit + leased=持有中的归一路径 +
-         ttl_seconds，排序确定）；
-      9. 返回 plan 决策快照（供调用方参考，不落盘）。
+      9. dispatch_wave.create_permit 签发派发许可（§6.3 每 permit 一
+         文件 + tmp/os.replace 原子写，ttl 取 dispatch_wave.
+         DEFAULT_TTL_SECONDS；wave_id 缺省 None，M4 wave 事务接线）；
+      10. journal dispatch_prepared（unit + leased=持有中的归一路径 +
+          ttl_seconds）与 dispatch_permit_created（unit + permit_id +
+          mode），先后各一条；
+      11. 返回 plan 决策快照，新增 "permit" 键（permit dict；主会话用
+          dispatch_wave.marker_for(permit_id) 构造 marker 派发 Agent，
+          消费归 wu-21-03 的 hook 侧）。
 
-    失败零副作用锚定：决策未批准（步骤 6）发生在获取租约（步骤 7）与
-    journal（步骤 8）之前——落选的 prepare 不写租约、不写事件。
+    失败零副作用锚定：决策未批准（步骤 7）发生在获取租约（步骤 8）与
+    journal（步骤 10）之前——落选的 prepare 不写租约、不写 permit、
+    不写事件。permit 落盘失败（OSError）在租约之后上抛：主会话可
+    abort_dispatch 回退半状态（崩溃窗口语义见模块 docstring permit
+    接线一节）。
     """
     api = "prepare_dispatch"
     st = _require_state(repo_root, task_id, api)
@@ -258,6 +318,26 @@ def prepare_dispatch(repo_root, task_id, uid, *, quota_status="AVAILABLE",
         raise TaskManagerError(
             "%s：单元 %s 当前状态为 %r 而非 ready，不能准备派发"
             % (api, uid, current))
+    # permit 参数先于任何 I/O 副作用全量校验（§6.3/§6.6 冻结不变量）
+    effective_mode = mode if mode is not None else _default_dispatch_mode(st)
+    if effective_mode not in dispatch_wave.PERMIT_MODES:
+        raise ValueError(
+            "%s：mode %r 不在合法取值内（%s）"
+            % (api, effective_mode, ", ".join(dispatch_wave.PERMIT_MODES)))
+    permit_reason = reason
+    if effective_mode == "foreground":
+        if permit_reason is None:
+            raise TaskManagerError(
+                "%s：mode=\"foreground\" 必须显式给出 reason（%s）——"
+                "foreground 派发须由主会话声明原因（§6.6）"
+                % (api, ", ".join(dispatch_wave.FOREGROUND_REASONS)))
+        if permit_reason not in dispatch_wave.FOREGROUND_REASONS:
+            raise ValueError(
+                "%s：reason %r 不在合法取值内（%s）"
+                % (api, permit_reason,
+                   ", ".join(dispatch_wave.FOREGROUND_REASONS)))
+    else:
+        permit_reason = None  # background permit 的 reason 恒 null
     dispatch_block = st.get("dispatch")
     if not isinstance(dispatch_block, dict):
         dispatch_block = {}
@@ -295,11 +375,19 @@ def prepare_dispatch(repo_root, task_id, uid, *, quota_status="AVAILABLE",
         owned = []
     lease.acquire_lease(repo_root, task_id, uid, owned,
                         ttl_seconds=LEASE_DEFAULT_TTL_SECONDS)
+    # 派发 permit（§6.3）：租约在位后签发——「无 permit 即 deny」门的
+    # 数据基础；wave_id 缺省 None（M4 wave 事务接线）
+    permit = dispatch_wave.create_permit(
+        repo_root, task_id, uid, mode=effective_mode, reason=permit_reason)
     # leased 记持有事实（归一路径、排序、同 owner 幂等重入不虚报）
     held = lease.held_by(repo_root, task_id, uid)
     journal.append_event(repo_root, task_id, {
         "event": "dispatch_prepared", "unit": uid, "leased": held,
         "ttl_seconds": LEASE_DEFAULT_TTL_SECONDS})
+    journal.append_event(repo_root, task_id, {
+        "event": "dispatch_permit_created", "unit": uid,
+        "permit_id": permit["permit_id"], "mode": effective_mode})
+    plan["permit"] = permit
     return plan
 
 
@@ -366,8 +454,8 @@ def commit_dispatch(repo_root, task_id, uid) -> dict:
 # —— abort：prepare 之后、commit 之前的回退 ——
 
 def abort_dispatch(repo_root, task_id, uid) -> dict:
-    """回退未提交的派发准备：释放租约 + dispatch_aborted 事件；返回
-    state dict。
+    """回退未提交的派发准备：释放租约 + permit 失效 + dispatch_aborted
+    事件；返回 state dict。
 
     流程：
       1. load_state；找不到 uid → TaskManagerError；
@@ -376,10 +464,17 @@ def abort_dispatch(repo_root, task_id, uid) -> dict:
       3. lease.release_lease 全部释放该 owner 的租约；
       4. uid 残留在 dispatch.active（异常残留）→ 移除并 save_state；
          无残留则不落盘（abort 对 state.json 零写入是常态）；
-      5. journal dispatch_aborted。
+      5. journal dispatch_aborted；
+      6. 该单元全部未消费 permit invalidate（dispatch_wave.
+         invalidate_permit，rename 为 .invalidated.json 保留审计轨迹），
+         每张实际失效的 permit 落一条 dispatch_permit_invalidated
+         （unit + permit_id；零失效不落事件——重复 abort / 无 permit
+         的 abort 不产生噪声行）；
+      7. 返回 state dict。
 
     不改单元状态：prepare 对 state 零副作用，abort 也不需要补偿单元
-    状态——回退后单元仍是 ready，可重新 prepare。
+    状态——回退后单元仍是 ready，可重新 prepare（新 prepare 签发新
+    permit，旧 permit 已 invalidated 不会复活）。
     """
     api = "abort_dispatch"
     st = _require_state(repo_root, task_id, api)
@@ -393,6 +488,16 @@ def abort_dispatch(repo_root, task_id, uid) -> dict:
         state.save_state(repo_root, st)
     journal.append_event(repo_root, task_id, {
         "event": "dispatch_aborted", "unit": uid})
+    # 未消费 permit 一并作废（§6.3）：先于返回值完成——回退后的任务
+    # 目录里不得残留可被 hook 放行的活跃 permit
+    for permit in dispatch_wave.list_permits(repo_root, task_id):
+        if permit.get("unit_id") != uid:
+            continue
+        permit_id = permit.get("permit_id")
+        if dispatch_wave.invalidate_permit(repo_root, task_id, permit_id):
+            journal.append_event(repo_root, task_id, {
+                "event": "dispatch_permit_invalidated", "unit": uid,
+                "permit_id": permit_id})
     return st
 
 

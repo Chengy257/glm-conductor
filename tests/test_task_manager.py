@@ -80,7 +80,16 @@ validate_state 拒绝「无验证命令的单元」（不可派发），因此�
     - RELEASE（refresh_readiness）：pending+依赖满足提升并返回 /
       waiting_dependency 提升 / 依赖未满足不提升零写入 / 全 ready 与
       空图零写入零返回零 journal / 提升序按 units 出现序 / 提升后
-      prepare_dispatch 直接准入（集成）。
+      prepare_dispatch 直接准入（集成）；
+    - v2.1 M2 前半（permit 接线，WU-21-02）：prepare 返回 "permit" 增量
+      键（冻结形状 + 落盘读回一致）/ dispatch_permit_created 事件与
+      prepared→created 事件序 / 落选零 permit / mode 取 execution_policy
+      default_mode（legacy 缺块兜底 background；foreground 须显式
+      reason）/ 显式 mode 覆盖 / 非法 mode/reason ValueError 零副作用 /
+      commit 不消费 permit / abort 作废 + dispatch_permit_invalidated
+      事件序 / 无 permit 零噪声 / 重复 prepare 全作废 / 按单元精确
+      作废 / abort 后重备新 permit（数据层原语全集见
+      tests/test_dispatch_wave.py）。
 
 运行：
     cd <repo_root> && python3 -m unittest tests.test_task_manager -v
@@ -97,6 +106,7 @@ import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "plugins" / "glm-conductor"))
+from runtime import dispatch_wave
 from runtime import fingerprint as fingerprint_mod
 from runtime import journal
 from runtime import lease
@@ -591,6 +601,7 @@ class CrashWindowTest(TaskManagerTestBase):
         self.assertEqual(st["dispatch"]["active"], ["u1"])
         names = [e["event"] for e in journal.read_events(self.root, TID)]
         self.assertEqual(names, ["dispatch_prepared",
+                                 "dispatch_permit_created",
                                  "implementation_started"])
 
     def test_crash_after_prepare_then_abort_releases(self):
@@ -670,6 +681,228 @@ class PrepareTtlTest(TaskManagerTestBase):
         task_manager.prepare_dispatch(self.root, TID, "u1")
         self.assertEqual(_read_lease_map(self.root)["src/a/**"], before)
         self.assertEqual(before["generation"], 1)
+
+
+# —— v2.1 M2 前半：派发 permit 接线（WU-21-02，§6.3/§6.6/§20.2） ——
+
+def permits_dir(root, task_id=TID):
+    """任务目录下的 permits/ 子目录路径（测试辅助）。"""
+    return (Path(root) / ".glm-conductor" / "tasks" / task_id / "permits")
+
+
+class PermitWiringTest(TaskManagerTestBase):
+    """prepare_dispatch 签发 permit / abort_dispatch 作废 permit 的接线。
+
+    数据层原语（validate / consume / marker / TTL）的全集在
+    tests/test_dispatch_wave.py；本类锚定 task_manager 的接缝：
+    返回 dict 的 "permit" 增量键、事件序、mode 策略来源、失败零副作用
+    与 abort 按单元作废。commit / finish 行为不变（消费归 wu-21-03
+    的 hook 侧，未消费 permit 随 TTL 自然过期兜底）。
+    """
+
+    def setUp(self):
+        super().setUp()
+        make_task(self.root, [wu("u1")])
+
+    def test_prepare_returns_permit_with_frozen_shape(self):
+        # 现有键全部保留（向后兼容增量）+ permit 冻结形状
+        plan = task_manager.prepare_dispatch(self.root, TID, "u1")
+        self.assertEqual(plan["dispatch"], ["u1"])
+        self.assertEqual(plan["max_workers"], 1)
+        self.assertEqual(plan["quota_status"], "AVAILABLE")
+        permit = plan["permit"]
+        self.assertEqual(permit["task_id"], TID)
+        self.assertEqual(permit["unit_id"], "u1")
+        self.assertIsNone(permit["wave_id"])
+        self.assertEqual(permit["mode"], "background")  # 默认策略
+        self.assertIsNone(permit["reason"])  # background 恒 null
+        self.assertFalse(permit["consumed"])
+        self.assertRegex(permit["permit_id"], r"^dp-[0-9a-f]{12}$")
+        self.assertIn("created_at", permit)
+        self.assertIn("expires_at", permit)
+        # 落盘读回一致（每 permit 一文件）
+        self.assertEqual(
+            dispatch_wave.load_permit(self.root, TID, permit["permit_id"]),
+            permit)
+
+    def test_prepare_journals_permit_created_after_prepared(self):
+        task_manager.prepare_dispatch(self.root, TID, "u1")
+        created = events(self.root, "dispatch_permit_created")
+        self.assertEqual(len(created), 1)
+        self.assertEqual(created[0]["unit"], "u1")
+        self.assertEqual(created[0]["mode"], "background")
+        names = [e["event"] for e in journal.read_events(self.root, TID)]
+        self.assertEqual(names, ["dispatch_prepared",
+                                 "dispatch_permit_created"])
+        # 事件 permit_id 与盘上活跃 permit 一致
+        self.assertEqual(
+            [p["permit_id"] for p in
+             dispatch_wave.list_permits(self.root, TID)],
+            [created[0]["permit_id"]])
+
+    def test_prepare_leaves_state_bytes_untouched_with_permit(self):
+        # permit 落在 permits/ 子目录：state.json 字节仍零副作用
+        before = state_bytes(self.root)
+        task_manager.prepare_dispatch(self.root, TID, "u1")
+        self.assertEqual(state_bytes(self.root), before)
+        self.assertEqual(len(dispatch_wave.list_permits(self.root, TID)), 1)
+
+    def test_marker_round_trip_from_prepared_permit(self):
+        # §6.4 流程形态：prepare → marker 进 prompt → parse 回 permit_id
+        plan = task_manager.prepare_dispatch(self.root, TID, "u1")
+        marker = dispatch_wave.marker_for(plan["permit"]["permit_id"])
+        self.assertEqual(dispatch_wave.parse_marker("实施单 u1：%s" % marker),
+                         plan["permit"]["permit_id"])
+
+    def test_prepare_failure_creates_no_permit(self):
+        # 决策未批准 → 零租约零 permit 零事件（失败零副作用锚定延伸）
+        make_task(self.root, [wu("u1")])
+        with self.assertRaises(task_manager.TaskManagerError):
+            task_manager.prepare_dispatch(self.root, TID, "u1",
+                                          quota_status="EXHAUSTED")
+        self.assertEqual(dispatch_wave.list_permits(self.root, TID), [])
+        self.assertFalse(permits_dir(self.root).exists())
+        self.assertEqual(lease.lease_state(self.root, TID), {})
+        self.assertEqual(journal.read_events(self.root, TID), [])
+
+    def test_mode_comes_from_execution_policy_default(self):
+        # mode 取 state execution_policy.worker_execution.default_mode
+        make_task(self.root, [wu("u1")])
+        st = state.load_state(self.root, TID)
+        st["execution_policy"]["worker_execution"]["default_mode"] = \
+            "foreground"
+        state.save_state(self.root, st)
+        # foreground 默认策略必须显式给 reason（§6.6）
+        with self.assertRaises(task_manager.TaskManagerError) as ctx:
+            task_manager.prepare_dispatch(self.root, TID, "u1")
+        self.assertIn("reason", str(ctx.exception))
+        # 给出 reason → foreground permit + 事件 mode 同步
+        plan = task_manager.prepare_dispatch(
+            self.root, TID, "u1", reason="short_diagnostic")
+        self.assertEqual(plan["permit"]["mode"], "foreground")
+        self.assertEqual(plan["permit"]["reason"], "short_diagnostic")
+        self.assertEqual(
+            events(self.root, "dispatch_permit_created")[0]["mode"],
+            "foreground")
+
+    def test_legacy_state_without_policy_block_defaults_background(self):
+        # legacy 缺 execution_policy 块 → 按默认块兜底（background）
+        make_task(self.root, [wu("u1")])
+        st = state.load_state(self.root, TID)
+        del st["execution_policy"]
+        state.save_state(self.root, st)
+        plan = task_manager.prepare_dispatch(self.root, TID, "u1")
+        self.assertEqual(plan["permit"]["mode"], "background")
+
+    def test_explicit_mode_overrides_policy(self):
+        make_task(self.root, [wu("u1")])
+        plan = task_manager.prepare_dispatch(
+            self.root, TID, "u1", mode="foreground",
+            reason="synchronous_dependency")
+        self.assertEqual(plan["permit"]["mode"], "foreground")
+        self.assertEqual(plan["permit"]["reason"],
+                         "synchronous_dependency")
+
+    def test_bad_mode_or_reason_value_error_zero_side_effects(self):
+        make_task(self.root, [wu("u1")])
+        for kwargs in ({"mode": "sync"},
+                       {"mode": "foreground", "reason": "because"}):
+            with self.subTest(kwargs=kwargs):
+                with self.assertRaises(ValueError) as ctx:
+                    task_manager.prepare_dispatch(self.root, TID, "u1",
+                                                  **kwargs)
+                # 消息含字段名
+                self.assertTrue(
+                    "mode" in str(ctx.exception)
+                    or "reason" in str(ctx.exception))
+        # 零副作用：不写租约、不写 permit、不写事件
+        self.assertEqual(lease.lease_state(self.root, TID), {})
+        self.assertEqual(dispatch_wave.list_permits(self.root, TID), [])
+        self.assertEqual(journal.read_events(self.root, TID), [])
+
+    def test_commit_leaves_permit_active_for_hook_consumption(self):
+        # commit / finish 行为不变：不消费不失效（消费归 wu-21-03 hook）
+        make_task(self.root, [wu("u1")])
+        plan = task_manager.prepare_dispatch(self.root, TID, "u1")
+        pid = plan["permit"]["permit_id"]
+        task_manager.commit_dispatch(self.root, TID, "u1")
+        self.assertEqual(
+            dispatch_wave.validate_permit(self.root, TID, pid,
+                                          unit_id="u1"),
+            (True, "ok"))
+        self.assertEqual(len(dispatch_wave.list_permits(self.root, TID)), 1)
+
+    def test_abort_invalidates_permit_and_journals(self):
+        make_task(self.root, [wu("u1")])
+        pid = task_manager.prepare_dispatch(
+            self.root, TID, "u1")["permit"]["permit_id"]
+        before = state_bytes(self.root)
+        task_manager.abort_dispatch(self.root, TID, "u1")
+        # 活跃 permit 清空、审计轨迹保留（.invalidated.json）
+        self.assertEqual(dispatch_wave.list_permits(self.root, TID), [])
+        self.assertIsNone(
+            dispatch_wave.load_permit(self.root, TID, pid))
+        trail = permits_dir(self.root) / (pid + ".invalidated.json")
+        self.assertTrue(trail.is_file())
+        record = events(self.root, "dispatch_permit_invalidated")
+        self.assertEqual(len(record), 1)
+        self.assertEqual(record[0]["unit"], "u1")
+        self.assertEqual(record[0]["permit_id"], pid)
+        names = [e["event"] for e in journal.read_events(self.root, TID)]
+        self.assertEqual(names, ["dispatch_prepared",
+                                 "dispatch_permit_created",
+                                 "dispatch_aborted",
+                                 "dispatch_permit_invalidated"])
+        # state.json 仍零写入（abort 常态）
+        self.assertEqual(state_bytes(self.root), before)
+
+    def test_abort_without_permits_journals_no_invalidation(self):
+        # 无 prepare 直接 abort（无 permit）→ 零失效零事件（不留噪声行）
+        make_task(self.root, [wu("u1")])
+        task_manager.abort_dispatch(self.root, TID, "u1")
+        self.assertEqual(
+            events(self.root, "dispatch_permit_invalidated"), [])
+        self.assertEqual(len(events(self.root, "dispatch_aborted")), 1)
+
+    def test_repeated_prepare_then_abort_invalidates_all(self):
+        # 重复 prepare 每次签发新 permit；abort 一次作废该单元全部
+        make_task(self.root, [wu("u1")])
+        task_manager.prepare_dispatch(self.root, TID, "u1")
+        task_manager.prepare_dispatch(self.root, TID, "u1")
+        self.assertEqual(len(dispatch_wave.list_permits(self.root, TID)), 2)
+        task_manager.abort_dispatch(self.root, TID, "u1")
+        self.assertEqual(dispatch_wave.list_permits(self.root, TID), [])
+        self.assertEqual(
+            len(events(self.root, "dispatch_permit_invalidated")), 2)
+
+    def test_abort_scopes_invalidation_to_unit(self):
+        # 其他单元的 permit 不被代失效（按 unit_id 精确过滤）
+        make_task(self.root, [wu("u1"), wu("u2", ("src/b/**",))],
+                  max_workers=2)
+        p1 = task_manager.prepare_dispatch(self.root, TID, "u1")["permit"]
+        p2 = task_manager.prepare_dispatch(self.root, TID, "u2")["permit"]
+        task_manager.abort_dispatch(self.root, TID, "u1")
+        self.assertEqual(
+            [p["permit_id"] for p in
+             dispatch_wave.list_permits(self.root, TID)],
+            [p2["permit_id"]])
+        invalidated = events(self.root, "dispatch_permit_invalidated")
+        self.assertEqual([r["permit_id"] for r in invalidated],
+                         [p1["permit_id"]])
+
+    def test_reprepare_after_abort_issues_fresh_permit(self):
+        # 崩溃窗口恢复：abort 后重新 prepare → 全新可用 permit
+        make_task(self.root, [wu("u1")])
+        first = task_manager.prepare_dispatch(
+            self.root, TID, "u1")["permit"]
+        task_manager.abort_dispatch(self.root, TID, "u1")
+        second = task_manager.prepare_dispatch(
+            self.root, TID, "u1")["permit"]
+        self.assertNotEqual(first["permit_id"], second["permit_id"])
+        self.assertEqual(
+            dispatch_wave.validate_permit(self.root, TID,
+                                          second["permit_id"]),
+            (True, "ok"))
 
 
 class RecoverLeasesTest(TaskManagerTestBase):
@@ -1044,6 +1277,7 @@ class BoundRepositoryFinishGateTest(TaskManagerTestBase):
         names = [e["event"] for e in
                  journal.read_events(str(self.ledger), TID)]
         self.assertEqual(names, ["dispatch_prepared",
+                                 "dispatch_permit_created",
                                  "implementation_started",
                                  "verification", "unit_finished"])
         # 绑定根归一落盘，账本仍在非 git 目录
@@ -1122,6 +1356,7 @@ class FinishGateCompletionTest(GitRepoFixture):
         self.assertEqual(record["fingerprint"], fp)
         names = [e["event"] for e in journal.read_events(self.root, TID)]
         self.assertEqual(names, ["dispatch_prepared",
+                                 "dispatch_permit_created",
                                  "implementation_started",
                                  "verification", "unit_finished"])
 
