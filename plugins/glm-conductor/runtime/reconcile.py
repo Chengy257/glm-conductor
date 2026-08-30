@@ -108,13 +108,43 @@ completed 不重跑锚定（§68）：
       自然上抛（结构性错误不静默转换）；
     - events 显式注入非 list → 按 [] 容错（缺省通道 read_events 本就
       容错；注入通道是测试 / 回放后门，坏形状不炸对账）。
+    （例外：reconcile_agent_run 是决策 API——求值异常不向调用方上抛，
+    一律归入 manual_ruling，见下节。）
+
+Agent Run 四分对账（v2.1 M3，计划 §9 / §7.3）：
+    reconcile_agent_run() 是单单元四分分类纯读决策 API：基于机械证据
+    （repo residue + 新鲜验证证据 + 原生档案 metadata + agent run
+    账本）输出 reuse_result / resume_with_progress / redispatch_clean
+    / manual_ruling 之一，附 rationale 与 evidence 证据视图——崩溃后
+    主会话据此决定「捞结果不重派 / 进度包续作 / 全新派发 / 人工裁决」，
+    而不是一律重派（dogfood 实录：崩溃后无 reconcile 消费原生记录，
+    续作会话把已完成单元全部重做）。两层分工（※DR）：本 API 只产出
+    「分类 + 证据句柄」；resume_with_progress 的进度包组装（旧
+    transcript 摘要、owned diff 内容级重建）由模型侧经
+    ReadSessionContext 读取子会话 transcript 完成——本模块绝不复制
+    transcript（§7.2）。僵尸语义（§7.3）：档案 metadata.status 绝不是
+    truth——observed_status == "running" 只触发 rationale 的僵尸语义
+    句，绝不据此判存活。证据优先级（§7.3）体现为判定树顺序：
+    repository state（residue）最先分流，其次 verification evidence，
+    再次 native 档案。单元定位：只读解析任务 state.json 的 work_units
+    （目录经 journal.journal_path 派生，不导入 runtime.state /
+    task_manager）；state 缺失 / 损坏 / 无此单元与 git 求值异常
+    （OwnershipError / FingerprintError）一律 manual_ruling（rationale
+    注明求值失败，residue 按无 residue 处理）——决策 API 恒返回冻结
+    形状。纯读纪律同上：零 journal / state / 档案写入，零状态转换，
+    零网络。
 
 依赖：
     runtime.ownership / runtime.fingerprint / runtime.journal（缺省
     证据来源）、runtime.lease（H5 租约对读——expired_leases 过期集
-    + lease_state 明细）。不导入 runtime.work_unit（建议层不依赖转
-    换层——应用示例里的 transition_work_unit 由调用方导入，无循环
-    导入）。仅 Python 3 标准库，`python3 -S` 可运行。
+    + lease_state 明细）、runtime.agent_run（v2.1 M3：agent run 账本
+    list_agent_runs 与原生档案只读 adapter native_agent_metadata）
+    + 标准库 json（v2.1 M3：任务 state.json 只读解析）。不导入
+    runtime.work_unit（建议层不依赖转换层——应用示例里的
+    transition_work_unit 由调用方导入）、不导入 runtime.state /
+    runtime.task_manager（单元定位经 journal 任务目录只读解析
+    state.json；task_manager 反向导入本模块，无循环导入）。
+    仅 Python 3 标准库，`python3 -S` 可运行。
 
 来源：
     docs/glm-conductor-v2-upgrade-guide-final.md §68（恢复后 completed
@@ -123,9 +153,15 @@ completed 不重跑锚定（§68）：
     verification 证据归属绑定 unit）+ release hardening 补丁计划
     docs/GLM-Conductor-v2.0.1-Release-Hardening-Patch-Agent-Implementation-Plan.md
     （RB-1 / WU-P1：共享证据谓词 fresh_unit_verification + all-match
-    收紧，D2 决策）。
+    收紧，D2 决策）+ v2.1 M3 计划
+    docs/GLM-Conductor-v2.1-Architecture-Agent-Implementation-Plan.md
+    §7.3（证据优先级与僵尸语义）/ §9（Agent Reconcile 四分模型，
+    ※DR 拆两层修订：runtime 产分类 + 证据句柄，进度包组装归模型侧）。
 """
 
+import json
+
+from runtime import agent_run
 from runtime import fingerprint
 from runtime import journal
 from runtime import lease
@@ -386,3 +422,276 @@ def reconcile_leases(repo_root, task_id, units, *, now=None) -> dict:
         "expired_running": sorted(expired_running,
                                   key=lambda item: item["path"]),
     }
+
+
+# —— v2.1 M3：reconcile_agent_run 单单元四分分类（计划 §9，纯读） ——
+
+# 四分分类词汇（§9 冻结；返回 dict "classification" 的全部取值）
+CLASS_REUSE_RESULT = "reuse_result"
+CLASS_RESUME_WITH_PROGRESS = "resume_with_progress"
+CLASS_REDISPATCH_CLEAN = "redispatch_clean"
+CLASS_MANUAL_RULING = "manual_ruling"
+
+# reuse_result 认可的档案终态（判定树第 4 条：completed / stopped；
+# failed 是证据冲突出口、running 是僵尸态——均不在 reuse 词汇内）
+REUSE_TERMINAL_STATUSES = ("completed", "stopped")
+
+# 僵尸态标记（§7.3：主会话崩溃后档案 status 可能永久 running，绝不
+# 解读为存活——只触发 rationale 的僵尸语义句）
+ZOMBIE_OBSERVED_STATUS = "running"
+
+# rationale 冻结短句（英文；逐字锁定，供调用方 / 测试锚定语义）
+RATIONALE_NO_RUNS_NO_RESIDUE = "no runs, no residue"
+RATIONALE_UNATTRIBUTABLE_EDITS = "unattributable edits present"
+RATIONALE_ARCHIVED_TERMINAL = "agent archived terminal + fresh evidence"
+RATIONALE_TRANSCRIPT_CONFLICT = "transcript/evidence conflict"
+RATIONALE_PARTIAL_WORK = "partial work present, no fresh pass evidence"
+RATIONALE_ZOMBIE_AWARE = "metadata running is not truth (zombie-aware)"
+RATIONALE_FRESH_EVIDENCE = "fresh pass evidence present"
+RATIONALE_CONSERVATIVE = "unresolved evidence combination; manual ruling"
+
+# 任务 state.json 文件名（与 runtime.state 的任务目录布局一致；目录经
+# journal.journal_path 定位派生——不导入 runtime.state / task_manager，
+# 保持本模块依赖面 = 既有依赖 + runtime.agent_run）
+_STATE_FILENAME = "state.json"
+
+
+def _load_unit_from_state(repo_root, task_id, uid):
+    """只读解析任务 state.json，定位 uid 对应的 work unit。
+
+    返回 (unit, state_readable)：
+      - unit：命中的单元 dict（work_units 中首个 id == uid 的元素），
+        找不到为 None；
+      - state_readable：state.json 可读且形状可解析（顶层 dict 且
+        work_units 为 list）。文件缺失 / OSError / JSON 损坏 / 顶层
+        非 dict / work_units 非 list → False。
+
+    纯读（零写入）；目录布局经 journal.journal_path 派生（state.json
+    与 events.jsonl 同处任务目录），不导入 runtime.state。
+    """
+    path = journal.journal_path(repo_root, task_id).parent / _STATE_FILENAME
+    if not path.is_file():
+        return None, False
+    try:
+        with open(str(path), "r", encoding="utf-8") as fh:
+            raw = json.load(fh)
+    except (OSError, ValueError):  # ValueError 含 JSON / 解码错误
+        return None, False
+    if not isinstance(raw, dict):
+        return None, False
+    units = raw.get("work_units")
+    if not isinstance(units, list):
+        return None, False
+    for unit in units:
+        if isinstance(unit, dict) and unit.get("id") == uid:
+            return unit, True
+    return None, True
+
+
+def _last_agent_id(runs):
+    """runs 中最后一个非空 agent_id（倒序扫描）；全缺失 → None。
+
+    与 agent_run.run_lifecycle 的 last_agent_id 同一口径：最后一次
+    派发的 agent_id 提取失败（工具返回形状异常）时回退更早的已知
+    档案句柄。
+    """
+    for run in reversed(runs):
+        agent_id = run.get("agent_id") if isinstance(run, dict) else None
+        if isinstance(agent_id, str) and agent_id:
+            return agent_id
+    return None
+
+
+def _classify_agent_run(runs, owned_residue, unattributable_residue,
+                        verification, native):
+    """四分判定树（§9.1-§9.4，冻结，逐条短路）；返回 (classification,
+    rationale)（rationale 按命中顺序，冻结短句见模块常量）。
+
+    分支 1（找不到单元 / git 求值异常）由调用方先行处理，不进入本
+    函数。分支 4/5 的衔接口径：verification 为 None（单元无 required
+    命令）或 ok=False 才算「无完整 pass 证据」进分支 5；verification
+    ok 但档案 observed_status 非终态亦非 failed（僵尸 running / 未知
+    值）时，分支 4 的两个出口与分支 5 的前提都不成立 → 分支 6 保守
+    兜底（证据与档案的张力禁止自动猜测，§9.4）。
+    """
+    if not runs and not owned_residue and not unattributable_residue:
+        # 分支 2：无执行内容、无任何残留 → 全新派发（成本最低）
+        return CLASS_REDISPATCH_CLEAN, [RATIONALE_NO_RUNS_NO_RESIDUE]
+    if unattributable_residue:
+        # 分支 3：ownership 之外有无法归属的改动 → 人工裁决
+        return CLASS_MANUAL_RULING, [RATIONALE_UNATTRIBUTABLE_EDITS]
+    observed = (native.get("observed_status")
+                if isinstance(native, dict) else None)
+    verified = (isinstance(verification, dict)
+                and verification.get("ok") is True)
+    if verified:
+        # 分支 4：新鲜 pass 证据在先（§7.3：证据优先级高于档案）
+        if native is None or observed in REUSE_TERMINAL_STATUSES:
+            return CLASS_REUSE_RESULT, [RATIONALE_ARCHIVED_TERMINAL]
+        if observed == "failed":
+            # 档案终态 failed 与 pass 证据冲突 → 禁止自动猜测
+            return CLASS_MANUAL_RULING, [RATIONALE_TRANSCRIPT_CONFLICT]
+        # 分支 6（保守兜底）：证据齐但档案非终态（僵尸 running / 未知值）
+        rationale = [RATIONALE_FRESH_EVIDENCE]
+        if observed == ZOMBIE_OBSERVED_STATUS:
+            rationale.append(RATIONALE_ZOMBIE_AWARE)
+        else:
+            rationale.append(
+                "native archive status %r is not terminal" % (observed,))
+        rationale.append(RATIONALE_CONSERVATIVE)
+        return CLASS_MANUAL_RULING, rationale
+    if runs or owned_residue:
+        # 分支 5：有执行内容但无完整 pass 证据 → 进度包续作
+        rationale = [RATIONALE_PARTIAL_WORK]
+        if observed == ZOMBIE_OBSERVED_STATUS:
+            rationale.append(RATIONALE_ZOMBIE_AWARE)
+        return CLASS_RESUME_WITH_PROGRESS, rationale
+    # 分支 6（保守兜底）：判定树未穷举的组合（防御保留位——分支 2-5
+    # 已穷尽输入空间，理论不可达；保留以锁定「其余组合 → 人工裁决」）
+    return CLASS_MANUAL_RULING, [RATIONALE_CONSERVATIVE]
+
+
+def reconcile_agent_run(repo_root, task_id, uid, *, events=None,
+                        agents_root=None, now=None) -> dict:
+    """单单元 Agent Run 四分分类决策 API（v2.1 M3，计划 §9；纯读）。
+
+    崩溃 / 中断后对单个 work unit 的 agent run 做机械证据对账，输出
+    四分分类之一，供主会话处置（而不是一律重派——dogfood 实录：崩溃
+    后无 reconcile 消费原生记录，续作会话把已完成单元全部重做）：
+      - reuse_result：agent 实际已完成但结果没回主会话——读 native
+        transcript / result 捞成果，不重派 implementation，继续
+        parent verification（§9.1；同会话另有轻量选项：SendMessage
+        续接已完成 agent 直接问询）；
+      - resume_with_progress：agent 做了一部分、repo 有一致 residue、
+        无完整 pass evidence——本 API 只给分类与证据句柄，进度包
+        （旧 transcript 摘要 / owned diff / 已定决策 / 未决问题 /
+        未跑验证）由模型侧经 ReadSessionContext 读子会话 transcript
+        组装后交新 agent 续作（§9.2，※DR 两层分工；本模块绝不复制
+        transcript，§7.2）；
+      - redispatch_clean：没有有效执行内容、没有可信 residue、没有
+        可用结果——全新派发（§9.3）；
+      - manual_ruling：unattributable edits / transcript 与证据冲突 /
+        证据与档案张力 / 求值失败——禁止自动猜测，裁决归主会话
+        （§9.4）。
+
+    判定树（冻结，逐条短路；rationale 按命中顺序）：
+      1. 找不到单元（state.json 缺失 / 损坏 / 无此 uid）或 git 求值
+         异常（OwnershipError / FingerprintError）→ manual_ruling，
+         rationale 注明求值失败（residue 按无 residue 处理，
+         verification 记 None）；
+      2. runs、owned_residue、unattributable_residue 全空 →
+         redispatch_clean（rationale "no runs, no residue"）；
+      3. unattributable_residue 非空（ownership 声明之外存在无法归属
+         的改动）→ manual_ruling（"unattributable edits present"）；
+      4. verification ok（all-match 新鲜 pass 证据，§7.3 证据优先级
+         高于档案）且（native 为 None 或 observed_status ∈
+         {completed, stopped}）→ reuse_result（"agent archived
+         terminal + fresh evidence"）；observed_status == "failed"
+         → manual_ruling（"transcript/evidence conflict"）；
+      5. runs 或 owned_residue 非空且无完整 pass 证据（verification
+         为 None——单元无 required 命令——或 ok=False）→
+         resume_with_progress（"partial work present, no fresh pass
+         evidence"）；observed_status == "running" 时 rationale 追加
+         "metadata running is not truth (zombie-aware)"（§7.3 僵尸
+         语义：档案 status 不是 truth，绝不解读为存活）；
+      6. 其余组合（verification ok 但档案 observed_status 非终态亦非
+         failed：僵尸 running / 未知值——证据与档案的张力不自动猜测）
+         → manual_ruling（保守兜底）。
+
+    参数：
+      - repo_root：仓库根（git 求值根：residue 清单与证据指纹基于
+        它；也是任务账本根——state.json / journal 同在
+        <repo_root>/.glm-conductor/tasks/<task-id>/ 下）；
+      - task_id：任务 id（单元定位与事件缺省读取都基于它）；
+      - uid：目标 work unit id（逐字精确匹配 work_units[].id）；
+      - events：显式注入事件清单（仅作用于验证证据谓词
+        fresh_unit_verification，与既有调用同一口径；None → 缺省
+        journal.read_events(repo_root, task_id)；非 list → 谓词按 []
+        容错）。run 账本（evidence["runs"]）恒读任务 journal——
+        agent_run.list_agent_runs 冻结签名不收事件注入；
+      - agents_root：原生档案根（透传
+        agent_run.native_agent_metadata；None → 缺省
+        ~/.zcode/cli/agents；测试注入 tempfile 伪造树，绝不读写
+        真实 ~/.zcode）；
+      - now：保留参数（时间注入点）——当前证据链所有调用均不取
+        时钟，透传无对象；为签名稳定保留，调用方无需传入。
+
+    返回（冻结形状）：
+        {"classification": <四分之一>,
+         "rationale": [英文短句...]（按命中顺序；冻结短句见模块常量），
+         "evidence": {"runs": <该单元 list_agent_runs 过滤结果>,
+                      "owned_residue": [...]（归一到 / 的路径），
+                      "unattributable_residue": [...]，
+                      "verification": <fresh_unit_verification 结果；
+                                       单元无 required 命令时 None>，
+                      "native": <native_agent_metadata 结果或 None>}}
+    native 取该单元 runs 的最后一个非空 agent_id（倒序扫描，与
+    run_lifecycle 同口径）；无 runs → native 恒 None。
+
+    纯读纪律：零 journal / state / 租约 / 档案写入、零状态转换、零
+    网络——分类与证据全部来自只读观察，处置（状态转换 / 重派 / 进度
+    包组装）归调用方。
+    """
+    runs = [run for run in agent_run.list_agent_runs(repo_root, task_id)
+            if run.get("unit") == uid]
+    last_agent_id = _last_agent_id(runs)
+    native = None
+    if last_agent_id is not None:
+        native = agent_run.native_agent_metadata(
+            last_agent_id, agents_root=agents_root)
+
+    unit, state_readable = _load_unit_from_state(repo_root, task_id, uid)
+    if unit is None:
+        # 分支 1a：找不到单元 → manual_ruling（rationale 注明定位失败）
+        rationale = []
+        if not state_readable:
+            rationale.append("task state missing or unreadable")
+        rationale.append("unit %s not found in task state" % (uid,))
+        return {"classification": CLASS_MANUAL_RULING,
+                "rationale": rationale,
+                "evidence": {"runs": runs, "owned_residue": [],
+                             "unattributable_residue": [],
+                             "verification": None, "native": native}}
+
+    patterns = unit.get("ownership")
+    if not isinstance(patterns, (list, tuple)):
+        patterns = []
+    required = unit.get("verification")
+    has_required = isinstance(required, (list, tuple)) and bool(required)
+
+    owned_residue = []
+    unattributable_residue = []
+    verification = None
+    try:
+        if events is None:
+            events = journal.read_events(repo_root, task_id)
+        touched = ownership.git_touched_files(repo_root)
+        owned_residue, unattributable_residue = ownership.classify_paths(
+            touched, patterns)
+        if has_required:
+            verification = fresh_unit_verification(
+                repo_root, task_id, unit, touched=touched, events=events)
+    except (ownership.OwnershipError, fingerprint.FingerprintError) as exc:
+        # 分支 1b：git 求值异常 → manual_ruling（residue 按无 residue
+        # 处理、verification 记 None，rationale 注明求值失败；
+        # 返回形状照旧——决策 API 不向调用方上抛求值异常）
+        rationale = ["repository evaluation failed: %s"
+                     % type(exc).__name__]
+        detail = str(exc).strip()
+        if detail:
+            rationale.append(detail[:160])
+        return {"classification": CLASS_MANUAL_RULING,
+                "rationale": rationale,
+                "evidence": {"runs": runs, "owned_residue": [],
+                             "unattributable_residue": [],
+                             "verification": None, "native": native}}
+
+    classification, rationale = _classify_agent_run(
+        runs, owned_residue, unattributable_residue, verification, native)
+    return {"classification": classification,
+            "rationale": rationale,
+            "evidence": {"runs": runs,
+                         "owned_residue": owned_residue,
+                         "unattributable_residue": unattributable_residue,
+                         "verification": verification,
+                         "native": native}}
