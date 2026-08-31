@@ -79,6 +79,10 @@ active task（continuity 为 resumable / idle 的任务，或需要 Stop 完成�
 | dispatch_permit_created / dispatch_permit_invalidated | `prepare_dispatch` 签发 permit / `abort_dispatch` 作废（v2.1 M2） |
 | agent_launched / agent_dispatch_failed / agent_launch_replay_skipped | PostToolUse 钩子观察到的派发生命周期（v2.1 M2——runtime-observed，与手写 implementation_started 互不替代） |
 | manifest_write_failed | resume manifest 写入失败警告（v2.1 M3——派生物降级，不阻断事务） |
+| dispatch_wave_prepared / wave_closed | `prepare_dispatch_wave` 批量准备 / 成员全部终态或 verifying 时 `finish_unit` 自动关 wave（v2.1 M4） |
+| quota_resolved | prepare 链缺省额度解析（resolver 四级层级，v2.1 M5——绝不默认 AVAILABLE） |
+| quota_waiting / quota_resumed / quota_wake_recorded / auto_resume_authorization_exhausted | 额度耗尽转态 / `quota-resume` 恢复 / wake automation 窗口扣减记账 / 授权预算耗尽转 waiting_user（v2.1 M5） |
+| verification_receipt / review_receipt | runtime 亲测验证 / 审查裁决申报的 durable receipt 落盘（v2.1 M6——receipt 是完成门证据唯一权威） |
 | completed / cancelled / failed | 进入终态时 |
 
 约束：不写入任何秘密值（密钥、Authorization 头）、不写入完整 prompt 或完整源码；它不是遥测。
@@ -198,6 +202,25 @@ continuity 不重新实现 Goal 模式。职责分工：
 **凭证**：环境变量 `GLM_CONDUCTOR_QUOTA_API_KEY` 优先，已登录 ZCode 的 `~/.zcode/v2/config.json` provider 配置为文档化回退；凭证零落盘（不进 state.json / events.jsonl / checkpoint / 日志 / 任何输出）。凭证不可得 → unavailable 模式 → 周期性存活探针回退。
 
 **不变边界**：原生插件级 quota API（getQuotaRemaining / getQuotaResetTime / onQuotaReset 等）仍不存在，不得虚构；不硬编码 5 小时重置；不把额度观察当作路由证据；不实现常驻轮询——查询只发生在任务开始 / 路由选定后 / 大段派发前 / 里程碑后 / 调度恢复前后等刷新点。额度观察除本节 provider-api 通道外仍可来自用户告知或 UI，只作为证据使用。
+
+### 授权续跑（v2.1 M5：authorized resume）
+
+额度 EXHAUSTED 的处置不再依赖模型即兴——`quota-exhausted <repo> <task>`（CLI）走确定性转态链：执行态任务与单元转 waiting_quota，按 `execution_policy.continuity.auto_resume` 四态授权裁决：
+
+| auto_resume | 授权要求 | EXHAUSTED 行为 |
+| --- | --- | --- |
+| manual（默认） | — | 不建自动化；降级 SessionStart 恢复注入提示用户 |
+| notify | — | 只产出提醒文本（wake.required=False）——提醒允许、自动恢复不允许 |
+| auto_once | `authorization.source == "user"`（保存时强制校验） | 一次性 wake：烧穿 1 个窗口预算后停 |
+| until_done | `authorization.source == "user"` | 惰性逐窗续跑，直至完成或预算耗尽 |
+
+机制要点：
+
+- **窗口预算**：`continuity.consumed_quota_windows` / `max_quota_windows`——每真实创建一个 wake automation 记 1 窗；预算耗尽任务转 `waiting_user`（新状态词，等待用户重新授权），此后**不得再创建任何自动化唤醒**
+- **记账与 automation 存活解耦**：`wake-record`（主会话 CronCreate 成功后调用）只做窗口扣减记账——wake 未触发、automation 被清理或丢失都不回滚；正确性底线永远是 SessionStart 恢复注入，automation 只是 best-effort bridge
+- **wake prompt 自足**：`wake-prompt` 产出的 prompt 以用户 turn 注入同一会话（宿主实锚：wake=同会话续行、SessionStart 不重放），因此 task_id、账本/仓库根、恢复首步、额度检查口径、预算状态与红线（绝不重试 CronDelete/CronUpdate、发布动作征询用户、RB-1 指纹口径）全部内置；主会话照 prompt 建 automation（recurring=false、maxRuns=1）
+- **恢复首步**：额度唤醒触发或新会话恢复时第一步 `quota-resume <repo> <task>`——AVAILABLE/PRESSURE → 任务转回 executing、waiting_quota 单元回 ready，按账本就绪顺序继续派发（SELECTIVE ROUTE、permit 门与租约时序不得绕过）；EXHAUSTED/UNKNOWN → 零转态保守等待，不派发、不重建唤醒
+- **SessionStart 兜底不变**：无论四态授权如何，automation 不可用时恢复语义始终回退 SessionStart 注入——automation 永远是加速器，不是正确性前提
 
 ## Completion Cleanup
 

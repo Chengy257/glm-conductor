@@ -25,11 +25,11 @@ description: GLM Conductor v2 强制层运行时契约。解释 Stop 完成门�
 | --- | --- | --- | --- |
 | 1 | ownership（Layer A 原有） | git 改动文件 ⊆ 声明 ownership.files | `ownership`（报文列 out-of-scope 路径与两条出路） |
 | 2 | 验证 | required 命令全部 completed，且 verification.fingerprint = 当前指纹 | `verification_missing` / `verification_stale` |
-| 3 | 审查（review.required=true **或 route 推导要求审查——mode 为 audit/full 或 assurance=high**——时同样受查，手写 state 漏写标志无法绕过） | verdict = ship，且 review.fingerprint = 当前指纹 | `review_missing` / `review_rejected`（fix-first/rethink）/ `review_stale` |
+| 3 | 审查（review.required=true **或 route 推导要求审查——mode 为 audit/full 或 assurance=high**——时同样受查，手写 state 漏写标志无法绕过） | **fresh ship review receipt（v2.1 M6 起 receipt 唯一权威）**：任务 receipts/ 内最新一张 review receipt verdict = ship，且其指纹 = 当前指纹 | `review_missing`（无任何 receipt）/ `review_rejected`（最新 receipt 非 ship）/ `review_stale`（receipt 指纹过期） |
 | 4 | 视觉证据 | visual_evidence 每项文件字节 sha256 与记录一致 | `visual_stale` |
 | 5 | 状态完整性（H3/P0-3） | state.json 可读 | `corrupt_state`（state.json 损坏 + journal 高保障证据 → fail-closed 拦截；见下方「损坏状态的处置与恢复指引」） |
 
-- **证据指纹（stale 检测的核心）**：验证/审查证据通过 `runtime.fingerprint.task_fingerprint`（基线修订 + 相关文件集归一化内容状态的 sha256）绑定到记录时的仓库状态；完成门用**同一入口**重算当前指纹，与记录值不一致 = 证据过期。任何后续编辑（包括"顺手小改"）都会使 verification_stale / review_stale 拦截完成——这是「任何修复使先前验证/审查失效」的自动强制。记录时机契约见 continuity 技能「证据指纹的记录时机」
+- **证据指纹（stale 检测的核心）**：验证/审查证据通过 `runtime.fingerprint.task_fingerprint`（基线修订 + 相关文件集归一化内容状态的 sha256）绑定到记录时的仓库状态；完成门用**同一入口**重算当前指纹，与记录值不一致 = 证据过期。任何后续编辑（包括"顺手小改"）都会使 verification_stale / review_stale 拦截完成——这是「任何修复使先前验证/审查失效」的自动强制。记录时机契约见 continuity 技能「证据指纹的记录时机」。**审查证据的权威形态（v2.1 M6）**：完成门审查检查只扫描任务 `receipts/` 目录的 durable review receipt（`review-record` / `runtime.provenance.run_review` 落，损坏 receipt 跳过取余下最新）——state.review 手写字段只是同调用的镜像，不再作为通过依据
 - **完成提交（生命周期封口）**：收尾时把 status 写为 `finalizing` 即请求完成（`state.transition_task_status`，公共状态 API 无法直达 completed）；四重检查全绿放行时，钩子对全部 `finalizing` 任务经 `state.commit_completion` 原子提交 `completed` 并记 `completed` 事件（via=completion_gate）——有违规照常 block（状态保持 finalizing，修复后重新 Stop）；连续 block 达上限（gate_exhausted）放行或任何降级路径都**不会**提交完成
 - **无活动任务 / 任务不参与** → 静默放行，普通会话零干预
 - `.glm-conductor/` 运行时目录豁免（编排器自身账本不算仓库改动）
@@ -50,7 +50,7 @@ Stop 完成门用 `state.discover_tasks` 对任务目录四分类（active / ter
 1. 从 `events.jsonl` 与 checkpoint 证据重建 `state.json`（仓库状态权威于运行时记录），重建后重新完成
 2. 或经用户确认任务已废弃后，归档（改名 / 移除）该任务目录
 
-### v2.1 强制面增量（M1-M3，新会话生效）
+### v2.1 强制面增量（M1-M6，新会话生效）
 
 钩子清单从 2 条扩到 6 条（SessionStart / PreToolUse(Agent|Task) / PreToolUse(Bash) / PostToolUse(Agent|Task) / PostToolUseFailure(Agent|Task) / Stop）：
 
@@ -59,6 +59,9 @@ Stop 完成门用 `state.discover_tasks` 对任务目录四分类（active / ter
 - **SessionStart——恢复注入（M3）**：新会话自动注入 `GLM CONDUCTOR RESUME CONTEXT`（未完成任务/中断单元/僵尸感知/建议步骤）；纯本地零 quota；无活动任务时完全安静
 - **失败语义三层（宿主实测定型）**：hook 无法启动（脚本/解释器缺失）→ 宿主阻断所有匹配调用（非静默）；hook 运行中崩溃 → fail-open 放行 + stderr `ENFORCEMENT DEGRADED`（唯一静默 bypass 窗口——但该路径无法产生合法生命周期证据，完成门仍拒）；超时语义宿主未文档化。整体分层：**派发面 fail-open（降级可见）+ 完成面 fail-closed（Stop 门）**——绕过派发门的任务最终无法合法 completed
 - **execution_policy（M1）**：state 可选顶层块承载自动化授权事实（并发预算上限 4 冻结、auto_resume 升档与 max_workers>2 须 `authorization.source == "user"`、保存时校验）；legacy 缺块按保守默认解释
+- **wave 成员资格环（M4，门检查序 5.5）**：PreToolUse permit 门在 `validate_permit` 通过后，对带 `wave_id` 的 wave permit 追加校验——permit 须指向 active wave 且 unit 仍在成员清单内，否则 `permissionDecision: deny`（英文报文含 wave_id 与 **re-prepare wave** 指引：wave 已关闭/重组后用 `prepare_dispatch_wave` 重备、以新 permit marker 重派即自救）；单单元 permit（wave_id=None）零影响
+- **任务状态词汇补 `waiting_user`（M5，耗尽语义）**：auto_once / until_done 的窗口预算（`consumed_quota_windows ≥ max_quota_windows`）耗尽后任务转入的等待用户重新授权态——转换边与 `waiting_quota` 同款；预算耗尽后不得再创建任何自动化唤醒，恢复入口是用户重新授权或 SessionStart 兜底
+- **审查 receipt 权威（M6）**：Stop 完成门审查检查改为「fresh ship review receipt 唯一权威」——receipt 由 `review-record`（`runtime.provenance.run_review`）落盘（任务 `receipts/` 目录 + journal `review_receipt` 事件），state.review 只是镜像；验证侧同构有 `verify-unit` / `verify-task` 的 durable verification receipt（runtime 亲测 + 白名单/policy 双闸 + 同刻指纹）
 
 ### Layer B — 派发时注入（提示级）
 
@@ -130,8 +133,8 @@ PreToolUse 钩子在每次 Agent/Task 派发前向主会话注入 ownership 契�
 1. **ownership 越界是有意的** → 主会话更新 `.glm-conductor/tasks/<task-id>/state.json` 的 `ownership.files` 纳入该路径，然后重新完成
 2. **ownership 越界是误伤** → 回退 out-of-scope 改动后重新完成
 3. **verification_missing** → 主会话亲自重跑 required 命令，`record_verification(st, cmd, task_fingerprint(repo, st))` 落账后重新完成
-4. **verification_stale / review_stale** → 证据已过期（文件在验证/审查后被改过）：重跑验证 / 重新审查并记录**新**指纹；禁止回写旧指纹"续命"
-5. **review_missing / review_rejected** → 派发审查者 / 按 fix-first·rethink 裁决修复后重新审查
+4. **verification_stale / review_stale** → 证据已过期（文件在验证/审查后被改过）：重跑验证（推荐 CLI `verify-unit` / `verify-task`，runtime 亲测 + receipt 自动落账）/ 重新审查后经 `review-record`（`runtime.provenance.run_review`）落**新** receipt；禁止回写旧指纹"续命"
+5. **review_missing / review_rejected** → 派发审查者 / 按 fix-first·rethink 裁决修复后重新审查，并经 `review-record` 申报新裁决落 fresh ship receipt（receipt 唯一权威——state.review 手写字段不再被门采信）
 6. **visual_stale** → 截图被替换过：重新采集视觉证据并重新视觉验收，`record_visual_evidence` 落账
 7. **corrupt_state** → state.json 损坏：按「损坏状态的处置与恢复指引」从 events.jsonl / checkpoint 证据重建 state.json，或经用户确认后归档任务目录
 8. **反复被拦且无法修复** → 向用户报告完整 block 报文，等待人工决策

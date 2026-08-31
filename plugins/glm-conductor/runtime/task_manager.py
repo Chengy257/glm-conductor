@@ -1546,9 +1546,7 @@ def quota_wake_prompt(repo_root, task_id) -> str:
         "第一步（必须最先执行）——额度检查与恢复：",
         "1. 解析当前额度四态（绝不重试网络；层级：新鲜缓存 → provider "
         "→ 陈旧缓存 → UNKNOWN）：",
-        "   python3 -c \"import sys; sys.path.insert(0, "
-        "'plugins/glm-conductor'); from runtime.quota import resolver; "
-        "print(resolver.resolve_quota_status(r'%s')['status'])\""
+        "   python3 plugins/glm-conductor/runtime/cli.py quota-resolve '%s'"
         % repo_root,
         "2. 调用 runtime.task_manager.resume_from_quota(repo_root=r'%s', "
         "task_id='%s')：" % (repo_root, task_id),

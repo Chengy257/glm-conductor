@@ -39,18 +39,23 @@ v2 起，插件把原本写在提示词里的关键契约升级为**运行时强
 - **完成门四重检查**——① ownership：实际改动 ⊆ 声明范围；② 验证：required 命令全部由主会话亲自跑过，并经 `record_unit_verification` / `record_verification` 记录新鲜证据，Work Unit 完成同样受 RB-1 证据门约束；③ 审查：high-assurance 须有新鲜 ship 裁决；④ 证据新鲜度：验证/审查证据经 `task_fingerprint` 绑定到记录时的仓库状态，后续任何编辑使其过期并拦截完成
 - **多仓工作区支持**——任务可通过 state 的 `repository.root` 绑定专属 Git 仓库根；Stop 完成门按任务仓库求值，workspace 根无需是 Git 仓库；账本（state / journal / lease）位置不变
 - **Bash 策略门控**——表驱动 allow/ask/deny：破坏性命令（rm -rf、git reset --hard、force push）恒拒；高保障任务的推送/迁移/发布/权限变更升级为 ask
+- **验证 / 审查溯源（v2.1 M6）**——`verify-unit` / `verify-task` 由 runtime 受限主动执行验证命令（白名单 + 策略双闸、零 TOCTOU 同刻指纹）并落 durable receipt；审查裁决经 `review-record` 绑定终指纹落 fresh ship receipt——完成门审查检查只认 receipt，state 手写字段不再作为通过依据
 - **降级可见**——强制层故障永不阻断会话（fail-open），stderr 报 `ENFORCEMENT DEGRADED`
 
 **长任务与额度**
 
 - **任务与工作单元管理**——Work Unit 依赖图（十状态生命周期、环校验、确定性拓扑序）、五道闸派发准入、证据对账式中断恢复（completed 不重跑）、显式 Join 强制任务级全局验证
-- **文件租约与有界并行**（experimental）——全有或全无获取、异 owner 冲突拒绝；并行上限 4，默认串行
+- **文件租约与有界并行**（experimental）——全有或全无获取、异 owner 冲突拒绝；**默认并发 2、上限 4**（v2.1 起），额度预算折算（AVAILABLE→策略值、PRESSURE/UNKNOWN→1、EXHAUSTED→0）；`prepare_dispatch_wave` 批量派发一次签发整批许可与 marker，wave 成员须同一回合并发派出
+- **runtime 额度解析（v2.1 M5）**——派发前额度状态由四级层级解析（新鲜缓存 → provider → 陈旧缓存 → UNKNOWN），**绝不默认 AVAILABLE**；UNKNOWN fail-open 折算预算 1 不阻塞派发
 - **额度感知连续性**——查询 Coding Plan 用量（凭证零落盘），四态评估，EXHAUSTED 按最晚窗口 reset 精确规划唤醒；不可用时 fail-open 回退周期性探针；`/glm-conductor:quota` 随时诊断
+- **授权续跑（v2.1 M5）**——额度 EXHAUSTED 走确定性转态链：四态授权（manual / notify / auto_once / until_done，升档须用户授权落盘）+ 窗口预算（`consumed_quota_windows`）+ 自足一次性 wake prompt（宿主实锚：wake=同会话续行）；预算耗尽转 `waiting_user` 不再建自动化，恢复首步 `quota-resume`
 - **跨会话恢复**——任务专属 checkpoint + 八步恢复检查，仓库真实状态始终优先于记录
 
 **v2.0.1 运行时完整性加固**——依据 v2.0.0 全面审查的 H1-H8 收口：完成生命周期门控（`finalizing` + 状态转换表，`completed` 仅完成门可提交）、路由跨字段不变量与任务发现四分类 fail-closed（损坏的 state.json 不再被当成"无任务"）。`task_manager` 事务边界四 API 固化派发生命周期（决策 → 租约 → 状态转换 → 记账 → 落盘 → 事件），崩溃窗口有确定性恢复路径。租约获得 TTL/generation/心跳续约，`recover_leases` 自动清理 stale 租约——崩溃后无需人工删 leases.json。验证证据显式绑定 work unit id（无 `unit` 字段的旧事件不再被恢复对账采信，属有意的破坏性变更；主会话需重新验证）。发布加固（RB-1/RB-2）补齐最后两块：Work Unit 完成（`completed`）前置单元绑定的新鲜验证证据门（all-match，拒绝零副作用，git/指纹读取失败 fail-closed）；任务可经 state 的 `repository.root` 绑定专属 Git 仓库根，Stop 完成门按任务逐个求值（同根快照缓存、单任务仓库故障只降级该任务），多仓工作区不再整体降级。CI 覆盖 ubuntu + windows × Python 3.8/3.13。
 
 **v2.1-alpha1 控制平面收口（M1-M3）**——把"存在但可被绕过"的机制变成不可绕过的机器事实：派发许可（dispatch permit + PreToolUse 拒绝门，实施者类型无有效许可即 deny，重放/过期/伪造机械拒绝）；执行策略授权事实源（并发预算硬上限 4、跨额度窗口自动续跑默认关闭、升档须用户确认并落盘审计）；runtime 观察到的 Agent 生命周期（PostToolUse 自动记账，与手写事件互不替代）；崩溃恢复三件套——SessionStart 自动注入恢复上下文（新会话无需提醒即知未完成任务）、四分 reconcile（捞结果/进度包续作/干净重派/人工裁决，不再一律重派）、事务点自动刷新的 resume manifest；runtime CLI 入口取代内联调用。详见 CHANGELOG 2.1.0-alpha1。
+
+**v2.1-alpha2 第二批收口（M4-M6）**——把有界并行、额度决策与证据溯源收进 runtime 确定性事实：dispatch wave 批量事务（`prepare_dispatch_wave` 一次签发整批许可与 marker，wave 成员同一回合并发派出——禁止"等第一个返回再派下一个"，默认并发 2 / 上限 4、额度预算折算，wave permit 成员资格环防旧许可重放）；运行时额度解析（`quota-resolve` 四级层级，绝不默认 AVAILABLE）与授权续跑链（`quota-exhausted` 四态授权 + 窗口预算 + 自足一次性 wake，预算耗尽转 `waiting_user`）；验证 / 审查溯源 receipts（`verify-unit` / `verify-task` runtime 亲测 + durable receipt，`review-record` 落 fresh ship receipt——完成门审查检查只认 receipt）。详见 CHANGELOG 2.1.0-alpha2。
 
 ## 路由矩阵
 
@@ -172,7 +177,6 @@ GLM Conductor 基于 ZCode 原生的本地会话生命周期机制，不是云�
 - **保守误拒（登记取舍）**：引用破坏性文本的字符串与 `git rm -r --cached` 会被 Bash 策略保守拒绝
 - **有界并行 experimental**：上限 4；租约以主会话单编排者为前提，多会话并行操作同一任务目录不在支持面内
 - **多仓工作区边界**：任务级 `repository.root` 绑定已支持（完成门按任务仓库求值）；同一 Git 仓库内多个 top-level active task 并存时的 diff attribution 仍非正式支持——保持"一仓一 active top-level task"（任务内多 Work Unit 有界并行照旧）
-- **连续性与 provenance 的 advisory 边界**：SessionStart 恢复注入 / 自动 resume 属 v2.1 规划（当前恢复语义需主会话主动调用）；派发准入的 quota 观测仍由调用方供给；`verify_unit()` / `verify_task()` 的 provenance 包装留 v2.1
 - **额度感知**：走已验证的 provider-api 监控端点（凭证零落盘）；不虚构原生 quota 接口、不硬编码 5 小时重置；端点失败时回退周期性探针
 - **视觉拓扑**：Browser/Computer Use 为主会话专用——截图由主会话采集、Flash 系角色读图判定
 - **子智能体**：不能再派生子智能体；只能看到会话启动时已连接的 MCP 服务
