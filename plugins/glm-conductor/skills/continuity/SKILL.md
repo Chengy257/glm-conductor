@@ -127,18 +127,14 @@ journal.append_event('<用户仓库根>', '<task-id>', {'event': 'task_created'}
 "
 ```
 
-验证 / 审查 / 视觉证据的指纹记录（时机契约见上节）同一接法：
+验证 / 审查证据的指纹记录（时机契约见上节）一律走 CLI（同上禁 `python3 -c` 内联；`verify-task` / `review-record` 以与完成门同一入口的同刻指纹自动落 receipt 并同步证据流，替代手记指纹）：
 
 ```bash
-python3 -c "
-import sys; sys.path.insert(0, r'<插件根>')
-from runtime import state, fingerprint
-st = state.load_state('<用户仓库根>', '<task-id>')
-fp = fingerprint.task_fingerprint('<用户仓库根>', st)
-state.record_verification(st, '<命令>', fp)  # 或 record_review(st, verdict, fp)
-state.save_state('<用户仓库根>', st)
-"
+python3 plugins/glm-conductor/runtime/cli.py verify-task '<用户仓库根>' '<task-id>' ['<单条命令>']
+python3 plugins/glm-conductor/runtime/cli.py review-record '<用户仓库根>' '<task-id>' '<reviewer>' '<verdict>' '<tool_use_id>' ['<route>'] ['<note>']
 ```
+
+视觉证据无 CLI 子命令：仍按上表时机以 `state.record_visual_evidence(st, path, sha256)` 后 save_state 记录。
 
 runtime 模块不可得时，按 `runtime/state.py` 的 schema 手写 state.json（字段与枚举必须逐项一致），恢复优先用模块读取（自动归一 v1.x 遗留标识）。
 

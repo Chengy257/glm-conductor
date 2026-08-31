@@ -789,7 +789,10 @@ class WaveCliTest(unittest.TestCase):
         self._tmp.cleanup()
 
     def test_wave_prepare_success_with_markers(self):
-        code, payload = run_cli("wave-prepare", self.root, TID)
+        # wu-21-15 起 CLI 缺省 quota_status=None 走 resolver（零网络纪律：
+        # 进程内用例显式 AVAILABLE 直通；缺省→resolver 行为锚定在
+        # tests/test_cli_extensions.py 的 monkeypatch 用例）
+        code, payload = run_cli("wave-prepare", self.root, TID, "AVAILABLE")
         self.assertEqual(code, 0)
         self.assertTrue(payload["wave_id"].startswith("wave-"))
         self.assertEqual(payload["units"], ["u1", "u2"])
@@ -823,7 +826,8 @@ class WaveCliTest(unittest.TestCase):
         self.assertEqual(code, 2)
 
     def test_wave_show_all_and_specific(self):
-        code, prepared = run_cli("wave-prepare", self.root, TID)
+        # 显式 AVAILABLE 直通（wu-21-15：缺省改走 resolver，零网络纪律）
+        code, prepared = run_cli("wave-prepare", self.root, TID, "AVAILABLE")
         self.assertEqual(code, 0)
         wave_id = prepared["wave_id"]
         # 全量：waves 数组

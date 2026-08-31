@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""GLM Conductor v2.1 runtime CLI（M1 policy + M2 permit + M3 agent-runs）。
+"""GLM Conductor v2.1 runtime CLI（M1 policy + M2 permit + M3 agent-runs
++ M4 dispatch wave + M5 quota 连续性 + M6 溯源/审查）。
 
 职责：
     以单行 JSON stdout 提供 execution_policy 三个子命令（M1）、
@@ -11,6 +12,11 @@
     （签发仍归 task_manager.prepare_dispatch，这里只做 list / show /
     consume）；agent-runs 是账本/档案的纯读薄壳（零写副作用，任务不
     存在时账本为空数组——journal 是唯一真相源，不做任务存在闸）。
+    v2.1 后半程（wu-21-15 横切收口）补齐：M4 wave 事务两子命令、
+    M5 quota 连续性五子命令（resolve / exhausted / resume / wake-record /
+    wake-prompt）、M6 溯源三子命令（verify-unit / verify-task /
+    review-record）与 manifest 只读查询——全部为对应 runtime API 的
+    薄壳，技能层 runtime 调用一律走本 CLI（禁止 python3 -c 内联）。
 
 子命令：
     policy-show <repo_root> <task_id>
@@ -61,17 +67,82 @@
         {"task_id", "waves": [...]}（无 waves 键输出空数组）；给定
         wave_id → 输出该 wave 记录原样 dict；wave 不存在或任务不存在
         → 退出码 1。
+    manifest-show <repo_root> <task_id>
+        Resume Manifest 只读查询（v2.1 M3，runtime.resume_manifest）。
+        输出 {"manifest": <dict|null>}——manifest 是派生压缩层，缺失 /
+        损坏输出 null 不是错误（read 侧永不抛）；任务存在与否不设闸。
+    quota-resolve <repo_root> [--force-refresh]
+        额度四态解析（v2.1 M5 wu-21-10，runtime.quota.resolver.
+        resolve_quota_status 薄壳）：四级层级（新鲜缓存 → provider →
+        陈旧缓存 → UNKNOWN）解析当前额度状态，输出键冻结 dict
+        {status, source, evaluated_at, reason}（绝不含凭证材料）。
+        --force-refresh 跳过层级 1 强制走 provider（§32 唤醒强制刷新
+        语义）。观测面：provider 成功时写额度缓存，零任务转态。
+    verify-unit <repo_root> <task_id> <uid> [command]
+        受限执行单元已声明验证命令并产出溯源凭证（v2.1 M6 wu-21-12，
+        runtime.provenance.verify_unit 薄壳）：command 缺省执行该单元
+        verification 全部 required 命令；显式 command 须逐字 ∈ required
+        清单（D4 白名单闸），全部命令先过 policy 闸（deny/ask 即拒）。
+        输出 {unit, receipts, exit_codes, all_passed}；all_passed=False
+        （exit_code 非 0 或超时）→ 退出码 1——证据没过就是失败口径；
+        任务/单元缺失、白名单或 policy 拒绝（ProvenanceError）→ 退出
+        码 1。
+    verify-task <repo_root> <task_id> [command]
+        任务作用域同构薄壳（runtime.provenance.verify_task）：白名单 =
+        state.verification.required（Stop 完成门 §19 同一清单）；成功
+        路径同步任务级完成门证据。输出形状与 verify-unit 同构（task 键
+        替代 unit 键），退出码口径相同。
+    review-record <repo_root> <task_id> <reviewer> <verdict>
+                  <tool_use_id> [route] [note]
+        申报一次已发生的审查并落 durable review receipt（v2.1 M6
+        wu-21-13，runtime.provenance.run_review 薄壳）：verdict 须 ∈
+        state.REVIEW_VERDICTS；route ∈ solo/delegate/audit/full（缺省
+        None）；note 缺省 None。输出 receipt dict（与落盘文件、journal
+        review_receipt 事件逐字段一致——Stop 完成门只认 fresh ship
+        review receipt，本子命令是该 receipt 的唯一 CLI 产出点）。
+        verdict / route 非法 → 退出码 2；任务缺失（ProvenanceError）
+        → 退出码 1。
+    quota-exhausted <repo_root> <task_id>
+        EXHAUSTED 转态链 + 授权矩阵裁决（v2.1 M5 §14.1，
+        task_manager.handle_quota_exhausted 薄壳；evaluation 不经 CLI
+        传——None 不虚构 recommended_resume_at）。输出冻结键 dict
+        {task_status, waiting_units, recommended_resume_at, auto_resume,
+        remaining_quota_windows, wake, reason}。任务缺失或不在执行态族
+        （TaskManagerError）→ 退出码 1。
+    quota-resume <repo_root> <task_id> [status]
+        额度唤醒 / SessionStart 的恢复首步（v2.1 M5 §14，
+        task_manager.resume_from_quota 薄壳）：status 缺省经 resolver
+        四级层级解析（四级来源记入 journal quota_resolved）；显式四态
+        （QUOTA_STATUSES）直通（source="explicit"，零解析零网络）。
+        输出 {resumed, status, recommended_resume_at,
+        wake_budget_remaining}。status 非法 → 退出码 2；任务缺失 →
+        退出码 1；EXHAUSTED / UNKNOWN 保守等待（resumed=false，零转态）
+        是合法结果——退出码仍 0。
+    wake-record <repo_root> <task_id> <automation_id> <fires_at>
+        唤醒窗口扣减记账（v2.1 M5 §14.4，task_manager.
+        record_quota_wake 薄壳；主会话 CronCreate 成功后调用）：
+        consumed_quota_windows += 1 + journal quota_wake_recorded。输出
+        {consumed_quota_windows, remaining_quota_windows,
+        max_quota_windows, automation_id, fires_at}。automation_id /
+        fires_at 空串（ValueError）→ 退出码 2；任务缺失 → 退出码 1。
+    wake-prompt <repo_root> <task_id>
+        一次性额度唤醒 prompt 生成（v2.1 M5 §14.4，task_manager.
+        quota_wake_prompt 薄壳）：**stdout 纯文本输出**（自足中文模板，
+        主会话直接复制进 automation 的 prompt 字段——本 CLI 唯一不裹
+        JSON 的子命令；显式 UTF-8 落 stdout）。纯读零写副作用；任务
+        缺失（TaskManagerError）→ 错误 JSON + 退出码 1。
 
 输出与退出码契约：
     stdout 恒为单行 JSON（json.dumps(..., ensure_ascii=True)，中文以
-    \\uXXXX 转义——管道 / Windows 控制台零编码依赖）；stderr 不承载
-    结构化输出。退出码：
+    \\uXXXX 转义——管道 / Windows 控制台零编码依赖；唯一例外是
+    wake-prompt 的成功路径：纯文本 prompt，显式 UTF-8 落 stdout）；
+    stderr 不承载结构化输出。退出码：
       0 = 成功；
       2 = 校验拒绝（用法错误 / 参数值非法 / setter 抛 ValueError /
           save_state 校验闸或状态转换门拒绝——含盘上 state.json 损坏
           的解析拒绝）；
-      1 = 异常（任务不存在 / 意外错误；错误 JSON 只含异常类型名与
-          消息，供操作者排查）。
+      1 = 异常（任务不存在 / 溯源执行被拒 / 事务被拒 / 意外错误；
+          错误 JSON 只含异常类型名与消息，供操作者排查）。
 
 依赖方向：
     本模块是薄壳：校验与变换都在 runtime.execution_policy /
@@ -108,8 +179,18 @@ USAGE = (
     "permit-show <repo_root> <task_id> <permit_id> | "
     "permit-consume <repo_root> <task_id> <permit_id> | "
     "agent-runs <repo_root> <task_id> [unit] | "
+    "manifest-show <repo_root> <task_id> | "
     "wave-prepare <repo_root> <task_id> [quota_status] [max_workers] | "
-    "wave-show <repo_root> <task_id> [wave_id]")
+    "wave-show <repo_root> <task_id> [wave_id] | "
+    "quota-resolve <repo_root> [--force-refresh] | "
+    "verify-unit <repo_root> <task_id> <uid> [command] | "
+    "verify-task <repo_root> <task_id> [command] | "
+    "review-record <repo_root> <task_id> <reviewer> <verdict> "
+    "<tool_use_id> [route] [note] | "
+    "quota-exhausted <repo_root> <task_id> | "
+    "quota-resume <repo_root> <task_id> [status] | "
+    "wake-record <repo_root> <task_id> <automation_id> <fires_at> | "
+    "wake-prompt <repo_root> <task_id>")
 
 # policy-set-resume 的 max_quota_windows 缺省推导表（§5.4 耦合的
 # 最小合法值：until_done 取下界 1，保守不放大）
@@ -140,9 +221,37 @@ class _WaveRejected(Exception):
     退出码 2）。"""
 
 
+class _QuotaFlowRejected(Exception):
+    """quota 连续性事务被 task_manager 拒绝（任务缺失 / 状态族不符 /
+    TaskManagerError；quota-exhausted / quota-resume / wake-record /
+    wake-prompt 共用）——运行期拒绝，退出码 1。"""
+
+
+class _VerifyRejected(Exception):
+    """溯源执行 / 审查申报被 provenance 拒绝（任务或单元缺失、白名单
+    闸 / policy 闸、ProvenanceError；verify-unit / verify-task /
+    review-record 共用）——运行期拒绝，退出码 1。"""
+
+
 def _emit(payload):
     """向 stdout 写单行 JSON（ensure_ascii=True，契约锚点）。"""
     sys.stdout.write(json.dumps(payload, ensure_ascii=True) + "\n")
+
+
+def _force_utf8_stdout():
+    """把 stdout 调到 UTF-8（wake-prompt 纯文本输出用；quota/report.py
+    同款——非 TTY / 测试捕获（StringIO）容错跳过）。"""
+    try:
+        sys.stdout.reconfigure(encoding="utf-8")
+    except (AttributeError, ValueError, OSError):
+        pass  # 测试捕获（StringIO）或已被重定向：保持原样
+
+
+def _emit_text(text):
+    """向 stdout 写纯文本（wake-prompt 专用；显式 UTF-8，Windows 管道
+    / 控制台零乱码）。"""
+    _force_utf8_stdout()
+    sys.stdout.write(text + "\n")
 
 
 def _now_iso8601() -> str:
@@ -306,11 +415,14 @@ def _wave_prepare(repo_root, task_id, raw_quota_status=None,
     批准（TaskManagerError）→ _WaveRejected（退出码 1）；成功输出
     wave_id / units / worker_budget / permits / markers / deferred /
     waiting_quota——markers 为 GLM_CONDUCTOR_DISPATCH=<permit_id>
-    文本，操作者可直接放进 Agent prompt。"""
+    文本，操作者可直接放进 Agent prompt。
+
+    quota_status 缺省 None → 透传 API（wu-21-10：None 走 resolver
+    四级层级并记 quota_resolved 事件，绝不默认 AVAILABLE）；显式
+    四态直通（CLI 侧只做词汇闸，非法 → 退出码 2）。"""
     from runtime import task_manager
-    quota_status = ("AVAILABLE" if raw_quota_status is None
-                    else raw_quota_status)
-    if quota_status not in QUOTA_STATUSES:
+    quota_status = raw_quota_status
+    if quota_status is not None and quota_status not in QUOTA_STATUSES:
         raise ValueError(
             "wave-prepare：quota_status %r 不在合法取值内（%s）"
             % (quota_status, ", ".join(QUOTA_STATUSES)))
@@ -362,6 +474,144 @@ def _wave_show(repo_root, task_id, wave_id=None) -> int:
             return 0
     raise _WaveMissing(
         "wave %s 不存在（任务 %s 无该 wave 记录）" % (wave_id, task_id))
+
+
+# —— v2.1 M6（wu-21-12/13）：溯源凭证与审查 receipt ——
+
+def _verify_unit(repo_root, task_id, uid, command=None) -> int:
+    """verify-unit：受限执行单元验证命令并产出溯源凭证（provenance.
+    verify_unit 薄壳）。任务/单元缺失、白名单或 policy 闸拒绝
+    （ProvenanceError）→ _VerifyRejected（退出码 1）；exit_code 非 0
+    或超时 → all_passed=False 且退出码 1（证据没过就是失败口径）。"""
+    from runtime import provenance
+    try:
+        result = provenance.verify_unit(repo_root, task_id, uid,
+                                        command=command)
+    except provenance.ProvenanceError as exc:
+        raise _VerifyRejected(str(exc)) from exc
+    _emit(result)
+    return 0 if result["all_passed"] else 1
+
+
+def _verify_task(repo_root, task_id, command=None) -> int:
+    """verify-task：任务级验证命令溯源（provenance.verify_task 薄壳，
+    与 _verify_unit 同构：白名单 = state.verification.required）。"""
+    from runtime import provenance
+    try:
+        result = provenance.verify_task(repo_root, task_id, command=command)
+    except provenance.ProvenanceError as exc:
+        raise _VerifyRejected(str(exc)) from exc
+    _emit(result)
+    return 0 if result["all_passed"] else 1
+
+
+def _review_record(repo_root, task_id, reviewer, verdict, tool_use_id,
+                   raw_route=None, raw_note=None) -> int:
+    """review-record：申报已发生的审查并落 durable receipt（provenance.
+    run_review 薄壳）。verdict / route 词汇在 CLI 侧先闸（参数值非法
+    → 退出码 2，与 policy-set-resume 的 auto_resume 闸同口径）；任务
+    缺失（ProvenanceError）→ _VerifyRejected（退出码 1）。note 缺省
+    None 原样透传。"""
+    from runtime import provenance
+    func_name = "review-record"
+    if verdict not in state.REVIEW_VERDICTS:
+        raise ValueError(
+            "%s：verdict %r 不在 state.REVIEW_VERDICTS 内（%s）"
+            % (func_name, verdict, ", ".join(state.REVIEW_VERDICTS)))
+    route = None
+    if raw_route is not None:
+        if raw_route not in provenance.REVIEW_ROUTES:
+            raise ValueError(
+                "%s：route %r 不在合法取值内（%s）"
+                % (func_name, raw_route,
+                   ", ".join(str(item) for item in provenance.REVIEW_ROUTES
+                             if item is not None)))
+        route = raw_route
+    try:
+        receipt = provenance.run_review(
+            repo_root, task_id, reviewer=reviewer, verdict=verdict,
+            tool_use_id=tool_use_id, route=route, note=raw_note)
+    except provenance.ProvenanceError as exc:
+        raise _VerifyRejected(str(exc)) from exc
+    _emit(receipt)
+    return 0
+
+
+# —— v2.1 M5（wu-21-10 / §14）：quota 连续性 ——
+
+def _quota_resolve(repo_root, force_refresh=False) -> int:
+    """quota-resolve：额度四态四级层级解析（quota.resolver.
+    resolve_quota_status 薄壳，输出键冻结 dict 原样直出）。观测面
+    零转态；--force-refresh 跳过新鲜缓存层强制走 provider。"""
+    from runtime.quota import resolver  # 函数内 import：monkeypatch 友好
+    resolved = resolver.resolve_quota_status(repo_root,
+                                             force_refresh=force_refresh)
+    _emit(resolved)
+    return 0
+
+
+def _quota_exhausted(repo_root, task_id) -> int:
+    """quota-exhausted：EXHAUSTED 转态链 + 授权矩阵裁决（task_manager.
+    handle_quota_exhausted 薄壳；evaluation 不经 CLI 传——None 不虚构
+    recommended_resume_at）。任务缺失 / 状态族不符（TaskManagerError）
+    → _QuotaFlowRejected（退出码 1）。"""
+    from runtime import task_manager
+    try:
+        result = task_manager.handle_quota_exhausted(repo_root, task_id)
+    except task_manager.TaskManagerError as exc:
+        raise _QuotaFlowRejected(str(exc)) from exc
+    _emit(result)
+    return 0
+
+
+def _quota_resume(repo_root, task_id, raw_status=None) -> int:
+    """quota-resume：额度唤醒 / SessionStart 的恢复首步（task_manager.
+    resume_from_quota 薄壳）。status 缺省 None → API 内经 resolver 四级
+    层级解析；显式四态直通（CLI 侧词汇闸，非法 → 退出码 2）。EXHAUSTED
+    / UNKNOWN 保守等待（resumed=false）是合法结果——退出码 0；任务
+    缺失（TaskManagerError）→ _QuotaFlowRejected（退出码 1）。"""
+    from runtime import task_manager
+    if raw_status is not None and raw_status not in QUOTA_STATUSES:
+        raise ValueError(
+            "quota-resume：status %r 不在合法取值内（%s）"
+            % (raw_status, ", ".join(QUOTA_STATUSES)))
+    try:
+        result = task_manager.resume_from_quota(repo_root, task_id,
+                                                status=raw_status)
+    except task_manager.TaskManagerError as exc:
+        raise _QuotaFlowRejected(str(exc)) from exc
+    _emit(result)
+    return 0
+
+
+def _wake_record(repo_root, task_id, automation_id, fires_at) -> int:
+    """wake-record：唤醒窗口扣减记账（task_manager.record_quota_wake
+    薄壳）。automation_id / fires_at 空串由 API 的 ValueError 闸拒绝
+    （退出码 2）；任务缺失（TaskManagerError）→ _QuotaFlowRejected
+    （退出码 1）。"""
+    from runtime import task_manager
+    try:
+        result = task_manager.record_quota_wake(
+            repo_root, task_id, automation_id=automation_id,
+            fires_at=fires_at)
+    except task_manager.TaskManagerError as exc:
+        raise _QuotaFlowRejected(str(exc)) from exc
+    _emit(result)
+    return 0
+
+
+def _wake_prompt(repo_root, task_id) -> int:
+    """wake-prompt：一次性额度唤醒 prompt 生成（task_manager.
+    quota_wake_prompt 薄壳）。成功路径 stdout 纯文本（不裹 JSON，
+    主会话直接复制进 automation）；任务缺失（TaskManagerError）→
+    _QuotaFlowRejected（错误 JSON + 退出码 1，stdout 契约不破）。"""
+    from runtime import task_manager
+    try:
+        prompt = task_manager.quota_wake_prompt(repo_root, task_id)
+    except task_manager.TaskManagerError as exc:
+        raise _QuotaFlowRejected(str(exc)) from exc
+    _emit_text(prompt)
+    return 0
 
 
 def _manifest_show(repo_root, task_id) -> int:
@@ -446,6 +696,67 @@ def _dispatch(args) -> int:
                 "manifest-show 需要 <repo_root> <task_id> 两个参数。"
                 + USAGE)
         return _manifest_show(rest[0], rest[1])
+    if cmd == "quota-resolve":
+        if len(rest) not in (1, 2):
+            raise _UsageError(
+                "quota-resolve 需要 <repo_root> [--force-refresh] 一或"
+                "两个参数。" + USAGE)
+        force_refresh = False
+        if len(rest) == 2:
+            if rest[1] != "--force-refresh":
+                raise _UsageError(
+                    "quota-resolve 的可选参数只接受 --force-refresh。"
+                    + USAGE)
+            force_refresh = True
+        return _quota_resolve(rest[0], force_refresh=force_refresh)
+    if cmd == "verify-unit":
+        if len(rest) not in (3, 4):
+            raise _UsageError(
+                "verify-unit 需要 <repo_root> <task_id> <uid> [command] "
+                "三或四个参数。" + USAGE)
+        return _verify_unit(
+            rest[0], rest[1], rest[2], rest[3] if len(rest) == 4 else None)
+    if cmd == "verify-task":
+        if len(rest) not in (2, 3):
+            raise _UsageError(
+                "verify-task 需要 <repo_root> <task_id> [command] 两或三"
+                "个参数。" + USAGE)
+        return _verify_task(
+            rest[0], rest[1], rest[2] if len(rest) == 3 else None)
+    if cmd == "review-record":
+        if len(rest) not in (5, 6, 7):
+            raise _UsageError(
+                "review-record 需要 <repo_root> <task_id> <reviewer> "
+                "<verdict> <tool_use_id> [route] [note] 五到七个参数。"
+                + USAGE)
+        return _review_record(
+            rest[0], rest[1], rest[2], rest[3], rest[4],
+            rest[5] if len(rest) >= 6 else None,
+            rest[6] if len(rest) == 7 else None)
+    if cmd == "quota-exhausted":
+        if len(rest) != 2:
+            raise _UsageError(
+                "quota-exhausted 需要 <repo_root> <task_id> 两个参数。"
+                + USAGE)
+        return _quota_exhausted(rest[0], rest[1])
+    if cmd == "quota-resume":
+        if len(rest) not in (2, 3):
+            raise _UsageError(
+                "quota-resume 需要 <repo_root> <task_id> [status] 两或三"
+                "个参数。" + USAGE)
+        return _quota_resume(
+            rest[0], rest[1], rest[2] if len(rest) == 3 else None)
+    if cmd == "wake-record":
+        if len(rest) != 4:
+            raise _UsageError(
+                "wake-record 需要 <repo_root> <task_id> <automation_id> "
+                "<fires_at> 四个参数。" + USAGE)
+        return _wake_record(rest[0], rest[1], rest[2], rest[3])
+    if cmd == "wake-prompt":
+        if len(rest) != 2:
+            raise _UsageError(
+                "wake-prompt 需要 <repo_root> <task_id> 两个参数。" + USAGE)
+        return _wake_prompt(rest[0], rest[1])
     raise _UsageError("未知子命令 %r。" % cmd + USAGE)
 
 
@@ -456,8 +767,9 @@ def main(argv=None) -> int:
     ValueError（用法 / 参数值 / setter / save_state 校验栈）→ 2；
     _TaskMissing（任务不存在）/ _PermitMissing（permit 不存在或已
     消费 / 已失效）/ _WaveMissing（wave 记录不存在）/ _WaveRejected
-    （wave 准备被派发事务层拒绝）→ 1；其余意外异常 → 1（错误 JSON 含
-    异常类型名，stdout 契约不破）。
+    （wave 准备被派发事务层拒绝）/ _QuotaFlowRejected（quota 连续性
+    事务被拒）/ _VerifyRejected（溯源执行或审查申报被拒）→ 1；其余
+    意外异常 → 1（错误 JSON 含异常类型名，stdout 契约不破）。
     """
     args = list(sys.argv[1:]) if argv is None else list(argv)
     try:
@@ -465,8 +777,8 @@ def main(argv=None) -> int:
     except ValueError as exc:  # 含 _UsageError：校验拒绝类
         _emit({"error": str(exc)})
         return 2
-    except (_TaskMissing, _PermitMissing, _WaveMissing,
-            _WaveRejected) as exc:
+    except (_TaskMissing, _PermitMissing, _WaveMissing, _WaveRejected,
+            _QuotaFlowRejected, _VerifyRejected) as exc:
         _emit({"error": str(exc)})
         return 1
     except Exception as exc:  # 意外异常兜底：stdout 契约不破
