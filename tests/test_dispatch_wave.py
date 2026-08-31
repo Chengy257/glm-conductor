@@ -16,10 +16,13 @@ CLI 用例经 cli.main 列表注入 + redirect_stdout 捕获，另设一条真�
       background 带 reason 拒绝 / ttl 非正数（含 None 与 bool）/
       task_id / unit_id 非空——全部 ValueError 中文消息含字段名；
     - validate_permit 校验链（§20.2）：fake permit denied / valid
-      allowed / expired（now 注入，边界：恰好相等不算过期）/ wrong
-      unit / wrong task（内容 task_id 与请求任务不符的兜底闸）/
-      wrong wave / wrong mode / 校验顺序（expired 先于 unit）/
-      consumed 后按 not found 拒绝；
+      allowed / expired（now 注入，边界：恰好相等即过期——RB-21-04
+      用户锁定决策）/ wrong unit / wrong task（内容 task_id 与请求
+      任务不符的兜底闸）/ wrong wave / wrong mode / 校验顺序
+      （expired 先于 unit）/ consumed 后按 not found 拒绝；RB-21-04
+      integrity 链（permit_id 形状闸 / payload.permit_id 一致性 /
+      mode 枚举 / reason invariant / created_at / expires_at 可解析
+      与先后 / consumed=true 载荷——全部 fail-closed deny）；
     - replay 防护（R3）：consume → True；validate → "permit not
       found"；二次 consume → False；audit 轨迹（.consumed.json 保留
       原内容、活跃文件消失）；
@@ -256,12 +259,139 @@ class ValidatePermitTest(DispatchWaveTestBase):
                                           now=FAR_LATER),
             (False, "permit expired"))
 
-    def test_expiry_boundary_exact_hit_not_expired(self):
-        # expires_at 恰好等于 now 不算过期（严格早于才拒，与 lease 同口径）
+    def test_expiry_boundary_exact_hit_expired(self):
+        # RB-21-04 用户锁定决策（语义翻转，非回退掩盖）：expires_at
+        # <= now 即过期——恰好到达过期时刻即失效，严格大于才有效
+        # （authorization fail-closed 方向：更严是唯一允许方向）
         self.assertEqual(
             dispatch_wave.validate_permit(self.root, TID, self.pid,
                                           now=AFTER_TTL),
+            (False, "permit expired"))
+
+    def test_expiry_just_before_boundary_still_valid(self):
+        # 新边界的另一侧锚定：expires_at 之前一刻仍有效
+        # （12:29:59.999 < expires_at 12:30:00.000 → ok）
+        self.assertEqual(
+            dispatch_wave.validate_permit(
+                self.root, TID, self.pid, now="2026-08-30T12:29:59.999Z"),
             (True, "ok"))
+
+    # —— RB-21-04 integrity 链（§5.4 命名回归集；malformed 构造走
+    # _rewrite_payload：只动被测字段，其余保持 §6.3 冻结形状） ——
+
+    def _rewrite_payload(self, **overrides):
+        """把 setUp 签发的活跃 permit 按字段覆盖后原位重写落盘。"""
+        permit = dict(self.permit)
+        permit.update(overrides)
+        path = permits_dir(self.root) / ("%s.json" % self.pid)
+        with open(path, "w", encoding="utf-8", newline="\n") as fh:
+            json.dump(permit, fh, ensure_ascii=False, indent=2,
+                      sort_keys=True)
+        return permit
+
+    def test_malformed_expires_at_denied(self):
+        # 损坏 expires_at 绝不按未过期放行（fail-closed 反转旧口径）
+        for bad in ("not-a-timestamp", "", 42, None):
+            with self.subTest(bad=bad):
+                self._rewrite_payload(expires_at=bad)
+                self.assertEqual(
+                    dispatch_wave.validate_permit(self.root, TID, self.pid,
+                                                  now=LATER),
+                    (False, "permit malformed"))
+
+    def test_malformed_created_at_denied(self):
+        for bad in ("not-a-timestamp", "", 42, None):
+            with self.subTest(bad=bad):
+                self._rewrite_payload(created_at=bad)
+                self.assertEqual(
+                    dispatch_wave.validate_permit(self.root, TID, self.pid,
+                                                  now=LATER),
+                    (False, "permit malformed"))
+
+    def test_expires_before_created_denied(self):
+        # 时间倒挂（expires_at < created_at）的伪造 permit → malformed
+        self._rewrite_payload(created_at=LATER, expires_at=NOW)
+        self.assertEqual(
+            dispatch_wave.validate_permit(self.root, TID, self.pid,
+                                          now=LATER),
+            (False, "permit malformed"))
+
+    def test_invalid_mode_in_file_denied(self):
+        # 校验端复核创建端不变量：文件内 mode 不在 PERMIT_MODES 即拒
+        for bad in ("sync", "BACKGROUND", "", 42, None):
+            with self.subTest(bad=bad):
+                self._rewrite_payload(mode=bad)
+                self.assertEqual(
+                    dispatch_wave.validate_permit(self.root, TID, self.pid,
+                                                  now=LATER),
+                    (False, "permit mode mismatch"))
+
+    def test_background_reason_in_file_denied(self):
+        # background permit 的 reason 恒 null：文件内写了 reason 即拒
+        for bad in ("synchronous_dependency", "because", ""):
+            with self.subTest(bad=bad):
+                self._rewrite_payload(reason=bad)
+                self.assertEqual(
+                    dispatch_wave.validate_permit(self.root, TID, self.pid,
+                                                  now=LATER),
+                    (False, "permit reason mismatch"))
+
+    def test_foreground_reason_out_of_vocabulary_in_file_denied(self):
+        # foreground permit 的 reason 不在 §6.6 冻结词汇 → 拒
+        self._rewrite_payload(mode="foreground", reason="because")
+        self.assertEqual(
+            dispatch_wave.validate_permit(self.root, TID, self.pid,
+                                          now=LATER),
+            (False, "permit reason mismatch"))
+
+    def test_permit_id_payload_mismatch_denied(self):
+        # payload.permit_id ≠ 请求 permit_id → id mismatch（文件名主体
+        # 与请求一致由 load 按 permit_id 定位结构性保证，此处闭合三角）
+        self._rewrite_payload(permit_id="dp-ffffffffffff")
+        self.assertEqual(
+            dispatch_wave.validate_permit(self.root, TID, self.pid,
+                                          now=LATER),
+            (False, "permit id mismatch"))
+
+    def test_consumed_true_payload_denied(self):
+        # 活跃 .json 内写 "consumed": true：载荷消费标记从被忽略到拒绝
+        self._rewrite_payload(consumed=True)
+        self.assertEqual(
+            dispatch_wave.validate_permit(self.root, TID, self.pid,
+                                          now=LATER),
+            (False, "permit consumed"))
+
+    def test_missing_consumed_field_malformed_denied(self):
+        # consumed 缺失 / 非 bool：载荷形状不完整 → malformed
+        for bad in (None, "false", 1):
+            with self.subTest(bad=bad):
+                self._rewrite_payload(consumed=bad)
+                self.assertEqual(
+                    dispatch_wave.validate_permit(self.root, TID, self.pid,
+                                                  now=LATER),
+                    (False, "permit malformed"))
+
+    def test_non_dp_shape_id_denied_as_not_found(self):
+        # permit_id 形状闸：非 "dp-"+12hex 的请求 id 哪文件存在也按
+        # 不存在 deny（无形状闸时此文件可全链通过拿到 ok——闸的真实缺口）
+        raw_permit_file(self.root, "totally-made-up")
+        self.assertEqual(
+            dispatch_wave.validate_permit(self.root, TID, "totally-made-up",
+                                          now=LATER),
+            (False, "permit not found"))
+
+    def test_malformed_unit_or_wave_type_denied(self):
+        # unit_id / wave_id 类型完整性：非 str 的载荷形状 → malformed
+        self._rewrite_payload(unit_id=42)
+        self.assertEqual(
+            dispatch_wave.validate_permit(self.root, TID, self.pid,
+                                          now=LATER),
+            (False, "permit malformed"))
+        self._rewrite_payload(wave_id=42)
+        self.assertEqual(
+            dispatch_wave.validate_permit(self.root, TID, self.pid,
+                                          now=LATER),
+            (False, "permit malformed"))
 
     def test_wrong_unit_denied(self):
         # §20.2 permit_wrong_unit_denied

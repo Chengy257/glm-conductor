@@ -49,9 +49,13 @@
 TTL / 崩溃恢复：
     - TTL：DEFAULT_TTL_SECONDS = 1800 秒（与租约层 LEASE_DEFAULT_TTL
       同一保守口径——覆盖单单元一次有界实施并留足余量）；过期判定
-      expires_at 严格早于 now（恰好相等不算），expires_at 解析失败
-      按未过期保守处理（与 lease 同口径：损坏时间戳绝不触发 deny 之外
-      的自动行为）；过期 permit 不被删除——validate 拒绝（
+      expires_at <= now 即过期（RB-21-04 用户锁定决策：恰好到达过期
+      时刻即失效，严格大于才有效）；created_at / expires_at 解析失败
+      按 "permit malformed" fail-closed deny——authorization permit
+      与 lease 的口径差异：lease 的损坏时间戳按未过期保守处理是
+      「绝不因坏数据自动释放」（活性安全侧），而 permit 是授权凭证，
+      「无法证明有效即拒绝」（授权安全侧），二者方向相反、各自按语义
+      锁定（RB-21-04）；过期 permit 不被删除——validate 拒绝（
       "permit expired"）、list 仍可见，人工审计后可清理；
     - 单写者前提（与 leases 相同）：主会话是唯一编排者（星型拓扑），
       多会话并行操作同一任务目录不在支持面内；rename 消费是唯一例外
@@ -148,6 +152,19 @@ def _valid_permit_id(permit_id) -> bool:
     return not any(ch in permit_id for ch in ("/", "\\", "\x00"))
 
 
+def _valid_permit_id_shape(permit_id) -> bool:
+    """permit_id 冻结形状闸："dp-" + 12 hex（§6.3，与 _new_permit_id
+    同一形状）。marker 是不可信输入——授权判定前先卡完整形状（仅含
+    路径安全的宽口径闸归 _valid_permit_id / load 层兜底）；不合法按
+    不存在处理（fail-closed deny，不抛）。"""
+    if not isinstance(permit_id, str) \
+            or not permit_id.startswith(PERMIT_ID_PREFIX):
+        return False
+    body = permit_id[len(PERMIT_ID_PREFIX):]
+    return (len(body) == PERMIT_ID_HEX_CHARS
+            and all(ch in "0123456789abcdef" for ch in body))
+
+
 # —— 时间归一（口径照抄 lease._format_iso / _coerce_now / _parse_iso） ——
 
 def _format_iso(moment) -> str:
@@ -159,8 +176,10 @@ def _format_iso(moment) -> str:
 
 def _parse_iso(value):
     """ISO-8601 时间戳 → aware UTC datetime（"Z" 后缀容错；naive 视为
-    UTC）。非字符串 / 空串 / 解析失败 → None（调用方按未过期保守
-    处理——损坏时间戳绝不额外触发自动行为）。"""
+    UTC）。非字符串 / 空串 / 解析失败 → None——None 的语义归调用方：
+    validate_permit 的授权闸把 None 按 "permit malformed" fail-closed
+    拒绝（RB-21-04：损坏时间戳绝不当作有效放行），_coerce_now 对显式
+    传入的非法 now 抛 ValueError（调用方错误不静默）。"""
     if not isinstance(value, str) or value == "":
         return None
     try:
@@ -364,29 +383,87 @@ def validate_permit(repo_root, task_id, permit_id, *, unit_id=None,
                     wave_id=None, mode=None, now=None) -> "tuple":
     """校验 permit 可用性，返回 (ok: bool, reason: str)。
 
+    RB-21-04 授权语义 fail-closed：无法证明有效即拒绝（cannot prove
+    valid → deny）——损坏的时间戳 / 载荷绝不再「当作有效放行」。
+
     校验顺序冻结（先命中先返回；reason 为英文短语，hook 侧直接透出
     给主会话）：
-      1. 不存在 / 已消费 / 已失效 / 形状非法 / 损坏 → "permit not
-         found"（load 视同名下全部按不存在处理）；
-      2. 文件内容 task_id 与请求任务不符 → "permit task mismatch"
+      1. permit_id 形状非 "dp-" + 12 hex → "permit not found"（按
+         不存在处理——marker 是不可信输入，形状不合法没有 lookup 价值）；
+      2. 不存在 / 已消费改名 / 已失效改名 / 文件损坏 / 非 dict →
+         "permit not found"（load 视同名下全部按不存在处理）；
+      3. payload.permit_id 与请求 permit_id（= 文件名主体，load 按
+         其定位打开）不一致 → "permit id mismatch"（伪造文件的兜底闸）；
+      4. 文件内容 task_id 与请求任务不符 → "permit task mismatch"
          （手工挪动 / 伪造文件的兜底闸）；
-      3. expires_at 严格早于 now → "permit expired"（解析失败按未
-         过期保守处理；恰好相等不算过期——与 lease 同口径）；
-      4. unit_id 给定且不符 → "permit unit mismatch"；
-      5. wave_id 给定且不符 → "permit wave mismatch"；
-      6. mode 给定且不符 → "permit mode mismatch"；
-      7. 全过 → (True, "ok")。
+      5. 载荷结构完整性（任一不满足即拒——fail-closed）：
+           - unit_id 非非空 str / wave_id 非 None 且非非空 str →
+             "permit malformed"；
+           - mode 不在 PERMIT_MODES → "permit mode mismatch"；
+           - reason invariant 不成立（mode="background" 而 reason 非
+             None；mode="foreground" 而 reason 不在 FOREGROUND_REASONS）
+             → "permit reason mismatch"；
+           - created_at / expires_at 不可解析 → "permit malformed"
+             （损坏时间戳绝不按未过期放行——与 lease 口径差异见模块
+             docstring TTL 节）；
+           - expires_at < created_at → "permit malformed"；
+           - consumed 缺失 / 非 bool → "permit malformed"；为 true →
+             "permit consumed"（活跃 .json 内写 consumed=true 同样拒）；
+      6. expires_at <= now → "permit expired"（严格大于才有效；恰好
+         到达过期时刻即失效——RB-21-04 用户锁定决策）；
+      7. unit_id 给定且不符 → "permit unit mismatch"；
+      8. wave_id 给定且不符 → "permit wave mismatch"；
+      9. mode 给定且不符 → "permit mode mismatch"；
+     10. 全过 → (True, "ok")。
     unit_id / wave_id / mode 传 None 表示该维不校验（hook 按 §6.4
-    校验链按需给值）。本函数只读不写——消费由 consume_permit 显式
-    进行（PreToolUse 校验零写副作用）。
+    校验链按需给值）。reason 词汇有限集（全集，无其他取值）：ok /
+    permit not found / permit id mismatch / permit task mismatch /
+    permit malformed / permit mode mismatch / permit reason mismatch /
+    permit consumed / permit expired / permit unit mismatch / permit
+    wave mismatch。本函数只读不写——消费由 consume_permit 显式进行
+    （PreToolUse 校验零写副作用）。
     """
+    if not _valid_permit_id_shape(permit_id):
+        return False, "permit not found"
     permit = load_permit(repo_root, task_id, permit_id)
     if permit is None:
         return False, "permit not found"
+    if permit.get("permit_id") != permit_id:
+        return False, "permit id mismatch"
     if permit.get("task_id") != task_id:
         return False, "permit task mismatch"
+    # —— 载荷结构完整性（fail-closed：任何一处无法证明即拒绝） ——
+    unit = permit.get("unit_id")
+    if not isinstance(unit, str) or unit == "":
+        return False, "permit malformed"
+    payload_wave = permit.get("wave_id")
+    if payload_wave is not None \
+            and (not isinstance(payload_wave, str) or payload_wave == ""):
+        return False, "permit malformed"
+    payload_mode = permit.get("mode")
+    if payload_mode not in PERMIT_MODES:
+        return False, "permit mode mismatch"
+    payload_reason = permit.get("reason")
+    if payload_mode == "background":
+        if payload_reason is not None:
+            return False, "permit reason mismatch"
+    elif payload_reason not in FOREGROUND_REASONS:
+        return False, "permit reason mismatch"
+    created_at = _parse_iso(permit.get("created_at"))
+    if created_at is None:
+        return False, "permit malformed"
     expires_at = _parse_iso(permit.get("expires_at"))
-    if expires_at is not None and expires_at < _coerce_now(now):
+    if expires_at is None:
+        return False, "permit malformed"
+    if expires_at < created_at:
+        return False, "permit malformed"
+    consumed = permit.get("consumed")
+    if not isinstance(consumed, bool):
+        return False, "permit malformed"
+    if consumed:
+        return False, "permit consumed"
+    # —— 过期（RB-21-04：expires_at <= now 即过期，严格大于才有效） ——
+    if expires_at <= _coerce_now(now):
         return False, "permit expired"
     if unit_id is not None and permit.get("unit_id") != unit_id:
         return False, "permit unit mismatch"
