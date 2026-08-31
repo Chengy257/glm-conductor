@@ -18,14 +18,18 @@ validate_state 拒绝「无验证命令的单元」（不可派发），因此�
 覆盖：
     - prepare_dispatch happy path：决策快照返回（dispatch 组含 uid）/
       租约落盘（owner==uid）/ dispatch_prepared 事件（leased=归一路径
-      排序）/ 单元状态与 state.json 字节不被改动（无 state 副作用）/
-      反斜杠 ownership 归一 / 同 owner 重复 prepare 幂等 /
-      max_workers 缺省取 dispatch.max_workers（显式传参覆盖）；
+      排序 + effective_max_workers=§12 折算后的有效预算）/ 单元状态与
+      state.json 字节不被改动（无 state 副作用）/ 反斜杠 ownership
+      归一 / 同 owner 重复 prepare 幂等 / max_workers 预算接线
+      （wu-21-09：cap_base 显式参数 → execution_policy.parallelism.
+      max_workers → dispatch.max_workers（legacy）→ 2，再按 quota
+      四态 min 折算，见 BudgetWiringTest）；
     - prepare 失败：单元缺失 / 单元非 ready（消息含当前状态）/ plan
       落选 quota EXHAUSTED（消息含 quota EXHAUSTED）/ plan 落选
-      deferred（消息含 reason）/ 依赖未满足未进候选（fallback 理由）/
-      落选零副作用（不写租约不写事件）/ 非法 quota_status ValueError
-      透传；
+      deferred（消息含 reason，ownership_conflict 口径）/ 依赖未满足
+      未进候选（fallback 理由）/ 落选零副作用（不写租约不写事件）/
+      非法 quota_status ValueError 透传 / PRESSURE 不再整批抑制
+      （wu-21-09：预算收缩为 1 后单单元照常准入）；
     - commit happy：ready→running / active 记账 / 任务级 created/
       decomposed→executing 直达边（executing、joining 不被翻动）/
       落盘读回一致 / implementation_started 事件（含 executor）/
@@ -107,6 +111,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "plugins" / "glm-conductor"))
 from runtime import dispatch_wave
+from runtime import execution_policy
 from runtime import fingerprint as fingerprint_mod
 from runtime import journal
 from runtime import lease
@@ -146,7 +151,12 @@ def wu(uid, owned=("src/a/**",), deps=(), status="ready",
 
 def make_task(root, units, *, status="decomposed", max_workers=1,
               active=()):
-    """在临时目录真实落盘一个任务 state（new_task_state 构造 + save）。"""
+    """在临时目录真实落盘一个任务 state（new_task_state 构造 + save）。
+
+    max_workers 写进 dispatch 块（legacy 账面口径）。wu-21-09 起真实
+    并发预算按 _effective_worker_cap 折算：state 恒含 execution_policy
+    默认块（parallelism.max_workers=2）时 policy 优先于本字段——
+    显式 prepare 传参仍最高优先。"""
     st = state.new_task_state(
         TID, "事务边界测试目标",
         {"mode": "delegate", "delegability": "high",
@@ -282,7 +292,9 @@ class PrepareHappyTest(TaskManagerTestBase):
     def test_prepare_returns_plan_and_acquires_lease(self):
         plan = task_manager.prepare_dispatch(self.root, TID, "u1")
         self.assertEqual(plan["dispatch"], ["u1"])
-        self.assertEqual(plan["max_workers"], 1)
+        # wu-21-09：预算取 policy parallelism.max_workers（默认块 2），
+        # dispatch 块的 legacy max_workers=1 不再优先
+        self.assertEqual(plan["max_workers"], 2)
         self.assertEqual(plan["quota_status"], "AVAILABLE")
         leases = lease.lease_state(self.root, TID)
         self.assertEqual(set(leases), {"src/a/**"})
@@ -364,13 +376,34 @@ class PrepareFailureTest(TaskManagerTestBase):
         self.assertEqual(journal.read_events(self.root, TID), [])
 
     def test_deferred_reason_surfaced(self):
-        make_task(self.root, [wu("u1")])
-        # PRESSURE 默认整批抑制 → deferred("pressure_suppressed")
+        # 落选理由透传：u2 与 u1 ownership 重叠 → plan 只批 topo 头一个
+        # u1，prepare(u2) 落选，deferred reason 进错误消息
+        make_task(self.root, [wu("u1", ("src/a/**",)),
+                              wu("u2", ("src/a/**",))])
         with self.assertRaises(task_manager.TaskManagerError) as ctx:
-            task_manager.prepare_dispatch(self.root, TID, "u1",
-                                          quota_status="PRESSURE")
-        self.assertIn("pressure_suppressed", str(ctx.exception))
+            task_manager.prepare_dispatch(self.root, TID, "u2")
+        self.assertIn("ownership_conflict", str(ctx.exception))
         self.assertEqual(lease.lease_state(self.root, TID), {})
+
+    def test_pressure_no_longer_suppresses_budget_one_admits(self):
+        # wu-21-09：PRESSURE 不再整批抑制（pressure_suppressed 分支
+        # 删除）——预算按 §12 收缩为 1，单就绪单元照常准入
+        make_task(self.root, [wu("u1", ("src/a/**",))])
+        plan = task_manager.prepare_dispatch(self.root, TID, "u1",
+                                             quota_status="PRESSURE")
+        self.assertEqual(plan["max_workers"], 1)
+        self.assertEqual(plan["dispatch"], ["u1"])
+        prepared = events(self.root, "dispatch_prepared")[0]
+        self.assertEqual(prepared["effective_max_workers"], 1)
+
+    def test_unknown_no_longer_suppresses_budget_one_admits(self):
+        # wu-21-09：UNKNOWN 不再整批挂起（unknown_suppressed 分支删除）
+        # ——预算按 §12 收缩为 1，单就绪单元照常准入
+        make_task(self.root, [wu("u1", ("src/a/**",))])
+        plan = task_manager.prepare_dispatch(self.root, TID, "u1",
+                                             quota_status="UNKNOWN")
+        self.assertEqual(plan["max_workers"], 1)
+        self.assertEqual(plan["dispatch"], ["u1"])
 
     def test_unmet_dependencies_not_candidate(self):
         make_task(self.root, [wu("dep", status="pending"),
@@ -382,11 +415,100 @@ class PrepareFailureTest(TaskManagerTestBase):
         self.assertEqual(lease.lease_state(self.root, TID), {})
 
     def test_invalid_quota_status_value_error_propagates(self):
-        # plan_dispatch 的参数校验 ValueError 不被吞
+        # plan_dispatch 的参数校验 ValueError 不被吞（词汇校验不变：
+        # 非法词汇被 effective_worker_budget 保守折 0 后仍进 plan 校验）
         make_task(self.root, [wu("u1")])
         with self.assertRaises(ValueError):
             task_manager.prepare_dispatch(self.root, TID, "u1",
                                           quota_status="MEGA")
+
+
+# —— wu-21-09 预算接线：_effective_worker_cap 的 cap_base × §12 折算 ——
+
+class BudgetWiringTest(TaskManagerTestBase):
+    """prepare_dispatch / prepare_dispatch_wave 共享的并发预算接线。
+
+    cap_base 优先级：显式 max_workers 参数 → execution_policy.
+    parallelism.max_workers（合法 1..4 int）→ dispatch.max_workers
+    （legacy）→ 2；有效预算 eff = min(cap_base, effective_worker_budget(
+    policy, quota_status))——§12 表 AVAILABLE→策略 max_workers /
+    PRESSURE→1 / UNKNOWN→1 / EXHAUSTED→0。§12 矩阵的 policy
+    max_workers=4 端到端形态在 tests/test_parallel_activation.py。
+    """
+
+    def test_explicit_param_tightens_below_policy(self):
+        # 显式 1 在 policy max=2 下收紧到 1
+        make_task(self.root, [wu("u1", ("src/a/**",))])
+        plan = task_manager.prepare_dispatch(self.root, TID, "u1",
+                                             max_workers=1)
+        self.assertEqual(plan["max_workers"], 1)
+
+    def test_explicit_param_capped_by_policy_budget(self):
+        # 显式 3 在 policy max=2 下被压回 2（min 语义）
+        make_task(self.root, [wu("u1", ("src/a/**",))])
+        plan = task_manager.prepare_dispatch(self.root, TID, "u1",
+                                             max_workers=3)
+        self.assertEqual(plan["max_workers"], 2)
+
+    def test_policy_max_workers_used_over_legacy_dispatch_block(self):
+        # policy 优先于 dispatch 块的 legacy 账面值（make_task 写 1）
+        make_task(self.root, [wu("u1", ("src/a/**",))])
+        st = state.load_state(self.root, TID)
+        st["execution_policy"] = execution_policy.set_parallel_authorization(
+            st["execution_policy"], max_workers=4, source="user",
+            confirmed_at="2026-08-31T00:00:00.000Z")
+        state.save_state(self.root, st)
+        plan = task_manager.prepare_dispatch(self.root, TID, "u1")
+        self.assertEqual(plan["max_workers"], 4)
+        prepared = events(self.root, "dispatch_prepared")[0]
+        self.assertEqual(prepared["effective_max_workers"], 4)
+
+    def test_legacy_state_without_policy_block_uses_dispatch_block(self):
+        # legacy 缺 execution_policy：cap_base 落回 dispatch.max_workers
+        # （make_task 默认 1），budget 按默认块 2 折算 → min 1
+        make_task(self.root, [wu("u1", ("src/a/**",))])
+        st = state.load_state(self.root, TID)
+        del st["execution_policy"]
+        state.save_state(self.root, st)
+        plan = task_manager.prepare_dispatch(self.root, TID, "u1")
+        self.assertEqual(plan["max_workers"], 1)
+        prepared = events(self.root, "dispatch_prepared")[0]
+        self.assertEqual(prepared["effective_max_workers"], 1)
+
+    def test_effective_worker_cap_fallback_chain_and_quota_matrix(self):
+        # 助手级锚定：cap_base 兜底链 + §12 四态折算（纯函数直测，
+        # 非法形状无法过 save_state 校验，只能以内存 dict 触达）
+        # policy 值非法（非 int）：cap_base 落 legacy dispatch.max_workers=3，
+        # 但 budget 侧按默认块 2 折算（effective_worker_budget 兜底）
+        # → min 2
+        st = {"execution_policy": {"parallelism": {"max_workers": "2"}},
+              "dispatch": {"max_workers": 3}}
+        self.assertEqual(
+            task_manager._effective_worker_cap(st, "AVAILABLE", None), 2)
+        # 同形状下 PRESSURE/UNKNOWN 恒 1、EXHAUSTED 恒 0（§12 优先）
+        self.assertEqual(
+            task_manager._effective_worker_cap(st, "PRESSURE", None), 1)
+        # policy 缺块：cap_base=3、budget 按默认块 2 折算 → min 2
+        st = {"dispatch": {"max_workers": 3}}
+        self.assertEqual(
+            task_manager._effective_worker_cap(st, "AVAILABLE", None), 2)
+        # 双缺 → 缺省 2（dispatcher.DEFAULT_MAX_WORKERS 口径）
+        self.assertEqual(
+            task_manager._effective_worker_cap({"dispatch": {}},
+                                               "AVAILABLE", None), 2)
+        # 显式参数优先于一切；quota 四态恒定折算
+        st = {"execution_policy": {"parallelism": {"max_workers": 4}},
+              "dispatch": {"max_workers": 1}}
+        self.assertEqual(
+            task_manager._effective_worker_cap(st, "AVAILABLE", 3), 3)
+        self.assertEqual(
+            task_manager._effective_worker_cap(st, "AVAILABLE", None), 4)
+        self.assertEqual(
+            task_manager._effective_worker_cap(st, "PRESSURE", None), 1)
+        self.assertEqual(
+            task_manager._effective_worker_cap(st, "UNKNOWN", None), 1)
+        self.assertEqual(
+            task_manager._effective_worker_cap(st, "EXHAUSTED", None), 0)
 
 
 # —— commit happy path ——
@@ -708,7 +830,8 @@ class PermitWiringTest(TaskManagerTestBase):
         # 现有键全部保留（向后兼容增量）+ permit 冻结形状
         plan = task_manager.prepare_dispatch(self.root, TID, "u1")
         self.assertEqual(plan["dispatch"], ["u1"])
-        self.assertEqual(plan["max_workers"], 1)
+        # wu-21-09：预算取 policy parallelism.max_workers（默认块 2）
+        self.assertEqual(plan["max_workers"], 2)
         self.assertEqual(plan["quota_status"], "AVAILABLE")
         permit = plan["permit"]
         self.assertEqual(permit["task_id"], TID)

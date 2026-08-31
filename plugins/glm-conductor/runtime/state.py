@@ -675,6 +675,12 @@ def new_task_state(task_id, goal, route, *, ownership_files=(),
     v2.1 M1：构造结果恒含顶层 "execution_policy" 默认块
     （runtime.execution_policy.default_execution_policy() 的保守
     默认——授权事实源的初始形状；升档经 set_*_authorization 变换）。
+
+    v2.1 §11.5（wu-21-09）：dispatch.max_workers 默认 1 → 2——与
+    dispatcher.DEFAULT_MAX_WORKERS=2、execution_policy parallelism
+    默认块（default_workers=max_workers=2）三处口径一致；真实并发
+    预算另按 quota 四态经 execution_policy.effective_worker_budget
+    折算（§12 表，接线在 task_manager._effective_worker_cap）。
     """
     if not isinstance(route, dict):
         raise TypeError(
@@ -707,7 +713,7 @@ def new_task_state(task_id, goal, route, *, ownership_files=(),
         },
         "visual_evidence": [],
         "work_units": [],
-        "dispatch": {"max_workers": 1, "active": []},
+        "dispatch": {"max_workers": 2, "active": []},
         "status": status,
         # v2.1 M1：执行策略授权事实源（§3 冻结 schema 的保守默认块；
         # 授权升档经 execution_policy.set_*_authorization 变换后写入）

@@ -291,7 +291,10 @@ class WaveLeaseConflictDegradationTest(unittest.TestCase):
 
 
 class WaveApprovedEmptyTest(unittest.TestCase):
-    """全部冲突 / 批准集空 → TaskManagerError（零租约零 wave 零事件）。"""
+    """全部冲突 / 批准集空 → TaskManagerError（零租约零 wave 零事件）。
+
+    wu-21-09 起 PRESSURE 不再属于本拒绝矩阵（整批抑制分支删除）——
+    其预算收缩为 1 的 wave 形态保留在本类末尾作对照锚。"""
 
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
@@ -320,16 +323,24 @@ class WaveApprovedEmptyTest(unittest.TestCase):
         self.assertEqual(state_bytes(self.root), before)
         self.assertIn("未批准任何单元", str(ctx.exception))
 
-    def test_pressure_deferred_everything_raises(self):
-        make_task(self.root, [wu("u1", ("src/a/**",))])
-        before = state_bytes(self.root)
-        with self.assertRaises(task_manager.TaskManagerError) as ctx:
-            task_manager.prepare_dispatch_wave(self.root, TID,
-                                               quota_status="PRESSURE")
-        self.assertIn("pressure_suppressed", str(ctx.exception))
-        self.assertEqual(lease.lease_state(self.root, TID), {})
-        self.assertEqual(waves_of(self.root), [])
-        self.assertEqual(state_bytes(self.root), before)
+    def test_pressure_budget_one_batches_single_unit(self):
+        # wu-21-09：PRESSURE 不再整批抑制（pressure_suppressed 分支删除）
+        # ——预算按 §12 收缩为 1：双就绪单元只批 1 个成 wave，另一个以
+        # concurrency 落在 deferred（不是 quota 挂起），租约只落 1 张
+        make_task(self.root, [wu("u1", ("src/a/**",)),
+                              wu("u2", ("src/b/**",))])
+        result = task_manager.prepare_dispatch_wave(self.root, TID,
+                                                    quota_status="PRESSURE")
+        self.assertEqual(result["units"], ["u1"])
+        self.assertEqual(result["worker_budget"], 1)
+        self.assertEqual(result["deferred"],
+                         [{"id": "u2", "reason": "concurrency"}])
+        self.assertEqual(result["waiting_quota"], [])
+        wave = waves_of(self.root)[0]
+        self.assertEqual(wave["worker_budget"], 1)
+        self.assertEqual(wave["quota_status"], "PRESSURE")
+        self.assertEqual(set(lease.lease_state(self.root, TID)),
+                         {"src/a/**"})
 
     def test_quota_exhausted_waiting_quota_wording(self):
         make_task(self.root, [wu("u1", ("src/a/**",))])

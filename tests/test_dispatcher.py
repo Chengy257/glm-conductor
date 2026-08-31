@@ -17,14 +17,16 @@
       容错）/ 租约闸（他人租约 key 冲突 → lease_conflict、同 owner
       放行、具体文件租约被候选模式覆盖、不相关租约放行、record dict
       容错、ghost active 下租约闸独挑、闸序 ownership 先于租约）/
-      quota 四态（AVAILABLE / PRESSURE 默认整批抑制与 small 放行 /
-      EXHAUSTED 全转 waiting_quota / UNKNOWN 全挂起）/ 闸门顺序
-      （压力放行的 small 仍受 ownership 与并发闸约束）/ 依赖层集成
+      quota 四态（AVAILABLE 照常 / PRESSURE 与 UNKNOWN 不再整批挂起
+      ——v2.1 wu-21-09 §12：预算收缩职责移交调用方，本层只按传入的
+      max_workers 放行 / EXHAUSTED 全转 waiting_quota）/ 闸门顺序
+      （PRESSURE 下仍受 ownership 与并发闸约束）/ 依赖层集成
       （未就绪单元不进候选）/ 候选顺序遵循 topo_order / 确定性 /
       入参不可变（deepcopy 比对）/ 非法参数 ValueError / 返回形状 /
-      决策组恰好划分候选集 / 六类 deferred reason 全覆盖；
+      决策组恰好划分候选集 / 三类 deferred reason 全覆盖；
     - max_workers 边界（§82）：1 与 4 合法；0 / 5 / 100 / "2" /
       bool 等非法值 ValueError（消息注明上限与 experimental）；
+      缺省 DEFAULT_MAX_WORKERS=2（v2.1 §11.5）；
     - 端到端并发冒烟（B10.1，tempdir）：不相交双单元双派发 → 双租约
       → 第三单元与 A 冲突被租约闸拦下 → A 完成释放 → 重派成功；
       全程 active 记账正确。
@@ -170,10 +172,19 @@ class PatternsConflictTest(unittest.TestCase):
 
 class PlanConcurrencyTest(unittest.TestCase):
 
-    def test_default_first_dispatched_second_concurrency_deferred(self):
-        # 全缺省（AVAILABLE / max_workers=1）；topo 序 m 先于 z
+    def test_default_budget_two_dispatches_both(self):
+        # v2.1 §11.5：不传 max_workers 时缺省预算 DEFAULT_MAX_WORKERS=2
+        # （并发默认 2）；topo 序 m 先于 z，两个都拿到槽位
         units = [wu("z", ("src/z/**",)), wu("m", ("src/m/**",))]
+        self.assertEqual(dispatcher.DEFAULT_MAX_WORKERS, 2)
         result = dispatcher.plan_dispatch(units)
+        self.assertEqual(result["dispatch"], ["m", "z"])
+        self.assertEqual(result["deferred"], [])
+
+    def test_explicit_budget_one_second_concurrency_deferred(self):
+        # 调用方显式收紧到 1：topo 序 m 先于 z，z 落 concurrency
+        units = [wu("z", ("src/z/**",)), wu("m", ("src/m/**",))]
+        result = dispatcher.plan_dispatch(units, max_workers=1)
         self.assertEqual(result["dispatch"], ["m"])
         self.assertEqual(reasons(result), [("z", "concurrency")])
 
@@ -259,68 +270,70 @@ class PlanQuotaTest(unittest.TestCase):
         self.assertEqual(result["dispatch"], [])
         self.assertEqual(result["deferred"], [])
 
-    def test_unknown_suppresses_all_ready(self):
-        # §67 保守：UNKNOWN 挂起且图不腐化（deferred，非 waiting_quota）
+    def test_unknown_no_longer_suppresses_budget_by_caller(self):
+        # v2.1 wu-21-09：UNKNOWN 不再整批挂起（unknown_suppressed 分支
+        # 删除）——预算收缩职责在调用方（task_manager 经 §12 表折算
+        # UNKNOWN→1）；本层按传入的 max_workers 放行，落选者记
+        # concurrency（仍是候选，不是 quota 挂起），waiting_quota 为空
+        result = dispatcher.plan_dispatch(self.three_ready(),
+                                          max_workers=1,
+                                          quota_status="UNKNOWN")
+        self.assertEqual(result["dispatch"], ["k"])  # topo 序 k 最先
+        self.assertEqual(result["waiting_quota"], [])
+        self.assertEqual(reasons(result),
+                         [("m", "concurrency"), ("z", "concurrency")])
+
+    def test_unknown_within_budget_dispatches_normally(self):
+        # 调用方给足预算时 UNKNOWN 与 AVAILABLE 无差别（本层不解释 quota）
         result = dispatcher.plan_dispatch(self.three_ready(),
                                           max_workers=4,
                                           quota_status="UNKNOWN")
-        self.assertEqual(result["dispatch"], [])
-        self.assertEqual(result["waiting_quota"], [])
-        self.assertEqual(reasons(result),
-                         [("k", "unknown_suppressed"),
-                          ("m", "unknown_suppressed"),
-                          ("z", "unknown_suppressed")])
+        self.assertEqual(result["dispatch"], ["k", "m", "z"])
+        self.assertEqual(result["deferred"], [])
 
 
-# —— plan_dispatch：压力（PRESSURE）与 small 放行 ——
+# —— plan_dispatch：PRESSURE / UNKNOWN 预算由调用方（wu-21-09 §12） ——
 
 class PlanPressureTest(unittest.TestCase):
+    """PRESSURE 不再整批抑制（pressure_suppressed / small_only 分支
+    删除）：本层对 PRESSURE / UNKNOWN 一视同仁，按调用方折算后的
+    max_workers 放行——§12 表 PRESSURE→1 的收缩发生在 task_manager
+    （tests/test_parallel_activation.py 端到端锚定）。"""
 
     def small_pair(self):
         return [wu("s", ("src/s/**",), small=True),
                 wu("big", ("src/big/**",))]
 
-    def test_pressure_default_suppresses_all(self):
-        # 默认整批 pressure_suppressed（small 键存在也不放行）
+    def test_pressure_dispatches_normally_within_budget(self):
+        # small 键不再有放行语义：带 small 的候选照常按预算派发
         result = dispatcher.plan_dispatch(self.small_pair(),
                                           quota_status="PRESSURE")
-        self.assertEqual(result["dispatch"], [])
-        # topo 序：big 先于 s（按 id 排序）
-        self.assertEqual(reasons(result),
-                         [("big", "pressure_suppressed"),
-                          ("s", "pressure_suppressed")])
+        self.assertEqual(result["dispatch"], ["big", "s"])
+        self.assertEqual(result["deferred"], [])
 
-    def test_pressure_small_allowed_dispatches_small_only(self):
-        result = dispatcher.plan_dispatch(
-            self.small_pair(), quota_status="PRESSURE",
-            allow_small_under_pressure=True)
-        self.assertEqual(result["dispatch"], ["s"])
-        self.assertEqual(reasons(result), [("big", "small_only")])
+    def test_pressure_budget_shrunk_by_caller_shows_concurrency(self):
+        # 预算 1（调用方折算 PRESSURE→1 后的形态）：只批 topo 头一个，
+        # 落选理由是 concurrency 而非任何 quota 挂起
+        result = dispatcher.plan_dispatch(self.small_pair(),
+                                          max_workers=1,
+                                          quota_status="PRESSURE")
+        self.assertEqual(result["dispatch"], ["big"])
+        self.assertEqual(reasons(result), [("s", "concurrency")])
 
-    def test_small_truthy_but_not_true_not_allowed(self):
-        # 锁定严格语义："small": True 才放行（向前兼容的可选键）
-        units = [wu("s", ("src/s/**",), small=1)]
-        result = dispatcher.plan_dispatch(
-            units, quota_status="PRESSURE", allow_small_under_pressure=True)
-        self.assertEqual(result["dispatch"], [])
-        self.assertEqual(reasons(result), [("s", "small_only")])
-
-    def test_allowed_small_still_bound_by_ownership_gate(self):
-        # 闸门顺序：small 过压力闸后仍受 ownership 闸约束
+    def test_pressure_still_bound_by_ownership_gate(self):
+        # 闸门顺序：PRESSURE 下 ownership 闸照常先裁
         units = [wu("run", ("src/auth/**",), status="running"),
-                 wu("s", ("src/auth/x.ts",), small=True)]
+                 wu("s", ("src/auth/x.ts",))]
         result = dispatcher.plan_dispatch(
-            units, max_workers=2, active=["run"], quota_status="PRESSURE",
-            allow_small_under_pressure=True)
+            units, max_workers=2, active=["run"], quota_status="PRESSURE")
         self.assertEqual(reasons(result), [("s", "ownership_conflict")])
 
-    def test_allowed_small_still_bound_by_concurrency_gate(self):
-        # 闸门顺序：small 过压力闸后仍受并发余量闸约束
+    def test_pressure_still_bound_by_concurrency_gate(self):
+        # 闸门顺序：PRESSURE 下并发余量闸照常约束（active 占槽）
         units = [wu("run", ("src/run/**",), status="running"),
-                 wu("s", ("src/s/**",), small=True)]
+                 wu("s", ("src/s/**",))]
         result = dispatcher.plan_dispatch(
-            units, max_workers=1, active=["run"], quota_status="PRESSURE",
-            allow_small_under_pressure=True)
+            units, max_workers=1, active=["run"], quota_status="PRESSURE")
         self.assertEqual(reasons(result), [("s", "concurrency")])
 
 
@@ -388,9 +401,7 @@ class PlanIntegrationTest(unittest.TestCase):
         for kwargs in ({}, {"max_workers": 2, "active": ["run"]},
                        {"quota_status": "EXHAUSTED"},
                        {"quota_status": "UNKNOWN"},
-                       {"quota_status": "PRESSURE"},
-                       {"quota_status": "PRESSURE",
-                        "allow_small_under_pressure": True}):
+                       {"quota_status": "PRESSURE"}):
             dispatcher.plan_dispatch(units, **kwargs)
         self.assertEqual(units, snapshot)
 
@@ -398,7 +409,7 @@ class PlanIntegrationTest(unittest.TestCase):
         self.assertEqual(
             dispatcher.plan_dispatch([]),
             {"dispatch": [], "waiting_quota": [], "deferred": [],
-             "max_workers": 1, "active": [], "quota_status": "AVAILABLE"})
+             "max_workers": 2, "active": [], "quota_status": "AVAILABLE"})
 
 
 # —— plan_dispatch：max_workers 边界（§82 上限 4，experimental） ——
@@ -486,7 +497,7 @@ class PlanLeaseGateTest(unittest.TestCase):
         self.assertEqual(reasons(result), [("x", "lease_conflict")])
 
     def test_gate_order_ownership_before_lease(self):
-        # 两闸同拦时先到先裁决：ownership_conflict（闸门 3）先于租约闸
+        # 两闸同拦时先到先裁决：ownership_conflict（闸门 2）先于租约闸
         units = [wu("run", ("src/a/**",), status="running"),
                  wu("x", ("src/a/**",))]
         result = dispatcher.plan_dispatch(
@@ -589,19 +600,18 @@ class PlanContractTest(unittest.TestCase):
             dispatcher.plan_dispatch(units)
 
 
-# —— 六类 deferred reason 全覆盖（验收锚） ——
+# —— 三类 deferred reason 全覆盖（验收锚；v2.1 wu-21-09 起词汇收敛） ——
 
 class DeferReasonCoverageTest(unittest.TestCase):
 
-    def test_all_six_defer_reasons_reachable(self):
+    def test_all_three_defer_reasons_reachable(self):
         base = [wu("m", ("src/m/**",)), wu("z", ("src/z/**",))]
         pair = [wu("x", ("src/auth/**",)), wu("y", ("src/auth/x.ts",))]
-        small = [wu("s", ("src/s/**",), small=True),
-                 wu("big", ("src/big/**",))]
         collected = set()
         # concurrency：余量耗尽
         collected.update(
-            r for _, r in reasons(dispatcher.plan_dispatch(base)))
+            r for _, r in reasons(dispatcher.plan_dispatch(
+                base, max_workers=1)))
         # lease_conflict：他人租约 key 与候选 ownership 冲突（§78）
         collected.update(
             r for _, r in reasons(dispatcher.plan_dispatch(
@@ -611,21 +621,12 @@ class DeferReasonCoverageTest(unittest.TestCase):
         collected.update(
             r for _, r in reasons(dispatcher.plan_dispatch(pair,
                                                            max_workers=2)))
-        # unknown_suppressed：配额不可知
-        collected.update(
-            r for _, r in reasons(dispatcher.plan_dispatch(
-                base, quota_status="UNKNOWN")))
-        # pressure_suppressed：压力默认整批抑制
-        collected.update(
-            r for _, r in reasons(dispatcher.plan_dispatch(
-                base, quota_status="PRESSURE")))
-        # small_only：压力下只放行 small，非 small 落选
-        collected.update(
-            r for _, r in reasons(dispatcher.plan_dispatch(
-                small, quota_status="PRESSURE",
-                allow_small_under_pressure=True)))
-        self.assertEqual(len(dispatcher.DEFER_REASONS), 6)
+        # quota 状态不再产生挂起理由（UNKNOWN/PRESSURE 整批挂起分支删除）
+        self.assertEqual(len(dispatcher.DEFER_REASONS), 3)
         self.assertEqual(collected, set(dispatcher.DEFER_REASONS))
+        self.assertNotIn("unknown_suppressed", dispatcher.DEFER_REASONS)
+        self.assertNotIn("pressure_suppressed", dispatcher.DEFER_REASONS)
+        self.assertNotIn("small_only", dispatcher.DEFER_REASONS)
 
 
 if __name__ == "__main__":

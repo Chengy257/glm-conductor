@@ -107,6 +107,23 @@
         wu-21-03 的 permit 门追加一环）使 closed / 重组后的旧 wave
         permit 不再放行；agent_launched 事件携带 wave_id。
 
+有界并行预算接线（v2.1 §11.5/§12，wu-21-09）：
+    prepare_dispatch / prepare_dispatch_wave 共享 _effective_worker_cap
+    预算折算：cap_base 优先级「显式 max_workers 参数 →
+    execution_policy.parallelism.max_workers（合法 1..4 int 时）→
+    dispatch.max_workers（legacy 任务）→ 2」，有效预算
+    eff = min(cap_base, execution_policy.effective_worker_budget(
+    policy, quota_status))——§12 表：AVAILABLE→策略 max_workers /
+    PRESSURE→1 / UNKNOWN→1 / EXHAUSTED→0。据此 dispatcher 不再整批
+    挂起 UNKNOWN / PRESSURE（旧的 unknown_suppressed /
+    pressure_suppressed / small_only 分支与 allow_small_under_pressure
+    参数已删除）——预算收缩职责从决策器移交本层；prepare_dispatch 的
+    dispatch_prepared 事件新增 effective_max_workers 字段（wave 事件
+    已有 worker_budget，不加重复键）；wave 的 worker_budget 自然成为
+    quota 调节后的值。并发默认 2：dispatcher.DEFAULT_MAX_WORKERS、
+    state.new_task_state 的 dispatch.max_workers 默认、execution_policy
+    parallelism 默认块三处口径一致；policy hard_limit=4 上限不变。
+
 单元验证证据归属绑定（v2.0.1 加固 H6，审查项 P1-7）+ RB-1 完成证据门
 （release hardening WU-P2，计划 §2 RB-1）：
     record_unit_verification 是单元级验证证据的唯一推荐写入口——主
@@ -164,7 +181,8 @@
     runtime.state（load/save）、runtime.dispatcher（纯决策）、
     runtime.lease（租约原语）、runtime.dispatch_wave（permit 原语）、
     runtime.execution_policy（default_execution_policy——permit mode
-    策略兜底）、runtime.work_unit（§62 表内转换）、
+    策略兜底；effective_worker_budget——§12 quota 四态预算折算）、
+    runtime.work_unit（§62 表内转换）、
     runtime.ownership（路径归一）、runtime.journal（事件追加）。
     仅 Python 3 标准库，`python3 -S` 可运行。
 
@@ -191,6 +209,8 @@ from runtime import resume_manifest
 from runtime import state
 from runtime import work_unit
 from runtime.execution_policy import default_execution_policy
+from runtime.execution_policy import effective_worker_budget
+from runtime.execution_policy import HARD_WORKER_LIMIT
 from runtime.lease import LEASE_DEFAULT_TTL_SECONDS
 
 
@@ -320,6 +340,55 @@ def _default_dispatch_mode(st) -> str:
     return default_execution_policy()["worker_execution"]["default_mode"]
 
 
+def _is_worker_cap(value) -> bool:
+    """value 是否可充当并发上限：int（bool 拒绝——int 子类不充当槽位
+    数）且 1 ≤ n ≤ execution_policy 冻结 hard_limit（4）。"""
+    return (not isinstance(value, bool) and isinstance(value, int)
+            and 1 <= value <= HARD_WORKER_LIMIT)
+
+
+def _effective_worker_cap(st, quota_status, max_workers) -> int:
+    """wu-21-09 预算接线（计划 §11.5/§12）：并发上限 × quota 四态折算。
+
+    cap_base 优先级（前者缺席 / 形状坏才落后者）：
+      1. 显式 max_workers 参数（非 None 即采纳）；
+      2. state execution_policy.parallelism.max_workers（合法
+         1..hard_limit 的 int 时）；
+      3. state dispatch.max_workers（legacy 任务的账面口径，同样
+         1..hard_limit 校验）；
+      4. dispatcher.DEFAULT_MAX_WORKERS（=2，v2.1 起与
+         new_task_state 默认、execution_policy 默认块三处口径一致）。
+    有效预算 eff = min(cap_base,
+    execution_policy.effective_worker_budget(policy, quota_status))：
+    §12 表——AVAILABLE→策略 max_workers（policy 缺块 / 坏形状按
+    default_execution_policy 的 2 兜底，effective_worker_budget 既有
+    行为）/ PRESSURE→1 / UNKNOWN→1 / EXHAUSTED→0（quota_status 非法
+    同样保守折 0，词汇校验仍由 plan_dispatch 的 ValueError 兜底）。
+
+    返回 int：eff ≥ 1 时即调用方应传给 plan_dispatch 的
+    max_workers；eff == 0（EXHAUSTED / 非法词汇折 0）不能直接传入
+    plan_dispatch（其校验 1..hard_limit）——调用方传 max(eff, 1)，
+    plan 的 quota 闸自然把候选全转 waiting_quota（预算 0 的可观察面
+    就是「零派发 + waiting_quota」，错误口径与旧实现逐字一致）。
+    纯函数：只读入参、零 I/O。
+    """
+    policy = st.get("execution_policy")
+    cap_base = max_workers
+    if cap_base is None:
+        parallelism = (policy.get("parallelism")
+                       if isinstance(policy, dict) else None)
+        cap_base = (parallelism.get("max_workers")
+                    if isinstance(parallelism, dict) else None)
+        if not _is_worker_cap(cap_base):
+            dispatch_block = st.get("dispatch")
+            cap_base = (dispatch_block.get("max_workers")
+                        if isinstance(dispatch_block, dict) else None)
+            if not _is_worker_cap(cap_base):
+                cap_base = dispatcher.DEFAULT_MAX_WORKERS
+    eff = min(cap_base, effective_worker_budget(policy, quota_status))
+    return eff if eff >= 1 else 0
+
+
 def _validate_permit_mode(api, st, mode, reason) -> "tuple":
     """permit mode/reason 全量校验（prepare_dispatch 与
     prepare_dispatch_wave 共享，wu-21-08 抽取；消息逐字保持原口径）。
@@ -362,8 +431,7 @@ def _validate_permit_mode(api, st, mode, reason) -> "tuple":
 # —— prepare：plan 决策 + 租约 + permit + 事件（无 state 副作用） ——
 
 def prepare_dispatch(repo_root, task_id, uid, *, quota_status="AVAILABLE",
-                     allow_small_under_pressure=False, max_workers=None,
-                     mode=None, reason=None) -> dict:
+                     max_workers=None, mode=None, reason=None) -> dict:
     """派发准备：准入决策 → 租约 → permit 签发 → 事件；不改单元状态、
     不 save state——prepare 对 state.json 零副作用（可安全重试）。
 
@@ -379,9 +447,16 @@ def prepare_dispatch(repo_root, task_id, uid, *, quota_status="AVAILABLE",
          _default_dispatch_mode）；mode="foreground" 必须显式给出
          reason ∈ dispatch_wave.FOREGROUND_REASONS（§6.6），缺给出
          TaskManagerError、值非法 ValueError；background 恒 reason
-         null（显式传了 reason 也拒绝）；
-      4. max_workers 缺省取 state["dispatch"]["max_workers"]（缺失按 1；
-         显式传参覆盖）；
+         null（显式传了也拒绝）；
+      4. max_workers 预算接线（wu-21-09，§11.5/§12，见
+         _effective_worker_cap）：cap_base 优先级为「显式参数 →
+         execution_policy.parallelism.max_workers（合法 1..4 int）→
+         dispatch.max_workers（legacy）→ 2」，有效预算
+         eff = min(cap_base, execution_policy.effective_worker_budget(
+         policy, quota_status))——AVAILABLE→策略 max_workers /
+         PRESSURE→1 / UNKNOWN→1 / EXHAUSTED→0；eff 作为 max_workers
+         传给 plan_dispatch（eff=0 时传 1，quota 闸自然全转
+         waiting_quota——dispatcher 不再整批挂起 UNKNOWN/PRESSURE）；
       5. 读出已落盘租约（lease.lease_state，损坏 ValueError 上抛）交给
          plan_dispatch 的租约闸——自有租约不挡自己（§78 同 owner 放行），
          因此 prepare 后崩溃重试安全；
@@ -396,8 +471,9 @@ def prepare_dispatch(repo_root, task_id, uid, *, quota_status="AVAILABLE",
          文件 + tmp/os.replace 原子写，ttl 取 dispatch_wave.
          DEFAULT_TTL_SECONDS；wave_id 缺省 None，M4 wave 事务接线）；
       10. journal dispatch_prepared（unit + leased=持有中的归一路径 +
-          ttl_seconds）与 dispatch_permit_created（unit + permit_id +
-          mode），先后各一条；
+          ttl_seconds + effective_max_workers=步 4 的有效预算）与
+          dispatch_permit_created（unit + permit_id + mode），先后各
+          一条；
       11. 返回 plan 决策快照，新增 "permit" 键（permit dict；主会话用
           dispatch_wave.marker_for(permit_id) 构造 marker 派发 Agent，
           消费归 wu-21-03 的 hook 侧）。
@@ -423,18 +499,18 @@ def prepare_dispatch(repo_root, task_id, uid, *, quota_status="AVAILABLE",
     dispatch_block = st.get("dispatch")
     if not isinstance(dispatch_block, dict):
         dispatch_block = {}
-    if max_workers is None:
-        max_workers = dispatch_block.get("max_workers", 1)
+    # wu-21-09 预算接线：cap_base（显式 > policy > legacy dispatch > 2）
+    # × quota 四态折算（§12）→ eff；eff=0（EXHAUSTED）时传 1 进 plan，
+    # 由 quota 闸自然全转 waiting_quota（plan 校验 1..4 不能收 0）
+    eff = _effective_worker_cap(st, quota_status, max_workers)
     active = dispatch_block.get("active")
     if not isinstance(active, list):
         active = []
     # 租约事实交给决策器的租约闸（record dict 形状由 plan_dispatch 容错）
     leases = lease.lease_state(repo_root, task_id)
     plan = dispatcher.plan_dispatch(
-        st.get("work_units"), max_workers=max_workers, active=active,
-        quota_status=quota_status,
-        allow_small_under_pressure=allow_small_under_pressure,
-        leases=leases)
+        st.get("work_units"), max_workers=max(eff, 1), active=active,
+        quota_status=quota_status, leases=leases)
     if uid not in plan["dispatch"]:
         if uid in plan["waiting_quota"]:
             why = "quota EXHAUSTED（配额耗尽，决策建议转 waiting_quota）"
@@ -465,7 +541,8 @@ def prepare_dispatch(repo_root, task_id, uid, *, quota_status="AVAILABLE",
     held = lease.held_by(repo_root, task_id, uid)
     journal.append_event(repo_root, task_id, {
         "event": "dispatch_prepared", "unit": uid, "leased": held,
-        "ttl_seconds": LEASE_DEFAULT_TTL_SECONDS})
+        "ttl_seconds": LEASE_DEFAULT_TTL_SECONDS,
+        "effective_max_workers": eff})
     journal.append_event(repo_root, task_id, {
         "event": "dispatch_permit_created", "unit": uid,
         "permit_id": permit["permit_id"], "mode": effective_mode})
@@ -476,8 +553,7 @@ def prepare_dispatch(repo_root, task_id, uid, *, quota_status="AVAILABLE",
 # —— wave：批量 plan 决策 + 全量租约 + wave 记录 + 批量 permit ——
 
 def prepare_dispatch_wave(repo_root, task_id, *, quota_status="AVAILABLE",
-                          allow_small_under_pressure=False, max_workers=None,
-                          mode=None, reason=None) -> dict:
+                          max_workers=None, mode=None, reason=None) -> dict:
     """批量派发准备（v2.1 M4 wu-21-08）：一次调用完成「决策 → 全量租约
     → wave 记录 → 批量 permit → journal」，事务性 all-or-safe-degrade
     ——wave 记录落盘时其全部成员租约已在位，绝不出现「wave 记录
@@ -487,8 +563,15 @@ def prepare_dispatch_wave(repo_root, task_id, *, quota_status="AVAILABLE",
       1. load_state（任务缺失 TaskManagerError；损坏 ValueError 上抛）；
       2. permit mode/reason 先于任何写副作用全量校验（与 prepare_dispatch
          共享 _validate_permit_mode，消息口径逐字一致）；
-      3. max_workers 缺省取 state["dispatch"]["max_workers"]（缺失按 1；
-         显式传参覆盖）；
+      3. max_workers 预算接线（wu-21-09，与 prepare_dispatch 共享
+         _effective_worker_cap，见其 docstring）：cap_base 优先级「显式
+         参数 → execution_policy.parallelism.max_workers（合法 1..4
+         int）→ dispatch.max_workers（legacy）→ 2」，eff =
+         min(cap_base, effective_worker_budget(policy, quota_status))
+         ——AVAILABLE→策略 max_workers / PRESSURE→1 / UNKNOWN→1 /
+         EXHAUSTED→0；eff 作为 max_workers 传给 plan_dispatch（eff=0
+         时传 1，quota 闸自然全转 waiting_quota——dispatcher 不再整批
+         挂起 UNKNOWN/PRESSURE）；
       4. 决策-租约循环（安全降级）：
            a. 候选 = 未被剔除的 work_units，plan_dispatch 全量决策（带
               落盘租约闸，纯决策器）；
@@ -501,11 +584,13 @@ def prepare_dispatch_wave(repo_root, task_id, *, quota_status="AVAILABLE",
               任一 LeaseConflictError → 释放本轮已获取的全部租约（零
               残留）、冲突单元加入 excluded 集合、回到 a 剔除后重试
               ——excluded 单调增长保证有界终止；
-      5. 全部租约到位 → worker_budget = min(max_workers, len(批准集))，
-         wave_id = dispatch_wave.new_wave_id()，wave 记录（冻结键：
-         wave_id/units/worker_budget/quota_status/created_at/status/
-         closed_at，status="active"）追加进 dispatch.waves，save_state
-         一次落盘（单元 wave 合法：只批 1 个也成 wave）；
+      5. 全部租约到位 → worker_budget = min(eff, len(批准集))（wu-21-09
+         起 max_workers 已是 quota 调节后的 eff，worker_budget 自然是
+         quota 调节后的值），wave_id = dispatch_wave.new_wave_id()，
+         wave 记录（冻结键：wave_id/units/worker_budget/quota_status/
+         created_at/status/closed_at，status="active"）追加进
+         dispatch.waves，save_state 一次落盘（单元 wave 合法：只批
+         1 个也成 wave）；
       6. 逐成员 create_permit（携带 wave_id 与 mode/reason）；
       7. journal 单条 dispatch_wave_prepared {wave_id, units,
          worker_budget, permits: [permit_id...]}——不逐单元重复
@@ -526,8 +611,10 @@ def prepare_dispatch_wave(repo_root, task_id, *, quota_status="AVAILABLE",
     dispatch_block = st.get("dispatch")
     if not isinstance(dispatch_block, dict):
         dispatch_block = {}
-    if max_workers is None:
-        max_workers = dispatch_block.get("max_workers", 1)
+    # wu-21-09 预算接线（与 prepare_dispatch 同口径，见
+    # _effective_worker_cap）：eff=0（EXHAUSTED）时传 1 进 plan，
+    # 由 quota 闸自然全转 waiting_quota
+    eff = _effective_worker_cap(st, quota_status, max_workers)
     active = dispatch_block.get("active")
     if not isinstance(active, list):
         active = []
@@ -545,10 +632,8 @@ def prepare_dispatch_wave(repo_root, task_id, *, quota_status="AVAILABLE",
         # 租约事实交给决策器的租约闸（§78 同 owner 幂等，自有租约不挡）
         leases = lease.lease_state(repo_root, task_id)
         plan = dispatcher.plan_dispatch(
-            candidates, max_workers=max_workers, active=active,
-            quota_status=quota_status,
-            allow_small_under_pressure=allow_small_under_pressure,
-            leases=leases)
+            candidates, max_workers=max(eff, 1), active=active,
+            quota_status=quota_status, leases=leases)
         by_id = {unit["id"]: unit for unit in candidates}
         approved_set = set(plan["dispatch"])
         # 批准集按 state.work_units 原序（plan 内部是 topo 序）
@@ -588,7 +673,7 @@ def prepare_dispatch_wave(repo_root, task_id, *, quota_status="AVAILABLE",
         if conflicted:
             continue
         break
-    worker_budget = min(max_workers, len(approved))
+    worker_budget = min(max(eff, 1), len(approved))
     wave_id = dispatch_wave.new_wave_id()
     wave = {
         "wave_id": wave_id,

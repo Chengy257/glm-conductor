@@ -389,7 +389,9 @@ class NewTaskStateTest(unittest.TestCase):
              "fingerprint": None})
         self.assertEqual(st["visual_evidence"], [])
         self.assertEqual(st["work_units"], [])
-        self.assertEqual(st["dispatch"], {"max_workers": 1, "active": []})
+        # v2.1 wu-21-09：并发默认 2（与 dispatcher.DEFAULT_MAX_WORKERS、
+        # execution_policy parallelism 默认块三处口径一致）
+        self.assertEqual(st["dispatch"], {"max_workers": 2, "active": []})
 
     def test_visual_evidence_key_position(self):
         # 顶层键顺序契约：visual_evidence 在 review 之后、work_units 之前
