@@ -18,7 +18,10 @@
   3. 预算耗尽：consumed >= max → budget_exhausted=True + until_done
      任务转 waiting_user + journal auto_resume_authorization_exhausted；
   4. record_quota_wake：consumed 递增、journal quota_wake_recorded、
-     与 automation 存活解耦（无回滚 API，二次调用纯递增）；
+     与 automation 存活解耦（无回滚 API，不同 automation_id 二次调用
+     纯递增）；SH-21-01 幂等（同 automation_id 重放返回既有消耗结果
+     ——不递增、不新建事件）与写入前授权三查（manual / source 非
+     "user" / 预算耗尽均拒绝，拒绝路径零副作用：§10.6 命名测试）；
   5. quota_wake_prompt：含 task_id / 仓库根 / resume_from_quota /
      RB-1 指纹 / 预算状态 / 红线（CronDelete 不重试）与 maxRuns=1
      一次性语义；quota-resolve 指令带 --force-refresh；
@@ -51,7 +54,7 @@ Python 3 标准库（unittest + tempfile + mock），零第三方依赖。
     cd <repo_root> && python3 -m unittest tests.test_authorized_resume -v
 """
 
-import sys, unittest
+import json, sys, unittest
 import tempfile
 from pathlib import Path
 from unittest import mock
@@ -372,7 +375,12 @@ class BudgetExhaustedTest(unittest.TestCase):
 
 
 class RecordQuotaWakeTest(unittest.TestCase):
-    """清单 4：window 扣减记账——递增、事件、与 automation 存活解耦。"""
+    """清单 4：window 扣减记账——递增、事件、与 automation 存活解耦。
+
+    SH-21-01 增补（§10.6 命名测试）：同 automation_id 幂等重放 +
+    写入前授权三查（auto_resume ∈ {auto_once, until_done} /
+    authorization.source == "user" / remaining > 0），拒绝路径零副作用。
+    """
 
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
@@ -388,6 +396,13 @@ class RecordQuotaWakeTest(unittest.TestCase):
         st["execution_policy"] = policy
         st["status"] = "waiting_quota"
         state.save_state(self.repo, st)
+
+    def _state_bytes(self):
+        return state.state_path(self.repo, TID).read_bytes()
+
+    def _wake_events(self):
+        return [e for e in journal.read_events(self.repo, TID)
+                if e.get("event") == "quota_wake_recorded"]
 
     def test_increments_journals_and_never_rolls_back(self):
         self._waiting_task()
@@ -436,6 +451,123 @@ class RecordQuotaWakeTest(unittest.TestCase):
         self.assertNotIn("consumed_quota_windows",
                          state.load_state(self.repo, TID)
                          ["execution_policy"]["continuity"])
+
+    def test_same_automation_recorded_once(self):
+        # SH-21-01 §10.6：同 automation_id 重放（cron glitch / 误重试）
+        # 幂等——返回既有消耗结果（既有键保留 + idempotent 标注），
+        # 不递增、不新建事件、state.json 字节不变
+        self._waiting_task()
+        first = task_manager.record_quota_wake(
+            self.repo, TID, automation_id="cron-1",
+            fires_at="2026-08-31T12:05:00Z")
+        self.assertEqual(first["consumed_quota_windows"], 1)
+        self.assertNotIn("idempotent", first)  # 新鲜记账路径形状不变
+        baseline = self._state_bytes()
+        self.assertEqual(len(self._wake_events()), 1)
+
+        replay = task_manager.record_quota_wake(
+            self.repo, TID, automation_id="cron-1",
+            fires_at="2026-08-31T12:05:00Z")
+
+        self.assertTrue(replay["idempotent"])
+        # 既有键保留 + 值为原始账（不是重放时的新计数）
+        self.assertEqual(replay["consumed_quota_windows"], 1)
+        self.assertEqual(replay["remaining_quota_windows"], 1)
+        self.assertEqual(replay["max_quota_windows"], 2)
+        self.assertEqual(replay["automation_id"], "cron-1")
+        self.assertEqual(replay["fires_at"], "2026-08-31T12:05:00Z")
+        # 零副作用：事件计数与盘上字节都不变
+        self.assertEqual(len(self._wake_events()), 1)
+        self.assertEqual(self._state_bytes(), baseline)
+        self.assertEqual(
+            state.load_state(self.repo, TID)["execution_policy"]
+            ["continuity"]["consumed_quota_windows"], 1)
+
+    def test_different_automation_consumes_second_window(self):
+        # SH-21-01 §10.6：幂等只按 automation_id 判定——不同 automation
+        # 的第二次调用照常消耗第二窗（与既有 unconstrained 用例互为正反）
+        self._waiting_task()
+        first = task_manager.record_quota_wake(
+            self.repo, TID, automation_id="cron-1",
+            fires_at="2026-08-31T12:05:00Z")
+        self.assertEqual(first["consumed_quota_windows"], 1)
+        second = task_manager.record_quota_wake(
+            self.repo, TID, automation_id="cron-2",
+            fires_at="2026-08-31T17:05:00Z")
+        self.assertNotIn("idempotent", second)
+        self.assertEqual(second["consumed_quota_windows"], 2)
+        self.assertEqual(second["remaining_quota_windows"], 0)
+        self.assertEqual(
+            state.load_state(self.repo, TID)["execution_policy"]
+            ["continuity"]["consumed_quota_windows"], 2)
+        self.assertEqual(len(self._wake_events()), 2)
+
+    def test_manual_mode_cannot_record_auto_wake(self):
+        # SH-21-01 §10.6：manual（默认块）任务不得经记账 API 制造
+        # consumed window——TaskManagerError 指明 violated 条件，零副作用
+        save_task(self.repo, units=[make_unit("wu-a")])
+        baseline = self._state_bytes()
+        with self.assertRaises(task_manager.TaskManagerError) as ctx:
+            task_manager.record_quota_wake(
+                self.repo, TID, automation_id="cron-manual",
+                fires_at="2026-08-31T12:05:00Z")
+        self.assertIn("auto_once", str(ctx.exception))
+        self.assertIn("manual", str(ctx.exception))
+        # 零副作用：state.json 字节不变、无事件、无记账
+        self.assertEqual(self._state_bytes(), baseline)
+        self.assertEqual(self._wake_events(), [])
+        self.assertNotIn("consumed_quota_windows",
+                         state.load_state(self.repo, TID)
+                         ["execution_policy"]["continuity"])
+
+    def test_unauthorized_source_cannot_record_auto_wake(self):
+        # SH-21-01 三查之二（纵深防御）：auto_once + source=default 被
+        # execution_policy §5.4 不变量挡在合法 state 之外——这里手写
+        # state.json 绕过保存闸（load_state 不复检），runtime 记账侧仍
+        # 必须独立拒绝（与 _quota_wake_decision 口径一致）
+        policy = authorize(save_task(self.repo, units=[make_unit("wu-a")]),
+                           "auto_once", 1)
+        policy["authorization"] = {"source": "default",
+                                   "confirmed_at": None, "scope": "task"}
+        st = state.load_state(self.repo, TID)
+        st["execution_policy"] = policy
+        with open(state.state_path(self.repo, TID), "w",
+                  encoding="utf-8", newline="\n") as fh:
+            json.dump(st, fh, ensure_ascii=False)
+        baseline = self._state_bytes()
+        with self.assertRaises(task_manager.TaskManagerError) as ctx:
+            task_manager.record_quota_wake(
+                self.repo, TID, automation_id="cron-bypass",
+                fires_at="2026-08-31T12:05:00Z")
+        self.assertIn("user", str(ctx.exception))
+        self.assertEqual(self._state_bytes(), baseline)
+        self.assertEqual(self._wake_events(), [])
+
+    def test_budget_zero_rejects_new_wake(self):
+        # SH-21-01 §10.6：预算耗尽（remaining == 0）后不得再记账新的
+        # automation——授权矩阵 §14.5 语义在记账侧的独立防线
+        policy = authorize(save_task(self.repo, units=[make_unit("wu-a")]),
+                           "until_done", 1)
+        st = state.load_state(self.repo, TID)
+        st["execution_policy"] = policy
+        state.save_state(self.repo, st)
+        first = task_manager.record_quota_wake(
+            self.repo, TID, automation_id="cron-once",
+            fires_at="2026-08-31T12:05:00Z")
+        self.assertEqual(first["consumed_quota_windows"], 1)
+        baseline = self._state_bytes()
+
+        with self.assertRaises(task_manager.TaskManagerError) as ctx:
+            task_manager.record_quota_wake(
+                self.repo, TID, automation_id="cron-second",
+                fires_at="2026-08-31T17:05:00Z")
+        self.assertIn("耗尽", str(ctx.exception))
+        # 零副作用：事件仍 1 条、consumed 仍 1、字节不变
+        self.assertEqual(len(self._wake_events()), 1)
+        self.assertEqual(
+            state.load_state(self.repo, TID)["execution_policy"]
+            ["continuity"]["consumed_quota_windows"], 1)
+        self.assertEqual(self._state_bytes(), baseline)
 
 
 class WakePromptTest(unittest.TestCase):

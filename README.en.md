@@ -184,6 +184,10 @@ GLM Conductor builds on ZCode's native local session lifecycle — it is not a c
 
 See the [architecture doc](./docs/architecture.md) for the complete registered-limit list.
 
+## Release discipline
+
+GitHub Release metadata is bound to version semantics: `alpha` / `rc` pre-releases must be marked **prerelease** ("Set as a pre-release"); only `stable` versions are published as the latest stable release — marketplace users rely on this flag to decide whether updates are offered automatically.
+
 ## References & Acknowledgments
 
 This project stands on the shoulders of the following projects/ecosystems (ordered by depth of reference):

@@ -22,7 +22,9 @@ exit 2 + 失败路径 exit 1）——
      （零转态是合法结果）；status 缺省走 resolver（monkeypatch 零网
      络）；非法词汇 → 2；任务缺失 → 1；
   6. wake-record：consumed 递增 + journal quota_wake_recorded；空
-     automation_id → 2；任务缺失 → 1；参数个数 → 2；
+     automation_id → 2；任务缺失 → 1；参数个数 → 2（SH-21-01 起记账
+     入口带写入前授权三查与同 automation_id 幂等——happy 用例 fixture
+     相应授予 until_done / 2 窗用户授权，断言本身不变）；
   7. wake-prompt：**stdout 纯文本**（不裹 JSON——json.loads 必炸的
      反向锚）；任务缺失 → 错误 JSON + 1；参数个数 → 2；真实子进程
      UTF-8 冒烟（Windows 显式 utf-8 纪律）；
@@ -52,7 +54,8 @@ from pathlib import Path
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "plugins" / "glm-conductor"))
-from runtime import agent_run, cli, dispatch_wave, journal, provenance, state
+from runtime import agent_run, cli, dispatch_wave, execution_policy, \
+    journal, provenance, state
 from runtime import task_manager, work_unit
 from runtime.quota import resolver as quota_resolver
 
@@ -511,12 +514,22 @@ class WakeRecordCliTest(TempDirFixture):
     """wake-record：窗口扣减记账 + 空串闸 2 / 缺失 1 / 用法 2。"""
 
     def test_wake_record_increments_consumed(self):
-        self.make_task()
+        # SH-21-01 起记账入口做写入前授权三查（manual / source 非 user /
+        # 预算耗尽拒绝）：fixture 相应授予 until_done / 2 窗用户授权——
+        # 本用例断言不变（不同 automation_id 两次调用纯递增 1→2）
+        st = self.make_task()
+        st["execution_policy"] = execution_policy.set_resume_authorization(
+            st["execution_policy"], auto_resume="until_done",
+            max_quota_windows=2, source="user",
+            confirmed_at="2026-08-31T00:00:00+00:00")
+        state.save_state(self.repo, st)
         code, payload = run_cli("wake-record", str(self.repo), TID,
                                 "aut-wake-0001", "2026-09-01T00:00:00Z")
         self.assertEqual(code, 0)
         self.assertEqual(payload["consumed_quota_windows"], 1)
-        self.assertEqual(payload["remaining_quota_windows"], 0)
+        # remaining=1：授权 fixture（until_done / 2 窗）消耗 1 窗后的
+        # 真实剩余——历史断言 0 是默认 manual 块 max=0 的装置伪影
+        self.assertEqual(payload["remaining_quota_windows"], 1)
         self.assertEqual(payload["automation_id"], "aut-wake-0001")
         self.assertEqual(payload["fires_at"], "2026-09-01T00:00:00Z")
         recorded = self.events("quota_wake_recorded")

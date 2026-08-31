@@ -1726,6 +1726,19 @@ def quota_wake_prompt(repo_root, task_id) -> str:
 def record_quota_wake(repo_root, task_id, *, automation_id, fires_at) -> dict:
     """window 扣减记账（v2.1 §14.4：主会话 CronCreate 成功后调用）。
 
+    - 幂等（SH-21-01）：journal 已有同 automation_id 的
+      quota_wake_recorded 事件 → 直接返回既有消耗结果（不递增、
+      不新建事件、零写副作用），返回 dict 既有键保留并增标
+      "idempotent": True——cron glitch 重放 / 误重试不再重复消耗
+      窗口预算（幂等只按 automation_id 判定，不同 automation_id
+      照常各消耗一窗）；
+    - 写入前授权复核（SH-21-01 三查，读取口径与 _continuity_view /
+      _quota_wake_decision 一致——execution_policy 块缺/坏按默认块
+      解释为 manual）：auto_resume ∈ {auto_once, until_done} /
+      authorization.source == "user" / 剩余窗口 > 0，任一不满足 →
+      TaskManagerError（中文消息指明 violated 条件，零副作用——
+      无事件、state.json 字节不变；manual/notify 任务不得经本 API
+      制造 consumed window）；
     - continuity.consumed_quota_windows += 1（缺键按 0 起算；legacy
       缺 execution_policy 块时以默认块补齐后写——半定义块过不了
       validate_state 的完整性闸）；
@@ -1733,12 +1746,14 @@ def record_quota_wake(repo_root, task_id, *, automation_id, fires_at) -> dict:
       remaining}；
     - 与 automation 存活解耦：wake 未触发、automation 被清理或丢失
       都不回滚（正确性底线永远是未来 SessionStart 恢复注入，automation
-      只是 best-effort bridge）；无回滚 API，二次调用纯递增。
+      只是 best-effort bridge）；无回滚 API，不同 automation_id 的
+      二次调用纯递增。
 
     参数校验（先于任何 I/O，失败零副作用）：automation_id / fires_at
     必须是非空 str，否则 ValueError（中文消息含字段名）。返回
     {"consumed_quota_windows", "remaining_quota_windows",
-    "max_quota_windows", "automation_id", "fires_at"}。
+    "max_quota_windows", "automation_id", "fires_at"}；幂等命中路径
+    既有键保留并增标 "idempotent": True。
     """
     api = "record_quota_wake"
     if not isinstance(automation_id, str) or automation_id == "":
@@ -1750,6 +1765,55 @@ def record_quota_wake(repo_root, task_id, *, automation_id, fires_at) -> dict:
             "%s：fires_at 必须是非空字符串（ISO8601 口径），得到 %r"
             % (api, fires_at))
     st = _require_state(repo_root, task_id, api)
+    view = _continuity_view(st)
+    # SH-21-01 幂等：同 automation_id 已记过账 → 原样返回既有消耗结果
+    # （取首条匹配——正确流程下至多一条；历史脏数据重复时首条是原始账）
+    prior = None
+    for event in journal.read_events(repo_root, task_id):
+        if event.get("event") == "quota_wake_recorded" \
+                and event.get("automation_id") == automation_id:
+            prior = event
+            break
+    if prior is not None:
+        consumed = prior.get("consumed")
+        if isinstance(consumed, bool) or not isinstance(consumed, int) \
+                or consumed < 0:
+            consumed = view["consumed_quota_windows"]
+        remaining = prior.get("remaining")
+        if isinstance(remaining, bool) or not isinstance(remaining, int) \
+                or remaining < 0:
+            remaining = view["remaining"]
+        recorded_fires_at = prior.get("fires_at")
+        if not isinstance(recorded_fires_at, str) or recorded_fires_at == "":
+            recorded_fires_at = fires_at
+        return {
+            "consumed_quota_windows": consumed,
+            "remaining_quota_windows": remaining,
+            "max_quota_windows": view["max_quota_windows"],
+            "automation_id": automation_id,
+            "fires_at": recorded_fires_at,
+            "idempotent": True,
+        }
+    # SH-21-01 写入前授权复核（三查逐条指明 violated 条件；在任何
+    # mutation / 落盘之前——拒绝路径零副作用）
+    if view["auto_resume"] not in ("auto_once", "until_done"):
+        raise TaskManagerError(
+            "%s：auto_resume=%r 不在自动续跑授权族（auto_once / "
+            "until_done）内——manual / notify 任务不得记账消耗窗口预算"
+            "（额度恢复一律走 SessionStart 恢复注入 / 用户手动续跑）"
+            % (api, view["auto_resume"]))
+    if view["source"] != "user":
+        raise TaskManagerError(
+            "%s：authorization.source=%r 非 \"user\"——跨额度窗口自动"
+            "续跑必须用户明确授权，拒绝记账窗口消耗（纵深防御，与 "
+            "_quota_wake_decision 口径一致）" % (api, view["source"]))
+    if view["remaining"] <= 0:
+        raise TaskManagerError(
+            "%s：窗口预算已耗尽（consumed %d / max %d，剩余 %d）——"
+            "不得再记账新的自动化唤醒，转 waiting_user 等待用户重新"
+            "授权（§14.5）" % (api, view["consumed_quota_windows"],
+                               view["max_quota_windows"],
+                               view["remaining"]))
     policy = st.get("execution_policy")
     if not isinstance(policy, dict):
         # legacy 任务无授权事实源块：以默认块补齐（完整四子块形状，
