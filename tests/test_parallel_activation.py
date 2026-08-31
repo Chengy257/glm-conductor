@@ -151,7 +151,7 @@ class QuotaBudgetMatrixTest(GitTaskFixture):
 
     def test_available_budget_equals_task_cap_four(self):
         self._policy4_task()
-        plan = task_manager.prepare_dispatch(self.root, TID, "u1")
+        plan = task_manager.prepare_dispatch(self.root, TID, "u1", quota_status="AVAILABLE")
         self.assertEqual(plan["max_workers"], 4)
         self.assertEqual(sorted(plan["dispatch"]), ["u1", "u2"])
         self.assertEqual(plan["deferred"], [])
@@ -226,7 +226,7 @@ class ExplicitCapMinSemanticsTest(GitTaskFixture):
                               wu("u2", ("src/b/**",))],
                   policy_max_workers=4)
         plan = task_manager.prepare_dispatch(self.root, TID, "u1",
-                                             max_workers=1)
+                                             max_workers=1, quota_status="AVAILABLE")
         self.assertEqual(plan["max_workers"], 1)
         self.assertEqual(plan["dispatch"], ["u1"])
         self.assertEqual(deferred_ids(plan),
@@ -237,7 +237,7 @@ class ExplicitCapMinSemanticsTest(GitTaskFixture):
         make_task(self.root, [wu("u1", ("src/a/**",)),
                               wu("u2", ("src/b/**",))])
         plan = task_manager.prepare_dispatch(self.root, TID, "u1",
-                                             max_workers=3)
+                                             max_workers=3, quota_status="AVAILABLE")
         self.assertEqual(plan["max_workers"], 2)
         self.assertEqual(sorted(plan["dispatch"]), ["u1", "u2"])
 
@@ -304,7 +304,7 @@ class EffectiveMaxWorkersEventTest(GitTaskFixture):
 
     def test_prepared_event_carries_effective_budget(self):
         make_task(self.root, [wu("u1", ("src/a/**",))])
-        task_manager.prepare_dispatch(self.root, TID, "u1")
+        task_manager.prepare_dispatch(self.root, TID, "u1", quota_status="AVAILABLE")
         prepared = events(self.root, "dispatch_prepared")[0]
         self.assertEqual(prepared["effective_max_workers"], 2)  # 默认块
 
@@ -317,7 +317,7 @@ class EffectiveMaxWorkersEventTest(GitTaskFixture):
 
     def test_wave_prepared_event_has_no_duplicate_budget_key(self):
         make_task(self.root, [wu("u1", ("src/a/**",))])
-        task_manager.prepare_dispatch_wave(self.root, TID)
+        task_manager.prepare_dispatch_wave(self.root, TID, quota_status="AVAILABLE")
         prepared = events(self.root, "dispatch_wave_prepared")[0]
         self.assertEqual(prepared["worker_budget"], 1)
         self.assertNotIn("effective_max_workers", prepared)

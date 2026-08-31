@@ -124,6 +124,20 @@
     state.new_task_state 的 dispatch.max_workers 默认、execution_policy
     parallelism 默认块三处口径一致；policy hard_limit=4 上限不变。
 
+运行时额度解析接线（v2.1 §13，wu-21-10）：
+    prepare_dispatch / prepare_dispatch_wave 的 quota_status 缺省值从
+    caller-supplied "AVAILABLE" 改为 None——**绝不默认 AVAILABLE**：
+    None 触发 _resolve_quota → runtime.quota.resolver.resolve_quota_status
+    （层级：fresh cache → provider fetch → stale cache → UNKNOWN，
+    绝不重试网络、异常不外泄、凭证零落盘），journal 落一条
+    quota_resolved {"status", "source", "evaluated_at"} 后把解析出的
+    status 送进既有 §12 预算折算与 plan_dispatch 决策链（wave 记录的
+    quota_status 字段记解析后的实际值）；显式字符串（含 CLI 的
+    "AVAILABLE" 兜底）原样直通——零解析、零网络、零事件，生产行为
+    语义不变（显式声明优先）。UNKNOWN 在预算侧按 wu-21-09 已落地的
+    语义折算为 1（不挂起），因此缺省调用在有凭证环境下更准、无凭证
+    环境下更保守，都不改变「可派发」这一基本事实。
+
 单元验证证据归属绑定（v2.0.1 加固 H6，审查项 P1-7）+ RB-1 完成证据门
 （release hardening WU-P2，计划 §2 RB-1）：
     record_unit_verification 是单元级验证证据的唯一推荐写入口——主
@@ -389,6 +403,38 @@ def _effective_worker_cap(st, quota_status, max_workers) -> int:
     return eff if eff >= 1 else 0
 
 
+def _resolve_quota(api, repo_root, task_id, quota_status) -> str:
+    """wu-21-10 运行时额度解析（v2.1 §13）：显式字符串直通，None → resolver。
+
+    - quota_status 为显式字符串（调用方声明，含 CLI wave-prepare 的
+      "AVAILABLE" 兜底）→ 原样返回：零解析、零网络、零事件（词汇
+      合法性由 effective_worker_budget / plan_dispatch 既有校验兜底）；
+    - quota_status 为 None（缺省——v2.1 起「绝不默认 AVAILABLE」）→
+      runtime.quota.resolver.resolve_quota_status(repo_root)（函数内
+      import + 属性访问，测试 monkeypatch 友好；resolver 层级：
+      fresh cache → provider fetch → stale cache → UNKNOWN，绝不重试
+      网络、异常不外泄、凭证零落盘），journal 落一条 quota_resolved
+      {"status", "source", "evaluated_at"}——额度是 best-effort 观测
+      面，解析事实入账供审计与诊断——随后返回其中的 status 字符串，
+      进入既有 §12 预算折算与 plan_dispatch 决策链（UNKNOWN 按预算 1
+      不挂起，wu-21-09 语义）。
+
+    调用方约束：必须在任何写副作用（租约 / wave / permit / 状态转换）
+    之前调用——参数校验全部通过后、预算折算前是唯一合法时点，被拒的
+    prepare 不留下 quota_resolved 噪声行以外的半状态。
+    """
+    if quota_status is not None:
+        return quota_status
+    from runtime.quota import resolver  # 函数内 import：monkeypatch 友好
+    resolved = resolver.resolve_quota_status(repo_root)
+    status = resolved["status"]
+    journal.append_event(repo_root, task_id, {
+        "event": "quota_resolved", "status": status,
+        "source": resolved["source"],
+        "evaluated_at": resolved["evaluated_at"]})
+    return status
+
+
 def _validate_permit_mode(api, st, mode, reason) -> "tuple":
     """permit mode/reason 全量校验（prepare_dispatch 与
     prepare_dispatch_wave 共享，wu-21-08 抽取；消息逐字保持原口径）。
@@ -430,7 +476,7 @@ def _validate_permit_mode(api, st, mode, reason) -> "tuple":
 
 # —— prepare：plan 决策 + 租约 + permit + 事件（无 state 副作用） ——
 
-def prepare_dispatch(repo_root, task_id, uid, *, quota_status="AVAILABLE",
+def prepare_dispatch(repo_root, task_id, uid, *, quota_status=None,
                      max_workers=None, mode=None, reason=None) -> dict:
     """派发准备：准入决策 → 租约 → permit 签发 → 事件；不改单元状态、
     不 save state——prepare 对 state.json 零副作用（可安全重试）。
@@ -448,41 +494,46 @@ def prepare_dispatch(repo_root, task_id, uid, *, quota_status="AVAILABLE",
          reason ∈ dispatch_wave.FOREGROUND_REASONS（§6.6），缺给出
          TaskManagerError、值非法 ValueError；background 恒 reason
          null（显式传了也拒绝）；
-      4. max_workers 预算接线（wu-21-09，§11.5/§12，见
+      4. 运行时额度解析（wu-21-10，见 _resolve_quota）：quota_status
+         缺省 None——**绝不默认 AVAILABLE**；None → resolver 四级层级
+         （fresh cache → provider fetch → stale cache → UNKNOWN）+
+         quota_resolved 事件；显式字符串原样直通（零解析零事件）；
+      5. max_workers 预算接线（wu-21-09，§11.5/§12，见
          _effective_worker_cap）：cap_base 优先级为「显式参数 →
          execution_policy.parallelism.max_workers（合法 1..4 int）→
          dispatch.max_workers（legacy）→ 2」，有效预算
          eff = min(cap_base, execution_policy.effective_worker_budget(
          policy, quota_status))——AVAILABLE→策略 max_workers /
-         PRESSURE→1 / UNKNOWN→1 / EXHAUSTED→0；eff 作为 max_workers
-         传给 plan_dispatch（eff=0 时传 1，quota 闸自然全转
-         waiting_quota——dispatcher 不再整批挂起 UNKNOWN/PRESSURE）；
-      5. 读出已落盘租约（lease.lease_state，损坏 ValueError 上抛）交给
+         PRESSURE→1 / UNKNOWN→1 / EXHAUSTED→0（quota_status 此时已是
+         解析后的实际值）；eff 作为 max_workers 传给 plan_dispatch
+         （eff=0 时传 1，quota 闸自然全转 waiting_quota——dispatcher
+         不再整批挂起 UNKNOWN/PRESSURE）；
+      6. 读出已落盘租约（lease.lease_state，损坏 ValueError 上抛）交给
          plan_dispatch 的租约闸——自有租约不挡自己（§78 同 owner 放行），
          因此 prepare 后崩溃重试安全；
-      6. plan = dispatcher.plan_dispatch(...)（纯决策器，零 I/O）；
-      7. uid 不在 plan["dispatch"] → TaskManagerError，消息含落选原因
+      7. plan = dispatcher.plan_dispatch(...)（纯决策器，零 I/O）；
+      8. uid 不在 plan["dispatch"] → TaskManagerError，消息含落选原因
          （waiting_quota 组 → quota EXHAUSTED；deferred 组 → 对应
          reason；未进候选 → 依赖未满足等）；
-      8. lease.acquire_lease（全有或全无，同 owner 幂等；ownership 非
+      9. lease.acquire_lease（全有或全无，同 owner 幂等；ownership 非
          list 容错为 []；按 LEASE_DEFAULT_TTL_SECONDS 保守 TTL 落盘
          expires_at，长期实施由 runtime.lease.renew_lease 心跳续约）；
-      9. dispatch_wave.create_permit 签发派发许可（§6.3 每 permit 一
-         文件 + tmp/os.replace 原子写，ttl 取 dispatch_wave.
-         DEFAULT_TTL_SECONDS；wave_id 缺省 None，M4 wave 事务接线）；
-      10. journal dispatch_prepared（unit + leased=持有中的归一路径 +
-          ttl_seconds + effective_max_workers=步 4 的有效预算）与
+      10. dispatch_wave.create_permit 签发派发许可（§6.3 每 permit 一
+          文件 + tmp/os.replace 原子写，ttl 取 dispatch_wave.
+          DEFAULT_TTL_SECONDS；wave_id 缺省 None，M4 wave 事务接线）；
+      11. journal dispatch_prepared（unit + leased=持有中的归一路径 +
+          ttl_seconds + effective_max_workers=步 5 的有效预算）与
           dispatch_permit_created（unit + permit_id + mode），先后各
-          一条；
-      11. 返回 plan 决策快照，新增 "permit" 键（permit dict；主会话用
+          一条（步 4 走了 resolver 时 quota_resolved 在最前）；
+      12. 返回 plan 决策快照，新增 "permit" 键（permit dict；主会话用
           dispatch_wave.marker_for(permit_id) 构造 marker 派发 Agent，
           消费归 wu-21-03 的 hook 侧）。
 
-    失败零副作用锚定：决策未批准（步骤 7）发生在获取租约（步骤 8）与
-    journal（步骤 10）之前——落选的 prepare 不写租约、不写 permit、
-    不写事件。permit 落盘失败（OSError）在租约之后上抛：主会话可
-    abort_dispatch 回退半状态（崩溃窗口语义见模块 docstring permit
-    接线一节）。
+    失败零副作用锚定：决策未批准（步骤 8）发生在获取租约（步骤 9）与
+    journal（步骤 11）之前——落选的 prepare 不写租约、不写 permit、
+    不写决策事件（quota_resolved 属解析事实，见 _resolve_quota）。
+    permit 落盘失败（OSError）在租约之后上抛：主会话可 abort_dispatch
+    回退半状态（崩溃窗口语义见模块 docstring permit 接线一节）。
     """
     api = "prepare_dispatch"
     st = _require_state(repo_root, task_id, api)
@@ -496,6 +547,9 @@ def prepare_dispatch(repo_root, task_id, uid, *, quota_status="AVAILABLE",
     # wu-21-08 起内联逻辑抽为 _validate_permit_mode 与 wave 批量事务共享）
     effective_mode, permit_reason = _validate_permit_mode(api, st, mode,
                                                           reason)
+    # wu-21-10 运行时额度解析：显式字符串直通；None → resolver 层级
+    # 决策 + quota_resolved 事件（此后 quota_status 恒为四态实际值）
+    quota_status = _resolve_quota(api, repo_root, task_id, quota_status)
     dispatch_block = st.get("dispatch")
     if not isinstance(dispatch_block, dict):
         dispatch_block = {}
@@ -552,7 +606,7 @@ def prepare_dispatch(repo_root, task_id, uid, *, quota_status="AVAILABLE",
 
 # —— wave：批量 plan 决策 + 全量租约 + wave 记录 + 批量 permit ——
 
-def prepare_dispatch_wave(repo_root, task_id, *, quota_status="AVAILABLE",
+def prepare_dispatch_wave(repo_root, task_id, *, quota_status=None,
                           max_workers=None, mode=None, reason=None) -> dict:
     """批量派发准备（v2.1 M4 wu-21-08）：一次调用完成「决策 → 全量租约
     → wave 记录 → 批量 permit → journal」，事务性 all-or-safe-degrade
@@ -563,16 +617,20 @@ def prepare_dispatch_wave(repo_root, task_id, *, quota_status="AVAILABLE",
       1. load_state（任务缺失 TaskManagerError；损坏 ValueError 上抛）；
       2. permit mode/reason 先于任何写副作用全量校验（与 prepare_dispatch
          共享 _validate_permit_mode，消息口径逐字一致）；
-      3. max_workers 预算接线（wu-21-09，与 prepare_dispatch 共享
+      3. 运行时额度解析（wu-21-10，与 prepare_dispatch 同口径，见
+         _resolve_quota）：quota_status 缺省 None——**绝不默认
+         AVAILABLE**；None → resolver 四级层级 + quota_resolved 事件，
+         显式字符串原样直通（零解析零事件）；
+      4. max_workers 预算接线（wu-21-09，与 prepare_dispatch 共享
          _effective_worker_cap，见其 docstring）：cap_base 优先级「显式
          参数 → execution_policy.parallelism.max_workers（合法 1..4
          int）→ dispatch.max_workers（legacy）→ 2」，eff =
          min(cap_base, effective_worker_budget(policy, quota_status))
          ——AVAILABLE→策略 max_workers / PRESSURE→1 / UNKNOWN→1 /
-         EXHAUSTED→0；eff 作为 max_workers 传给 plan_dispatch（eff=0
-         时传 1，quota 闸自然全转 waiting_quota——dispatcher 不再整批
-         挂起 UNKNOWN/PRESSURE）；
-      4. 决策-租约循环（安全降级）：
+         EXHAUSTED→0（quota_status 此时已是解析后的实际值）；eff 作为
+         max_workers 传给 plan_dispatch（eff=0 时传 1，quota 闸自然全
+         转 waiting_quota——dispatcher 不再整批挂起 UNKNOWN/PRESSURE）；
+      5. 决策-租约循环（安全降级）：
            a. 候选 = 未被剔除的 work_units，plan_dispatch 全量决策（带
               落盘租约闸，纯决策器）；
            b. 批准集按 state.work_units 原序重排（plan 内部是 topo 序）；
@@ -584,18 +642,18 @@ def prepare_dispatch_wave(repo_root, task_id, *, quota_status="AVAILABLE",
               任一 LeaseConflictError → 释放本轮已获取的全部租约（零
               残留）、冲突单元加入 excluded 集合、回到 a 剔除后重试
               ——excluded 单调增长保证有界终止；
-      5. 全部租约到位 → worker_budget = min(eff, len(批准集))（wu-21-09
+      6. 全部租约到位 → worker_budget = min(eff, len(批准集))（wu-21-09
          起 max_workers 已是 quota 调节后的 eff，worker_budget 自然是
          quota 调节后的值），wave_id = dispatch_wave.new_wave_id()，
          wave 记录（冻结键：wave_id/units/worker_budget/quota_status/
-         created_at/status/closed_at，status="active"）追加进
-         dispatch.waves，save_state 一次落盘（单元 wave 合法：只批
-         1 个也成 wave）；
-      6. 逐成员 create_permit（携带 wave_id 与 mode/reason）；
-      7. journal 单条 dispatch_wave_prepared {wave_id, units,
+         created_at/status/closed_at，status="active"；quota_status 记
+         解析后的实际值，wu-21-10）追加进 dispatch.waves，save_state
+         一次落盘（单元 wave 合法：只批 1 个也成 wave）；
+      7. 逐成员 create_permit（携带 wave_id 与 mode/reason）；
+      8. journal 单条 dispatch_wave_prepared {wave_id, units,
          worker_budget, permits: [permit_id...]}——不逐单元重复
-         dispatch_prepared；
-      8. 返回 {"wave_id", "units", "permits", "worker_budget",
+         dispatch_prepared（步 3 走了 resolver 时 quota_resolved 在最前）；
+      9. 返回 {"wave_id", "units", "permits", "worker_budget",
          "deferred", "waiting_quota"}（permits 为 permit dict 列表；
          deferred/waiting_quota 为最终决策的落选面透传）。
 
@@ -608,6 +666,10 @@ def prepare_dispatch_wave(repo_root, task_id, *, quota_status="AVAILABLE",
     # mode/reason 校验先于任何写副作用（与「落选零副作用」同口径）
     effective_mode, permit_reason = _validate_permit_mode(api, st, mode,
                                                           reason)
+    # wu-21-10 运行时额度解析：显式字符串直通；None → resolver 层级
+    # 决策 + quota_resolved 事件（此后 quota_status 恒为四态实际值，
+    # wave 记录的 quota_status 字段记的正是它）
+    quota_status = _resolve_quota(api, repo_root, task_id, quota_status)
     dispatch_block = st.get("dispatch")
     if not isinstance(dispatch_block, dict):
         dispatch_block = {}

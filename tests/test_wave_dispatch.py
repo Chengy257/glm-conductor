@@ -161,7 +161,7 @@ class WaveHappyPathTest(unittest.TestCase):
         self._tmp.cleanup()
 
     def test_wave_prepared_end_to_end(self):
-        result = task_manager.prepare_dispatch_wave(self.root, TID)
+        result = task_manager.prepare_dispatch_wave(self.root, TID, quota_status="AVAILABLE")
         # wave_id 形状："wave-" + 12 hex
         wave_id = result["wave_id"]
         self.assertIsInstance(wave_id, str)
@@ -214,7 +214,7 @@ class WaveHappyPathTest(unittest.TestCase):
     def test_worker_budget_capped_by_max_workers(self):
         # 2 单元 ready、max_workers=1：只批 1 个，worker_budget = min(1, 1)
         result = task_manager.prepare_dispatch_wave(self.root, TID,
-                                                    max_workers=1)
+                                                    max_workers=1, quota_status="AVAILABLE")
         self.assertEqual(len(result["units"]), 1)
         self.assertEqual(result["worker_budget"], 1)
         self.assertEqual(len(result["permits"]), 1)
@@ -223,7 +223,7 @@ class WaveHappyPathTest(unittest.TestCase):
     def test_single_unit_wave_is_legal(self):
         # 单元 wave：plan 只批 1 个时照常成 wave
         make_task(self.root, [wu("solo", ("src/a/**",))], max_workers=2)
-        result = task_manager.prepare_dispatch_wave(self.root, TID)
+        result = task_manager.prepare_dispatch_wave(self.root, TID, quota_status="AVAILABLE")
         self.assertEqual(result["units"], ["solo"])
         self.assertEqual(waves_of(self.root)[0]["units"], ["solo"])
 
@@ -272,7 +272,7 @@ class WaveLeaseConflictDegradationTest(unittest.TestCase):
                                side_effect=flaky_acquire), \
                 mock.patch.object(task_manager.lease, "release_lease",
                                   side_effect=recording_release):
-            result = task_manager.prepare_dispatch_wave(self.root, TID)
+            result = task_manager.prepare_dispatch_wave(self.root, TID, quota_status="AVAILABLE")
         # wave 只含成功成员；冲突单元被剔除（重 plan 后不再批准）
         self.assertEqual(result["units"], ["u1"])
         self.assertEqual(waves_of(self.root)[0]["units"], ["u1"])
@@ -315,7 +315,7 @@ class WaveApprovedEmptyTest(unittest.TestCase):
         with mock.patch.object(task_manager.lease, "acquire_lease",
                                side_effect=always_conflict):
             with self.assertRaises(task_manager.TaskManagerError) as ctx:
-                task_manager.prepare_dispatch_wave(self.root, TID)
+                task_manager.prepare_dispatch_wave(self.root, TID, quota_status="AVAILABLE")
         # 零租约残留、无 wave 记录、无事件、state.json 字节不变
         self.assertEqual(lease.lease_state(self.root, TID), {})
         self.assertEqual(waves_of(self.root), [])
@@ -369,7 +369,7 @@ class WaveDeferredPassthroughTest(unittest.TestCase):
         self._tmp.cleanup()
 
     def test_ownership_conflicted_unit_deferred(self):
-        result = task_manager.prepare_dispatch_wave(self.root, TID)
+        result = task_manager.prepare_dispatch_wave(self.root, TID, quota_status="AVAILABLE")
         self.assertEqual(result["units"], ["u1"])
         self.assertEqual(result["deferred"],
                          [{"id": "u2", "reason": "ownership_conflict"}])
@@ -393,7 +393,7 @@ class WaveModeValidationTest(unittest.TestCase):
     def test_foreground_without_reason_rejected_before_io(self):
         with self.assertRaises(task_manager.TaskManagerError) as ctx:
             task_manager.prepare_dispatch_wave(self.root, TID,
-                                               mode="foreground")
+                                               mode="foreground", quota_status="AVAILABLE")
         self.assertIn("foreground", str(ctx.exception))
         # 校验先于任何写副作用
         self.assertEqual(lease.lease_state(self.root, TID), {})
@@ -402,7 +402,7 @@ class WaveModeValidationTest(unittest.TestCase):
     def test_foreground_with_valid_reason_succeeds(self):
         result = task_manager.prepare_dispatch_wave(
             self.root, TID, mode="foreground",
-            reason="synchronous_dependency")
+            reason="synchronous_dependency", quota_status="AVAILABLE")
         self.assertEqual(result["permits"][0]["mode"], "foreground")
         self.assertEqual(result["permits"][0]["reason"],
                          "synchronous_dependency")
@@ -411,7 +411,7 @@ class WaveModeValidationTest(unittest.TestCase):
         # background 恒 reason null：显式传入的 reason 静默归 null
         # （原 prepare_dispatch 口径逐字保持，create_permit 端才严格拒绝）
         result = task_manager.prepare_dispatch_wave(
-            self.root, TID, reason="synchronous_dependency")
+            self.root, TID, reason="synchronous_dependency", quota_status="AVAILABLE")
         self.assertIsNone(result["permits"][0]["reason"])
 
 
@@ -496,7 +496,7 @@ class PreToolUseWaveGateTest(unittest.TestCase):
         self.root = self._tmp.name
         make_task(self.root, [wu("u1", ("src/a/**",)),
                               wu("u2", ("src/b/**",))])
-        result = task_manager.prepare_dispatch_wave(self.root, TID)
+        result = task_manager.prepare_dispatch_wave(self.root, TID, quota_status="AVAILABLE")
         self.wave_id = result["wave_id"]
         self.permit_u1 = next(p for p in result["permits"]
                               if p["unit_id"] == "u1")
@@ -571,7 +571,7 @@ class FinishUnitWaveClosureTest(unittest.TestCase):
     def test_last_member_finish_closes_wave(self):
         make_task(self.root, [wu("u1", ("src/a/**",)),
                               wu("u2", ("src/b/**",))])
-        result = task_manager.prepare_dispatch_wave(self.root, TID)
+        result = task_manager.prepare_dispatch_wave(self.root, TID, quota_status="AVAILABLE")
         wave_id = result["wave_id"]
         # 首个成员收尾：wave 仍 active（还有 running 成员）
         self._commit_and_finish("u1")
@@ -591,7 +591,7 @@ class FinishUnitWaveClosureTest(unittest.TestCase):
 
     def test_single_member_wave_closes_immediately(self):
         make_task(self.root, [wu("solo", ("src/a/**",))])
-        result = task_manager.prepare_dispatch_wave(self.root, TID)
+        result = task_manager.prepare_dispatch_wave(self.root, TID, quota_status="AVAILABLE")
         self._commit_and_finish("solo")
         wave = waves_of(self.root)[0]
         self.assertEqual(wave["status"], "closed")
@@ -602,7 +602,7 @@ class FinishUnitWaveClosureTest(unittest.TestCase):
     def test_no_waves_key_zero_behavior(self):
         # legacy 任务（无 waves 键）：finish 正常，零 wave_closed 噪声
         make_task(self.root, [wu("u1", ("src/a/**",))])
-        task_manager.prepare_dispatch(self.root, TID, "u1")
+        task_manager.prepare_dispatch(self.root, TID, "u1", quota_status="AVAILABLE")
         self._commit_and_finish("u1")
         self.assertEqual(waves_of(self.root), [])
         self.assertEqual(events(self.root, "wave_closed"), [])
@@ -612,7 +612,7 @@ class FinishUnitWaveClosureTest(unittest.TestCase):
         # 非 verifying/终态成员（ready）阻挡关闭
         make_task(self.root, [wu("u1", ("src/a/**",)),
                               wu("u2", ("src/b/**",))])
-        task_manager.prepare_dispatch_wave(self.root, TID)
+        task_manager.prepare_dispatch_wave(self.root, TID, quota_status="AVAILABLE")
         self._commit_and_finish("u1")
         # u2 从未 commit（仍 ready）→ wave 不关闭
         self.assertEqual(waves_of(self.root)[0]["status"], "active")
@@ -751,7 +751,7 @@ class PostToolUseWaveWiringTest(unittest.TestCase):
         self._tmp = tempfile.TemporaryDirectory()
         self.root = self._tmp.name
         make_task(self.root, [wu("u1", ("src/a/**",))])
-        result = task_manager.prepare_dispatch_wave(self.root, TID)
+        result = task_manager.prepare_dispatch_wave(self.root, TID, quota_status="AVAILABLE")
         self.wave_id = result["wave_id"]
         self.permit_id = result["permits"][0]["permit_id"]
 
