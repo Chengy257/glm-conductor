@@ -161,3 +161,73 @@ wave 事务层在真实三波九单元次派发中零人工干预闭合——批
 | E 并行授权 | max_workers=2、ownership deferred、预算折算 | 并行消耗 ~2×（1.5h 烧穿满窗）→ PRESSURE 检查前置于每次 wave prepare |
 
 五场景共同指向一个结论：v2.1 第二批的三个里程碑（M4 wave / M5 额度决策 / M6 溯源）不是纸面设计——它们的每个分支都在编排本批自身的过程中被真实触发过，且触发方式与设计假设一致（两处宿主行为差异——SendMessage 不可用与钩子快照边界——已回写进机制文档）。
+
+---
+
+# GLM Conductor v2.1 第三批 Dogfood 实录（alpha3，RB-21 系列）
+
+> 任务 `v21-alpha3-15f660`（Runtime Integrity Closure：RB-21-01..05 + SH-21-01..03），2026-08-31，主会话亲历实录。
+> 五场景（R1-R5）对应实施计划文档 §11 的强制实测清单；除标注"注入"外全部走真实 runtime 模块与真实子进程（真实 Agent 派发、真实 permit 消费、真实 hook 子进程、真实 CLI）。驱动脚本留存于 `.glm-conductor/tmp/dogfood_r1345.py` 与 `r2_driver.py`（本地账本工件，不入库）。
+
+## Dogfood R1 — 多窗口额度耗尽与唤醒强刷
+
+**时间线**：scratch git 仓库 + 真实 `task_manager` 链：构造双 EXHAUSTED 窗（5h 窗 reset 早 + 周窗 reset 晚，均 100% 耗尽）→ `handle_quota_exhausted(evaluation=…)` → 预置"新鲜 AVAILABLE 缓存" + `resolver._build_providers` 注入返回 EXHAUSTED snapshot 的 fake provider → `resume_from_quota()`（status=None）→ 再 `resume_from_quota(status="AVAILABLE")`。
+
+**观察**：
+- `recommended_resume_at` = **晚窗 reset + 300s**（23:34:08Z），非早窗 + 300s（18:34:08Z）——max(reset)+grace 口径实证，auto_once 单窗预算不会被 premature wake 浪费；
+- 中断来源落盘：`{'wu-run': 'running', 'wu-ready': 'ready'}`——两类 origin 区分正确；
+- **wake 强刷绕过新鲜缓存实证**：缓存里躺着 0 秒前抓取的 AVAILABLE，`resume_from_quota` 仍返回 `status=EXHAUSTED, resumed=False`，journal 零 `quota_resumed`——force_refresh 真的走了 provider，没有信任休眠期缓存；
+- 显式 AVAILABLE 恢复时 running 来源单元走了对账（`unit_recovery={'wu-run': {'classification': 'redispatch_clean'}}`，无残留无 run 后自动分类），非盲目 ready。
+
+**机制对应**：RB-21-01 修复 A（force refresh）/ B（plan_resume 统一最晚口径）/ C（origin）/ D（恢复对账入口）。
+
+## Dogfood R2 — 运行中 worker 崩溃 + 额度恢复（真实 Agent）
+
+**时间线**：主仓账本建 dogfood 任务（unit ownership=CHANGELOG.md）→ `prepare_dispatch` 真 permit（`dp-0fd42b646351`，PreToolUse 真实消费，journal 落 `agent_launched`）→ 真实后台 flash worker 写入残留行 → 运行 33 秒后被主会话 TaskStop 强杀 → `handle_quota_exhausted` → `resume_from_quota(status="AVAILABLE")` **两次**。
+
+**观察**：
+- 第一次恢复：工作树混有未跟踪文件（计划文档）+ CHANGELOG 残留 → reconcile 判 **`manual_ruling`（"unattributable edits present"）**，单元保持 waiting_quota、任务不转 executing、resumed=false——混树拒绝自动分类，与第二批 Dogfood B 同款 fail-closed；
+- 提交计划文档（消除混树）后第二次恢复：判 **`resume_with_progress`**，证据包完整——真实 agent run（tool_use_id/permit_id/execution_mode=background）+ **原生档案 `observed_status="stopped"`（zombie-aware：不据此判存活）** + `owned_residue=[CHANGELOG.md]` + 无新鲜验证证据；单元落 ready、任务转 executing；
+- 两条路径都不是"盲目 waiting_quota→ready"——分类先于落点，且第二次的证据链可供主会话直接组装 Progress Package。
+
+**机制对应**：RB-21-01 修复 C/D + RB-21-05（reconcile 在主仓单根场景）+ §69 恢复对账四分的两个分支（manual_ruling / resume_with_progress）在同一场景先后触发。
+
+## Dogfood R3 — Wave 部分 permit 失败（注入）
+
+**时间线**：scratch 仓 2 单元 wave → 进程内 monkeypatch `dispatch_wave.create_permit` 第 2 次调用抛 OSError → `prepare_dispatch_wave`。
+
+**观察**：OSError 上抛，磁盘终态逐项核验——state `dispatch.waves` 为空（wave 未落盘）、租约账本零残留、permits 目录**零活跃文件**（第 1 张 permit 已被补偿 rename 为 `.invalidated.json` 审计文件）、journal 有 `transaction_aborted` 无 `dispatch_wave_prepared`。前 N-1 张 permit"仍可过 hook 门"的旧缺口随"wave 根本不落盘"根治。
+
+**机制对应**：RB-21-03 方案 A（permits 先于 wave 落盘）+ `_compensate_failed_prepare` 全额补偿。
+
+## Dogfood R4 — 伪造审查与真实审查链
+
+**时间线**：scratch 仓真实 CLI `review-record` 提交伪造 tool_use_id → 拒；然后以**真实 hook 子进程**（`hooks/post_tool_use.py`，stdin 载荷 = reviewer 派发 + `GLM_CONDUCTOR_REVIEW=<task>` marker）落 `reviewer_invoked` → `review-record` 申报 ship → 过；同参重放 → 幂等；换 verdict → 拒。
+
+**观察**：
+- 伪造申报 exit 1，错误消息明确指向"journal 无该 tool_use_id 的 reviewer_invoked——runtime 未观察到审查调用真实发生"；
+- reviewer_invoked 事件字段精确（tool_use_id / reviewer=实际 subagent_type 含命名空间 / task_id）；
+- 真实链 ship receipt exit 0（runner=glm-conductor-runtime）；重放 exit 0 且 `review_receipt` 事件恒 1 条；矛盾 verdict exit 1（replay 闸）；
+- 附带实证：申报的 reviewer 串必须与 invocation 记录的**实际 subagent_type 逐字一致**（首轮用裸名 `glm-reviewer` 申报命名空间形态派发被身份闸拒——绑定比白名单更严）。
+
+**机制对应**：RB-21-02 全链（marker 记账 → run_review 回验 → replay 幂等 → 身份/task 绑定）。
+
+## Dogfood R5 — 账本根 ≠ Git 根恢复
+
+**时间线**：workspace 账本根（非 git）+ 嵌套真仓库 `repo-real`（state 绑定 `repository.root`）→ unit running + journal 真实 `agent_launched` → 在 `repo-real` 制造未提交残留 → `reconcile_agent_run(账本根, …)`。
+
+**观察**：分类 `resume_with_progress`（owned residue + 无新鲜证据），run 账本从账本根读到（runs=1），residue 从**绑定仓库**求值——旧代码在此场景会把 git 求值打到非 git 的账本根上（OwnershipError → manual_ruling 误判），双根分离后行为正确。
+
+**机制对应**：RB-21-05（ledger root 做 I/O、resolve_repository_root 解析的 git 根做求值）。
+
+## 汇总（第三批）
+
+| 场景 | 验证的机制 | 关键实证 |
+| --- | --- | --- |
+| R1 多窗口耗尽 | force-refresh wake、plan_resume 最晚口径、origin、恢复对账 | 强刷绕过 0 秒新鲜的 AVAILABLE 缓存；recommended=晚窗+300s |
+| R2 崩溃+额度恢复 | reconcile 四分前置、manual_ruling/resume_with_progress 双分支 | 真实强杀 worker（33s）+ 原生档案 observed_status=stopped 入证据包 |
+| R3 wave 部分失败 | 方案 A 事务补偿 | 零活跃 wave/permit/租约，transaction_aborted 落账 |
+| R4 伪造审查 | reviewer_invoked 记账、回验链、replay 幂等 | 伪造拒；真实 hook 子进程链 ship receipt 过；身份逐字绑定 |
+| R5 双根恢复 | ledger/git 双根分离 | 混合残留正确归属绑定仓库，账本读不跟随迁移 |
+
+五场景结论：alpha3 的五个 release blocker 修复不是纸面闭合——异常路径（多窗耗尽、worker 强杀、permit 写盘失败、伪造溯源、双根工作区）全部在真实 runtime 上确定性收敛，且收敛方向与 §18 的验收原则一致（failure path converges safely / recovery does not redo trustworthy work / completion cannot be forged）。
