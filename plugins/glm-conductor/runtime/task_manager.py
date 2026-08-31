@@ -163,10 +163,31 @@ from runtime import journal
 from runtime import lease
 from runtime import ownership
 from runtime import reconcile
+from runtime import resume_manifest
 from runtime import state
 from runtime import work_unit
 from runtime.execution_policy import default_execution_policy
 from runtime.lease import LEASE_DEFAULT_TTL_SECONDS
+
+
+def _write_manifest_safe(repo_root, task_id):
+    """Resume Manifest 安全挂点（v2.1 M3 wu-21-07，§10.3 失败语义）。
+
+    在主事务（save_state + journal 事件）完成之后调用：写 manifest
+    失败不得覆盖 state truth、不得让事务半提交——任何异常只落一条
+    manifest_write_failed journal 警告事件（错误文本截断 200 字符），
+    绝不向上传播。延迟 import 的 resume_manifest 在模块顶部已静态
+    导入（无循环：resume_manifest 不 import 本模块）。
+    """
+    try:
+        resume_manifest.write_resume_manifest(repo_root, task_id)
+    except Exception as exc:  # 派生物写入失败只降级不阻断（§10.3）
+        try:
+            journal.append_event(repo_root, task_id, {
+                "event": "manifest_write_failed",
+                "error": str(exc)[:200]})
+        except Exception:
+            pass  # journal 也写不进（如盘满）：静默，主事务已落
 
 # finish_unit 的合法结局词汇（work unit 终态全集，§62）
 FINISH_OUTCOMES = ("completed", "failed", "cancelled")
@@ -448,6 +469,7 @@ def commit_dispatch(repo_root, task_id, uid) -> dict:
     journal.append_event(repo_root, task_id, {
         "event": "implementation_started", "unit": uid,
         "executor": unit.get("executor")})
+    _write_manifest_safe(repo_root, task_id)
     return st
 
 
@@ -498,6 +520,7 @@ def abort_dispatch(repo_root, task_id, uid) -> dict:
             journal.append_event(repo_root, task_id, {
                 "event": "dispatch_permit_invalidated", "unit": uid,
                 "permit_id": permit_id})
+    _write_manifest_safe(repo_root, task_id)
     return st
 
 
@@ -612,6 +635,7 @@ def finish_unit(repo_root, task_id, uid, *, outcome="completed") -> dict:
     state.save_state(repo_root, st)
     journal.append_event(repo_root, task_id, {
         "event": "unit_finished", "unit": uid, "outcome": outcome})
+    _write_manifest_safe(repo_root, task_id)
     return st
 
 

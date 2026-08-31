@@ -271,6 +271,19 @@ def _agent_runs(repo_root, task_id, unit=None) -> int:
     return 0
 
 
+def _manifest_show(repo_root, task_id) -> int:
+    """manifest-show：Resume Manifest 只读查询（薄壳）。
+
+    输出 {"manifest": <dict|null>}——manifest 缺失 / 损坏均输出 null
+    （read 侧永不抛）；任务是否存在不设闸（manifest 是派生物，缺失
+    即无快照，不是错误）。
+    """
+    from runtime import resume_manifest
+    _emit({"manifest": resume_manifest.read_resume_manifest(
+        repo_root, task_id)})
+    return 0
+
+
 def _dispatch(args) -> int:
     """argv 分发；子命令 / 参数个数错误抛 _UsageError（退出码 2）。"""
     if not args:
@@ -318,6 +331,12 @@ def _dispatch(args) -> int:
                 "参数。" + USAGE)
         return _agent_runs(
             rest[0], rest[1], rest[2] if len(rest) == 3 else None)
+    if cmd == "manifest-show":
+        if len(rest) != 2:
+            raise _UsageError(
+                "manifest-show 需要 <repo_root> <task_id> 两个参数。"
+                + USAGE)
+        return _manifest_show(rest[0], rest[1])
     raise _UsageError("未知子命令 %r。" % cmd + USAGE)
 
 
