@@ -63,6 +63,10 @@ Agent tool 调用在 launch 成功即「完成」，最终结果经异步通知�
 | C | CLI 入口 | 新增 WU-21-15：正式 CLI 入口替代技能层 `python3 -c "..."` 内联调用，随各里程碑增量交付，技能示例全迁移 | ms_new 实战：内联 -c 的引号/换行陷阱多次炸；v2.1 调用面暴涨 |
 | B | 分批交付与分支 | 两批：M1–M3（控制面闭合+恢复）先行 → M4–M6（并行+续跑+溯源）+ Docs/Release；每批新会话推进；实施分支沿用 v2 既定策略（v2-dev 开发、里程碑后合 main） | 14 WU 单批回滚成本高；开新会话续作省 30–50%（成本锚点）；v2-dev 为既定分支策略 |
 
+### D1 分批裁定补记（2026-08-31，第一批 M1-M3 终审第 1 项）
+
+D1 锁定文本将 glm-reviewer / visual-reviewer 列入「必须 permit」的实施者集合；第一批实施（wu-21-03，`hooks/pre_tool_use.py` 的 `IMPLEMENTATION_EXECUTORS`）**暂将 reviewer 类型留在豁免集**（走只读 advisory 注入路径），理由：第一批无 review receipt 绑定机制，permit 而无 receipt 不能提升审查溯源强度，反而增加无收益摩擦。reviewer 类型的 permit 义务最终裁定（纳入义务集、或以 WU-21-13 review receipt 绑定替代）**推迟至 WU-21-13 Review Provenance 一并落定**。裁定落定前，规范口径以本补记为准——计划 §6.4 D1 文本中的实施者集合应读作「flash-implementer / visual-implementer 及别名（reviewer 类型待 WU-21-13 裁定）」。
+
 ## 五、计划修订对照（已执行，计划内标注 ※DR）
 
 | 计划位置 | 修订 |
