@@ -97,11 +97,15 @@
         申报一次已发生的审查并落 durable review receipt（v2.1 M6
         wu-21-13，runtime.provenance.run_review 薄壳）：verdict 须 ∈
         state.REVIEW_VERDICTS；route ∈ solo/delegate/audit/full（缺省
-        None）；note 缺省 None。输出 receipt dict（与落盘文件、journal
-        review_receipt 事件逐字段一致——Stop 完成门只认 fresh ship
-        review receipt，本子命令是该 receipt 的唯一 CLI 产出点）。
-        verdict / route 非法 → 退出码 2；任务缺失（ProvenanceError）
-        → 退出码 1。
+        None）；note 缺省 None。RB-21-02 起落证前机械回验调用真实性
+        （reviewer ∈ agent_run.REVIEWER_PROFILES 白名单 + 任务 journal
+        内 tool_use_id 绑定的 reviewer_invoked 事件 + reviewer/task
+        匹配 + 不可 replay——审查派发 prompt 必须携带
+        GLM_CONDUCTOR_REVIEW=<task_id> marker）。输出 receipt dict（与
+        落盘文件、journal review_receipt 事件逐字段一致——Stop 完成门
+        只认 fresh ship review receipt，本子命令是该 receipt 的唯一
+        CLI 产出点）。verdict / route 非法 → 退出码 2；任务缺失或回验
+        被拒（ProvenanceError）→ 退出码 1。
     quota-exhausted <repo_root> <task_id>
         EXHAUSTED 转态链 + 授权矩阵裁决（v2.1 M5 §14.1，
         task_manager.handle_quota_exhausted 薄壳；evaluation 不经 CLI
@@ -510,8 +514,10 @@ def _review_record(repo_root, task_id, reviewer, verdict, tool_use_id,
     """review-record：申报已发生的审查并落 durable receipt（provenance.
     run_review 薄壳）。verdict / route 词汇在 CLI 侧先闸（参数值非法
     → 退出码 2，与 policy-set-resume 的 auto_resume 闸同口径）；任务
-    缺失（ProvenanceError）→ _VerifyRejected（退出码 1）。note 缺省
-    None 原样透传。"""
+    缺失或调用真实性回验被拒（RB-21-02：reviewer 白名单 / journal 内
+    tool_use_id 绑定的 reviewer_invoked 事件缺失 / reviewer-task 不
+    匹配 / replay 矛盾——均为 ProvenanceError）→ _VerifyRejected
+    （退出码 1）。note 缺省 None 原样透传。"""
     from runtime import provenance
     func_name = "review-record"
     if verdict not in state.REVIEW_VERDICTS:

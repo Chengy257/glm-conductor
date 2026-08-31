@@ -57,6 +57,8 @@ RECOMMENDED_EVENTS = (
     "gate_passed",         # 完成门校验通过放行（断链 + 审计）
     "gate_exhausted",      # 完成门连续 block 达运行时上限后放行
     "gate_degraded",       # git 不可用等降级跳过校验
+    "reviewer_invoked",    # RB-21-02：reviewer 派发的 runtime-observed 记账（PostToolUse）
+    "reviewer_invocation_skipped",  # RB-21-02：marker 指向任务不存在的警告记账
     "completed",
     "cancelled",
     "failed",

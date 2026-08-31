@@ -25,7 +25,11 @@
          review_rejected，最新 receipt 指纹 != 当前任务指纹（审查后
          文件又变化）→ review_stale；ship 且指纹一致才放行。损坏
          receipt（非 JSON / 非 dict）跳过，取余下最新——手写损坏文件
-         不炸门、不静默放行；
+         不炸门、不静默放行；RB-21-02 起候选 receipt 还必须 runner ==
+         "glm-conductor-runtime" 且 verdict / fingerprint / observed_at
+         / tool_use_id / reviewer 五字段齐全非空——手工伪造的 receipt
+         文件（缺 runner / 冒名 / 字段不全）不计入候选，全部不合法按
+         无 receipt 处理（review_missing）；
       4. visual：visual_evidence 记录的视觉证据按文件自身字节哈希比对，
          记录后发生变化 → visual_stale（§22）。
     参与校验判定：ownership 声明非空 / verification.required 非空 /
@@ -480,21 +484,56 @@ def _nonempty_strs(value):
     return [item for item in value if isinstance(item, str) and item != ""]
 
 
+def _is_runtime_review_receipt(receipt):
+    """RB-21-02 receipt 来源与形状闸（fail-closed）。
+
+    候选 receipt 必须同时满足：
+      - dict 且 kind == "review"；
+      - runner == provenance.RUNNER_ID（"glm-conductor-runtime"）——
+        runtime 亲产凭证的落盘标识，手工伪造的 receipt 文件缺该字段
+        或值不符即被拒（第二个伪造入口的机械闸）；
+      - verdict / fingerprint / observed_at / tool_use_id / reviewer
+        五字段全部齐全且为非空 str（fingerprint 允许任意 str 内容，
+        不做格式校验；route / note 可为 None，不在此列）。
+    任一不满足 → 该文件不计入候选；全部不合法 → 按无 receipt 处理
+    （review_missing 口径）。"""
+    from runtime import provenance
+
+    if not isinstance(receipt, dict):
+        return False
+    if receipt.get("kind") != "review":
+        return False
+    if receipt.get("runner") != provenance.RUNNER_ID:
+        return False
+    for field in ("verdict", "fingerprint", "observed_at", "tool_use_id",
+                  "reviewer"):
+        value = receipt.get(field)
+        if not isinstance(value, str) or value == "":
+            return False
+    return True
+
+
 def latest_review_receipt(ledger, task_id):
-    """扫描任务 receipts 目录，返回 kind=="review" 的最新一张 receipt
-    （wu-21-13 §16.5：receipt 是审查裁决的唯一权威），无则返回 None。
+    """扫描任务 receipts 目录，返回 kind=="review" 的最新一张**runtime
+    来源** receipt（wu-21-13 §16.5：receipt 是审查裁决的唯一权威；
+    RB-21-02 起加严来源与形状闸），无则返回 None。
 
     首参语义：任务账本根——receipts/ 恒在账本根的任务目录下（与
     state.json / events.jsonl 同位），与 git 求值根无关（RB-2）。
       - 目录不存在 / 空 / listdir 失败 → None（review_missing 口径）；
-      - 逐文件容错读：非 JSON / 非 dict / kind != "review" / 读取
-        OSError 一律跳过（损坏 receipt 不炸门、不静默放行——只从余下
-        合法 receipt 里取最新，全部损坏等效于无 receipt）；
+      - 逐文件容错读：非 JSON / 非 dict / 读取 OSError 一律跳过（损坏
+        receipt 不炸门、不静默放行——只从余下合法 receipt 里取最新，
+        全部损坏等效于无 receipt）；
+      - RB-21-02 来源/形状闸（_is_runtime_review_receipt）：runner !=
+        "glm-conductor-runtime"、或 verdict / fingerprint / observed_at
+        / tool_use_id / reviewer 任一缺失或非非空 str 的文件不计入
+        候选——手工往 receipts/ 写 JSON 文件（runner 缺失 / 置空 /
+        冒名）同样过不了门；全部不合法 → None（review_missing，绝不
+        回退采信 state.review 手写字段）；
       - 「最新」按 (observed_at, 文件名) 字典序取最大：observed_at 为
         runtime 统一产出的 ISO-8601 毫秒 Z 形态（同 UTC），字典序即
-        时间序；observed_at 缺失 / 非 str 按 "" 参与排序（任何带时间戳
-        的 receipt 恒更新）；文件名为确定性 tie-break（hash8 已区分同
-        毫秒多条）。验证 receipt（kind=="verification"）不参与。
+        时间序；文件名为确定性 tie-break（hash8 已区分同毫秒多条）。
+        验证 receipt（kind=="verification"）不参与。
 
     预算：目录内文件数有界（receipts 仅由 runtime 逐次追加），单次全
     量读取排序，5s 钩子预算内。
@@ -520,9 +559,8 @@ def latest_review_receipt(ledger, task_id):
                 receipt = json.load(fh)
         except (ValueError, OSError):
             continue  # 损坏 receipt（非 JSON / 不可读）跳过
-        if not isinstance(receipt, dict) \
-                or receipt.get("kind") != "review":
-            continue
+        if not _is_runtime_review_receipt(receipt):
+            continue  # 非 runtime 来源 / 形状不合规：不计入候选
         observed = receipt.get("observed_at")
         if not isinstance(observed, str):
             observed = ""

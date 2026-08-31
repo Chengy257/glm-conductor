@@ -21,11 +21,17 @@
         state.record_verification + save_state 落账；
       - run_review()（wu-21-13，§16.5）：审查作用域——主会话把 reviewer
         对已发生审查的裁决（verdict + reviewer + tool_use_id）申报进来，
-        runtime 绑定终指纹（与完成门同一入口）落 durable review
-        receipt + journal review_receipt 事件 + state.review 同步
-        （完成门快速路径字段与 receipt 恒一致）。Stop 完成门的审查
-        检查（wu-21-13 升级）只认 fresh ship review receipt——receipt
-        是审查裁决的唯一权威，state.review 只是同一调用的镜像。
+        runtime **机械回验调用真实性**（RB-21-02：reviewer 白名单 →
+        任务 journal 内 tool_use_id 绑定的 reviewer_invoked 事件存在 →
+        reviewer/task 匹配 → replay 闸）后绑定终指纹（与完成门同一
+        入口）落 durable review receipt + journal review_receipt 事件 +
+        state.review 同步（完成门快速路径字段与 receipt 恒一致）。
+        reviewer_invoked 事件由 PostToolUse 钩子对 reviewer 类型派发落
+        账（审查派发 prompt 必须携带 GLM_CONDUCTOR_REVIEW=<task_id>
+        marker）。Stop 完成门的审查检查（wu-21-13 升级）只认 fresh
+        ship review receipt 且只认 runtime 来源（RB-21-02：runner 闸拒
+        手工伪造文件）——receipt 是审查裁决的唯一权威，state.review
+        只是同一调用的镜像。
 
 四道确定性保障（D4）：
       1. 白名单闸：runtime 只执行 state 中已声明的 required 验证命令
@@ -108,8 +114,9 @@ RB-2 双根分离（与 task_manager 同口径）：
 
 依赖：
     runtime.state / runtime.journal / runtime.policy / runtime.reconcile
-    / runtime.fingerprint（均无循环导入；reconcile 只被读消费）+
-    标准库 datetime / hashlib / json / os / subprocess / time。
+    / runtime.fingerprint / runtime.agent_run（RB-21-02 起：REVIEWER_
+    PROFILES 白名单唯一定义点；agent_run 只依赖 journal，无循环导入）
+    + 标准库 datetime / hashlib / json / os / subprocess / time。
     task_manager 仅在单元验证成功路径上惰性导入（它导入本模块不
     存在——延迟是为把重依赖留在真正需要的分支）。仅 Python 3 标准
     库，`python3 -S` 可运行。
@@ -122,7 +129,10 @@ RB-2 双根分离（与 task_manager 同口径）：
     2026-08-31：run_review receipt 键冻结 + Stop 完成门「只有 fresh
     ship receipt 才能通过」+ D1 裁定落定——reviewer 维持 permit 豁免，
     溯源由 receipt 绑定承担）
-    + release hardening RB-1/RB-2（完成证据门与双根分离的既有口径）。
+    + release hardening RB-1/RB-2（完成证据门与双根分离的既有口径）
+    + release hardening RB-21-02（review receipt 从申报制升级为
+      runtime-observed invocation + runtime-bound verdict：run_review
+      回验链 + replay 闸 + Stop 门 runner 闸，2026-08-31）。
 """
 
 import datetime
@@ -132,6 +142,7 @@ import os
 import subprocess
 import time
 
+from runtime import agent_run
 from runtime import fingerprint
 from runtime import journal
 from runtime import policy
@@ -502,17 +513,78 @@ def verify_task(repo_root, task_id, *, command=None,
     }
 
 
-# —— 审查作用域：run_review（wu-21-13，§16.5） ——
+# —— 审查作用域：run_review（wu-21-13，§16.5；RB-21-02 回验加严） ——
+
+def _require_invocation(api, repo_root, task_id, reviewer, tool_use_id):
+    """调用真实性回验（RB-21-02，fail-closed）：任务 journal 中必须存在
+    tool_use_id 匹配的 reviewer_invoked 事件，且其 reviewer / task_id
+    与申报一致——runtime 没观察到审查调用真实发生 / 身份或任务对不上
+    一律 ProvenanceError（零副作用）。
+
+    多条同 tool_use_id 事件取文件序最新一条比对（正常流每条 Agent 调用
+    恒有宿主新发的 tool_use_id，多条只出现在极端重放）。reviewer 白名
+    单闸由调用方先行（REVIEWER_PROFILES ∈ runtime.agent_run 账本域）。
+    """
+    invocation = None
+    for event in journal.read_events(repo_root, task_id):
+        if event.get("event") == "reviewer_invoked" \
+                and event.get("tool_use_id") == tool_use_id:
+            invocation = event
+    if invocation is None:
+        raise ProvenanceError(
+            "%s：任务 %s 的 journal 中没有 tool_use_id=%s 的 "
+            "reviewer_invoked 事件——runtime 未观察到该审查调用真实发生，"
+            "拒绝落 receipt（review receipt 不再受理口头申报；审查派发 "
+            "prompt 必须携带 GLM_CONDUCTOR_REVIEW=%s marker，PostToolUse "
+            "据此落账，reviewer 类型 ∈ agent_run.REVIEWER_PROFILES）"
+            % (api, task_id, tool_use_id, task_id))
+    if invocation.get("reviewer") != reviewer:
+        raise ProvenanceError(
+            "%s：reviewer 身份不匹配——journal 观察到的 reviewer_invoked"
+            "（tool_use_id=%s）记录的审查者是 %r，申报为 %r；receipt 只"
+            "受理与真实调用一致的身份申报"
+            % (api, tool_use_id, invocation.get("reviewer"), reviewer))
+    if invocation.get("task_id") != task_id:
+        raise ProvenanceError(
+            "%s：task 绑定不匹配——journal 观察到的 reviewer_invoked"
+            "（tool_use_id=%s）绑定任务 %r，申报任务为 %r；一次审查调用"
+            "不可跨任务申报"
+            % (api, tool_use_id, invocation.get("task_id"), task_id))
+
+
+def _replay_receipt(api, repo_root, task_id, tool_use_id, verdict):
+    """replay 语义（RB-21-02）：查任务 journal 内同 tool_use_id 的既有
+    review_receipt 事件。verdict 相同 → 返回既有 receipt dict（幂等：
+    调用方原样返回，不新建第二份 receipt、不重复记事件、不改 state）；
+    verdict 矛盾 → ProvenanceError（同一审查调用不可重放为不同裁决）；
+    无既有事件 → None（首次申报，走正常落证）。"""
+    for event in journal.read_events(repo_root, task_id):
+        if event.get("event") != "review_receipt" \
+                or event.get("tool_use_id") != tool_use_id:
+            continue
+        existing = {key: value for key, value in event.items()
+                    if key not in ("event", "ts")}
+        if existing.get("verdict") == verdict:
+            return existing
+        raise ProvenanceError(
+            "%s：tool_use_id %s 已绑定 verdict=%r 的 review receipt，与本"
+            "申报 verdict=%r 矛盾——同一审查调用（tool_use_id 唯一）不可"
+            "重放为不同裁决（replay 闸）"
+            % (api, tool_use_id, existing.get("verdict"), verdict))
+    return None
+
 
 def run_review(repo_root, task_id, *, reviewer, verdict, tool_use_id,
                route=None, note=None) -> dict:
-    """申报一次已发生的审查并落 durable review receipt（wu-21-13 §16.5）。
+    """申报一次已发生的审查并落 durable review receipt（wu-21-13 §16.5；
+    RB-21-02 起调用真实性机械回验）。
 
-    主会话在 reviewer（glm-reviewer / visual-reviewer 等只读审查者）
-    返回裁决后调用本 API：runtime 把裁决与**终指纹**（与 Stop 完成门
-    同一入口 fingerprint.task_fingerprint）绑定，落盘 durable receipt
-    并同步既有证据流。Stop 完成门的审查检查自本单元起只认 fresh ship
-    review receipt——本函数是该 receipt 的唯一产出点。
+    主会话在 reviewer（glm-reviewer / visual-reviewer，白名单见
+    agent_run.REVIEWER_PROFILES）返回裁决后调用本 API：runtime 把裁决
+    与**终指纹**（与 Stop 完成门同一入口 fingerprint.task_fingerprint）
+    绑定，落盘 durable receipt 并同步既有证据流。Stop 完成门的审查检查
+    自 wu-21-13 起只认 fresh ship review receipt——本函数是该 receipt
+    的唯一产出点。
 
     流程：
       1. 全量参数校验（先于任何 I/O 副作用，失败零副作用）：
@@ -523,34 +595,52 @@ def run_review(repo_root, task_id, *, reviewer, verdict, tool_use_id,
          非 None 时必须是 str。任一违规 → ProvenanceError；
       2. load_state（任务缺失 → ProvenanceError；JSON 损坏的
          ValueError 自然上抛）；
-      3. 终指纹：git_root = state.resolve_repository_root（RB-2 双根：
+      3. 调用真实性回验（RB-21-02，fail-closed，任一不满足
+         ProvenanceError 且零副作用）：
+         a. reviewer 白名单：reviewer ∉ agent_run.REVIEWER_PROFILES
+            （glm-reviewer / visual-reviewer 及其 "glm-conductor:" 命名
+            空间变体）→ 拒——receipt 只受理 runtime 已知审查者身份；
+         b. invocation 存在：任务 journal 中没有 tool_use_id 匹配的
+            reviewer_invoked 事件 → 拒——runtime（PostToolUse）没观察
+            到审查调用真实发生（审查派发 prompt 必须携带
+            GLM_CONDUCTOR_REVIEW=<task_id> marker，PostToolUse 据此
+            落账）；
+         c. reviewer / task 匹配：invocation 事件记录的 reviewer /
+            task_id 与申报不一致 → 拒；
+         d. replay 闸：同 tool_use_id 已有 review_receipt 事件 →
+            verdict 相同幂等返回既有 receipt（不新建第二份 receipt、
+            不重复记事件、不改 state）；verdict 矛盾 → 拒；
+      4. 终指纹：git_root = state.resolve_repository_root（RB-2 双根：
          绑定 repository.root 优先，legacy 回退账本根）→
          fingerprint.task_fingerprint(git_root, st)——与 Stop 完成门
          完成提交同一入口，receipt 因此可与完成门直接对账；
-      4. 构建冻结键 receipt → durable 落盘（tmp + os.replace 原子写，
+      5. 构建冻结键 receipt → durable 落盘（tmp + os.replace 原子写，
          文件名 review-<observed_at紧凑串>-<hash8>.json）+ journal
          review_receipt 事件（同字段）；
-      5. state 同步：state.record_review(st, verdict, fingerprint) 后
+      6. state 同步：state.record_review(st, verdict, fingerprint) 后
          state.save_state——完成门的快速路径字段（review.verdict /
          review.fingerprint）由同一次调用维护，与 receipt 恒一致
          （但完成门不再单独采信 state.review——receipt 是唯一权威）。
 
-    信任边界（设计决策，wu-21-13 锁定）：
-        reviewer / tool_use_id / verdict 是主会话对**已发生审查**的申
-        报输入——runtime 不回验 Agent 调用本身（不做「这个 tool_use_id
-        真的跑过一次审查吗」的密码学追查）。receipt 的价值在于：
-        durable 落盘（可审计、不随会话记忆消失）+ 终指纹绑定（审查后
-        文件再变动即 review_stale，完成门机械拦截）+ 时间戳（多张
-        receipt 取 observed_at 最新一张）。伪造申报骗过的是完成门的
-        「审查已发生」记录，骗不过的是「审查对应的就是即将提交的
-        diff」——后者由指纹绑定机械保证。
+    信任边界（RB-21-02 升级，替代 wu-21-13 的「不回验调用本身」）：
+        receipt 必须同时证明「reviewer invocation 真实发生」（runtime
+        观察到的 reviewer_invoked 账本事件 + tool_use_id 绑定 +
+        reviewer/task 匹配 + 不可 replay）与「verdict 对应当前 final
+        fingerprint」（与完成门同一入口的终指纹绑定——审查后文件再变
+        动即 review_stale，完成门机械拦截）。伪造任意 tool_use_id /
+        reviewer / verdict 的口头申报在第 3 步即被拒。手工伪造 receipt
+        文件则由 Stop 完成门的 runner 来源闸拒收
+        （hooks/stop_gate.latest_review_receipt 只认
+        runner == "glm-conductor-runtime" 且冻结字段齐全的 receipt）。
 
     返回：
-        receipt dict（与落盘文件、journal 事件逐字段一致；键名冻结）。
+        receipt dict（与落盘文件、journal 事件逐字段一致；键名冻结；
+        replay 幂等路径返回既有 receipt——含其首次 observed_at）。
 
-    纪律：参数非法 / 任务缺失零副作用（无 receipt、无事件、state.json
-    字节不变）；本函数不改任务状态机、不动租约；visual_reviewer 专属
-    流程无需分支（receipt 同构，reviewer 字段自辨）。
+    纪律：参数非法 / 任务缺失 / 白名单拒绝 / invocation 缺失或不匹配 /
+    replay 矛盾零副作用（无 receipt、无事件、state.json 字节不变）；
+    本函数不改任务状态机、不动租约；visual_reviewer 流程无需分支
+    （receipt 同构，reviewer 字段自辨）。
     """
     api = "run_review"
     # 1) 全量参数校验（先于任何 I/O 副作用）
@@ -575,10 +665,22 @@ def run_review(repo_root, task_id, *, reviewer, verdict, tool_use_id,
             "%s：note 必须是 None 或字符串，得到 %r" % (api, note))
     # 2) 任务必须存在（损坏 ValueError 自然上抛）
     st = _require_state(repo_root, task_id, api)
-    # 3) 终指纹：与 Stop 完成门同一入口（RB-2 双根：按任务绑定根求值）
+    # 3) 调用真实性回验（RB-21-02）：白名单 → invocation 存在 →
+    #    reviewer/task 匹配 → replay 闸（幂等返回 / 矛盾拒绝）
+    if reviewer not in agent_run.REVIEWER_PROFILES:
+        raise ProvenanceError(
+            "%s：reviewer %r 不在 agent_run.REVIEWER_PROFILES 白名单内"
+            "（%s）——receipt 只受理 runtime 已知审查者身份的申报"
+            % (api, reviewer, ", ".join(sorted(agent_run.REVIEWER_PROFILES))))
+    _require_invocation(api, repo_root, task_id, reviewer, tool_use_id)
+    replayed = _replay_receipt(api, repo_root, task_id, tool_use_id,
+                               verdict)
+    if replayed is not None:
+        return replayed
+    # 4) 终指纹：与 Stop 完成门同一入口（RB-2 双根：按任务绑定根求值）
     git_root = state.resolve_repository_root(st, repo_root)
     fp = fingerprint.task_fingerprint(git_root, st)
-    # 4) 冻结键 receipt → durable 落盘 + journal review_receipt（同字段）
+    # 5) 冻结键 receipt → durable 落盘 + journal review_receipt（同字段）
     receipt = {
         "kind": REVIEW_RECEIPT_KIND,
         "reviewer": reviewer,
@@ -591,7 +693,7 @@ def run_review(repo_root, task_id, *, reviewer, verdict, tool_use_id,
         "note": note,
     }
     _record_receipt(repo_root, task_id, receipt)
-    # 5) state 快速路径字段同步（同一调用维护，与 receipt 恒一致）
+    # 6) state 快速路径字段同步（同一调用维护，与 receipt 恒一致）
     state.record_review(st, verdict, fp)
     state.save_state(repo_root, st)
     return receipt

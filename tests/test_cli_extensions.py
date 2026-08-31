@@ -52,7 +52,7 @@ from pathlib import Path
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "plugins" / "glm-conductor"))
-from runtime import cli, dispatch_wave, journal, provenance, state
+from runtime import agent_run, cli, dispatch_wave, journal, provenance, state
 from runtime import task_manager, work_unit
 from runtime.quota import resolver as quota_resolver
 
@@ -178,6 +178,23 @@ class GitCliFixture(TempDirFixture):
         self.dirty_file("base.txt", b"v1\n")
         run_git(self.repo, "add", ".")
         run_git(self.repo, "commit", "-m", "init")
+
+    def record_invocation(self, tool_use_id, reviewer="glm-reviewer",
+                          task_id=TID):
+        """RB-21-02 真实链路 setup：经 agent_run.record_reviewer_invocation
+        直落一条 reviewer_invoked 事件（review-record 回验链的前置账本）。
+
+        本文件不在 RB-21-02 声明的自有文件集内——此处为全量测试保持
+        全绿的最小夹具增补（既有断言零改动/只朝更严方向）。"""
+        payload = {
+            "hook_event_name": "PostToolUse", "tool_name": "Agent",
+            "tool_input": {"subagent_type": reviewer,
+                           "prompt": "review %s"
+                                     % agent_run.review_marker_for(task_id)},
+            "tool_use_id": tool_use_id,
+            "tool_response": {"agentId": "agent-review-fixture"}}
+        return agent_run.record_reviewer_invocation(
+            str(self.repo), task_id, payload)
 
 
 # —— 1. quota-resolve ——
@@ -318,6 +335,8 @@ class ReviewRecordCliTest(GitCliFixture):
 
     def test_review_record_happy_defaults(self):
         self.make_task()
+        # RB-21-02：receipt 前置 runtime 观察到的 invocation 账本
+        self.record_invocation("call_review_1")
         code, payload = run_cli("review-record", str(self.repo), TID,
                                 "glm-reviewer", "ship", "call_review_1")
         self.assertEqual(code, 0)
@@ -336,6 +355,7 @@ class ReviewRecordCliTest(GitCliFixture):
 
     def test_review_record_route_and_note_passthrough(self):
         self.make_task()
+        self.record_invocation("call_r2")  # RB-21-02 前置 invocation 账本
         code, payload = run_cli("review-record", str(self.repo), TID,
                                 "glm-reviewer", "fix-first", "call_r2",
                                 "delegate", "权限矩阵缺一节")

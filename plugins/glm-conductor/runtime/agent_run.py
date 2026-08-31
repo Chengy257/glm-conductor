@@ -13,7 +13,16 @@
       - record_agent_failure：派发失败 → agent_dispatch_failed 事件
         （error 摘要自载荷提取或显式给定，截断 200 字符）；
       - record_launch_replay_skipped：permit 已消费/不存在时的幂等
-        容错记账（agent_launch_replay_skipped 事件）。
+        容错记账（agent_launch_replay_skipped 事件）；
+      - record_reviewer_invocation（RB-21-02）：reviewer 类型派发的
+        runtime-observed 记账——PostToolUse 从 tool_input 识别 reviewer
+        类型 + 解析 GLM_CONDUCTOR_REVIEW=<task_id> marker 后调用本
+        入口，落 reviewer_invoked 事件（tool_use_id 绑定 task）。该
+        事件是 provenance.run_review 落 review receipt 前机械回验
+        「审查调用真实发生」的唯一账本依据（receipt 不再受理口头申报）；
+      - record_reviewer_invocation_skipped（RB-21-02）：marker 指向的
+        任务不存在时的 fail-loud 警告记账（reviewer_invocation_skipped
+        事件，reason 字段）——不抛异常、不阻断 hook。
 
     二、纯读账本面（M3 前半，计划 §7.1/§7.2）——把 launch 事实提升
     为可机械查询的运行账本，建立 Work Unit ↔ Dispatch Permit ↔
@@ -75,6 +84,24 @@ _ERROR_KEYS = ("error", "message")
 
 # error 摘要截断长度（journal 事件不倾倒长文本）
 _MAX_ERROR_CHARS = 200
+
+# —— RB-21-02：reviewer invocation 账本域冻结词汇 ——
+
+# reviewer 类型白名单（账本域唯一定义点；provenance 与 hooks 一律从
+# 本处 import，不得两处定义）。bare 与 "glm-conductor:" 前缀两种命名
+# 形态都认（照 hooks/pre_tool_use.IMPLEMENTATION_EXECUTORS 的两形式
+# 模式——宿主子代理类型命名兼容双形态）。receipt 只受理白名单内审查
+# 者身份的申报。
+REVIEWER_PROFILES = frozenset((
+    "glm-reviewer", "visual-reviewer",
+    "glm-conductor:glm-reviewer", "glm-conductor:visual-reviewer",
+))
+
+# review marker 前缀（与 dispatch_wave.MARKER_PREFIX 同构但独立——
+# 不改动 dispatch_wave；格式冻结：GLM_CONDUCTOR_REVIEW=<task_id>）。
+# 主会话把它放进 reviewer 派发的 prompt/description，PostToolUse 据此
+# 落 reviewer_invoked，run_review 回验据此通过。
+REVIEW_MARKER_PREFIX = "GLM_CONDUCTOR_REVIEW="
 
 # —— 以下为 M3 前半纯读账本面的冻结词汇（§7.2/§7.3） ——
 
@@ -201,6 +228,108 @@ def record_launch_replay_skipped(repo_root, task_id, payload,
         "event": "agent_launch_replay_skipped",
         "tool_use_id": _tool_use_id(payload),
         "permit_id": permit_id,
+    })
+
+
+# —— RB-21-02：reviewer invocation 账本（runtime-observed 审查溯源） ——
+
+def _subagent_type(payload):
+    """从钩子载荷提取 tool_input.subagent_type（非空 str），缺失 None。"""
+    if not isinstance(payload, dict):
+        return None
+    tool_input = payload.get("tool_input")
+    if isinstance(tool_input, dict):
+        value = tool_input.get("subagent_type")
+        if isinstance(value, str) and value:
+            return value
+    return None
+
+
+def _execution_mode(payload):
+    """从钩子载荷推导执行模式：tool_input.run_in_background is True
+    → "background"，其余（含载荷形状异常）→ "foreground"（缺省口径）。"""
+    if isinstance(payload, dict):
+        tool_input = payload.get("tool_input")
+        if isinstance(tool_input, dict) \
+                and tool_input.get("run_in_background") is True:
+            return "background"
+    return "foreground"
+
+
+def review_marker_for(task_id) -> str:
+    """构造 review marker："GLM_CONDUCTOR_REVIEW=<task_id>"（格式冻结，
+    与 dispatch_wave.marker_for 同构但独立）。主会话把返回值放进
+    reviewer 派发的 prompt/description 文本；hook 在文本中查找本前缀
+    提取 task_id。task_id 非非空 str 抛 ValueError（marker 是绑定键，
+    构造端不给垃圾）。"""
+    if not isinstance(task_id, str) or task_id == "":
+        raise ValueError(
+            "review_marker_for：task_id 必须是非空字符串，得到 %r"
+            % (task_id,))
+    return REVIEW_MARKER_PREFIX + task_id
+
+
+def parse_review_marker(text):
+    """从文本中解析 review marker 携带的 task_id；无 marker → None。
+
+    规则与 dispatch_wave.parse_marker 同构（独立实现，不改 dispatch_
+    wave）：查找 REVIEW_MARKER_PREFIX 首次出现处，取其后到首个空白
+    字符（空格 / 换行 / 制表）之间的 token 为 task_id——多行 prompt/
+    description 文本中按行定位即由此保证；文本在 prefix 后直接结束
+    （空 token）→ None。返回原始 token（非空 str 即视为合法 task_id，
+    存在性交 hook 的任务 state 校验承担）。"""
+    if not isinstance(text, str):
+        return None
+    index = text.find(REVIEW_MARKER_PREFIX)
+    if index < 0:
+        return None
+    rest = text[index + len(REVIEW_MARKER_PREFIX):]
+    token = rest.split()[0] if rest.split() else ""
+    return token or None
+
+
+def record_reviewer_invocation(repo_root, task_id, payload) -> dict:
+    """记 reviewer_invoked 事件（RB-21-02：PostToolUse 对 reviewer 类型
+    派发的 runtime-observed 记账），返回事件 dict。
+
+    调用方（hook）已先行校验：subagent_type ∈ REVIEWER_PROFILES、
+    prompt/description 解析出非空 task_id、任务 state 存在。本函数只
+    记账，零审批逻辑。事件字段冻结：
+    {"event": "reviewer_invoked", "tool_use_id", "reviewer", "task_id",
+     "agent_id"（可 null）, "execution_mode"}。
+    reviewer 取 tool_input.subagent_type；agent_id 从 tool_response 形
+    状自适应提取（同 agent_launched 口径，取不到 null）；execution_mode
+    由 run_in_background 推导（True → "background"，缺省
+    "foreground"）。
+
+    该事件是 provenance.run_review 落 receipt 前回验「审查调用真实发
+    生」的唯一账本依据；tool_use_id 绑定 task_id，receipt 不可脱离
+    本事件凭空申报。
+    """
+    return journal.append_event(repo_root, task_id, {
+        "event": "reviewer_invoked",
+        "tool_use_id": _tool_use_id(payload),
+        "reviewer": _subagent_type(payload),
+        "task_id": task_id,
+        "agent_id": _extract_agent_id(
+            payload.get("tool_response")
+            if isinstance(payload, dict) else None),
+        "execution_mode": _execution_mode(payload),
+    })
+
+
+def record_reviewer_invocation_skipped(repo_root, task_id, payload,
+                                       *, reason) -> dict:
+    """记 reviewer_invocation_skipped 警告事件（RB-21-02：marker 指向
+    的任务不存在时的 fail-loud 记账——不抛异常、不阻断 hook，但账本
+    留痕可审计）。reason 压成非空字符串并截断 200 字符（同 error 摘要
+    口径）。"""
+    return journal.append_event(repo_root, task_id, {
+        "event": "reviewer_invocation_skipped",
+        "reason": _coerce_error_text(reason),
+        "tool_use_id": _tool_use_id(payload),
+        "reviewer": _subagent_type(payload),
+        "task_id": task_id,
     })
 
 
