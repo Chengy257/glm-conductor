@@ -132,9 +132,10 @@
     绝不重试网络、异常不外泄、凭证零落盘），journal 落一条
     quota_resolved {"status", "source", "evaluated_at"} 后把解析出的
     status 送进既有 §12 预算折算与 plan_dispatch 决策链（wave 记录的
-    quota_status 字段记解析后的实际值）；显式字符串（含 CLI 的
-    "AVAILABLE" 兜底）原样直通——零解析、零网络、零事件，生产行为
-    语义不变（显式声明优先）。UNKNOWN 在预算侧按 wu-21-09 已落地的
+    quota_status 字段记解析后的实际值）；显式字符串原样直通——零解析、
+    零网络、零事件，生产行为语义不变（显式声明优先；CLI 缺省同样走
+    None→resolver，wu-21-15 起 wave-prepare 不再有 AVAILABLE 兜底）。
+    UNKNOWN 在预算侧按 wu-21-09 已落地的
     语义折算为 1（不挂起），因此缺省调用在有凭证环境下更准、无凭证
     环境下更保守，都不改变「可派发」这一基本事实。
 
@@ -440,9 +441,9 @@ def _effective_worker_cap(st, quota_status, max_workers) -> int:
 def _resolve_quota(api, repo_root, task_id, quota_status) -> str:
     """wu-21-10 运行时额度解析（v2.1 §13）：显式字符串直通，None → resolver。
 
-    - quota_status 为显式字符串（调用方声明，含 CLI wave-prepare 的
-      "AVAILABLE" 兜底）→ 原样返回：零解析、零网络、零事件（词汇
-      合法性由 effective_worker_budget / plan_dispatch 既有校验兜底）；
+    - quota_status 为显式字符串（调用方声明）→ 原样返回：零解析、
+      零网络、零事件（词汇合法性由 effective_worker_budget /
+      plan_dispatch 既有校验兜底）；
     - quota_status 为 None（缺省——v2.1 起「绝不默认 AVAILABLE」）→
       runtime.quota.resolver.resolve_quota_status(repo_root)（函数内
       import + 属性访问，测试 monkeypatch 友好；resolver 层级：

@@ -244,17 +244,18 @@ def _gate_policy(api, commands) -> None:
                 % (api, command, decision, rule))
 
 
-def _execute_command(repo_root, command, timeout_seconds) -> tuple:
+def _execute_command(work_root, command, timeout_seconds) -> tuple:
     """执行一条验证命令，返回 (timed_out, exit_code, stdout_excerpt,
     stderr_excerpt, duration_ms)。
 
-    subprocess 固定形态（D4 锁定）：shell=True、cwd=repo_root、
-    capture_output=True、text=True、encoding="utf-8"、errors="replace"
-    ——Windows GBK 控制台下不显式 utf-8 会把子进程输出按本地代码页
-    解码，中文输出乱码甚至 UnicodeDecodeError；errors="replace" 保证
-    最坏情况也只是替换符而非异常。stdout/stderr 截断保留前
-    EXCERPT_LIMIT 字符。超时（TimeoutExpired）按 timed_out=True 归一
-    返回（部分输出不采信，excerpt 恒空串），不向上抛。
+    subprocess 固定形态（D4 锁定）：shell=True、cwd=work_root（任务绑定的
+    Git 仓库根——RB-2 双根分离下恒与指纹求值根同源，绝不取账本根；
+    终审 P1 修复）、capture_output=True、text=True、encoding="utf-8"、
+    errors="replace"——Windows GBK 控制台下不显式 utf-8 会把子进程输出
+    按本地代码页解码，中文输出乱码甚至 UnicodeDecodeError；
+    errors="replace" 保证最坏情况也只是替换符而非异常。stdout/stderr
+    截断保留前 EXCERPT_LIMIT 字符。超时（TimeoutExpired）按 timed_out=True
+    归一返回（部分输出不采信，excerpt 恒空串），不向上抛。
     """
     started = time.monotonic()
     timed_out = False
@@ -263,7 +264,7 @@ def _execute_command(repo_root, command, timeout_seconds) -> tuple:
     stderr_excerpt = ""
     try:
         proc = subprocess.run(
-            command, shell=True, cwd=str(repo_root), capture_output=True,
+            command, shell=True, cwd=str(work_root), capture_output=True,
             text=True, encoding="utf-8", errors="replace",
             timeout=timeout_seconds)
         exit_code = proc.returncode
@@ -390,7 +391,7 @@ def verify_unit(repo_root, task_id, uid, *, command=None,
     exit_codes = {}
     for cmd in commands:
         timed_out, exit_code, stdout_excerpt, stderr_excerpt, duration_ms = \
-            _execute_command(repo_root, cmd, timeout_seconds)
+            _execute_command(git_root, cmd, timeout_seconds)
         # 零 TOCTOU 同刻指纹：进程退出后、任何其他仓库操作前立即计算
         # （口径与 RB-1 完成证据门同一谓词；events 从账本根注入）
         events_snapshot = journal.read_events(repo_root, task_id)
@@ -468,7 +469,7 @@ def verify_task(repo_root, task_id, *, command=None,
     exit_codes = {}
     for cmd in commands:
         timed_out, exit_code, stdout_excerpt, stderr_excerpt, duration_ms = \
-            _execute_command(repo_root, cmd, timeout_seconds)
+            _execute_command(git_root, cmd, timeout_seconds)
         # 零 TOCTOU 同刻指纹：任务作用域，与完成门同一入口
         fp = fingerprint.task_fingerprint(git_root, st)
         receipt = {

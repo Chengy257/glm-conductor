@@ -100,15 +100,16 @@ class TempDirFixture(unittest.TestCase):
         self.repo = Path(self._tmp.name)
 
     def _force_cleanup(self):
-        """解除 git 只读对象后清理临时目录（模式复用 test_reconcile）。"""
-        git_dir = os.path.join(self._tmp.name, ".git")
-        if os.path.isdir(git_dir):
-            for dirpath, _dirnames, filenames in os.walk(git_dir):
-                for name in filenames:
-                    try:
-                        os.chmod(os.path.join(dirpath, name), stat.S_IWRITE)
-                    except OSError:
-                        pass
+        """解除 git 只读对象后清理临时目录（模式复用 test_reconcile）。
+
+        全树 chmod（不限于顶层 .git）：终审 P1 的双根测试在账本根子目录
+        内另建绑定仓库，嵌套 .git 的只读对象同样拦截 rmtree。"""
+        for dirpath, _dirnames, filenames in os.walk(self._tmp.name):
+            for name in filenames:
+                try:
+                    os.chmod(os.path.join(dirpath, name), stat.S_IWRITE)
+                except OSError:
+                    pass
         self._tmp.cleanup()
 
     def dirty_file(self, rel, data):
@@ -416,6 +417,49 @@ class VerifyTaskTest(ProvenanceFixture):
         # 任务级 state 未被写入任何 completed
         st = state.load_state(self.repo, TID)
         self.assertEqual(st["verification"]["completed"], [])
+
+
+@unittest.skipUnless(shutil.which("git"),
+                     "需要 git 可执行文件（scratch 仓库必须 git init）")
+class SplitRootExecutionTest(TempDirFixture):
+    """终审 P1 修复锚定：账本根 ≠ 任务绑定 Git 根（RB-2 双根分离）时，
+    verify_unit 的验证命令必须在**绑定根**执行——required 命令
+    "git rev-parse --is-inside-work-tree" 只在 Git 仓库内 exit 0，在
+    非账本根场景（本测试的账本根不是 Git 仓库）修复前会 exit 128
+    （命令跑错目录 → 误拒），修复后应 exit 0 且指纹可计算。"""
+
+    INSIDE_GIT_CMD = "git rev-parse --is-inside-work-tree"
+
+    def setUp(self):
+        super().setUp()
+        # 账本根（self.repo）刻意保持非 Git 目录；绑定仓库独立建在子目录
+        self.worktree = self.repo / "bound-repo"
+        self.worktree.mkdir()
+        run_git(self.worktree, "init")
+        run_git(self.worktree, "config", "user.email", "split@example.com")
+        run_git(self.worktree, "config", "user.name", "Split")
+        run_git(self.worktree, "config", "core.autocrlf", "false")
+        (self.worktree / ".gitignore").write_bytes(b".glm-conductor/\n")
+        (self.worktree / "base.txt").write_bytes(b"v1\n")
+        run_git(self.worktree, "add", ".")
+        run_git(self.worktree, "commit", "-m", "init")
+
+    def test_verify_unit_executes_in_bound_git_root(self):
+        unit = make_unit("u1", ("src/**",), (self.INSIDE_GIT_CMD,))
+        st = state.new_task_state(
+            TID, "双根分离执行测试", dict(ROUTE),
+            ownership_files=["src/**"],
+            verification_required=[self.INSIDE_GIT_CMD],
+            status="decomposed",
+            repository_root=str(self.worktree))
+        st["work_units"] = [unit]
+        state.save_state(self.repo, st)  # 账本写在账本根，仓库绑定 worktree
+        result = provenance.verify_unit(self.repo, TID, "u1")
+        self.assertTrue(result["all_passed"],
+                        "验证命令须在绑定 Git 根执行（exit 0），账本根非 "
+                        "Git 目录下会 128：%r" % (result["exit_codes"],))
+        self.assertEqual(result["exit_codes"][self.INSIDE_GIT_CMD], 0)
+        self.assertIsNotNone(result["receipts"][0]["fingerprint"])
 
 
 if __name__ == "__main__":
