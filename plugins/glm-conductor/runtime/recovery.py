@@ -34,11 +34,16 @@
 
 依赖：
     runtime.state（discover_tasks / load_state / resolve_repository_root）
-    + runtime.agent_run（run_lifecycle）。仅 Python 3 标准库，
+    + runtime.agent_run（run_lifecycle）+ runtime.journal（quota_waiting
+    事件读取，v2.1 §14 wu-21-11：waiting_quota / waiting_user 任务的
+    recommended_resume_at 恒从 journal 事实源读，不虚构）+
+    runtime.execution_policy（consumed_quota_windows 容错读，剩余窗口
+    预算渲染）。全部纯本地读取，仅 Python 3 标准库，
     `python3 -S` 可运行（无 site-packages）。
 """
 
-from runtime import agent_run, state
+from runtime import agent_run, journal, state
+from runtime.execution_policy import consumed_quota_windows
 
 # 摘要 goal 字段的截断长度（冻结：120 字符，控制注入文本体积）
 GOAL_TRUNCATE = 120
@@ -51,6 +56,12 @@ INTERRUPTED_UNIT_STATUSES = ("running", "waiting_quota", "blocked")
 # legacy 任务的 auto_resume 兜底值（无 execution_policy 块即 legacy，
 # 按保守默认 manual 解释，与 default_execution_policy 一致）
 LEGACY_AUTO_RESUME = "manual"
+
+# 额度等待任务状态词汇（v2.1 §14 wu-21-11）：处于这两个状态的任务在
+# 摘要条目增补第九键 "quota_wait"（recommended_resume_at + 剩余窗口
+# 预算），渲染层据此追加 Quota wait / resume_from_quota 指引两行；
+# 其他状态不增补（既有八字段冻结形状不变）
+QUOTA_WAIT_TASK_STATUSES = ("waiting_quota", "waiting_user")
 
 # —— render 层有界性常量（additionalContext 有 32KB stdout cap） ——
 
@@ -74,6 +85,21 @@ MAX_CORRUPT_IDS_SHOWN = 5
 
 # —— 摘要构建（纯本地只读） ——
 
+def _latest_recommended_resume_at(repo_root, task_id):
+    """读最近一条 quota_waiting 事件的 recommended_resume_at（无 → None）。
+
+    wu-21-11：recommended_resume_at 是 handle_quota_exhausted 落进
+    journal 的事实（quota_waiting 事件），本函数按文件序倒序取第一条
+    该事件；值缺失 / 非非空 str（当初 reset 不可解析不虚构为 None）→
+    None。纯本地只读。
+    """
+    for event in reversed(journal.read_events(repo_root, task_id)):
+        if isinstance(event, dict) and event.get("event") == "quota_waiting":
+            value = event.get("recommended_resume_at")
+            return value if isinstance(value, str) and value else None
+    return None
+
+
 def _summarize_task(repo_root, task_id, loaded):
     """把单个活动任务的状态 dict 聚合为摘要条目（冻结八字段）。
 
@@ -91,6 +117,14 @@ def _summarize_task(repo_root, task_id, loaded):
     块缺失 / 形状异常 / 值非法（非非空 str）→ legacy 兜底 "manual"。
     repo_root：resolve_repository_root(loaded, None)——绑定优先，
     无绑定（legacy 形态）为 None。
+
+    quota_wait（第九键，wu-21-11 增补）：仅 status ∈
+    QUOTA_WAIT_TASK_STATUSES（waiting_quota / waiting_user）的任务
+    携带 {"recommended_resume_at", "remaining_windows"}——前者取最近
+    一条 quota_waiting 事件（journal 事实源，无事件 / 当初不虚构为
+    None），后者 = max(0, continuity.max_quota_windows -
+    consumed_quota_windows) 容错折算；其余状态整键省略（既有八字段
+    冻结形状逐字不变——test_recovery 的冻结形状契约依赖于此）。
     """
     work_units = loaded.get("work_units")
     units = work_units if isinstance(work_units, list) else []
@@ -131,7 +165,11 @@ def _summarize_task(repo_root, task_id, loaded):
     if not isinstance(task_id_normalized, str) or task_id_normalized == "":
         task_id_normalized = task_id
 
-    return {
+    # quota_wait 增补（wu-21-11）：仅额度等待态任务携带该键（其余状态
+    # 整键省略——既有八字段冻结形状不变）；剩余窗口预算 =
+    # max(0, max_quota_windows - consumed_quota_windows)（容错读，
+    # legacy / 形状异常按 0 折算）
+    entry = {
         "task_id": task_id_normalized,
         "goal": goal[:GOAL_TRUNCATE],
         "status": loaded.get("status"),
@@ -141,6 +179,22 @@ def _summarize_task(repo_root, task_id, loaded):
         "interrupted_units": interrupted_units,
         "auto_resume": auto_resume,
     }
+    if loaded.get("status") in QUOTA_WAIT_TASK_STATUSES:
+        policy_block = loaded.get("execution_policy")
+        continuity = (policy_block.get("continuity")
+                      if isinstance(policy_block, dict) else None)
+        max_windows = (continuity.get("max_quota_windows")
+                       if isinstance(continuity, dict) else None)
+        if isinstance(max_windows, bool) or not isinstance(max_windows, int) \
+                or max_windows < 0:
+            max_windows = 0
+        entry["quota_wait"] = {
+            "recommended_resume_at":
+                _latest_recommended_resume_at(repo_root, task_id),
+            "remaining_windows":
+                max(0, max_windows - consumed_quota_windows(policy_block)),
+        }
+    return entry
 
 
 def build_recovery_summary(repo_root):
@@ -204,6 +258,9 @@ def _render_task(entry):
     Waiting = incomplete_units 去掉 interrupted 的 id（挂起等依赖 /
     待派发的单元）；interrupted 单元逐个列出，possibly_zombie=True 时
     追加逐字僵尸标注行。
+    wu-21-11 增补（仅 quota_wait 携带任务，即 waiting_quota /
+    waiting_user）：其后追加 Quota wait（recommended_resume_at + 剩余
+    窗口预算）与 Resume first step（resume_from_quota 指引）两行。
     """
     lines = ["", "Task: %s" % entry.get("task_id")]
     repo = entry.get("repo_root")
@@ -237,6 +294,25 @@ def _render_task(entry):
                if uid not in interrupted_ids]
     lines.extend(_render_unit_list("Waiting", waiting))
     lines.append("Quota-resume authorization: %s" % entry.get("auto_resume"))
+
+    # 额度等待任务增补（wu-21-11）：recommended_resume_at + 剩余窗口
+    # 预算 + resume_from_quota 恢复指引一句；非等待态任务零增行
+    # （既有渲染逐字不变）
+    quota_wait = entry.get("quota_wait")
+    if isinstance(quota_wait, dict):
+        recommended = quota_wait.get("recommended_resume_at")
+        remaining = quota_wait.get("remaining_windows")
+        lines.append(
+            "Quota wait: recommended_resume_at=%s; remaining wake budget: "
+            "%s window(s)" % (recommended if isinstance(recommended, str)
+                              and recommended else "unknown",
+                              remaining if isinstance(remaining, int)
+                              and not isinstance(remaining, bool)
+                              else 0))
+        lines.append(
+            "Resume first step: resume_from_quota "
+            "(task_manager.resume_from_quota) after quota re-check; "
+            "AVAILABLE/PRESSURE resume, EXHAUSTED/UNKNOWN wait")
     return lines
 
 

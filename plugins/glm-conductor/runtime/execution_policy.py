@@ -50,6 +50,14 @@
     confirmed_at 为 ISO8601 字符串或 null（source=="user" 时必须非 null）；
     authorization.scope == "task"。
 
+window 预算记账（v2.1 §14，wu-21-11）：
+    continuity.consumed_quota_windows 是可选键（已消耗的自动续跑窗口
+    预算计数，task_manager.record_quota_wake 在主会话 CronCreate 成功
+    后递增）：缺键完全合法（按 0 解释——validate 容错缺省，默认块不
+    含该键，legacy / 新任务形状不变）；存在时必须是 >= 0 的 int
+    （bool 拒绝）。消费方经 consumed_quota_windows() 容错读，与
+    max_quota_windows 的差即剩余窗口预算。
+
 有效并发预算（计划 §12 表）：
     AVAILABLE → 策略 max_workers；PRESSURE → 1；UNKNOWN → 1；
     EXHAUSTED → 0；quota_status 非法 / 未映射 → 0（保守）。
@@ -269,6 +277,14 @@ def validate_execution_policy(policy) -> "list[str]":
                     "continuity.max_quota_windows 必须是 >= 0 的整数")
             else:
                 windows_ok = True
+        # 可选键 consumed_quota_windows（v2.1 §14 wu-21-11 window 预算
+        # 记账）：缺键合法（按 0 解释）；存在时必须 >= 0 int（bool 拒绝）
+        if "consumed_quota_windows" in con:
+            consumed = con.get("consumed_quota_windows")
+            if not _is_count(consumed) or consumed < 0:
+                errors.append(
+                    "continuity.consumed_quota_windows 必须是 >= 0 的整数"
+                    "（可选键，缺省按 0 解释）")
 
     # —— authorization ——
     auth = blocks.get("authorization")
@@ -483,6 +499,28 @@ def set_resume_authorization(policy, *, auto_resume, max_quota_windows,
     updated["authorization"] = {"source": source, "confirmed_at": confirmed_at,
                                 "scope": AUTH_SCOPE}
     return updated
+
+
+# —— window 预算记账读取（v2.1 §14，wu-21-11） ——
+
+
+def consumed_quota_windows(policy) -> int:
+    """容错读 continuity.consumed_quota_windows（已消耗自动续跑窗口数）。
+
+    validate 容错缺省 0 的读取面对应物：policy 非 dict / continuity
+    缺块 / 键缺失 / 值形状非法（bool / 负数 / 非整数）→ 一律 0（手写
+    state 不炸消费方，形状纠错归 validate_execution_policy）。
+    纯函数：只读入参、零 I/O。剩余窗口预算 =
+    max(0, continuity.max_quota_windows - 本函数返回值)，由消费方
+    （task_manager 的授权矩阵 / recovery 渲染）自行折算。
+    """
+    continuity = (policy.get("continuity")
+                  if isinstance(policy, dict) else None)
+    consumed = (continuity.get("consumed_quota_windows")
+                if isinstance(continuity, dict) else None)
+    if _is_count(consumed) and consumed >= 0:
+        return consumed
+    return 0
 
 
 # —— 有效并发预算（计划 §12 表） ——

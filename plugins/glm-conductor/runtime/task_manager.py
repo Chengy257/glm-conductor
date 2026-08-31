@@ -138,6 +138,39 @@
     语义折算为 1（不挂起），因此缺省调用在有凭证环境下更准、无凭证
     环境下更保守，都不改变「可派发」这一基本事实。
 
+用户授权续跑（v2.1 §14/§22.7，wu-21-11 Authorized Quota Resume）：
+    把「EXHAUSTED 之后怎么办」从模型即兴变成四态授权矩阵 + window
+    预算记账。prepare 两个 API 解析出 EXHAUSTED 时只抛 waiting_quota
+    口径错误、不自动转态——转态是编排决策，由主会话显式调用本模块
+    的四个入口完成：
+      - handle_quota_exhausted：EXHAUSTED 转态链（任务与未终态单元转
+        waiting_quota + dispatch.active 清空 + manifest 刷新 +
+        recommended_resume_at 计算 + 授权矩阵裁决 wake 指令）；
+      - quota_wake_prompt：自足唤醒 prompt（宿主实测：automation wake
+        是同会话续行、SessionStart 不重放，prompt 必须自带 task_id /
+        恢复步骤 / 红线）；
+      - record_quota_wake：window 扣减记账（主会话 CronCreate 成功后
+        调用，写 continuity.consumed_quota_windows，与 automation 存活
+        解耦、绝不回滚——正确性底线永远是未来 SessionStart 恢复注入，
+        automation 只是 best-effort bridge）；
+      - resume_from_quota：唤醒会话 / SessionStart 的恢复首步（按额度
+        四态裁决 AVAILABLE/PRESSURE 恢复、EXHAUSTED/UNKNOWN 保守等待）。
+    授权矩阵（execution_policy.continuity.auto_resume，§14.2-§14.5）：
+      - manual → 不建自动化，未来 SessionStart 恢复注入提示用户；
+      - notify → 只允许提醒类 automation（runtime 只给 prompt 文本，
+        "required" 语义是「授权允许自动恢复执行」，notify 不允许）；
+      - auto_once / until_done → 必须 authorization.source == "user"
+        且剩余窗口预算（max_quota_windows - consumed_quota_windows）
+        > 0 才产出 wake.required=True；预算耗尽 → 任务转 waiting_user
+        + journal auto_resume_authorization_exhausted（§14.5，不得再
+        创建任何自动化唤醒）。
+    until_done 惰性逐窗：任一时刻最多 1 个活跃 wake 由主会话保证
+    （runtime 在 handle_quota_exhausted 返回里带 wake 指令即此模式）；
+    每次成功恢复后再次 EXHAUSTED 时主会话重走 handle_quota_exhausted。
+    wake 红线（宿主实测锁定）：一次性 automation（maxRuns=1）自完成、
+    绝不重试 CronDelete/CronUpdate（本机已知 glitch）、清理失败容忍、
+    发布类动作征询用户。
+
 单元验证证据归属绑定（v2.0.1 加固 H6，审查项 P1-7）+ RB-1 完成证据门
 （release hardening WU-P2，计划 §2 RB-1）：
     record_unit_verification 是单元级验证证据的唯一推荐写入口——主
@@ -222,6 +255,7 @@ from runtime import reconcile
 from runtime import resume_manifest
 from runtime import state
 from runtime import work_unit
+from runtime.execution_policy import consumed_quota_windows
 from runtime.execution_policy import default_execution_policy
 from runtime.execution_policy import effective_worker_budget
 from runtime.execution_policy import HARD_WORKER_LIMIT
@@ -1193,3 +1227,479 @@ def recover_leases(repo_root, task_id, *, now=None) -> dict:
                 item["path"] for item in report["expired_running"])})
     report["released"] = released
     return report
+
+
+# —— 用户授权续跑（v2.1 §14/§22.7，wu-21-11 Authorized Quota Resume） ——
+
+# handle_quota_exhausted 的合法入口任务状态（执行态族；任务不在此族
+# → TaskManagerError——额度转态是执行期编排决策，created 等前置态
+# 不存在「因额度耗尽而挂起」的语义）
+QUOTA_WAIT_TASK_STATUSES = ("executing", "joining", "verifying", "reviewing")
+
+# 额度耗尽时随任务一并转 waiting_quota 的单元状态（§62 表内边
+# ready→waiting_quota、running→waiting_quota 均合法；waiting_quota
+# 原地保持——已在等待态的单元不重复转、只计入 waiting_units 清单）
+QUOTA_WAIT_UNIT_STATUSES = ("ready", "running", "waiting_quota")
+
+# recommended_resume_at 的宽限秒数（§30 口径：reset 之后再等一等，
+# 防唤醒过早；与 runtime.quota.scheduler.DEFAULT_GRACE_SECONDS 同源）
+QUOTA_RESUME_GRACE_SECONDS = 300
+
+# resume_from_quota 允许恢复执行的额度四态（AVAILABLE 直恢复；
+# PRESSURE 也恢复——恢复后并发预算经既有 §12 折算自动收缩到 1；
+# EXHAUSTED / UNKNOWN 保守等待，UNKNOWN 不虚构可用性）
+QUOTA_RESUME_STATUSES = ("AVAILABLE", "PRESSURE")
+
+
+def _parse_iso_utc_z(text):
+    """ISO8601 时刻文本（含 Z 后缀）→ aware datetime（UTC）；失败 None。
+
+    Python 3.7 的 fromisoformat 不认 Z 后缀，先改写为 +00:00；
+    naive 时刻按 UTC 处理；非 str / 空串 / 不可解析 → None（调用方
+    按「未知」处理，不虚构）。
+    """
+    if not isinstance(text, str) or text == "":
+        return None
+    raw = text.strip()
+    if raw.endswith(("Z", "z")):
+        raw = raw[:-1] + "+00:00"
+    try:
+        moment = datetime.datetime.fromisoformat(raw)
+    except ValueError:
+        return None
+    if moment.tzinfo is None:
+        return moment.replace(tzinfo=datetime.timezone.utc)
+    return moment
+
+
+def _format_iso_z(moment) -> str:
+    """aware datetime → UTC ISO8601 秒精度 Z 形式（与 scheduler 同口径）。"""
+    return moment.astimezone(datetime.timezone.utc).strftime(
+        "%Y-%m-%dT%H:%M:%SZ")
+
+
+def _recommended_resume_at(evaluation):
+    """由 evaluation 计算建议恢复时刻（最早 EXHAUSTED 窗 reset + 宽限）。
+
+    - evaluation 提供 windows（evaluate() 输出的逐窗明细）→ 取全部
+      EXHAUSTED 窗中 reset_at 可解析的最早者 + QUOTA_RESUME_GRACE_
+      SECONDS（比 scheduler.plan_resume 的取最晚口径更进取：首次
+      reset 即可尝试恢复，resume_from_quota 会重新解析四态、仍
+      EXHAUSTED 则零转态保守等待，正确性不受影响）；
+    - evaluation 为 None / 无 windows / 无可解析 reset → None（§31
+      不虚构：reset 未知时回退周期探针，绝不编造调度时刻）。
+    """
+    if not isinstance(evaluation, dict):
+        return None
+    windows = evaluation.get("windows")
+    if not isinstance(windows, list):
+        return None
+    moments = []
+    for window in windows:
+        if not isinstance(window, dict) \
+                or window.get("status") != "EXHAUSTED":
+            continue
+        moment = _parse_iso_utc_z(window.get("reset_at"))
+        if moment is not None:
+            moments.append(moment)
+    if not moments:
+        return None
+    grace = datetime.timedelta(seconds=QUOTA_RESUME_GRACE_SECONDS)
+    return _format_iso_z(min(moments) + grace)
+
+
+def _continuity_view(st) -> dict:
+    """容错读取续跑授权四元组（execution_policy 事实源，§14）。
+
+    返回 {"auto_resume", "source", "max_quota_windows",
+    "consumed_quota_windows", "remaining"}：
+      - auto_resume：continuity.auto_resume；缺块 / 非法词汇 → 保守
+        按 "manual"（legacy 形态与 default_execution_policy 一致）；
+      - source：authorization.source；缺块 / 非法词汇 → "default"；
+      - max_quota_windows：continuity.max_quota_windows；非 >= 0 int
+        → 0；
+      - consumed_quota_windows：经 execution_policy.consumed_quota_
+        windows 容错读（缺键 / 形状异常 → 0）；
+      - remaining = max(0, max_quota_windows - consumed_quota_windows)
+        （record_quota_wake 只增不减，跨过 max 后不再出现负数口径）。
+    纯读函数：不改入参、零 I/O。
+    """
+    policy = st.get("execution_policy")
+    continuity = (policy.get("continuity")
+                  if isinstance(policy, dict) else None)
+    continuity = continuity if isinstance(continuity, dict) else {}
+    auto_resume = continuity.get("auto_resume")
+    if auto_resume not in ("manual", "notify", "auto_once", "until_done"):
+        auto_resume = "manual"
+    authorization = (policy.get("authorization")
+                     if isinstance(policy, dict) else None)
+    source = (authorization.get("source")
+              if isinstance(authorization, dict) else None)
+    if source not in ("default", "user"):
+        source = "default"
+    max_windows = continuity.get("max_quota_windows")
+    if isinstance(max_windows, bool) or not isinstance(max_windows, int) \
+            or max_windows < 0:
+        max_windows = 0
+    consumed = consumed_quota_windows(policy)
+    return {
+        "auto_resume": auto_resume,
+        "source": source,
+        "max_quota_windows": max_windows,
+        "consumed_quota_windows": consumed,
+        "remaining": max(0, max_windows - consumed),
+    }
+
+
+def _quota_wake_decision(view) -> dict:
+    """授权矩阵纯决策（§14.2-§14.5；输入 _continuity_view 的输出）。
+
+    返回 {"required", "budget_exhausted", "prompt_mode", "reason",
+    "transition_waiting_user"}：
+      - required：「授权允许自动恢复执行」——manual / notify 恒 False；
+      - prompt_mode："wake"（auto_once / until_done 且已授权且有预算
+        ——自足唤醒 prompt）；"reminder"（notify——提醒模板，任务实际
+        执行前仍需用户动作）；None（不产出 prompt）；
+      - transition_waiting_user：auto_once / until_done 且已授权且预算
+        耗尽（remaining <= 0）→ True（§14.5 授权耗尽语义）；source
+        非 "user" 的未授权分支不转（合法 state 里 auto_once/until_done
+        恒已授权——execution_policy §5.4 不变量保证，该分支是纵深防御）；
+      - reason：中文一句话裁决理由。
+    纯函数：零 I/O。
+    """
+    auto_resume = view["auto_resume"]
+    remaining = view["remaining"]
+    if auto_resume == "manual":
+        return {
+            "required": False, "budget_exhausted": False,
+            "prompt_mode": None, "transition_waiting_user": False,
+            "reason": "auto_resume=manual：不创建自动化唤醒，未来 "
+                      "SessionStart 恢复注入会提示用户手动续跑",
+        }
+    if auto_resume == "notify":
+        return {
+            "required": False, "budget_exhausted": False,
+            "prompt_mode": "reminder", "transition_waiting_user": False,
+            "reason": "auto_resume=notify：授权允许提醒、不允许自动恢复"
+                      "执行——可自建一次性提醒 automation（maxRuns=1，"
+                      "prompt 文本已随返回给出），任务实际执行前仍需用户"
+                      "动作",
+        }
+    # —— auto_once / until_done（跨窗口自动续跑授权族） ——
+    if view["source"] != "user":
+        return {
+            "required": False, "budget_exhausted": remaining <= 0,
+            "prompt_mode": None, "transition_waiting_user": False,
+            "reason": "auto_resume=%r 未获得用户授权（authorization."
+                      "source != \"user\"），不自动恢复执行" % auto_resume,
+        }
+    if remaining <= 0:
+        return {
+            "required": False, "budget_exhausted": True,
+            "prompt_mode": None, "transition_waiting_user": True,
+            "reason": "auto_resume=%r 的窗口预算已耗尽（consumed %d / "
+                      "max %d），不得再创建任何自动化唤醒——转 waiting_user"
+                      "等待用户重新授权（§14.5）"
+                      % (auto_resume, view["consumed_quota_windows"],
+                         view["max_quota_windows"]),
+        }
+    return {
+        "required": True, "budget_exhausted": False,
+        "prompt_mode": "wake", "transition_waiting_user": False,
+        "reason": "auto_resume=%r 已获用户授权且窗口预算剩余 %d：创建"
+                  "一次性自动化唤醒（maxRuns=1）恢复执行"
+                  % (auto_resume, remaining),
+    }
+
+
+def handle_quota_exhausted(repo_root, task_id, *, evaluation=None) -> dict:
+    """EXHAUSTED 转态链 + 授权矩阵裁决（v2.1 §14.1，主会话显式调用）。
+
+    触发点：prepare_dispatch / prepare_dispatch_wave 解析出 EXHAUSTED
+    时由主会话显式调用——prepare 自身只抛 waiting_quota 口径错误，
+    不自动转态（转态是编排决策）。
+
+    流程：
+      1. load_state（任务缺失 TaskManagerError；损坏 ValueError 上抛）；
+         任务 status 须 ∈ QUOTA_WAIT_TASK_STATUSES（executing / joining /
+         verifying / reviewing），否则 TaskManagerError；
+      2. 未终态单元（QUOTA_WAIT_UNIT_STATUSES：ready / running /
+         waiting_quota）转 waiting_quota（§62 表内边；waiting_quota
+         原地保持）+ dispatch.active 清空；
+      3. 任务级转 waiting_quota：joining / verifying / reviewing 先经
+         表内边回 executing 落盘一次，再 executing → waiting_quota
+         （TASK_TRANSITIONS 无 joining→waiting_quota 直达边，两段转换
+         全部落在表内；executing 入口单次直达）；
+      4. journal quota_waiting {units, recommended_resume_at}；
+      5. 授权矩阵（_quota_wake_decision，§14.2-§14.5）：budget 分支
+         耗尽时任务再转 waiting_user + journal
+         auto_resume_authorization_exhausted；
+      6. manifest 刷新（_write_manifest_safe——写失败只降级为
+         manifest_write_failed 警告事件，绝不阻断主事务）；放在全部
+         转态之后，保证 manifest.task_status 反映最终状态；
+      7. 返回键冻结 dict：
+         {"task_status", "waiting_units", "recommended_resume_at",
+          "auto_resume", "remaining_quota_windows",
+          "wake": {"required", "prompt", "budget_exhausted"}, "reason"}。
+
+    evaluation（可选）：quota 子系统的 evaluate() 输出 dict——提供
+    windows 时 recommended_resume_at = 最早 EXHAUSTED 窗 reset +
+    300 秒宽限；None（或无 windows / reset 不可解析）→ None（§31
+    不虚构）。wake.prompt：required 分支与 notify 提醒分支为
+    quota_wake_prompt(...) 的自足文本，其余为 None。
+    """
+    api = "handle_quota_exhausted"
+    st = _require_state(repo_root, task_id, api)
+    if st.get("status") not in QUOTA_WAIT_TASK_STATUSES:
+        raise TaskManagerError(
+            "%s：任务 %s 当前状态为 %r，不在执行态族（%s）内——额度耗尽"
+            "转态只对执行中的任务有意义"
+            % (api, task_id, st.get("status"),
+               ", ".join(QUOTA_WAIT_TASK_STATUSES)))
+    waiting = []
+    units = st.get("work_units")
+    if isinstance(units, list):
+        for unit in units:
+            if not isinstance(unit, dict):
+                continue
+            if unit.get("status") not in QUOTA_WAIT_UNIT_STATUSES:
+                continue
+            if unit.get("status") != "waiting_quota":
+                work_unit.transition_work_unit(unit, "waiting_quota")
+            waiting.append(unit.get("id"))
+    _set_active(st, [])
+    # 任务级转换：非 executing 入口先经表内边回 executing 落盘一次
+    # （joining/verifying/reviewing → executing 均为合法边），再直达
+    # waiting_quota——两段转换都落在 TASK_TRANSITIONS 内
+    if st.get("status") != "executing":
+        st["status"] = "executing"
+        state.save_state(repo_root, st)
+    st["status"] = "waiting_quota"
+    state.save_state(repo_root, st)
+    recommended = _recommended_resume_at(evaluation)
+    journal.append_event(repo_root, task_id, {
+        "event": "quota_waiting", "units": list(waiting),
+        "recommended_resume_at": recommended})
+    # 授权矩阵（§14.2-§14.5）：wake 指令与 waiting_user 耗尽语义
+    view = _continuity_view(st)
+    decision = _quota_wake_decision(view)
+    prompt = None
+    if decision["prompt_mode"] is not None:
+        prompt = quota_wake_prompt(repo_root, task_id)
+    if decision["transition_waiting_user"]:
+        st["status"] = "waiting_user"
+        state.save_state(repo_root, st)
+        journal.append_event(repo_root, task_id, {
+            "event": "auto_resume_authorization_exhausted",
+            "auto_resume": view["auto_resume"],
+            "consumed_quota_windows": view["consumed_quota_windows"],
+            "max_quota_windows": view["max_quota_windows"]})
+    _write_manifest_safe(repo_root, task_id)
+    return {
+        "task_status": st.get("status"),
+        "waiting_units": list(waiting),
+        "recommended_resume_at": recommended,
+        "auto_resume": view["auto_resume"],
+        "remaining_quota_windows": view["remaining"],
+        "wake": {"required": decision["required"],
+                 "prompt": prompt,
+                 "budget_exhausted": decision["budget_exhausted"]},
+        "reason": decision["reason"],
+    }
+
+
+def quota_wake_prompt(repo_root, task_id) -> str:
+    """生成自足的一次性额度唤醒 prompt（v2.1 §14.4 wake 形态锁定）。
+
+    宿主实测（2026-08-31 wake 入账本）：ZCode automation wake 是同会话
+    续行——prompt 以用户 turn 注入、SessionStart 不重放，因此 prompt
+    必须自足：task_id、账本根 / 任务仓库根、恢复首步（resume_from_quota
+    → 按账本就绪继续）、额度检查口径、预算状态（已消耗 / 共几窗 /
+    剩余）、红线（绝不重试 CronDelete/CronUpdate、发布动作征询用户、
+    RB-1 完成证据门指纹口径）与一次性（maxRuns=1）语义全部内置。
+
+    纯函数：只读 state.json（预算读 execution_policy.continuity），
+    零写副作用；任务缺失 TaskManagerError。中文模板，主会话把它放进
+    automation 的 prompt 字段即可（automation 创建/删除本身归主会话
+    的宿主工具，runtime 只产出指令与记账）。
+    """
+    api = "quota_wake_prompt"
+    st = _require_state(repo_root, task_id, api)
+    view = _continuity_view(st)
+    waiting_ids = [
+        unit.get("id") for unit in st.get("work_units") or []
+        if isinstance(unit, dict) and unit.get("status") == "waiting_quota"]
+    work_root = state.resolve_repository_root(st, str(repo_root))
+    lines = [
+        "GLM CONDUCTOR 额度唤醒（一次性 automation：recurring=false、"
+        "maxRuns=1，本次触发即自完成）",
+        "",
+        "任务 task_id：%s" % task_id,
+        "账本根：%s" % repo_root,
+        "任务仓库根：%s" % work_root,
+        "等待恢复的单元：%s" % ("、".join(waiting_ids) if waiting_ids
+                               else "无（任务级挂起）"),
+        "",
+        "本唤醒是一次性自动化（maxRuns=1）：触发即终结，绝不依赖 "
+        "CronUpdate 修改参数或改期。",
+        "",
+        "第一步（必须最先执行）——额度检查与恢复：",
+        "1. 解析当前额度四态（绝不重试网络；层级：新鲜缓存 → provider "
+        "→ 陈旧缓存 → UNKNOWN）：",
+        "   python3 -c \"import sys; sys.path.insert(0, "
+        "'plugins/glm-conductor'); from runtime.quota import resolver; "
+        "print(resolver.resolve_quota_status(r'%s')['status'])\""
+        % repo_root,
+        "2. 调用 runtime.task_manager.resume_from_quota(repo_root=r'%s', "
+        "task_id='%s')：" % (repo_root, task_id),
+        "   - AVAILABLE / PRESSURE → 任务转回 executing、waiting_quota "
+        "单元回 ready，按账本就绪顺序经 prepare_dispatch / "
+        "prepare_dispatch_wave 继续（遵守 orchestration 纪律：SELECTIVE "
+        "ROUTE、permit 门与租约时序不得绕过）；",
+        "   - EXHAUSTED / UNKNOWN → 零转态保守等待：不得派发、不得再建"
+        "唤醒，按 recovery 摘要重排或降级 SessionStart 恢复。",
+        "",
+        "预算状态：已消耗 %d / 共 %d 窗（剩余 %d 窗）。本唤醒消耗 1 个"
+        "窗口预算——主会话在 CronCreate 成功后调用 record_quota_wake "
+        "记账（与 automation 存活解耦，wake 未触发也不回滚）；预算耗尽"
+        "后不得再创建任何自动化唤醒，一律降级 SessionStart 恢复。"
+        % (view["consumed_quota_windows"], view["max_quota_windows"],
+           view["remaining"]),
+        "",
+        "红线（违反即事故）：",
+        "- 绝不重试 CronDelete / CronUpdate（本机已知 glitch）；清理"
+        "失败容忍，降级 SessionStart 恢复；",
+        "- 发布类动作（git push、对外发布、删除性操作）必须先征询用户；",
+        "- 单元完成必须过 RB-1 完成证据门：finish_unit 前亲自运行该"
+        "单元全部 required 验证命令，并用 record_unit_verification 记录"
+        "绑定当前改动的 pass 指纹证据（record 与 finish 之间不得产生 "
+        "git 提交，否则证据 stale 须重验）。",
+    ]
+    return "\n".join(lines)
+
+
+def record_quota_wake(repo_root, task_id, *, automation_id, fires_at) -> dict:
+    """window 扣减记账（v2.1 §14.4：主会话 CronCreate 成功后调用）。
+
+    - continuity.consumed_quota_windows += 1（缺键按 0 起算；legacy
+      缺 execution_policy 块时以默认块补齐后写——半定义块过不了
+      validate_state 的完整性闸）；
+    - journal quota_wake_recorded {automation_id, fires_at, consumed,
+      remaining}；
+    - 与 automation 存活解耦：wake 未触发、automation 被清理或丢失
+      都不回滚（正确性底线永远是未来 SessionStart 恢复注入，automation
+      只是 best-effort bridge）；无回滚 API，二次调用纯递增。
+
+    参数校验（先于任何 I/O，失败零副作用）：automation_id / fires_at
+    必须是非空 str，否则 ValueError（中文消息含字段名）。返回
+    {"consumed_quota_windows", "remaining_quota_windows",
+    "max_quota_windows", "automation_id", "fires_at"}。
+    """
+    api = "record_quota_wake"
+    if not isinstance(automation_id, str) or automation_id == "":
+        raise ValueError(
+            "%s：automation_id 必须是非空字符串，得到 %r"
+            % (api, automation_id))
+    if not isinstance(fires_at, str) or fires_at == "":
+        raise ValueError(
+            "%s：fires_at 必须是非空字符串（ISO8601 口径），得到 %r"
+            % (api, fires_at))
+    st = _require_state(repo_root, task_id, api)
+    policy = st.get("execution_policy")
+    if not isinstance(policy, dict):
+        # legacy 任务无授权事实源块：以默认块补齐（完整四子块形状，
+        # 否则 validate_state 拒绝落盘）——记账语义与默认 manual/0 授权
+        # 解释一致，只是把「已消耗窗口」显式落盘
+        policy = default_execution_policy()
+        st["execution_policy"] = policy
+    continuity = policy.get("continuity")
+    if not isinstance(continuity, dict):
+        continuity = default_execution_policy()["continuity"]
+        policy["continuity"] = continuity
+    consumed = consumed_quota_windows(policy) + 1
+    continuity["consumed_quota_windows"] = consumed
+    state.save_state(repo_root, st)
+    view = _continuity_view(st)
+    journal.append_event(repo_root, task_id, {
+        "event": "quota_wake_recorded", "automation_id": automation_id,
+        "fires_at": fires_at, "consumed": consumed,
+        "remaining": view["remaining"]})
+    return {
+        "consumed_quota_windows": consumed,
+        "remaining_quota_windows": view["remaining"],
+        "max_quota_windows": view["max_quota_windows"],
+        "automation_id": automation_id,
+        "fires_at": fires_at,
+    }
+
+
+def _wake_budget_remaining(st) -> int:
+    """任务 state 的剩余唤醒窗口预算（max(0, max - consumed)，容错读）。"""
+    policy = st.get("execution_policy")
+    continuity = (policy.get("continuity")
+                  if isinstance(policy, dict) else None)
+    max_windows = (continuity.get("max_quota_windows")
+                   if isinstance(continuity, dict) else None)
+    if isinstance(max_windows, bool) or not isinstance(max_windows, int) \
+            or max_windows < 0:
+        max_windows = 0
+    return max(0, max_windows - consumed_quota_windows(policy))
+
+
+def resume_from_quota(repo_root, task_id, *, status=None) -> dict:
+    """额度唤醒 / SessionStart 的恢复首步（v2.1 §14 恢复入口）。
+
+    流程：
+      1. load_state（任务缺失 TaskManagerError）；
+      2. status 缺省经 runtime.quota.resolver.resolve_quota_status 解析
+         （wu-21-10 四级层级：fresh cache → provider fetch → stale
+         cache → UNKNOWN；函数内 import + 属性访问，测试 monkeypatch
+         友好；绝不重试网络、异常不外泄、凭证零落盘）——source 记
+         resolved["source"]；显式 status（调用方声明）直通，source 记
+         "explicit"（零解析、零网络）；
+      3. status ∈ QUOTA_RESUME_STATUSES（AVAILABLE / PRESSURE——
+         PRESSURE 恢复后并发预算经既有 §12 折算自动收缩到 1）且任务
+         处于 waiting_quota / waiting_user → 恢复：waiting_quota 单元
+         回 ready（§62 表内边）+ 任务转回 executing（waiting_quota →
+         executing 与 waiting_user → executing 均为表内边）+ save +
+         journal quota_resumed {status, source} + manifest 刷新，返回
+         {"resumed": True, ...}；
+      4. 其余情形（EXHAUSTED / UNKNOWN 保守等待；任务已不在等待态——
+         如重复唤醒）零转态，返回 {"resumed": False, ...}。
+
+    返回键冻结：{"resumed", "status", "recommended_resume_at",
+    "wake_budget_remaining"}。recommended_resume_at 恒 None——本入口
+    不携带 evaluation，reset 未知时不虚构调度时刻（§31；再次 EXHAUSTED
+    的重排由主会话重走 handle_quota_exhausted 按其 evaluation 计算）。
+    """
+    api = "resume_from_quota"
+    st = _require_state(repo_root, task_id, api)
+    source = "explicit"
+    if status is None:
+        from runtime.quota import resolver  # 函数内 import：monkeypatch 友好
+        resolved = resolver.resolve_quota_status(repo_root)
+        status = resolved["status"]
+        source = resolved["source"]
+    result = {
+        "resumed": False,
+        "status": status,
+        "recommended_resume_at": None,
+        "wake_budget_remaining": _wake_budget_remaining(st),
+    }
+    if status not in QUOTA_RESUME_STATUSES:
+        # EXHAUSTED / UNKNOWN：保守等待，零转态（UNKNOWN 不虚构可用性）
+        return result
+    if st.get("status") not in ("waiting_quota", "waiting_user"):
+        # 任务已不在额度等待态（重复唤醒 / 他处已恢复）：零转态幂等
+        return result
+    for unit in st.get("work_units") or []:
+        if isinstance(unit, dict) and unit.get("status") == "waiting_quota":
+            work_unit.transition_work_unit(unit, "ready")
+    st["status"] = "executing"
+    state.save_state(repo_root, st)
+    journal.append_event(repo_root, task_id, {
+        "event": "quota_resumed", "status": status, "source": source})
+    _write_manifest_safe(repo_root, task_id)
+    result["resumed"] = True
+    result["wake_budget_remaining"] = _wake_budget_remaining(st)
+    return result

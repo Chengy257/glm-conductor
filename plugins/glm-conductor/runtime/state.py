@@ -101,11 +101,14 @@ IMPLEMENTER_EXECUTORS = ("flash-implementer", "visual-implementer")
 # 连续性三模式
 CONTINUITY_MODES = ("foreground", "resumable", "idle")
 # 任务全生命周期状态（finalizing = 完成请求态：进入即请求完成，
-# completed 只能由 Stop 完成门在其四重检查全部通过后提交）
+# completed 只能由 Stop 完成门在其四重检查全部通过后提交；
+# waiting_user = v2.1 §14.5 自动续跑授权耗尽态：auto_once / until_done
+# 的窗口预算用尽后等待用户重新授权，重新授权后经 waiting_user →
+# executing 回到执行态族）
 TASK_STATUSES = (
     "created", "preflight", "routed", "decomposed", "executing",
     "joining", "verifying", "reviewing", "finalizing", "completed",
-    "waiting_quota", "blocked", "cancelled", "failed")
+    "waiting_quota", "waiting_user", "blocked", "cancelled", "failed")
 # 终态：discover_tasks 归入 terminal 桶（find_active_tasks 不再返回）
 TERMINAL_STATUSES = ("completed", "cancelled", "failed")
 # 顶层状态转换表：键 = 旧 status，值 = 允许的直接后继（终态无表项 =
@@ -127,7 +130,12 @@ TASK_TRANSITIONS = {
                   "failed", "cancelled"),
     "reviewing": ("finalizing", "executing", "blocked", "failed",
                   "cancelled"),
-    "waiting_quota": ("executing", "blocked", "failed", "cancelled"),
+    "waiting_quota": ("executing", "waiting_user", "blocked", "failed",
+                      "cancelled"),
+    # waiting_user（v2.1 §14.5）：自动续跑授权耗尽后等待用户重新授权；
+    # 用户重新授权（或主会话经授权升档）后回到 executing，公共尾巴
+    # （blocked/failed/cancelled）与 waiting_quota 同款
+    "waiting_user": ("executing", "blocked", "failed", "cancelled"),
     "blocked": ("preflight", "routed", "decomposed", "executing",
                 "joining", "verifying", "reviewing", "waiting_quota",
                 "finalizing", "failed", "cancelled"),
