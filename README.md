@@ -50,6 +50,8 @@ v2 起，插件把原本写在提示词里的关键契约升级为**运行时强
 
 **v2.0.1 运行时完整性加固**——依据 v2.0.0 全面审查的 H1-H8 收口：完成生命周期门控（`finalizing` + 状态转换表，`completed` 仅完成门可提交）、路由跨字段不变量与任务发现四分类 fail-closed（损坏的 state.json 不再被当成"无任务"）。`task_manager` 事务边界四 API 固化派发生命周期（决策 → 租约 → 状态转换 → 记账 → 落盘 → 事件），崩溃窗口有确定性恢复路径。租约获得 TTL/generation/心跳续约，`recover_leases` 自动清理 stale 租约——崩溃后无需人工删 leases.json。验证证据显式绑定 work unit id（无 `unit` 字段的旧事件不再被恢复对账采信，属有意的破坏性变更；主会话需重新验证）。发布加固（RB-1/RB-2）补齐最后两块：Work Unit 完成（`completed`）前置单元绑定的新鲜验证证据门（all-match，拒绝零副作用，git/指纹读取失败 fail-closed）；任务可经 state 的 `repository.root` 绑定专属 Git 仓库根，Stop 完成门按任务逐个求值（同根快照缓存、单任务仓库故障只降级该任务），多仓工作区不再整体降级。CI 覆盖 ubuntu + windows × Python 3.8/3.13。
 
+**v2.1-alpha1 控制平面收口（M1-M3）**——把"存在但可被绕过"的机制变成不可绕过的机器事实：派发许可（dispatch permit + PreToolUse 拒绝门，实施者类型无有效许可即 deny，重放/过期/伪造机械拒绝）；执行策略授权事实源（并发预算硬上限 4、跨额度窗口自动续跑默认关闭、升档须用户确认并落盘审计）；runtime 观察到的 Agent 生命周期（PostToolUse 自动记账，与手写事件互不替代）；崩溃恢复三件套——SessionStart 自动注入恢复上下文（新会话无需提醒即知未完成任务）、四分 reconcile（捞结果/进度包续作/干净重派/人工裁决，不再一律重派）、事务点自动刷新的 resume manifest；runtime CLI 入口取代内联调用。详见 CHANGELOG 2.1.0-alpha1。
+
 ## 路由矩阵
 
 | Delegability | Assurance | 路由 | 实施 | 独立审查 |

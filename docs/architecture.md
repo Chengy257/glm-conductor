@@ -301,6 +301,21 @@ R4 delegate/full 实质性：ownership.files 与 verification.required 必须非
 
 强制层的用户可见解释（自检、报文含义、被拦截恢复方法）见 `skills/enforcement`。
 
+## 9.5 控制平面收口（v2.1 alpha1，M1-M3）
+
+v2.1 第一批把「存在但可被 advisory 文本绕过」的能力收进机器可查的控制平面（计划与 ※DR 决策记录见 docs/GLM-Conductor-v2.1-Architecture-Agent-Implementation-Plan.md）：
+
+- **execution_policy（M1）**：state 可选顶层块——自动化授权的事实源（worker 模式默认 background、并发默认 2 / 硬上限 4 冻结、auto_resume 默认 manual、升档须 authorization.source=user 且保存时校验）；legacy 缺块按保守默认解释。`runtime/execution_policy.py` 五个纯 API + CLI policy-* 子命令
+- **dispatch permit（M2）**：`prepare_dispatch` 为单元签发持久 permit（`runtime/dispatch_wave.py`：每 permit 一文件、原子 rename 消费防重放、TTL 兜底、路径逃逸闸）；派发 prompt 必须携带 `GLM_CONDUCTOR_DISPATCH=<permit_id>` marker——新会话中 PreToolUse(Agent|Task) 对实施者类型无有效 permit 的派发直接 deny（D1 分级：只读类型豁免、Layer A 兜底）；background permit 由 hook 经 updatedInput 强制后台
+- **runtime-observed 生命周期（M2）**：PostToolUse/PostToolUseFailure 自动消费/作废 permit 并 journal `agent_launched` / `agent_dispatch_failed`（tool_use_id ↔ permit ↔ unit ↔ agent_id 绑定）——与手写 implementation_started 互不替代；后台 Agent 结果回收 = 模型转述 + 原生档案对账两路（H2）
+- **agent run 账本与档案 adapter（M3）**：`runtime/agent_run.py` 读取面（list_agent_runs / native_agent_metadata 白名单只读 adapter / run_lifecycle）——僵尸语义：原生档案 status=running 永不解读为存活（§7.3）
+- **SessionStart 恢复注入（M3）**：`hooks/session_start.py` + `runtime/recovery.py`——新会话自动注入 RESUME CONTEXT（纯本地零 quota，无任务时安静），闭合连续性缺口 R2
+- **四分 reconcile（M3）**：`reconcile_agent_run` 纯读分类（reuse_result / resume_with_progress / redispatch_clean / manual_ruling），证据优先级 repo 残留 > 新鲜验证 > 原生档案；进度包组装归模型侧（两层分工）
+- **resume manifest（M3）**：commit/abort/finish 事务后自动刷新派生快照（写失败仅记警告、绝不阻断 state truth）
+- **runtime CLI（WU-21-15）**：`runtime/cli.py` 取代 python3 -c 内联（policy/permits/agent-runs/manifest-show，退出码 0/2/1）
+
+宿主硬约束（探查实测定型，计划 §2.3）：子代理内 hooks 不触发（H1）；后台 PostToolUse 只见 launch 确认（H2）；automation 20 槽上限（H3）；hook 失败三层语义（H4）——派发面 fail-open + 完成面 fail-closed 分层不变。第二批（M4-M6：wave 并行、quota 授权续跑、验证/审查溯源）未包含在本 alpha。
+
 ## 10. 运行时边界（ZCode 约束）
 
 - 连续性编排基于 ZCode 原生的本地会话生命周期机制，不是独立的云调度器或后台守护进程；桌面客户端需保持运行、机器需保持唤醒

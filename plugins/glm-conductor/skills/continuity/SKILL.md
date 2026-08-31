@@ -76,9 +76,21 @@ active task（continuity 为 resumable / idle 的任务，或需要 Stop 完成�
 | checkpoint_written | checkpoint 落盘后 |
 | status_changed | 任务状态迁移后（`transition_task_status` 自动记录） |
 | gate_passed / gate_blocked / gate_degraded / gate_exhausted | 完成门放行 / 拦截 / 降级跳过 / 达上限放行（由 Stop 钩子记录） |
+| dispatch_permit_created / dispatch_permit_invalidated | `prepare_dispatch` 签发 permit / `abort_dispatch` 作废（v2.1 M2） |
+| agent_launched / agent_dispatch_failed / agent_launch_replay_skipped | PostToolUse 钩子观察到的派发生命周期（v2.1 M2——runtime-observed，与手写 implementation_started 互不替代） |
+| manifest_write_failed | resume manifest 写入失败警告（v2.1 M3——派生物降级，不阻断事务） |
 | completed / cancelled / failed | 进入终态时 |
 
 约束：不写入任何秘密值（密钥、Authorization 头）、不写入完整 prompt 或完整源码；它不是遥测。
+
+### 自动恢复面（v2.1 M3：SessionStart 注入 + Resume Manifest）
+
+连续性不再完全依赖模型纪律——两个 runtime 自动面已落地（新会话生效）：
+
+- **SessionStart 恢复注入**：`hooks/session_start.py`（matcher `startup|clear|compact`）在每个新会话自动发现未完成任务并注入 `GLM CONDUCTOR RESUME CONTEXT`（任务/状态/已完成单元/被中断单元（含 possibly_zombie 标注——原生档案 status=running 不是真相）/等待单元/quota-resume 授权/建议步骤）。纯本地：无网络、无模型调用、零 quota 消耗；无活动任务时完全安静。崩溃后**不需要**用户提醒模型"还有任务"。
+- **Resume Manifest**：`commit_dispatch` / `abort_dispatch` / `finish_unit` 事务后自动刷新 `tasks/<task-id>/manifest.json`（active units / verification due / agent runs / next ready candidates / quota snapshot / resume authorization）。它是**派生压缩层不是 truth**——读取用 CLI `manifest-show <repo> <task>`；写失败只记 journal 警告（manifest_write_failed），绝不阻断主事务。
+- **崩溃后 reconcile**：对 running 单元先跑 `runtime/reconcile.py` 的 `reconcile_agent_run`（四分：reuse_result 捞结果不重派 / resume_with_progress 组进度包续作 / redispatch_clean 全新派发 / manual_ruling 人工裁决）——不再一律重派；进度包组装（旧 transcript 摘要）由主会话经 ReadSessionContext 完成（runtime 只给分类与证据句柄）。同会话内对已完成的旧 agent 可用 SendMessage 轻量续接问询。
+- **runtime 调用入口**：一律 `python3 plugins/glm-conductor/runtime/cli.py <子命令>`（policy-show / policy-set-parallel / policy-set-resume / permits / permit-show / permit-consume / agent-runs [unit] / manifest-show；退出码 0/2/1）——**禁止 `python3 -c` 内联**（引号/换行陷阱实战已多次炸）。
 
 ### 证据指纹的记录时机（verification / review / visual-evidence）
 
@@ -96,6 +108,7 @@ active task（continuity 为 resumable / idle 的任务，或需要 Stop 完成�
 红线：
 
 - 指纹必须经 `runtime.fingerprint.task_fingerprint` 计算（与完成门同一入口、同一范围规则：声明了 ownership 时取「当前改动 ∩ 声明范围」，未声明时取全部当前改动）；不得手算、不得另定范围——两侧口径不一致的指纹永远无法通过比对
+- **单元级指纹口径（v2.1 实战教训）**：`record_unit_verification` 的 fingerprint 必须取**单元作用域**——直接用 `reconcile.fresh_unit_verification(repo, task, unit, events=journal.read_events(repo, task))` 返回的 `fingerprint` 字段值记录；用任务作用域 `task_fingerprint(repo, st)` 在工作树还含其他单元/任务级改动（如 .gitignore、validator）时与 RB-1 门的单元口径不一致，finish 会被拒（missing 证据）且原因晦涩
 - 记录指纹后不得再改动 owned 文件：任何后续编辑都使指纹过期——这是设计意图（任何修复使先前验证/审查失效）。确需改动 → 改完后重走「验证 →（审查）→ 记指纹」
 - fix-first / rethink 修复后的重新审查是新裁决：verdict 与 fingerprint 一并重记
 - 记录证据后执行 git commit 会改变基线修订 → 证据随之 stale（指纹公式含 base，属设计内保守行为；提交前重走「验证 →（审查）→ 记指纹」即可）

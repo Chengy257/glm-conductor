@@ -50,6 +50,16 @@ Stop 完成门用 `state.discover_tasks` 对任务目录四分类（active / ter
 1. 从 `events.jsonl` 与 checkpoint 证据重建 `state.json`（仓库状态权威于运行时记录），重建后重新完成
 2. 或经用户确认任务已废弃后，归档（改名 / 移除）该任务目录
 
+### v2.1 强制面增量（M1-M3，新会话生效）
+
+钩子清单从 2 条扩到 6 条（SessionStart / PreToolUse(Agent|Task) / PreToolUse(Bash) / PostToolUse(Agent|Task) / PostToolUseFailure(Agent|Task) / Stop）：
+
+- **PreToolUse(Agent|Task)——dispatch permit 门（M2）**：存在活动任务时，实施者类型子智能体（`flash-implementer` / `visual-implementer`，含 `glm-conductor:` 前缀变体）的派发**必须携带有效 permit marker**（`GLM_CONDUCTOR_DISPATCH=<permit_id>`，来自 `task_manager.prepare_dispatch` 签发的持久 permit）——无 marker / 伪造 / 过期 / 已消费（重放）/ 任务不匹配一律 `permissionDecision: deny`（英文可行动报文：先 prepare_dispatch 再把 marker 放进 prompt）。只读类型（Explore / reviewer 等）不受此门，继续走 v2.0.1 的 ownership advisory 注入。background permit 且未显式 `run_in_background: true` 时，hook 经 `updatedInput` 全量改写强制后台。无活动任务时零干预（v2.0.1 行为不回退）
+- **PostToolUse / PostToolUseFailure——runtime-observed 生命周期（M2）**：Agent 派发成功返回即由 hook 自动消费 permit（原子 rename，重放机械拒绝）并 journal `agent_launched`（tool_use_id / permit_id / agent_id / execution_mode 绑定）；派发失败自动作废 permit 并 journal `agent_dispatch_failed`。这两个事件是 runtime 亲眼观察到的生命周期事实，与手写 `implementation_started` **互不替代**——崩溃后对账以它们 + 仓库真相为准。注意：后台 Agent 的结果经异步通知到达（PostToolUse 只见 launch 确认），结果回收 = 模型转述 + 原生档案对账（`agent_runs`）两路
+- **SessionStart——恢复注入（M3）**：新会话自动注入 `GLM CONDUCTOR RESUME CONTEXT`（未完成任务/中断单元/僵尸感知/建议步骤）；纯本地零 quota；无活动任务时完全安静
+- **失败语义三层（宿主实测定型）**：hook 无法启动（脚本/解释器缺失）→ 宿主阻断所有匹配调用（非静默）；hook 运行中崩溃 → fail-open 放行 + stderr `ENFORCEMENT DEGRADED`（唯一静默 bypass 窗口——但该路径无法产生合法生命周期证据，完成门仍拒）；超时语义宿主未文档化。整体分层：**派发面 fail-open（降级可见）+ 完成面 fail-closed（Stop 门）**——绕过派发门的任务最终无法合法 completed
+- **execution_policy（M1）**：state 可选顶层块承载自动化授权事实（并发预算上限 4 冻结、auto_resume 升档与 max_workers>2 须 `authorization.source == "user"`、保存时校验）；legacy 缺块按保守默认解释
+
 ### Layer B — 派发时注入（提示级）
 
 PreToolUse 钩子在每次 Agent/Task 派发前向主会话注入 ownership 契约提醒（声明清单 + "越界将无法通过完成门"）。Layer B 提高合规但**不构成强制**——确定性完成门强制只在 Layer A。
