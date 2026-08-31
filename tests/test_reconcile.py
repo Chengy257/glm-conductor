@@ -45,7 +45,18 @@ journal + 驱动 reconcile_interrupted）+ 纯函数容错用例：
     required 内 / 无 unit 字段旧格式五类事件均不算；events 注入非
     list 容错为 []；恢复集成（经 reconcile_interrupted）——多
     command 部分证据 + 残留改动 → running 得 verifying（不再
-    completed）、verifying 得 stay advisory，全部证据才双双 completed。
+    completed）、verifying 得 stay advisory，全部证据才双双 completed；
+  - RB-21-05 多仓双根（账本根 ≠ git 根）：SplitLedgerReconcileFixture
+    （非 git 账本根 + 嵌套真实 git 仓库 + state 绑定 repository.root，
+    模式借鉴 test_stop_gate 的 SplitLedgerFixture）——
+    reconcile_agent_run 用绑定仓库根求值 residue / 指纹（非 git 账本
+    根误当 git 根会 manual_ruling「求值失败」，双根分离因此可机械
+    区分）、journal / agent run 账本恒读账本根（reuse_result 只有从
+    账本根读到证据才可得）、多仓残留分类正确（未绑定仓库的改动不
+    可见）、legacy 无绑定回退账本根（与单根时代一致）；
+    fresh_unit_verification / reconcile_interrupted 的 git_root 注入
+    口直测（None 缺省路径在非 git 账本根上抛 OwnershipError——历史
+    行为逐字一致；注入后 git 求值在绑定仓库、账本读仍在账本根）。
 
 git fixture 做法（git init + config + commit、Windows 下 .git 只读位
 清理）对齐 tests/test_stop_gate.py 的 GitRepoFixture；环境无 git 可执行
@@ -121,13 +132,23 @@ class TempDirFixture(unittest.TestCase):
         self.repo = Path(self._tmp.name)
 
     def _force_cleanup(self):
-        """解除 git 只读对象后清理临时目录（模式复用 test_stop_gate）。"""
-        git_dir = os.path.join(self._tmp.name, ".git")
-        if os.path.isdir(git_dir):
-            for dirpath, _dirnames, filenames in os.walk(git_dir):
+        """解除 git 只读对象后清理临时目录（模式复用 test_stop_gate）。
+
+        Windows 上 git 松散对象文件带只读属性，TemporaryDirectory.cleanup()
+        的 rmtree 会 PermissionError；先遍历临时树内全部 .git 目录
+        （RB-21-05 起夹具含嵌套真实 git 仓库，.git 不止 tempdir 根一处）
+        清掉只读位再删除。
+        """
+        git_dirs = []
+        for dirpath, dirnames, _filenames in os.walk(self._tmp.name):
+            if ".git" in dirnames:
+                git_dirs.append(os.path.join(dirpath, ".git"))
+        for git_dir in git_dirs:
+            for sub_dirpath, _sub_dirnames, filenames in os.walk(git_dir):
                 for name in filenames:
                     try:
-                        os.chmod(os.path.join(dirpath, name), stat.S_IWRITE)
+                        os.chmod(os.path.join(sub_dirpath, name),
+                                 stat.S_IWRITE)
                     except OSError:
                         pass
         self._tmp.cleanup()
@@ -1385,6 +1406,262 @@ class ReconcileAgentRunNonGitTest(TempDirFixture):
         self.assertEqual(report["evidence"]["unattributable_residue"], [])
         self.assertEqual(report["evidence"]["verification"], None)
         self.assertEqual(report["evidence"]["native"], None)
+
+
+# —— RB-21-05：多仓双根（账本根 ≠ git 根）——账本 I/O 用账本根、git 求值用绑定仓库根 ——
+
+class SplitLedgerReconcileFixture(TempDirFixture):
+    """RB-2 双根夹具：非 git 账本根（workspace）+ 嵌套真实 git 仓库。
+
+    模式借鉴 tests/test_stop_gate.py 的 SplitLedgerFixture，按本文件
+    的对账口径自建：self.repo 即账本根（.glm-conductor/ 所在目录，
+    自身无 .git——对账若误把账本根当 git 根求值会得到 OwnershipError
+    而非错误结果，双根分离因此可被机械区分）；make_inner_repo 在账本
+    根下创建嵌套真实 git 仓库。任务 state 经 save_units 绑定
+    repository.root=内嵌仓库后，reconcile 的 git 求值（touched / 指纹）
+    在绑定仓库进行，账本 I/O（state.json / events.jsonl / agent run
+    账本）恒在 self.repo——精确复现 v2.0.1 RB-2 的 dogfood 场景。
+    """
+
+    def setUp(self):
+        super().setUp()
+        self._native_tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._native_tmp.cleanup)
+        self.agents_root = Path(self._native_tmp.name)
+
+    def make_inner_repo(self, name):
+        """在账本根下创建嵌套真实 git 仓库（含基线提交），返回其 Path。"""
+        inner = self.repo / name
+        inner.mkdir()
+        run_git(inner, "init")
+        run_git(inner, "config", "user.email", "reconcile@example.com")
+        run_git(inner, "config", "user.name", "Reconcile")
+        # 固定换行行为，避免全局 autocrlf 干扰指纹的换行归一口径
+        run_git(inner, "config", "core.autocrlf", "false")
+        (inner / "base.txt").write_bytes(b"v1\n")
+        run_git(inner, "add", ".")
+        run_git(inner, "commit", "-m", "init")
+        return inner
+
+    def git_init_ledger_root(self):
+        """把账本根本身初始化为 git 仓库（legacy 单根对照场景用）；
+        账本目录不入库，避免混入 touched 清单污染对账证据。"""
+        run_git(self.repo, "init")
+        run_git(self.repo, "config", "user.email", "reconcile@example.com")
+        run_git(self.repo, "config", "user.name", "Reconcile")
+        run_git(self.repo, "config", "core.autocrlf", "false")
+        self.write(".gitignore", b".glm-conductor/\n")
+        self.write("base.txt", b"v1\n")
+        run_git(self.repo, "add", ".")
+        run_git(self.repo, "commit", "-m", "init")
+
+    def save_units(self, units, task_id=TID, bind=None):
+        """在账本根写入任务 state.json（state.save_state 生产通道）；
+        bind 非 None 时绑定 repository.root=bind（RB-2），None 保持
+        legacy 无绑定形态。"""
+        st = state.new_task_state(task_id, "双根对账目标", dict(ROUTE))
+        st["work_units"] = units
+        if bind is not None:
+            state.bind_repository_root(st, str(bind))
+        state.save_state(self.repo, st)
+        return st
+
+    def write_in(self, root, rel, data):
+        """在指定根（如内嵌任务仓库）内写一个文件（自动建父目录）。"""
+        target = Path(root) / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(data)
+
+    def inner_fingerprint(self, inner, unit, touched=None):
+        """按 reconcile 同一口径对指定内嵌仓库真算单元当前证据指纹。"""
+        if touched is None:
+            touched = ownership.git_touched_files(str(inner))
+        owned_hits, _ = ownership.classify_paths(touched, unit["ownership"])
+        return fingerprint_mod.compute_fingerprint(str(inner), owned_hits)
+
+    def record_event(self, payload, task_id=TID):
+        """向账本根任务 journal 追加一条事件（缺省通道的真实落盘）。"""
+        return journal_mod.append_event(self.repo, task_id, payload)
+
+    def verification_event(self, unit, fp):
+        """构造绑定单元 id + 指纹的 pass 验证事件（H6 journal 形态）。"""
+        return {"event": "verification",
+                "unit": unit["id"],
+                "command": unit["verification"][0],
+                "status": "pass",
+                "fingerprint": fp}
+
+    def record_launch(self, uid, agent_id, *, tool_use_id="tu-1",
+                      permit_id="dp-1"):
+        """经 agent_run.record_agent_launch 在账本根落一条真实
+        agent_launched（agent run 账本恒在账本根）。"""
+        return agent_run.record_agent_launch(
+            self.repo, TID,
+            {"tool_use_id": tool_use_id,
+             "tool_response": {"agentId": agent_id} if agent_id else {}},
+            permit={"unit_id": uid, "permit_id": permit_id,
+                    "mode": "background"})
+
+    def write_native_archive(self, agent_id, status):
+        """伪造原生档案 <agents_root>/<主会话id>/<agentId>/metadata.json
+        （白名单形状对齐 agent_run.native_agent_metadata 的读取口径）。"""
+        agent_dir = self.agents_root / "session-main" / agent_id
+        agent_dir.mkdir(parents=True, exist_ok=True)
+        payload = {"agentId": agent_id, "status": status,
+                   "childSessionId": "child-%s" % agent_id,
+                   "usage": {"inputTokens": 10, "outputTokens": 5}}
+        (agent_dir / "metadata.json").write_text(
+            json.dumps(payload), encoding="utf-8")
+
+    def reconcile(self, uid, **kwargs):
+        """驱动 reconcile_agent_run：首参传账本根（调用方传账本根的
+        生产口径），agents_root 缺省指向伪造档案根。"""
+        kwargs.setdefault("agents_root", self.agents_root)
+        return reconcile.reconcile_agent_run(str(self.repo), TID, uid,
+                                             **kwargs)
+
+
+@unittest.skipUnless(shutil.which("git"), "环境无 git 可执行，跳过 git fixture 测试")
+class ReconcileAgentRunSplitLedgerTest(SplitLedgerReconcileFixture):
+    """reconcile_agent_run 双根分离（文档 §10.5 三个命名测试 + legacy
+    回退）：git 求值用任务绑定仓库根，账本 I/O 恒用账本根。"""
+
+    def test_agent_reconcile_uses_bound_repository_root(self):
+        # 账本根非 git：若误把账本根当 git 根求值 → OwnershipError →
+        # manual_ruling「repository evaluation failed」；正确行为是在
+        # 绑定仓库求值 residue → owned 残留 → resume_with_progress
+        inner = self.make_inner_repo("repo-alpha")
+        unit = make_unit("wu1", ("src/wu1/**",), status="running",
+                         verification=(CMD_A,))
+        self.save_units([unit], bind=inner)
+        self.write_in(inner, "src/wu1/a.py", b"a-v1\n")  # 绑定仓库内 owned 残留
+        report = self.reconcile("wu1")
+        self.assertEqual(report["classification"], "resume_with_progress")
+        self.assertEqual(report["rationale"],
+                         ["partial work present, no fresh pass evidence"])
+        self.assertEqual(report["evidence"]["owned_residue"],
+                         ["src/wu1/a.py"])
+        self.assertEqual(report["evidence"]["unattributable_residue"], [])
+
+    def test_agent_reconcile_reads_journal_from_ledger_root(self):
+        # 验证事件与 agent run 账本都落在账本根（绑定仓库无 events.jsonl）
+        # ——reuse_result 只有从账本根读到证据才可能得出
+        inner = self.make_inner_repo("repo-alpha")
+        unit = make_unit("wu1", ("src/wu1/**",), status="running",
+                         verification=(CMD_A,))
+        self.save_units([unit], bind=inner)
+        self.write_in(inner, "src/wu1/a.py", b"a-v1\n")
+        self.record_launch("wu1", "agent-1")
+        self.write_native_archive("agent-1", "completed")
+        fp = self.inner_fingerprint(inner, unit)
+        self.record_event(self.verification_event(unit, fp))
+        report = self.reconcile("wu1")
+        self.assertEqual(report["classification"], "reuse_result")
+        self.assertEqual(report["rationale"],
+                         ["agent archived terminal + fresh evidence"])
+        self.assertEqual(report["evidence"]["verification"],
+                         {"ok": True, "fingerprint": fp,
+                          "required": [CMD_A], "matched": [CMD_A],
+                          "missing": []})
+        self.assertEqual(len(report["evidence"]["runs"]), 1)
+        self.assertEqual(report["evidence"]["native"]["observed_status"],
+                         "completed")
+
+    def test_multi_repo_residue_classification_correct(self):
+        # 双内嵌仓库：只有被绑定的 alpha 参与 git 求值——alpha 的 owned
+        # 残留进 owned_residue；beta 的同名规则命中文件与 ownership 之外
+        # 的 rogue 都不可见（不入 touched，既非 owned 也非 unattributable）
+        alpha = self.make_inner_repo("repo-alpha")
+        beta = self.make_inner_repo("repo-beta")
+        unit = make_unit("wu1", ("src/wu1/**",), status="running",
+                         verification=(CMD_A,))
+        self.save_units([unit], bind=alpha)
+        self.write_in(alpha, "src/wu1/a.py", b"a-v1\n")
+        self.write_in(beta, "src/wu1/b.py", b"b-v1\n")
+        self.write_in(beta, "src/rogue/x.py", b"rogue\n")
+        report = self.reconcile("wu1")
+        self.assertEqual(report["classification"], "resume_with_progress")
+        self.assertEqual(report["evidence"]["owned_residue"],
+                         ["src/wu1/a.py"])
+        self.assertEqual(report["evidence"]["unattributable_residue"], [])
+
+    def test_legacy_unbound_task_falls_back_to_ledger_root(self):
+        # legacy 任务（state 无 repository.root 绑定）：回退账本根求值
+        # git——账本根本身是 git 仓库时行为与单根时代逐字一致
+        self.git_init_ledger_root()
+        unit = make_unit("wu1", ("src/wu1/**",), status="running",
+                         verification=(CMD_A,))
+        self.save_units([unit])  # bind=None：legacy 无绑定形态
+        self.write("src/wu1/a.py", b"a-v1\n")  # 账本根（=git 根）内残留
+        report = self.reconcile("wu1")
+        self.assertEqual(report["classification"], "resume_with_progress")
+        self.assertEqual(report["rationale"],
+                         ["partial work present, no fresh pass evidence"])
+        self.assertEqual(report["evidence"]["owned_residue"],
+                         ["src/wu1/a.py"])
+        self.assertEqual(report["evidence"]["unattributable_residue"], [])
+
+
+@unittest.skipUnless(shutil.which("git"), "环境无 git 可执行，跳过 git fixture 测试")
+class ReconcileGitRootInjectionTest(SplitLedgerReconcileFixture):
+    """fresh_unit_verification / reconcile_interrupted 的 git_root 注入
+    口直测：None 缺省路径与历史行为逐字一致（非 git 账本根上抛
+    OwnershipError）；注入后 git 求值在绑定仓库、账本读仍在账本根。"""
+
+    def residue_unit(self):
+        return make_unit("wu1", ("src/wu1/**",), status="running",
+                         verification=(CMD_A,))
+
+    def test_git_root_none_default_raises_on_non_git_ledger_root(self):
+        # git_root=None（缺省）→ git 求值根 = repo_root（账本根，非
+        # git）→ 与单根时代逐字一致地上抛 OwnershipError（既有调用方
+        # 「git 根传参 + 账本根注入 events」纪律依赖此不变性）
+        inner = self.make_inner_repo("repo-alpha")
+        unit = self.residue_unit()
+        self.save_units([unit], bind=inner)
+        self.write_in(inner, "src/wu1/a.py", b"a-v1\n")
+        with self.assertRaises(ownership.OwnershipError):
+            reconcile.fresh_unit_verification(str(self.repo), TID, unit)
+        with self.assertRaises(ownership.OwnershipError):
+            reconcile.reconcile_interrupted(str(self.repo), TID, [unit])
+
+    def test_git_root_injection_evaluates_bound_repo_ledger_events(self):
+        # git_root 注入：缺省 touched / 指纹在绑定仓库求值，缺省 events
+        # 恒从账本根读取——账本根 journal 里的新鲜证据被正确消费
+        inner = self.make_inner_repo("repo-alpha")
+        unit = self.residue_unit()
+        self.save_units([unit], bind=inner)
+        self.write_in(inner, "src/wu1/a.py", b"a-v1\n")
+        fp = self.inner_fingerprint(inner, unit)
+        self.record_event(self.verification_event(unit, fp))
+        verdict = reconcile.fresh_unit_verification(
+            str(self.repo), TID, unit, git_root=str(inner))
+        self.assertEqual(
+            verdict,
+            {"ok": True, "fingerprint": fp, "required": [CMD_A],
+             "matched": [CMD_A], "missing": []})
+        report = reconcile.reconcile_interrupted(
+            str(self.repo), TID, [unit], git_root=str(inner))
+        self.assertEqual(report["suggestions"], {
+            "wu1": {"to": "completed",
+                    "reason": "存在绑定当前改动的新鲜验证证据"
+                              "（parent-observed），待主会话确认"}})
+        self.assertEqual(report["touched"], ["src/wu1/a.py"])
+        self.assertEqual(report["advisories"], {})
+
+    def test_reconcile_interrupted_git_root_none_verbatim_single_root(self):
+        # 对照：账本根自身是 git 仓库（legacy 单根）+ git_root 缺省 →
+        # 行为与既有单根集成测试一致（求值与账本读同根）
+        self.git_init_ledger_root()
+        unit = self.residue_unit()
+        self.save_units([unit])
+        self.write("src/wu1/a.py", b"a-v1\n")
+        report = reconcile.reconcile_interrupted(str(self.repo), TID, [unit])
+        self.assertEqual(report["suggestions"], {
+            "wu1": {"to": "verifying",
+                    "reason": "残留改动无新鲜验证证据：主会话必须"
+                              "亲自检查 diff 并运行单元验证"}})
+        self.assertEqual(report["touched"], ["src/wu1/a.py"])
 
 
 if __name__ == "__main__":

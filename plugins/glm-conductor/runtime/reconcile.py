@@ -126,9 +126,14 @@ Agent Run 四分对账（v2.1 M3，计划 §9 / §7.3）：
     truth——observed_status == "running" 只触发 rationale 的僵尸语义
     句，绝不据此判存活。证据优先级（§7.3）体现为判定树顺序：
     repository state（residue）最先分流，其次 verification evidence，
-    再次 native 档案。单元定位：只读解析任务 state.json 的 work_units
-    （目录经 journal.journal_path 派生，不导入 runtime.state /
-    task_manager）；state 缺失 / 损坏 / 无此单元与 git 求值异常
+    再次 native 档案。双根分离（RB-21-05）：首参是账本根 ledger_root
+    （agent run 账本 / 任务 state.json / journal 全部在
+    <ledger_root>/.glm-conductor/tasks/<task-id>/ 下），git 求值根另行
+    按任务绑定解析（state.resolve_repository_root：绑定 repository.root
+    优先，legacy 回退账本根）——多仓场景（账本根 ≠ git 根）下 residue
+    与证据指纹在绑定仓库求值，账本读不跟随迁移。单元定位：只读解析
+    任务 state.json 的 work_units（文件经 journal.journal_path 派生
+    定位）；state 缺失 / 损坏 / 无此单元与 git 求值异常
     （OwnershipError / FingerprintError）一律 manual_ruling（rationale
     注明求值失败，residue 按无 residue 处理）——决策 API 恒返回冻结
     形状。纯读纪律同上：零 journal / state / 档案写入，零状态转换，
@@ -138,12 +143,14 @@ Agent Run 四分对账（v2.1 M3，计划 §9 / §7.3）：
     runtime.ownership / runtime.fingerprint / runtime.journal（缺省
     证据来源）、runtime.lease（H5 租约对读——expired_leases 过期集
     + lease_state 明细）、runtime.agent_run（v2.1 M3：agent run 账本
-    list_agent_runs 与原生档案只读 adapter native_agent_metadata）
+    list_agent_runs 与原生档案只读 adapter native_agent_metadata）、
+    runtime.state（RB-21-05：resolve_repository_root 只读复用——git
+    求值根按任务绑定解析，绑定优先 legacy 回退，禁止第二套解析；
+    state 的依赖闭包不引用本模块，无循环导入，已验证）
     + 标准库 json（v2.1 M3：任务 state.json 只读解析）。不导入
     runtime.work_unit（建议层不依赖转换层——应用示例里的
-    transition_work_unit 由调用方导入）、不导入 runtime.state /
-    runtime.task_manager（单元定位经 journal 任务目录只读解析
-    state.json；task_manager 反向导入本模块，无循环导入）。
+    transition_work_unit 由调用方导入）、不导入 runtime.task_manager
+    （task_manager 反向导入本模块，无循环导入）。
     仅 Python 3 标准库，`python3 -S` 可运行。
 
 来源：
@@ -166,6 +173,7 @@ from runtime import fingerprint
 from runtime import journal
 from runtime import lease
 from runtime import ownership
+from runtime import state
 
 # 中断对账的目标状态集合：只有处于这两个状态的单元才产出建议（§68）
 INTERRUPTED_STATUSES = ("running", "verifying")
@@ -192,7 +200,7 @@ ADVISORY_VERIFYING_STAY = {
 
 
 def fresh_unit_verification(repo_root, task_id, unit, *, touched=None,
-                            events=None) -> dict:
+                            events=None, git_root=None) -> dict:
     """单元验证证据纯判断谓词（v2.0.1 RB-1 / WU-P1，all-match 口径）。
 
     判断 unit["verification"] 内每个 required command 是否各存在至少
@@ -219,6 +227,13 @@ def fresh_unit_verification(repo_root, task_id, unit, *, touched=None,
     返回 ok=True（fingerprint=None）——不取 touched、不读 journal、
     不碰 git（下游完成门依赖此性质：零 required 的完成路径零 git）。
 
+    双根注入口（RB-21-05，向后兼容）：git_root=None（缺省）时行为与
+    单根时代逐字一致——git 求值（缺省 touched 清单与证据指纹）与
+    账本读（缺省 events）都落在 repo_root；提供时**仅 git 求值改在
+    git_root**（多仓场景：调用方传账本根 repo_root + 任务绑定仓库根
+    git_root），缺省 events 恒从账本根 repo_root 读取，touched 显式
+    注入时指纹仍按 git_root 计算（指纹必须绑定改动所在仓库）。
+
     参数容错（与 reconcile_interrupted 同口径）：touched 缺省 →
     ownership.git_touched_files（git 失败 OwnershipError 自然上抛）；
     events 缺省 → journal.read_events(repo_root, task_id)；注入非
@@ -238,14 +253,17 @@ def fresh_unit_verification(repo_root, task_id, unit, *, touched=None,
     patterns = unit.get("ownership")
     if not isinstance(patterns, (list, tuple)):
         patterns = []
+    # RB-21-05 双根分离：git_root 提供时 git 求值（缺省 touched / 指纹）
+    # 改在 git_root；None（缺省）→ 与单根时代逐字一致（求值根=repo_root）
+    git_eval_root = repo_root if git_root is None else git_root
     if touched is None:
-        touched = ownership.git_touched_files(repo_root)
+        touched = ownership.git_touched_files(git_eval_root)
     if events is None:
         events = journal.read_events(repo_root, task_id)
     elif not isinstance(events, list):
         events = []  # 注入通道容错：坏形状不炸判断（对账同口径）
     owned_hits, _ = ownership.classify_paths(touched, patterns)
-    fp = fingerprint.compute_fingerprint(repo_root, owned_hits)
+    fp = fingerprint.compute_fingerprint(git_eval_root, owned_hits)
     matched = []
     # 无合法 id 的单元：任何事件都无法通过 unit 逐字匹配（None==None
     # 不得成为 legacy 无 unit 字段事件的匹配通道——H6 口径的形状防御；
@@ -270,7 +288,8 @@ def fresh_unit_verification(repo_root, task_id, unit, *, touched=None,
             "missing": missing}
 
 
-def _interrupted_advice(repo_root, task_id, unit, touched, events):
+def _interrupted_advice(repo_root, task_id, unit, touched, events,
+                        git_root=None):
     """单个中断单元的裁决输出：(advice, advisory) 恰一非 None。
 
     running 走 §69 三分支建议（三分支见模块 docstring 证据顺序节）；
@@ -280,7 +299,8 @@ def _interrupted_advice(repo_root, task_id, unit, touched, events):
     verifying→ready / verifying→verifying 均不在 §62 转换表内，
     建议层不出表外建议）。
     证据判断复用 fresh_unit_verification（注入手中已有的 touched /
-    events，避免二次 git 与读盘；五条件逐字口径见该谓词 docstring）。
+    events，避免二次 git 与读盘；git_root 透传 RB-21-05 双根注入口
+    ——指纹须绑定改动所在仓库；五条件逐字口径见该谓词 docstring）。
     """
     status = unit.get("status")
     patterns = unit.get("ownership")
@@ -292,7 +312,8 @@ def _interrupted_advice(repo_root, task_id, unit, touched, events):
             return None, dict(ADVISORY_VERIFYING_RULING)
         return dict(SUGGEST_READY), None
     evidence = fresh_unit_verification(repo_root, task_id, unit,
-                                       touched=touched, events=events)
+                                       touched=touched, events=events,
+                                       git_root=git_root)
     if evidence["ok"]:
         return dict(SUGGEST_COMPLETED), None
     if status == "verifying":
@@ -301,20 +322,26 @@ def _interrupted_advice(repo_root, task_id, unit, touched, events):
 
 
 def reconcile_interrupted(repo_root, task_id, units, *, touched=None,
-                          events=None) -> dict:
+                          events=None, git_root=None) -> dict:
     """对中断单元（running / verifying）产出恢复裁决（§68-§69）。
 
     参数：
-      - repo_root：仓库根（git 仓库；指纹与缺省 touched 清单基于它）；
-      - task_id：任务 id（缺省 events 读取
-        .glm-conductor/tasks/<task-id>/events.jsonl）；
+      - repo_root：账本根（缺省 events 读取
+        .glm-conductor/tasks/<task-id>/events.jsonl 的根；git_root
+        缺省时兼作 git 求值根——单根时代行为，逐字不变）；
+      - task_id：任务 id；
       - units：work unit dict 列表（§61 形状；非 list 按空图处理，
         容错与 runtime.dependency 一致）；
       - touched：显式注入改动清单（git_touched_files 同口径；None →
-        内部 ownership.git_touched_files(repo_root)，git 失败
-        OwnershipError 上抛）；
+        内部 ownership.git_touched_files(git_root 为 None 时用
+        repo_root)，git 失败 OwnershipError 上抛）；
       - events：显式注入事件清单（read_events 同口径；None → 内部
-        journal.read_events(repo_root, task_id)；非 list → 按 [] 容错）。
+        journal.read_events(repo_root, task_id)；非 list → 按 [] 容错）；
+      - git_root：任务绑定的 git 求值根（RB-21-05 可选注入口，向后
+        兼容：None → 与单根时代逐字一致，git 求值根 = repo_root）。
+        提供时缺省 touched 清单与证据指纹在 git_root 求值，缺省
+        events 仍从账本根 repo_root 读取（多仓场景：repo_root 传
+        账本根，git_root 传 state.resolve_repository_root 的解析结果）。
 
     返回（结构见模块 docstring；suggestions / advisories / reconciled
     键序均按 units 出现序）：
@@ -326,8 +353,11 @@ def reconcile_interrupted(repo_root, task_id, units, *, touched=None,
     （只对 suggestions 应用 transition，advisories 仅提示）。
     completed 等非中断状态零输出（§68，见模块 docstring 锚定）。
     """
+    # RB-21-05 双根分离：git_root 提供时 git 求值（缺省 touched / 指纹）
+    # 改在 git_root；None（缺省）→ 与单根时代逐字一致
+    git_eval_root = repo_root if git_root is None else git_root
     if touched is None:
-        touched = ownership.git_touched_files(repo_root)
+        touched = ownership.git_touched_files(git_eval_root)
     if events is None:
         events = journal.read_events(repo_root, task_id)
     elif not isinstance(events, list):
@@ -345,7 +375,8 @@ def reconcile_interrupted(repo_root, task_id, units, *, touched=None,
         if unit.get("status") not in INTERRUPTED_STATUSES:
             continue  # §68：completed 等非中断状态零建议，不重跑
         advice, advisory = _interrupted_advice(repo_root, task_id, unit,
-                                               touched, events)
+                                               touched, events,
+                                               git_eval_root)
         if advice is not None:
             suggestions[uid] = advice
         if advisory is not None:
@@ -450,42 +481,49 @@ RATIONALE_ZOMBIE_AWARE = "metadata running is not truth (zombie-aware)"
 RATIONALE_FRESH_EVIDENCE = "fresh pass evidence present"
 RATIONALE_CONSERVATIVE = "unresolved evidence combination; manual ruling"
 
-# 任务 state.json 文件名（与 runtime.state 的任务目录布局一致；目录经
-# journal.journal_path 定位派生——不导入 runtime.state / task_manager，
-# 保持本模块依赖面 = 既有依赖 + runtime.agent_run）
+# 任务 state.json 文件名（与 runtime.state 的任务目录布局一致；文件
+# 经 journal.journal_path 派生定位，恒在账本任务目录。RB-21-05 起
+# 模块级导入 runtime.state 仅用于 resolve_repository_root 只读复用
+# ——git 求值根按任务绑定解析；单元定位仍不经 state API，纯读不变）
 _STATE_FILENAME = "state.json"
 
 
-def _load_unit_from_state(repo_root, task_id, uid):
-    """只读解析任务 state.json，定位 uid 对应的 work unit。
+def _load_unit_from_state(ledger_root, task_id, uid):
+    """只读解析账本根下的任务 state.json，定位 uid 对应的 work unit。
 
-    返回 (unit, state_readable)：
+    入参是账本根（RB-21-05：state.json 恒在账本任务目录，与 git 根
+    解耦）。
+
+    返回 (unit, state_readable, task_state)：
       - unit：命中的单元 dict（work_units 中首个 id == uid 的元素），
         找不到为 None；
       - state_readable：state.json 可读且形状可解析（顶层 dict 且
         work_units 为 list）。文件缺失 / OSError / JSON 损坏 / 顶层
-        非 dict / work_units 非 list → False。
+        非 dict / work_units 非 list → False；
+      - task_state：可读时的原始顶层 dict（供
+        state.resolve_repository_root 解析任务绑定仓库根；不可读时
+        为 None——unit 非 None 蕴含 task_state 为可解析 dict）。
 
-    纯读（零写入）；目录布局经 journal.journal_path 派生（state.json
-    与 events.jsonl 同处任务目录），不导入 runtime.state。
+    纯读（零写入）；文件经 journal.journal_path 派生定位（state.json
+    与 events.jsonl 同处账本任务目录）。
     """
-    path = journal.journal_path(repo_root, task_id).parent / _STATE_FILENAME
+    path = journal.journal_path(ledger_root, task_id).parent / _STATE_FILENAME
     if not path.is_file():
-        return None, False
+        return None, False, None
     try:
         with open(str(path), "r", encoding="utf-8") as fh:
             raw = json.load(fh)
     except (OSError, ValueError):  # ValueError 含 JSON / 解码错误
-        return None, False
+        return None, False, None
     if not isinstance(raw, dict):
-        return None, False
+        return None, False, None
     units = raw.get("work_units")
     if not isinstance(units, list):
-        return None, False
+        return None, False, None
     for unit in units:
         if isinstance(unit, dict) and unit.get("id") == uid:
-            return unit, True
-    return None, True
+            return unit, True, raw
+    return None, True, raw
 
 
 def _last_agent_id(runs):
@@ -551,7 +589,7 @@ def _classify_agent_run(runs, owned_residue, unattributable_residue,
     return CLASS_MANUAL_RULING, [RATIONALE_CONSERVATIVE]
 
 
-def reconcile_agent_run(repo_root, task_id, uid, *, events=None,
+def reconcile_agent_run(ledger_root, task_id, uid, *, events=None,
                         agents_root=None, now=None) -> dict:
     """单单元 Agent Run 四分分类决策 API（v2.1 M3，计划 §9；纯读）。
 
@@ -599,16 +637,21 @@ def reconcile_agent_run(repo_root, task_id, uid, *, events=None,
          → manual_ruling（保守兜底）。
 
     参数：
-      - repo_root：仓库根（git 求值根：residue 清单与证据指纹基于
-        它；也是任务账本根——state.json / journal 同在
-        <repo_root>/.glm-conductor/tasks/<task-id>/ 下）；
+      - ledger_root：账本根（RB-21-05 更名自 repo_root——本 API 的
+        账本 I/O 根：agent run 账本 / 任务 state.json / journal 全部
+        在 <ledger_root>/.glm-conductor/tasks/<task-id>/ 下；位置传
+        参的既有调用方不受更名影响）。git 求值根另行按任务绑定解析
+        ——state.resolve_repository_root(任务 state, ledger_root)：
+        绑定 repository.root 优先，legacy（无绑定）回退账本根，单根
+        场景行为与历史逐字一致；residue 清单与证据指纹基于解析出的
+        git 根求值；
       - task_id：任务 id（单元定位与事件缺省读取都基于它）；
       - uid：目标 work unit id（逐字精确匹配 work_units[].id）；
       - events：显式注入事件清单（仅作用于验证证据谓词
         fresh_unit_verification，与既有调用同一口径；None → 缺省
-        journal.read_events(repo_root, task_id)；非 list → 谓词按 []
-        容错）。run 账本（evidence["runs"]）恒读任务 journal——
-        agent_run.list_agent_runs 冻结签名不收事件注入；
+        journal.read_events(ledger_root, task_id)——账本读恒在账本根；
+        非 list → 谓词按 [] 容错）。run 账本（evidence["runs"]）恒读
+        任务 journal——agent_run.list_agent_runs 冻结签名不收事件注入；
       - agents_root：原生档案根（透传
         agent_run.native_agent_metadata；None → 缺省
         ~/.zcode/cli/agents；测试注入 tempfile 伪造树，绝不读写
@@ -632,7 +675,7 @@ def reconcile_agent_run(repo_root, task_id, uid, *, events=None,
     网络——分类与证据全部来自只读观察，处置（状态转换 / 重派 / 进度
     包组装）归调用方。
     """
-    runs = [run for run in agent_run.list_agent_runs(repo_root, task_id)
+    runs = [run for run in agent_run.list_agent_runs(ledger_root, task_id)
             if run.get("unit") == uid]
     last_agent_id = _last_agent_id(runs)
     native = None
@@ -640,7 +683,8 @@ def reconcile_agent_run(repo_root, task_id, uid, *, events=None,
         native = agent_run.native_agent_metadata(
             last_agent_id, agents_root=agents_root)
 
-    unit, state_readable = _load_unit_from_state(repo_root, task_id, uid)
+    unit, state_readable, task_state = _load_unit_from_state(
+        ledger_root, task_id, uid)
     if unit is None:
         # 分支 1a：找不到单元 → manual_ruling（rationale 注明定位失败）
         rationale = []
@@ -653,6 +697,12 @@ def reconcile_agent_run(repo_root, task_id, uid, *, events=None,
                              "unattributable_residue": [],
                              "verification": None, "native": native}}
 
+    # RB-21-05 双根分离：git 求值根按任务绑定解析（绑定 repository.root
+    # 优先，legacy 回退账本根；与 stop_gate / task_manager / provenance
+    # 消费同一解析入口，不引入第二套解析）；账本读（runs / events /
+    # state.json）恒在账本根 ledger_root，不跟随 git 根迁移
+    git_root = state.resolve_repository_root(task_state, ledger_root)
+
     patterns = unit.get("ownership")
     if not isinstance(patterns, (list, tuple)):
         patterns = []
@@ -664,13 +714,14 @@ def reconcile_agent_run(repo_root, task_id, uid, *, events=None,
     verification = None
     try:
         if events is None:
-            events = journal.read_events(repo_root, task_id)
-        touched = ownership.git_touched_files(repo_root)
+            events = journal.read_events(ledger_root, task_id)
+        touched = ownership.git_touched_files(git_root)
         owned_residue, unattributable_residue = ownership.classify_paths(
             touched, patterns)
         if has_required:
             verification = fresh_unit_verification(
-                repo_root, task_id, unit, touched=touched, events=events)
+                ledger_root, task_id, unit, touched=touched, events=events,
+                git_root=git_root)
     except (ownership.OwnershipError, fingerprint.FingerprintError) as exc:
         # 分支 1b：git 求值异常 → manual_ruling（residue 按无 residue
         # 处理、verification 记 None，rationale 注明求值失败；
