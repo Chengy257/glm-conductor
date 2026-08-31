@@ -14,7 +14,11 @@
       - invalidate_permit：失效（abort 回退时作废未消费 permit）；
       - list_permits：任务活跃 permit 清单（审计面）；
       - marker_for / parse_marker：机器可验证 marker 的构造与解析
-        （计划 §6.4，marker 格式冻结：GLM_CONDUCTOR_DISPATCH=<permit_id>）。
+        （计划 §6.4，marker 格式冻结：GLM_CONDUCTOR_DISPATCH=<permit_id>）；
+      - new_wave_id：wave 标识生成（"wave-" + 12 hex，v2.1 M4 wu-21-08）；
+      - validate_wave_membership：wave permit 的成员资格校验（permit
+        须指向 active wave 且 unit 仍在成员清单内；wu-21-08，hook
+        PreToolUse 门在 validate_permit 通过后追加调用）。
 
 存储（计划 §6.3 ※DR R3 锁定，照抄 leases 模式）：
     <repo_root>/.glm-conductor/tasks/<task-id>/permits/<permit_id>.json
@@ -59,10 +63,13 @@ TTL / 崩溃恢复：
       两个方向都收敛到确定语义，无需恢复程序。
 
 分层关系（分工锚定，照 lease 原语层不写 journal 的先例）：
-    本模块是纯原语层：零 journal 写入、零 state 读写、不 import
+    本模块是纯原语层：零 journal 写入、零 state 写入、模块顶层不 import
     runtime.state / runtime.journal（journal 事件 dispatch_permit_created /
     dispatch_permit_invalidated 与 mode 策略读取由 task_manager 接线层
     负责）；hook 侧（wu-21-03）只消费 validate / consume 只读面。
+    wu-21-08 的 validate_wave_membership 是唯一例外：它只读 state.json
+    （惰性 import runtime.state，函数内 import，模块顶层依赖面不变），
+    供 hook 做 wave 成员资格校验；本模块自身仍零 state 写入、零 journal。
 
 依赖：
     仅 Python 3 标准库（datetime / json / os / pathlib），零第三方，
@@ -468,3 +475,69 @@ def parse_marker(text):
     rest = text[index + len(MARKER_PREFIX):]
     token = rest.split()[0] if rest.split() else ""
     return token or None
+
+
+# —— wave 标识与成员资格校验（v2.1 M4 wu-21-08） ——
+
+# wave_id 形状（冻结）："wave-" + 12 hex（os.urandom，仿 permit_id）
+WAVE_ID_PREFIX = "wave-"
+WAVE_ID_HEX_CHARS = 12
+_WAVE_ID_RANDOM_BYTES = WAVE_ID_HEX_CHARS // 2
+
+
+def new_wave_id() -> str:
+    """生成新 wave_id："wave-" + 12 hex（os.urandom，仿 _new_permit_id
+    的冻结形状）。调用方（task_manager.prepare_dispatch_wave）负责
+    唯一性落盘——wave 记录的 wave_id 在 dispatch.waves 列表内唯一由
+    state._validate_dispatch 兜底校验。"""
+    return WAVE_ID_PREFIX + os.urandom(_WAVE_ID_RANDOM_BYTES).hex()
+
+
+def validate_wave_membership(repo_root, task_id, permit) -> "tuple":
+    """wave permit 的成员资格校验，返回 (ok: bool, reason: str | None)。
+
+    校验链（v2.1 M4 wu-21-08，hook 在 validate_permit 通过后追加调用；
+    reason 为英文短语，hook 侧直接透出）：
+      - permit 无 wave_id（缺失 / None；含 permit 非 dict 的容错）→
+        (True, None)：单单元派发（prepare_dispatch 直签）不受 wave
+        语义约束，恒放行；
+      - wave permit → 惰性 import runtime.state 只读 state.json
+        （函数内 import，模块顶层零 state 依赖的分层关系保持成立）：
+          * state 缺失 / JSON 损坏 → (False, "wave state unavailable")
+            （fail-closed：无法判定成员资格即不放行）；
+          * dispatch.waves 无该 wave_id → (False, "wave not found")；
+          * wave status != "active" → (False, "wave not active")；
+          * permit.unit_id 不在 wave.units → (False, "wave member
+            mismatch")；
+          * 全过 → (True, None)。
+    本函数只读不写——wave 关闭归 task_manager.finish_unit，这里绝不
+    就地改 wave 状态。
+    """
+    wave_id = permit.get("wave_id") if isinstance(permit, dict) else None
+    if wave_id is None:
+        return True, None
+    from runtime import state  # 惰性 import：保持模块顶层零 state 依赖
+    try:
+        st = state.load_state(repo_root, task_id)
+    except ValueError:
+        return False, "wave state unavailable"
+    if st is None:
+        return False, "wave state unavailable"
+    dispatch_block = st.get("dispatch")
+    waves = (dispatch_block.get("waves")
+             if isinstance(dispatch_block, dict) else None)
+    wave = None
+    if isinstance(waves, list):
+        for entry in waves:
+            if isinstance(entry, dict) and entry.get("wave_id") == wave_id:
+                wave = entry
+                break
+    if wave is None:
+        return False, "wave not found"
+    if wave.get("status") != "active":
+        return False, "wave not active"
+    members = wave.get("units")
+    unit_id = permit.get("unit_id") if isinstance(permit, dict) else None
+    if not isinstance(members, list) or unit_id not in members:
+        return False, "wave member mismatch"
+    return True, None

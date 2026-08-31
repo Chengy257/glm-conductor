@@ -149,12 +149,15 @@ def record_agent_launch(repo_root, task_id, payload, *, permit) -> dict:
     permit 为 dispatch_wave.load_permit 的 dict（消费前后均可——本
     函数只读其字段）；payload 为钩子 stdin dict。字段形状冻结：
     {"event": "agent_launched", "unit": ..., "permit_id": ...,
+     "wave_id": ...（v2.1 M4 wu-21-08，单单元派发恒 null）,
      "tool_use_id": ..., "agent_id": ...（可 null）, "execution_mode": ...}
     """
     return journal.append_event(repo_root, task_id, {
         "event": "agent_launched",
         "unit": permit.get("unit_id") if isinstance(permit, dict) else None,
         "permit_id": permit.get("permit_id") if isinstance(permit, dict)
+        else None,
+        "wave_id": permit.get("wave_id") if isinstance(permit, dict)
         else None,
         "tool_use_id": _tool_use_id(payload),
         "agent_id": _extract_agent_id(

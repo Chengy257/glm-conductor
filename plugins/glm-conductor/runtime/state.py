@@ -389,8 +389,87 @@ def _validate_visual_evidence(entries):
     return errors
 
 
+def _validate_dispatch_waves(waves) -> "list[str]":
+    """校验可选 dispatch.waves 数组（v2.1 M4 wu-21-08 wave 记录）。
+
+    键名冻结：wave_id（非空 str 且列表内唯一）/ units（非空字符串
+    数组）/ worker_budget（>= 1 整数）/ quota_status（四态）/
+    created_at（非空 str，ISO-8601 落盘口径）/ status（active|closed）/
+    closed_at（非空 str 或 None；status="closed" 时必须非 None）。
+    缺 waves 键 = legacy 合法（调用方把关）；逐条聚合全部错误不短路，
+    错误消息中文、前缀 dispatch.waves[i]。
+    """
+    if not isinstance(waves, list):
+        return ["dispatch.waves 必须是数组"]
+    errors = []
+    seen_wave_ids = set()
+    for index, wave in enumerate(waves):
+        prefix = "dispatch.waves[%d]" % index
+        if not isinstance(wave, dict):
+            errors.append("%s 必须是 JSON 对象" % prefix)
+            continue
+        for key in ("wave_id", "units", "worker_budget", "quota_status",
+                    "created_at", "status", "closed_at"):
+            if key not in wave:
+                errors.append("%s 缺少必填键 %s" % (prefix, key))
+        if "wave_id" in wave:
+            wave_id = wave["wave_id"]
+            if not isinstance(wave_id, str) or wave_id == "":
+                errors.append("%s.wave_id 必须是非空字符串" % prefix)
+            elif wave_id in seen_wave_ids:
+                errors.append(
+                    "%s.wave_id %r 重复（wave_id 必须在列表内唯一）"
+                    % (prefix, wave_id))
+            else:
+                seen_wave_ids.add(wave_id)
+        if "units" in wave:
+            units = wave["units"]
+            if not isinstance(units, list) or not units:
+                errors.append("%s.units 必须是非空数组" % prefix)
+            else:
+                errors.extend(
+                    "%s.units[%d] 必须是非空字符串" % (prefix, u_index)
+                    for u_index, item in enumerate(units)
+                    if not isinstance(item, str) or item == "")
+        if "worker_budget" in wave:
+            worker_budget = wave["worker_budget"]
+            # bool 是 int 的子类，但 True/False 不应充当 worker_budget
+            if isinstance(worker_budget, bool) \
+                    or not isinstance(worker_budget, int) or worker_budget < 1:
+                errors.append("%s.worker_budget 必须是 >= 1 的整数" % prefix)
+        if "quota_status" in wave:
+            quota_status = wave["quota_status"]
+            if quota_status not in QUOTA_STATUSES:
+                errors.append(_enum_error(prefix + ".quota_status",
+                                          quota_status, QUOTA_STATUSES))
+        if "created_at" in wave:
+            created_at = wave["created_at"]
+            if not isinstance(created_at, str) or created_at == "":
+                errors.append(
+                    "%s.created_at 必须是非空字符串（ISO-8601）" % prefix)
+        if "status" in wave:
+            status = wave["status"]
+            if status not in ("active", "closed"):
+                errors.append(_enum_error(prefix + ".status", status,
+                                          ("active", "closed")))
+        if "closed_at" in wave:
+            closed_at = wave["closed_at"]
+            if closed_at is not None and (
+                    not isinstance(closed_at, str) or closed_at == ""):
+                errors.append(
+                    "%s.closed_at 必须是非空字符串（ISO-8601）或 null"
+                    % prefix)
+            if wave.get("status") == "closed" and (
+                    not isinstance(closed_at, str) or closed_at == ""):
+                errors.append(
+                    "%s.closed_at 与 status=\"closed\" 矛盾：closed 波必须"
+                    "携带 closed_at" % prefix)
+    return errors
+
+
 def _validate_dispatch(dispatch):
-    """校验 dispatch 子对象（max_workers 为 1-§82 上限的整数 + active 数组）。"""
+    """校验 dispatch 子对象（max_workers 为 1-§82 上限的整数 + active 数组
+    + 可选 waves 数组，wu-21-08）。"""
     if not isinstance(dispatch, dict):
         return ["dispatch 必须是 JSON 对象"]
     from runtime.lease import DEFAULT_MAX_WORKERS_LIMIT
@@ -406,6 +485,9 @@ def _validate_dispatch(dispatch):
             % (DEFAULT_MAX_WORKERS_LIMIT, DEFAULT_MAX_WORKERS_LIMIT))
     if not isinstance(dispatch.get("active", []), list):
         errors.append("dispatch.active 必须是数组")
+    # 可选 waves 键（wu-21-08 wave 记录）：缺键 = legacy 合法
+    if "waves" in dispatch:
+        errors.extend(_validate_dispatch_waves(dispatch["waves"]))
     return errors
 
 

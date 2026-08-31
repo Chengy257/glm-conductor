@@ -85,6 +85,28 @@
     现有回退逻辑之后对该单元全部未消费 permit invalidate 并落
     dispatch_permit_invalidated（零失效不落事件）。
 
+派发 wave 批量事务（v2.1 M4，wu-21-08）：
+    prepare_dispatch_wave 把「决策 → 全量租约 → wave 记录 → 批量 permit
+    → journal」固化为一次调用的事务入口，与 prepare_dispatch（单单元）
+    并存；事务性 all-or-safe-degrade：wave 记录落盘时其全部成员租约
+    已在位——绝不出现「wave 记录 2 单元但只有 1 张租约」。要点：
+      - plan_dispatch 全量决策（带租约闸），批准集按 state.work_units
+        原序（plan 内部是 topo 序，这里重排回账面原序）；
+      - 批准集逐单元 acquire_lease；任一 LeaseConflictError → 释放本轮
+        已获取的全部租约、冲突单元入 excluded 集合、剔除后重新 plan
+        重试——excluded 单调增长保证有界终止；批准集空 →
+        TaskManagerError（消息口径照抄 prepare_dispatch，零租约残留）；
+      - 全部租约到位 → wave 记录（dispatch.waves[]，status="active"）
+        随 save_state 一次落盘 → 逐成员 create_permit（携带 wave_id）→
+        journal 单条 dispatch_wave_prepared（不逐单元重复
+        dispatch_prepared）；单元 wave 合法（只批 1 个也成 wave）；
+      - wave 关闭归 finish_unit：收尾使某 active wave 的 units 全部进入
+        completed/failed/cancelled/verifying → status="closed" +
+        closed_at + journal wave_closed；无 waves 键零行为；
+      - hook 侧成员资格校验（dispatch_wave.validate_wave_membership，
+        wu-21-03 的 permit 门追加一环）使 closed / 重组后的旧 wave
+        permit 不再放行；agent_launched 事件携带 wave_id。
+
 单元验证证据归属绑定（v2.0.1 加固 H6，审查项 P1-7）+ RB-1 完成证据门
 （release hardening WU-P2，计划 §2 RB-1）：
     record_unit_verification 是单元级验证证据的唯一推荐写入口——主
@@ -156,6 +178,8 @@
     账本根注入）。
 """
 
+import datetime
+
 from runtime import dependency
 from runtime import dispatch_wave
 from runtime import dispatcher
@@ -196,10 +220,24 @@ FINISH_OUTCOMES = ("completed", "failed", "cancelled")
 # （TASK_TRANSITIONS 内的合法边；executing 及之后的执行态不重复翻转）
 PRE_DISPATCH_TASK_STATUSES = ("created", "preflight", "routed", "decomposed")
 
+# wave 收口的单元状态闭集（v2.1 M4 wu-21-08 设计决策 3）：verifying 计入
+# ——已停止写文件、等待验证裁决的单元不再阻挡 wave 关闭
+WAVE_CLOSED_UNIT_STATUSES = ("completed", "failed", "cancelled", "verifying")
+
 
 class TaskManagerError(Exception):
     """task_manager 事务边界违背（单元缺失/状态不符/租约丢失/决策未批准
     /RB-1 完成证据缺失或不可判定）。"""
+
+
+# —— 内部助手（容错读取，均不改入参语义） ——
+
+def _utc_now_iso() -> str:
+    """当前 UTC 时刻的 ISO-8601 字符串（毫秒精度 Z 形态，与 permit /
+    租约层时间字段同格式）——wave 记录 created_at / closed_at 落盘口径。"""
+    moment = datetime.datetime.now(datetime.timezone.utc)
+    return (moment.strftime("%Y-%m-%dT%H:%M:%S")
+            + ".%03dZ" % (moment.microsecond // 1000))
 
 
 # —— 内部助手（容错读取，均不改入参语义） ——
@@ -282,6 +320,45 @@ def _default_dispatch_mode(st) -> str:
     return default_execution_policy()["worker_execution"]["default_mode"]
 
 
+def _validate_permit_mode(api, st, mode, reason) -> "tuple":
+    """permit mode/reason 全量校验（prepare_dispatch 与
+    prepare_dispatch_wave 共享，wu-21-08 抽取；消息逐字保持原口径）。
+
+    - 显式 mode 参数优先，缺省取 state execution_policy 的
+      worker_execution.default_mode（缺块/坏形状按默认块兜底，见
+      _default_dispatch_mode）；
+    - mode 不在 PERMIT_MODES → ValueError；
+    - mode="foreground" 必须显式给出 reason ∈
+      dispatch_wave.FOREGROUND_REASONS（§6.6），缺给出
+      TaskManagerError、值非法 ValueError；background 恒 reason null
+      （显式传入的 reason 静默归 null——接线层宽松，原语层
+      create_permit 才严格拒绝）。
+    返回 (effective_mode, permit_reason)。调用方必须在任何写副作用
+    （租约 / wave / permit / journal）之前调用——非法参数不得留下
+    半张租约或半个 wave。
+    """
+    effective_mode = mode if mode is not None else _default_dispatch_mode(st)
+    if effective_mode not in dispatch_wave.PERMIT_MODES:
+        raise ValueError(
+            "%s：mode %r 不在合法取值内（%s）"
+            % (api, effective_mode, ", ".join(dispatch_wave.PERMIT_MODES)))
+    permit_reason = reason
+    if effective_mode == "foreground":
+        if permit_reason is None:
+            raise TaskManagerError(
+                "%s：mode=\"foreground\" 必须显式给出 reason（%s）——"
+                "foreground 派发须由主会话声明原因（§6.6）"
+                % (api, ", ".join(dispatch_wave.FOREGROUND_REASONS)))
+        if permit_reason not in dispatch_wave.FOREGROUND_REASONS:
+            raise ValueError(
+                "%s：reason %r 不在合法取值内（%s）"
+                % (api, permit_reason,
+                   ", ".join(dispatch_wave.FOREGROUND_REASONS)))
+    else:
+        permit_reason = None  # background permit 的 reason 恒 null
+    return effective_mode, permit_reason
+
+
 # —— prepare：plan 决策 + 租约 + permit + 事件（无 state 副作用） ——
 
 def prepare_dispatch(repo_root, task_id, uid, *, quota_status="AVAILABLE",
@@ -339,26 +416,10 @@ def prepare_dispatch(repo_root, task_id, uid, *, quota_status="AVAILABLE",
         raise TaskManagerError(
             "%s：单元 %s 当前状态为 %r 而非 ready，不能准备派发"
             % (api, uid, current))
-    # permit 参数先于任何 I/O 副作用全量校验（§6.3/§6.6 冻结不变量）
-    effective_mode = mode if mode is not None else _default_dispatch_mode(st)
-    if effective_mode not in dispatch_wave.PERMIT_MODES:
-        raise ValueError(
-            "%s：mode %r 不在合法取值内（%s）"
-            % (api, effective_mode, ", ".join(dispatch_wave.PERMIT_MODES)))
-    permit_reason = reason
-    if effective_mode == "foreground":
-        if permit_reason is None:
-            raise TaskManagerError(
-                "%s：mode=\"foreground\" 必须显式给出 reason（%s）——"
-                "foreground 派发须由主会话声明原因（§6.6）"
-                % (api, ", ".join(dispatch_wave.FOREGROUND_REASONS)))
-        if permit_reason not in dispatch_wave.FOREGROUND_REASONS:
-            raise ValueError(
-                "%s：reason %r 不在合法取值内（%s）"
-                % (api, permit_reason,
-                   ", ".join(dispatch_wave.FOREGROUND_REASONS)))
-    else:
-        permit_reason = None  # background permit 的 reason 恒 null
+    # permit 参数先于任何 I/O 副作用全量校验（§6.3/§6.6 冻结不变量；
+    # wu-21-08 起内联逻辑抽为 _validate_permit_mode 与 wave 批量事务共享）
+    effective_mode, permit_reason = _validate_permit_mode(api, st, mode,
+                                                          reason)
     dispatch_block = st.get("dispatch")
     if not isinstance(dispatch_block, dict):
         dispatch_block = {}
@@ -410,6 +471,160 @@ def prepare_dispatch(repo_root, task_id, uid, *, quota_status="AVAILABLE",
         "permit_id": permit["permit_id"], "mode": effective_mode})
     plan["permit"] = permit
     return plan
+
+
+# —— wave：批量 plan 决策 + 全量租约 + wave 记录 + 批量 permit ——
+
+def prepare_dispatch_wave(repo_root, task_id, *, quota_status="AVAILABLE",
+                          allow_small_under_pressure=False, max_workers=None,
+                          mode=None, reason=None) -> dict:
+    """批量派发准备（v2.1 M4 wu-21-08）：一次调用完成「决策 → 全量租约
+    → wave 记录 → 批量 permit → journal」，事务性 all-or-safe-degrade
+    ——wave 记录落盘时其全部成员租约已在位，绝不出现「wave 记录
+    2 单元但只有 1 张租约」。
+
+    流程：
+      1. load_state（任务缺失 TaskManagerError；损坏 ValueError 上抛）；
+      2. permit mode/reason 先于任何写副作用全量校验（与 prepare_dispatch
+         共享 _validate_permit_mode，消息口径逐字一致）；
+      3. max_workers 缺省取 state["dispatch"]["max_workers"]（缺失按 1；
+         显式传参覆盖）；
+      4. 决策-租约循环（安全降级）：
+           a. 候选 = 未被剔除的 work_units，plan_dispatch 全量决策（带
+              落盘租约闸，纯决策器）；
+           b. 批准集按 state.work_units 原序重排（plan 内部是 topo 序）；
+           c. 批准集空 → TaskManagerError（消息口径照抄
+              prepare_dispatch：waiting_quota → quota EXHAUSTED；
+              deferred → 对应 reason；未进候选 → 依赖未满足），零租约
+              残留；
+           d. 批准集逐单元 acquire_lease（owner=uid，§78 全有或全无）；
+              任一 LeaseConflictError → 释放本轮已获取的全部租约（零
+              残留）、冲突单元加入 excluded 集合、回到 a 剔除后重试
+              ——excluded 单调增长保证有界终止；
+      5. 全部租约到位 → worker_budget = min(max_workers, len(批准集))，
+         wave_id = dispatch_wave.new_wave_id()，wave 记录（冻结键：
+         wave_id/units/worker_budget/quota_status/created_at/status/
+         closed_at，status="active"）追加进 dispatch.waves，save_state
+         一次落盘（单元 wave 合法：只批 1 个也成 wave）；
+      6. 逐成员 create_permit（携带 wave_id 与 mode/reason）；
+      7. journal 单条 dispatch_wave_prepared {wave_id, units,
+         worker_budget, permits: [permit_id...]}——不逐单元重复
+         dispatch_prepared；
+      8. 返回 {"wave_id", "units", "permits", "worker_budget",
+         "deferred", "waiting_quota"}（permits 为 permit dict 列表；
+         deferred/waiting_quota 为最终决策的落选面透传）。
+
+    wave 关闭不归本 API：成员全部终态/verifying 时由 finish_unit 收口
+    （见 _close_finished_waves）；hook 侧经
+    dispatch_wave.validate_wave_membership 校验成员资格。
+    """
+    api = "prepare_dispatch_wave"
+    st = _require_state(repo_root, task_id, api)
+    # mode/reason 校验先于任何写副作用（与「落选零副作用」同口径）
+    effective_mode, permit_reason = _validate_permit_mode(api, st, mode,
+                                                          reason)
+    dispatch_block = st.get("dispatch")
+    if not isinstance(dispatch_block, dict):
+        dispatch_block = {}
+    if max_workers is None:
+        max_workers = dispatch_block.get("max_workers", 1)
+    active = dispatch_block.get("active")
+    if not isinstance(active, list):
+        active = []
+    work_units = st.get("work_units")
+    if not isinstance(work_units, list):
+        work_units = []
+    # 决策-租约循环（安全降级）：冲突单元入 excluded，剔除后重 plan；
+    # excluded 每轮至少新增一个 uid，单调增长保证有界终止
+    excluded = set()
+    while True:
+        candidates = [
+            unit for unit in work_units
+            if isinstance(unit, dict) and isinstance(unit.get("id"), str)
+            and unit.get("id") not in excluded]
+        # 租约事实交给决策器的租约闸（§78 同 owner 幂等，自有租约不挡）
+        leases = lease.lease_state(repo_root, task_id)
+        plan = dispatcher.plan_dispatch(
+            candidates, max_workers=max_workers, active=active,
+            quota_status=quota_status,
+            allow_small_under_pressure=allow_small_under_pressure,
+            leases=leases)
+        by_id = {unit["id"]: unit for unit in candidates}
+        approved_set = set(plan["dispatch"])
+        # 批准集按 state.work_units 原序（plan 内部是 topo 序）
+        approved = [unit["id"] for unit in candidates
+                    if unit["id"] in approved_set]
+        if not approved:
+            if plan["waiting_quota"]:
+                why = "quota EXHAUSTED（配额耗尽，决策建议转 waiting_quota）"
+            elif plan["deferred"]:
+                why = "挂起（deferred）：%s" % "；".join(
+                    "%s（%s）" % (item.get("id"), item.get("reason"))
+                    for item in plan["deferred"])
+            else:
+                why = ("未进入派发候选（依赖未全部 completed 或状态未提升"
+                       "为 ready）")
+            raise TaskManagerError(
+                "%s：plan_dispatch 未批准任何单元（零租约残留）——%s"
+                % (api, why))
+        acquired = []
+        conflicted = False
+        for uid in approved:
+            owned = by_id[uid].get("ownership")
+            if not isinstance(owned, (list, tuple)):
+                owned = []
+            try:
+                lease.acquire_lease(repo_root, task_id, uid, owned,
+                                    ttl_seconds=LEASE_DEFAULT_TTL_SECONDS)
+            except lease.LeaseConflictError:
+                # 安全降级：释放本轮已获取的全部租约（零残留），冲突
+                # 单元剔除后重 plan——绝不带残缺租约进 wave 记录
+                for done in acquired:
+                    lease.release_lease(repo_root, task_id, done)
+                excluded.add(uid)
+                conflicted = True
+                break
+            acquired.append(uid)
+        if conflicted:
+            continue
+        break
+    worker_budget = min(max_workers, len(approved))
+    wave_id = dispatch_wave.new_wave_id()
+    wave = {
+        "wave_id": wave_id,
+        "units": list(approved),
+        "worker_budget": worker_budget,
+        "quota_status": quota_status,
+        "created_at": _utc_now_iso(),
+        "status": "active",
+        "closed_at": None,
+    }
+    if not isinstance(st.get("dispatch"), dict):
+        st["dispatch"] = {}
+    waves = st["dispatch"].get("waves")
+    if not isinstance(waves, list):
+        waves = []
+        st["dispatch"]["waves"] = waves
+    waves.append(wave)
+    # 一次落盘：此处起 wave.units 与在位租约一一对应（all-or-safe 界）
+    state.save_state(repo_root, st)
+    permits = [
+        dispatch_wave.create_permit(
+            repo_root, task_id, uid, wave_id=wave_id,
+            mode=effective_mode, reason=permit_reason)
+        for uid in approved]
+    journal.append_event(repo_root, task_id, {
+        "event": "dispatch_wave_prepared", "wave_id": wave_id,
+        "units": list(approved), "worker_budget": worker_budget,
+        "permits": [permit["permit_id"] for permit in permits]})
+    return {
+        "wave_id": wave_id,
+        "units": list(approved),
+        "permits": permits,
+        "worker_budget": worker_budget,
+        "deferred": plan["deferred"],
+        "waiting_quota": plan["waiting_quota"],
+    }
 
 
 # —— commit：ready→running + active 记账 + 单次 save ———
@@ -572,6 +787,43 @@ def _require_completion_evidence(repo_root, task_id, uid, unit, st) -> None:
             % (api, uid, "；".join(evidence["missing"])))
 
 
+def _close_finished_waves(st) -> "list[str]":
+    """wave 收口检查（v2.1 M4 wu-21-08，finish_unit 专用内存变换）。
+
+    对每个 active wave：若其 units 全部处于 WAVE_CLOSED_UNIT_STATUSES
+    （completed/failed/cancelled/verifying）→ 就地置 status="closed" +
+    closed_at=当前时刻，收集其 wave_id。返回本次关闭的 wave_id 列表
+    （落盘与 journal 归调用方：save_state 已在 finish_unit 的单次落盘
+    内，wave_closed 事件随其后的 journal 追加）。无 dispatch 块 / 无
+    waves 键 / 无 active wave → 空列表零行为（legacy 任务零影响）。
+    """
+    dispatch_block = st.get("dispatch")
+    if not isinstance(dispatch_block, dict):
+        return []
+    waves = dispatch_block.get("waves")
+    if not isinstance(waves, list):
+        return []
+    statuses = {}
+    units = st.get("work_units")
+    if isinstance(units, list):
+        for unit in units:
+            if isinstance(unit, dict):
+                statuses[unit.get("id")] = unit.get("status")
+    closed = []
+    for wave in waves:
+        if not isinstance(wave, dict) or wave.get("status") != "active":
+            continue
+        members = wave.get("units")
+        if not isinstance(members, list) or not members:
+            continue
+        if all(statuses.get(uid) in WAVE_CLOSED_UNIT_STATUSES
+               for uid in members):
+            wave["status"] = "closed"
+            wave["closed_at"] = _utc_now_iso()
+            closed.append(wave.get("wave_id"))
+    return closed
+
+
 def finish_unit(repo_root, task_id, uid, *, outcome="completed") -> dict:
     """单元收尾：RB-1 完成证据门（completed 时）→ 终态转换 → 释放租约
     → active 移除 → 单次 save → unit_finished 事件；返回 state dict。
@@ -600,8 +852,11 @@ def finish_unit(repo_root, task_id, uid, *, outcome="completed") -> dict:
          单步直达（running→failed/cancelled、verifying→completed/
          failed/cancelled，均在 §62 表内）；
       6. lease.release_lease + dispatch.active 移除 uid（在则删）；
-      7. save_state 一次；
-      8. journal unit_finished（unit + outcome）。
+         随后 wave 收口（wu-21-08）：active wave 全成员进入终态/
+         verifying → 置 status="closed"+closed_at（无 waves 键零行为）；
+      7. save_state 一次（单元转换与 wave 收口同一次落盘）；
+      8. journal unit_finished（unit + outcome）+ 逐个 wave_closed
+         （仅实际关闭的 wave）。
 
     证据门先于转换是刻意的：拒绝发生在任何变更之前——被拒的收尾可
     安全重试（补证后重调即可）。转 verifying 不落盘也是刻意的：它只是
@@ -632,9 +887,16 @@ def finish_unit(repo_root, task_id, uid, *, outcome="completed") -> dict:
     work_unit.transition_work_unit(unit, outcome)
     lease.release_lease(repo_root, task_id, uid)
     _remove_active(st, uid)
+    # wave 收口（wu-21-08）：在 release+active 移除之后、save 之前检查
+    # ——收尾使某 active wave 全成员进入终态/verifying 时关闭该 wave
+    # （内存置 status/closed_at，随本函数唯一的 save_state 落盘）
+    closed_waves = _close_finished_waves(st)
     state.save_state(repo_root, st)
     journal.append_event(repo_root, task_id, {
         "event": "unit_finished", "unit": uid, "outcome": outcome})
+    for closed_wave_id in closed_waves:
+        journal.append_event(repo_root, task_id, {
+            "event": "wave_closed", "wave_id": closed_wave_id})
     _write_manifest_safe(repo_root, task_id)
     return st
 

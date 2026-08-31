@@ -48,6 +48,19 @@
         possibly_zombie/archived_terminal 僵尸语义二标注，§7.3：
         status=="running" 绝不解读为存活）。纯读：不写 journal /
         state / 档案；任务不存在同空账本（退出码仍 0）。
+    wave-prepare <repo_root> <task_id> [quota_status] [max_workers]
+        批量派发准备（v2.1 M4 wu-21-08，task_manager.
+        prepare_dispatch_wave 薄壳）：一次调用完成「决策 → 全量租约 →
+        wave 记录 → 批量 permit → journal」。成功输出 wave_id / units /
+        worker_budget / permits（permit dict 列表）/ markers
+        （GLM_CONDUCTOR_DISPATCH=<permit_id>，可直接放进 Agent prompt）/
+        deferred / waiting_quota；任务缺失或决策未批准（TaskManagerError）
+        → 退出码 1；quota_status / max_workers 非法 → 退出码 2。
+    wave-show <repo_root> <task_id> [wave_id]
+        wave 记录只读查询（v2.1 M4 wu-21-08）。缺省 wave_id → 输出
+        {"task_id", "waves": [...]}（无 waves 键输出空数组）；给定
+        wave_id → 输出该 wave 记录原样 dict；wave 不存在或任务不存在
+        → 退出码 1。
 
 输出与退出码契约：
     stdout 恒为单行 JSON（json.dumps(..., ensure_ascii=True)，中文以
@@ -83,6 +96,7 @@ if str(PLUGIN_ROOT) not in sys.path:
     sys.path.insert(0, str(PLUGIN_ROOT))
 
 from runtime import agent_run, dispatch_wave, execution_policy, state  # noqa: E402
+from runtime.quota.parser import QUOTA_STATUSES  # noqa: E402
 
 USAGE = (
     "用法: python3 plugins/glm-conductor/runtime/cli.py "
@@ -93,7 +107,9 @@ USAGE = (
     "permits <repo_root> <task_id> | "
     "permit-show <repo_root> <task_id> <permit_id> | "
     "permit-consume <repo_root> <task_id> <permit_id> | "
-    "agent-runs <repo_root> <task_id> [unit]")
+    "agent-runs <repo_root> <task_id> [unit] | "
+    "wave-prepare <repo_root> <task_id> [quota_status] [max_workers] | "
+    "wave-show <repo_root> <task_id> [wave_id]")
 
 # policy-set-resume 的 max_quota_windows 缺省推导表（§5.4 耦合的
 # 最小合法值：until_done 取下界 1，保守不放大）
@@ -112,6 +128,16 @@ class _TaskMissing(Exception):
 class _PermitMissing(Exception):
     """permit 不存在（或已消费 / 已失效，load 按不存在处理）——运行期
     异常，退出码 1（fail-closed：consume 空操作显式报错而非静默成功）。"""
+
+
+class _WaveMissing(Exception):
+    """wave 记录不存在——运行期异常，退出码 1。"""
+
+
+class _WaveRejected(Exception):
+    """wave 准备被派发事务层拒绝（任务缺失 / 决策未批准 /
+    TaskManagerError）——运行期拒绝，退出码 1（区别于参数值非法的
+    退出码 2）。"""
 
 
 def _emit(payload):
@@ -271,6 +297,73 @@ def _agent_runs(repo_root, task_id, unit=None) -> int:
     return 0
 
 
+# —— v2.1 M4（wu-21-08）：dispatch wave 批量事务与只读查询 ——
+
+def _wave_prepare(repo_root, task_id, raw_quota_status=None,
+                  raw_max_workers=None) -> int:
+    """wave-prepare：批量派发准备（task_manager.prepare_dispatch_wave
+    薄壳）。参数值非法 → ValueError（退出码 2）；任务缺失 / 决策未
+    批准（TaskManagerError）→ _WaveRejected（退出码 1）；成功输出
+    wave_id / units / worker_budget / permits / markers / deferred /
+    waiting_quota——markers 为 GLM_CONDUCTOR_DISPATCH=<permit_id>
+    文本，操作者可直接放进 Agent prompt。"""
+    from runtime import task_manager
+    quota_status = ("AVAILABLE" if raw_quota_status is None
+                    else raw_quota_status)
+    if quota_status not in QUOTA_STATUSES:
+        raise ValueError(
+            "wave-prepare：quota_status %r 不在合法取值内（%s）"
+            % (quota_status, ", ".join(QUOTA_STATUSES)))
+    max_workers = None
+    if raw_max_workers is not None:
+        max_workers = _parse_int("wave-prepare", "max_workers",
+                                 raw_max_workers)
+    try:
+        result = task_manager.prepare_dispatch_wave(
+            repo_root, task_id, quota_status=quota_status,
+            max_workers=max_workers)
+    except task_manager.TaskManagerError as exc:
+        raise _WaveRejected(str(exc)) from exc
+    _emit({
+        "task_id": task_id,
+        "wave_id": result["wave_id"],
+        "units": result["units"],
+        "worker_budget": result["worker_budget"],
+        "permits": result["permits"],
+        "markers": [dispatch_wave.marker_for(permit["permit_id"])
+                    for permit in result["permits"]],
+        "deferred": result["deferred"],
+        "waiting_quota": result["waiting_quota"],
+    })
+    return 0
+
+
+def _waves_of(task_state) -> list:
+    """容错读取 state dict 的 dispatch.waves（缺失/形状异常按空处理）。"""
+    dispatch_block = (task_state.get("dispatch")
+                      if isinstance(task_state, dict) else None)
+    waves = (dispatch_block.get("waves")
+             if isinstance(dispatch_block, dict) else None)
+    return waves if isinstance(waves, list) else []
+
+
+def _wave_show(repo_root, task_id, wave_id=None) -> int:
+    """wave-show：wave 记录只读查询。缺省 wave_id → 全部 waves 数组；
+    给定 wave_id → 该 wave 记录原样 dict（照 permit-show 直出风格）；
+    wave 不存在 → _WaveMissing（退出码 1）。"""
+    st = _require_task_for_permit(repo_root, task_id)
+    waves = _waves_of(st)
+    if wave_id is None:
+        _emit({"task_id": task_id, "waves": waves})
+        return 0
+    for entry in waves:
+        if isinstance(entry, dict) and entry.get("wave_id") == wave_id:
+            _emit(entry)
+            return 0
+    raise _WaveMissing(
+        "wave %s 不存在（任务 %s 无该 wave 记录）" % (wave_id, task_id))
+
+
 def _manifest_show(repo_root, task_id) -> int:
     """manifest-show：Resume Manifest 只读查询（薄壳）。
 
@@ -331,6 +424,22 @@ def _dispatch(args) -> int:
                 "参数。" + USAGE)
         return _agent_runs(
             rest[0], rest[1], rest[2] if len(rest) == 3 else None)
+    if cmd == "wave-prepare":
+        if len(rest) not in (2, 3, 4):
+            raise _UsageError(
+                "wave-prepare 需要 <repo_root> <task_id> [quota_status] "
+                "[max_workers] 两到四个参数。" + USAGE)
+        return _wave_prepare(
+            rest[0], rest[1],
+            rest[2] if len(rest) >= 3 else None,
+            rest[3] if len(rest) >= 4 else None)
+    if cmd == "wave-show":
+        if len(rest) not in (2, 3):
+            raise _UsageError(
+                "wave-show 需要 <repo_root> <task_id> [wave_id] 两或三个"
+                "参数。" + USAGE)
+        return _wave_show(
+            rest[0], rest[1], rest[2] if len(rest) == 3 else None)
     if cmd == "manifest-show":
         if len(rest) != 2:
             raise _UsageError(
@@ -346,8 +455,9 @@ def main(argv=None) -> int:
     argv 缺省取 sys.argv[1:]；测试可直接传列表调用。异常映射：
     ValueError（用法 / 参数值 / setter / save_state 校验栈）→ 2；
     _TaskMissing（任务不存在）/ _PermitMissing（permit 不存在或已
-    消费 / 已失效）→ 1；其余意外异常 → 1（错误 JSON 含异常类型名，
-    stdout 契约不破）。
+    消费 / 已失效）/ _WaveMissing（wave 记录不存在）/ _WaveRejected
+    （wave 准备被派发事务层拒绝）→ 1；其余意外异常 → 1（错误 JSON 含
+    异常类型名，stdout 契约不破）。
     """
     args = list(sys.argv[1:]) if argv is None else list(argv)
     try:
@@ -355,7 +465,8 @@ def main(argv=None) -> int:
     except ValueError as exc:  # 含 _UsageError：校验拒绝类
         _emit({"error": str(exc)})
         return 2
-    except (_TaskMissing, _PermitMissing) as exc:
+    except (_TaskMissing, _PermitMissing, _WaveMissing,
+            _WaveRejected) as exc:
         _emit({"error": str(exc)})
         return 1
     except Exception as exc:  # 意外异常兜底：stdout 契约不破

@@ -26,6 +26,9 @@
     runtime.dispatch_wave.validate_permit（存在/未消费/未过期/任务匹配）
     才放行；background permit 经 updatedInput 全量改写强制后台（§6.5）。
     无 marker / permit 无效 → permissionDecision deny（可行动英文报文）。
+    v2.1 M4（wu-21-08）追加 wave 成员资格环：wave permit（permit 带
+    wave_id）须指向 active wave 且 unit 仍在成员清单内，否则 deny
+    （报文含 wave_id 与 re-prepare wave 指引）；单单元 permit 零影响。
     非实施者类型（只读类：Explore / reviewer 等）保留既有 ownership
     advisory 注入路径原样（deny 义务第二批 WU-21-13 评估）；无活动
     任务时零干预（v2.0.1 行为不回退）。
@@ -272,6 +275,29 @@ def _deny_dispatch(reason):
     return 0
 
 
+def _deny_wave(reason, wave_id):
+    """输出 wave 成员资格 deny 决策（v2.1 M4 wu-21-08，英文可行动报文）。
+
+    与 _deny_dispatch 同形态；报文含 wave_id 与「re-prepare wave」
+    指引——wave 已关闭 / 成员变更时，主会话照报文重备 wave（
+    prepare_dispatch_wave）并以新 permit marker 重新派发即可自救。
+    """
+    text = ("Agent dispatch blocked: %s (wave_id=%s). This wave permit is "
+            "no longer valid for its unit; re-prepare the wave with "
+            "task_manager.prepare_dispatch_wave and dispatch with the "
+            "fresh marker GLM_CONDUCTOR_DISPATCH=<permit_id>."
+            % (reason, wave_id))
+    output = {
+        "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": "deny",
+            "permissionDecisionReason": text,
+        }
+    }
+    sys.stdout.write(json.dumps(output) + "\n")
+    return 0
+
+
 def _marker_text(tool_input):
     """把 tool_input 的 prompt / description 拼为 marker 检索面（容错）。"""
     parts = []
@@ -314,6 +340,10 @@ def agent_permit_gate(payload):
          不存在）→ 无归属即 deny "permit not found"；
       5. validate_permit（存在/任务匹配/未过期；unit/wave 维由 permit
          内容保证，hook 不传）→ 不过即 deny（原因透出）；
+      5.5 wave 成员资格（v2.1 M4 wu-21-08）：permit 带 wave_id 时经
+         dispatch_wave.validate_wave_membership 校验（wave 存在且
+         active 且 unit 仍在成员清单）→ 失败 deny（报文含 wave_id 与
+         re-prepare 指引）；单单元 permit（wave_id None）不受影响；
       6. mode 一致性：background 且 run_in_background 非 True →
          updatedInput 全量替换强制后台；foreground / 已后台 → 放行
          （附 join 提醒）。
@@ -349,6 +379,16 @@ def agent_permit_gate(payload):
     ok, reason = dispatch_wave.validate_permit(repo, owner_task, permit_id)
     if not ok:
         return _deny_dispatch(reason)
+
+    # wave 成员资格校验（v2.1 M4 wu-21-08）：wave permit 须指向 active
+    # wave 且 unit 仍在成员清单内——closed / 重组后的旧 wave permit 不
+    # 得再放行；单单元 permit（wave_id None）恒放行，零行为变化
+    wave_id = permit.get("wave_id")
+    if wave_id is not None:
+        wave_ok, wave_reason = dispatch_wave.validate_wave_membership(
+            repo, owner_task, permit)
+        if not wave_ok:
+            return _deny_wave(wave_reason, wave_id)
 
     # mode 一致性（§6.5）：background 许可强制后台——未显式 True 即经
     # updatedInput 全量替换回写（全部原有字段 + run_in_background=True）；
