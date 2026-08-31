@@ -1419,6 +1419,10 @@ def _evaluation_from_refreshed_cache(repo_root):
     _recommended_resume_at（plan_resume 统一口径）计算建议恢复时刻。
 
     缓存缺失 / snapshot 非 dict / 求值异常 → None（§31 不虚构）。
+    边界（mid-batch review P3）：provider 层在 wake 时抓取失败 →
+    resolver 回退陈旧缓存 status，此处读到的 snapshot 是休眠前的
+    旧账——recommended_resume_at 仍只是建议值（不虚构、主会话按
+    四态重解析裁决），消费方不得将其当作已验证的可用性事实。
     """
     try:
         from runtime.quota import resolver, scheduler  # 函数内 import
