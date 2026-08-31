@@ -65,7 +65,7 @@ class ConstantsTest(unittest.TestCase):
             "id", "objective", "status", "depends_on", "executor",
             "ownership", "verification"))
         self.assertEqual(work_unit.WU_OPTIONAL_KEYS, (
-            "interfaces", "constraints", "attempt", "result"))
+            "interfaces", "constraints", "attempt", "result", "runtime"))
 
     def test_executors_vocabulary_matches_state_layer(self):
         self.assertEqual(work_unit.WU_EXECUTORS,
@@ -321,7 +321,9 @@ class TransitionTableTest(unittest.TestCase):
             "pending": ("waiting_dependency", "ready", "cancelled"),
             "waiting_dependency": ("ready", "blocked", "cancelled"),
             "ready": ("running", "waiting_quota", "blocked", "cancelled"),
-            "waiting_quota": ("ready", "blocked", "cancelled"),
+            # waiting_quota → verifying：RB-21-01 恢复对账边（额度中断
+            # 的 running 单元对账为 reuse_result 时直达验证）
+            "waiting_quota": ("ready", "verifying", "blocked", "cancelled"),
             "blocked": ("ready", "failed", "cancelled"),
             "running": ("verifying", "ready", "blocked", "waiting_quota",
                         "failed", "completed", "cancelled"),
@@ -357,8 +359,9 @@ class TransitionLegalEdgesTest(unittest.TestCase):
                     self.assertIs(result, w)  # 就地更新并返回同一 dict
                     self.assertEqual(w["status"], target)
                     self.assertEqual(w["id"], "wu-auth-tests")  # 其余键不动
-        # §62 转换表共 26 条合法边
-        self.assertEqual(total, 26)
+        # §62 转换表共 27 条合法边（RB-21-01 起 waiting_quota→verifying
+        # 恢复对账边 +1）
+        self.assertEqual(total, 27)
 
     def test_recommended_main_chain_end_to_end(self):
         # §62 推荐主链：pending → waiting_dependency → ready → running

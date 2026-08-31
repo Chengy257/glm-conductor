@@ -154,8 +154,13 @@
         调用，写 continuity.consumed_quota_windows，与 automation 存活
         解耦、绝不回滚——正确性底线永远是未来 SessionStart 恢复注入，
         automation 只是 best-effort bridge）；
-      - resume_from_quota：唤醒会话 / SessionStart 的恢复首步（按额度
-        四态裁决 AVAILABLE/PRESSURE 恢复、EXHAUSTED/UNKNOWN 保守等待）。
+      - resume_from_quota：唤醒会话 / SessionStart 的恢复首步（RB-21-01
+        恢复对账语义：status 缺省强制刷新额度；AVAILABLE/PRESSURE 恢复
+        时逐 waiting_quota 单元按中断来源 quota_interrupted_from 分类
+        落点——running 来源先 reconcile_agent_run 四分对账，禁止盲目
+        回 ready；返回增量 unit_recovery map；EXHAUSTED/UNKNOWN 保守
+        等待，EXHAUSTED 经强刷缓存 snapshot 按 scheduler.plan_resume
+        统一口径给建议恢复时刻）。
     授权矩阵（execution_policy.continuity.auto_resume，§14.2-§14.5）：
       - manual → 不建自动化，未来 SessionStart 恢复注入提示用户；
       - notify → 只允许提醒类 automation（runtime 只给 prompt 文本，
@@ -1032,7 +1037,9 @@ def finish_unit(repo_root, task_id, uid, *, outcome="completed") -> dict:
       5. 转换：running + completed → 先 verifying 再 completed（§70 父
          验证语义：worker 报告只是 claim，编码为两次表内转换）；其余
          单步直达（running→failed/cancelled、verifying→completed/
-         failed/cancelled，均在 §62 表内）；
+         failed/cancelled，均在 §62 表内）；终态落点后兜底清除单元的
+         runtime.quota_interrupted_from 中断来源标记（RB-21-01，存在
+         才清）；
       6. lease.release_lease + dispatch.active 移除 uid（在则删）；
          随后 wave 收口（wu-21-08）：active wave 全成员进入终态/
          verifying → 置 status="closed"+closed_at（无 waves 键零行为）；
@@ -1067,6 +1074,9 @@ def finish_unit(repo_root, task_id, uid, *, outcome="completed") -> dict:
         # 验证后才算 completed）——两次表内转换，不越表直跳
         work_unit.transition_work_unit(unit, "verifying")
     work_unit.transition_work_unit(unit, outcome)
+    # RB-21-01 兜底：终态单元不再有「中断来源」语义（恢复落点已定），
+    # 残留标记一律清除（存在才清，legacy 单元零影响）
+    _clear_quota_interrupt_origin(unit)
     lease.release_lease(repo_root, task_id, uid)
     _remove_active(st, uid)
     # wave 收口（wu-21-08）：在 release+active 移除之后、save 之前检查
@@ -1252,61 +1262,59 @@ QUOTA_RESUME_GRACE_SECONDS = 300
 QUOTA_RESUME_STATUSES = ("AVAILABLE", "PRESSURE")
 
 
-def _parse_iso_utc_z(text):
-    """ISO8601 时刻文本（含 Z 后缀）→ aware datetime（UTC）；失败 None。
-
-    Python 3.7 的 fromisoformat 不认 Z 后缀，先改写为 +00:00；
-    naive 时刻按 UTC 处理；非 str / 空串 / 不可解析 → None（调用方
-    按「未知」处理，不虚构）。
-    """
-    if not isinstance(text, str) or text == "":
-        return None
-    raw = text.strip()
-    if raw.endswith(("Z", "z")):
-        raw = raw[:-1] + "+00:00"
-    try:
-        moment = datetime.datetime.fromisoformat(raw)
-    except ValueError:
-        return None
-    if moment.tzinfo is None:
-        return moment.replace(tzinfo=datetime.timezone.utc)
-    return moment
-
-
-def _format_iso_z(moment) -> str:
-    """aware datetime → UTC ISO8601 秒精度 Z 形式（与 scheduler 同口径）。"""
-    return moment.astimezone(datetime.timezone.utc).strftime(
-        "%Y-%m-%dT%H:%M:%SZ")
-
-
 def _recommended_resume_at(evaluation):
-    """由 evaluation 计算建议恢复时刻（最早 EXHAUSTED 窗 reset + 宽限）。
+    """由 evaluation 计算建议恢复时刻（统一走 scheduler.plan_resume）。
 
-    - evaluation 提供 windows（evaluate() 输出的逐窗明细）→ 取全部
-      EXHAUSTED 窗中 reset_at 可解析的最早者 + QUOTA_RESUME_GRACE_
-      SECONDS（比 scheduler.plan_resume 的取最晚口径更进取：首次
-      reset 即可尝试恢复，resume_from_quota 会重新解析四态、仍
-      EXHAUSTED 则零转态保守等待，正确性不受影响）；
-    - evaluation 为 None / 无 windows / 无可解析 reset → None（§31
-      不虚构：reset 未知时回退周期探针，绝不编造调度时刻）。
+    RB-21-01 起本函数降级为 runtime.quota.scheduler.plan_resume 的薄
+    容错 wrapper——本模块不再维护第二套 reset 数学（历史的「最早
+    EXHAUSTED 窗 reset + 宽限」min 口径已删除；统一为 §30 最晚多窗
+    口径：resume_at = max(全部 EXHAUSTED 窗 reset) + 宽限，多窗同时
+    EXHAUSTED 时不产生 premature wake 浪费 auto_once 的单窗预算）：
+      - evaluation None / 非 dict / status 缺失或非法 / 规划异常 →
+        None（不抛——调用方按「未知」处理，§31 不虚构）；
+      - EXHAUSTED → plan["resume_at"]（任一阻塞窗 reset 不可解析 →
+        periodic_fallback，plan["resume_at"] 为 None）；
+      - 非 EXHAUSTED → None（AVAILABLE / PRESSURE 不需要调度时刻）。
     """
     if not isinstance(evaluation, dict):
         return None
-    windows = evaluation.get("windows")
-    if not isinstance(windows, list):
+    try:
+        from runtime.quota import scheduler  # 函数内 import：monkeypatch 友好
+        plan = scheduler.plan_resume(
+            evaluation, grace_seconds=QUOTA_RESUME_GRACE_SECONDS)
+    except Exception:
         return None
-    moments = []
-    for window in windows:
-        if not isinstance(window, dict) \
-                or window.get("status") != "EXHAUSTED":
-            continue
-        moment = _parse_iso_utc_z(window.get("reset_at"))
-        if moment is not None:
-            moments.append(moment)
-    if not moments:
+    if not isinstance(plan, dict):
         return None
-    grace = datetime.timedelta(seconds=QUOTA_RESUME_GRACE_SECONDS)
-    return _format_iso_z(min(moments) + grace)
+    if evaluation.get("status") != "EXHAUSTED":
+        return None
+    return plan.get("resume_at")
+
+
+def _evaluation_from_refreshed_cache(repo_root):
+    """强刷后的额度缓存 snapshot → scheduler.evaluate 的 evaluation。
+
+    resume_from_quota 的 EXHAUSTED 分支专用：wake 已以 force_refresh=
+    True 强制刷新，provider 抓取成功时 resolver 缓存（
+    <repo_root>/.glm-conductor/quota-cache.json）保存完整 snapshot
+    （形状 {"provider", "fetched_at", "snapshot", "status"}）——复用
+    resolver 的缓存原语（_cache_path / _load_cache，零 resolver 改动）
+    读回 snapshot，经 scheduler.evaluate 产出 evaluation，交
+    _recommended_resume_at（plan_resume 统一口径）计算建议恢复时刻。
+
+    缓存缺失 / snapshot 非 dict / 求值异常 → None（§31 不虚构）。
+    """
+    try:
+        from runtime.quota import resolver, scheduler  # 函数内 import
+        cache = resolver._load_cache(resolver._cache_path(repo_root))
+        if not isinstance(cache, dict):
+            return None
+        snapshot = cache.get("snapshot")
+        if not isinstance(snapshot, dict):
+            return None
+        return scheduler.evaluate(snapshot)
+    except Exception:
+        return None
 
 
 def _continuity_view(st) -> dict:
@@ -1426,7 +1434,11 @@ def handle_quota_exhausted(repo_root, task_id, *, evaluation=None) -> dict:
          verifying / reviewing），否则 TaskManagerError；
       2. 未终态单元（QUOTA_WAIT_UNIT_STATUSES：ready / running /
          waiting_quota）转 waiting_quota（§62 表内边；waiting_quota
-         原地保持）+ dispatch.active 清空；
+         原地保持）+ dispatch.active 清空；首次转换时在中断来源标记
+         unit["runtime"]["quota_interrupted_from"] = 转换前状态
+         （RB-21-01：恢复对账据此区分 ready / running——running 中断
+         单元须先 reconcile 对账，禁止盲目回 ready；已是 waiting_quota
+         的单元不覆盖既有标记）；
       3. 任务级转 waiting_quota：joining / verifying / reviewing 先经
          表内边回 executing 落盘一次，再 executing → waiting_quota
          （TASK_TRANSITIONS 无 joining→waiting_quota 直达边，两段转换
@@ -1444,9 +1456,12 @@ def handle_quota_exhausted(repo_root, task_id, *, evaluation=None) -> dict:
           "wake": {"required", "prompt", "budget_exhausted"}, "reason"}。
 
     evaluation（可选）：quota 子系统的 evaluate() 输出 dict——提供
-    windows 时 recommended_resume_at = 最早 EXHAUSTED 窗 reset +
-    300 秒宽限；None（或无 windows / reset 不可解析）→ None（§31
-    不虚构）。wake.prompt：required 分支与 notify 提醒分支为
+    windows 时 recommended_resume_at = scheduler.plan_resume 统一口径
+    （§30 最晚多窗语义：max(全部 EXHAUSTED 窗 reset) + 300 秒宽限，
+    RB-21-01 起不再用历史上的「最早窗」min 口径——多窗同时 EXHAUSTED
+    时过早唤醒会浪费 auto_once 的单窗预算）；None（或无 windows /
+    reset 不可解析 / status 非法）→ None（§31 不虚构）。
+    wake.prompt：required 分支与 notify 提醒分支为
     quota_wake_prompt(...) 的自足文本，其余为 None。
     """
     api = "handle_quota_exhausted"
@@ -1466,7 +1481,16 @@ def handle_quota_exhausted(repo_root, task_id, *, evaluation=None) -> dict:
             if unit.get("status") not in QUOTA_WAIT_UNIT_STATUSES:
                 continue
             if unit.get("status") != "waiting_quota":
+                # RB-21-01：保存中断来源（恢复对账据此区分落点——
+                # running 中断单元恢复须先 reconcile，禁止盲目回 ready；
+                # 仅首次转换时写，已是 waiting_quota 不覆盖既有标记）
+                interrupted_from = unit.get("status")
                 work_unit.transition_work_unit(unit, "waiting_quota")
+                runtime_meta = unit.get("runtime")
+                if not isinstance(runtime_meta, dict):
+                    runtime_meta = {}
+                    unit["runtime"] = runtime_meta
+                runtime_meta["quota_interrupted_from"] = interrupted_from
             waiting.append(unit.get("id"))
     _set_active(st, [])
     # 任务级转换：非 executing 入口先经表内边回 executing 落盘一次
@@ -1545,14 +1569,20 @@ def quota_wake_prompt(repo_root, task_id) -> str:
         "CronUpdate 修改参数或改期。",
         "",
         "第一步（必须最先执行）——额度检查与恢复：",
-        "1. 解析当前额度四态（绝不重试网络；层级：新鲜缓存 → provider "
-        "→ 陈旧缓存 → UNKNOWN）：",
-        "   python3 plugins/glm-conductor/runtime/cli.py quota-resolve '%s'"
+        "1. 解析当前额度四态（绝不重试网络；--force-refresh 强制走 "
+        "provider——唤醒后不得信任休眠期间的本地缓存；provider 不可用"
+        "时按陈旧缓存 → UNKNOWN 层级回退）：",
+        "   python3 plugins/glm-conductor/runtime/cli.py quota-resolve "
+        "--force-refresh '%s'"
         % repo_root,
         "2. 调用 runtime.task_manager.resume_from_quota(repo_root=r'%s', "
-        "task_id='%s')：" % (repo_root, task_id),
+        "task_id='%s')（内部同样强制刷新额度并对中断单元做恢复对账）："
+        % (repo_root, task_id),
         "   - AVAILABLE / PRESSURE → 任务转回 executing、waiting_quota "
-        "单元回 ready，按账本就绪顺序经 prepare_dispatch / "
+        "单元按中断来源恢复（ready 来源直回 ready；running 来源先 "
+        "reconcile 四分：干净重派回 ready、成果可复用直达 verifying、"
+        "有进度回 ready 待主会话组装进度包续作、人工裁决保持等待），"
+        "按账本就绪顺序经 prepare_dispatch / "
         "prepare_dispatch_wave 继续（遵守 orchestration 纪律：SELECTIVE "
         "ROUTE、permit 门与租约时序不得绕过）；",
         "   - EXHAUSTED / UNKNOWN → 零转态保守等待：不得派发、不得再建"
@@ -1645,45 +1675,134 @@ def _wake_budget_remaining(st) -> int:
     return max(0, max_windows - consumed_quota_windows(policy))
 
 
+def _clear_quota_interrupt_origin(unit) -> None:
+    """清除单元的中断来源标记（RB-21-01 恢复落点收尾）。
+
+    runtime.quota_interrupted_from 成功恢复后即失义（下一轮额度中断
+    会重新写入），清除避免陈旧标记误导后续对账；runtime dict 因此变
+    空则整键删除（保持单元形状最简）。runtime 缺失 / 非 dict 时零操作。
+    """
+    runtime_meta = unit.get("runtime")
+    if not isinstance(runtime_meta, dict):
+        return
+    runtime_meta.pop("quota_interrupted_from", None)
+    if not runtime_meta:
+        unit.pop("runtime", None)
+
+
+def _reconcile_running_unit(repo_root, task_id, uid):
+    """对 running 中断单元做四分对账 → (落点状态, unit_recovery 条目)。
+
+    调 runtime.reconcile.reconcile_agent_run（纯读对账，RB-21-01：
+    resume 链禁止盲目 waiting_quota→ready——worker 现场可能有残留），
+    按 classification 决定落点：
+      - redispatch_clean → "ready"（无执行内容无残留，全新派发）；
+      - reuse_result → "verifying"（agent 成果可复用，经 §62 演进的
+        waiting_quota→verifying 新边直达验证；条目带
+        action_required="recover_agent_result"，主会话须先捞取成果）；
+      - resume_with_progress → "ready"（有进度无完整证据；条目透传
+        evidence 证据句柄，主会话组装 Previous Progress Package 随新
+        规格续派——编排纪律，runtime 不机械阻止）；
+      - manual_ruling（及未知分类，防御）→ "waiting_quota"（保持等待，
+        禁止自动猜测；条目透传 rationale）。
+
+    fail-closed：reconcile 异常（求值失败 / 环境问题）→ 按 manual_ruling
+    处理（rationale 注明 reconcile error 与异常类型名），绝不让异常炸掉
+    整个 resume。
+    """
+    try:
+        from runtime import reconcile  # 函数内 import：monkeypatch 友好
+        report = reconcile.reconcile_agent_run(repo_root, task_id, uid)
+    except Exception as exc:
+        return "waiting_quota", {
+            "classification": "manual_ruling",
+            "rationale": ["reconcile error: %s" % type(exc).__name__]}
+    classification = (report.get("classification")
+                      if isinstance(report, dict) else None)
+    if classification == "redispatch_clean":
+        return "ready", {"classification": classification}
+    if classification == "reuse_result":
+        return "verifying", {
+            "classification": classification,
+            "action_required": "recover_agent_result",
+            "evidence": report.get("evidence")}
+    if classification == "resume_with_progress":
+        return "ready", {
+            "classification": classification,
+            "evidence": report.get("evidence")}
+    # manual_ruling 与未知分类（防御保留位）：保持 waiting_quota
+    entry = {"classification":
+             classification if isinstance(classification, str)
+             and classification else "manual_ruling"}
+    rationale = (report.get("rationale")
+                 if isinstance(report, dict) else None)
+    if rationale is not None:
+        entry["rationale"] = rationale
+    return "waiting_quota", entry
+
+
 def resume_from_quota(repo_root, task_id, *, status=None) -> dict:
     """额度唤醒 / SessionStart 的恢复首步（v2.1 §14 恢复入口）。
 
     流程：
       1. load_state（任务缺失 TaskManagerError）；
-      2. status 缺省经 runtime.quota.resolver.resolve_quota_status 解析
-         （wu-21-10 四级层级：fresh cache → provider fetch → stale
-         cache → UNKNOWN；函数内 import + 属性访问，测试 monkeypatch
-         友好；绝不重试网络、异常不外泄、凭证零落盘）——source 记
-         resolved["source"]；显式 status（调用方声明）直通，source 记
-         "explicit"（零解析、零网络）；
-      3. status ∈ QUOTA_RESUME_STATUSES（AVAILABLE / PRESSURE——
-         PRESSURE 恢复后并发预算经既有 §12 折算自动收缩到 1）且任务
-         处于 waiting_quota / waiting_user → 恢复：waiting_quota 单元
-         回 ready（§62 表内边）+ 任务转回 executing（waiting_quota →
-         executing 与 waiting_user → executing 均为表内边）+ save +
-         journal quota_resumed {status, source} + manifest 刷新，返回
-         {"resumed": True, ...}；
-      4. 其余情形（EXHAUSTED / UNKNOWN 保守等待；任务已不在等待态——
+      2. status 缺省经 runtime.quota.resolver.resolve_quota_status 解析，
+         **强制刷新**（RB-21-01：force_refresh=True——§32 唤醒后必须
+         强刷，休眠期间的新鲜缓存可能早已失效成误导；函数内 import +
+         属性访问，测试 monkeypatch 友好；绝不重试网络、异常不外泄、
+         凭证零落盘）——source 记 resolved["source"]；显式 status
+         （调用方声明）直通，source 记 "explicit"（零解析、零网络、
+         零缓存读）；
+      3. EXHAUSTED（经 resolver 解析的分支）→ 从强刷后的缓存读回
+         snapshot，交 scheduler.evaluate + plan_resume 统一口径计算
+         recommended_resume_at（§30 最晚 reset + 宽限；缓存不可读 /
+         reset 未知 → None 不虚构）；
+      4. status ∈ QUOTA_RESUME_STATUSES（AVAILABLE / PRESSURE）且任务
+         处于 waiting_quota / waiting_user → 恢复对账（RB-21-01）：
+         逐 waiting_quota 单元按中断来源分类落点——
+           - 无 runtime.quota_interrupted_from（legacy）或来源 ready →
+             转 ready（向后兼容现行为）；
+           - 来源 running → _reconcile_running_unit 四分对账：
+             redispatch_clean → ready / reuse_result → verifying
+             （§62 演进新边）/ resume_with_progress → ready /
+             manual_ruling → 保持 waiting_quota；对账异常 fail-closed
+             按 manual_ruling。成功落点的单元清除中断来源标记；
+         任一 manual_ruling → 任务不转 executing（保持 waiting_quota、
+         resumed=False，不落 quota_resumed）；否则任务转回 executing
+         （waiting_quota → executing 与 waiting_user → executing 均为
+         表内边）+ save + journal quota_resumed {status, source,
+         unit_recovery} + manifest 刷新，返回 {"resumed": True, ...}；
+      5. 其余情形（EXHAUSTED / UNKNOWN 保守等待；任务已不在等待态——
          如重复唤醒）零转态，返回 {"resumed": False, ...}。
 
-    返回键冻结：{"resumed", "status", "recommended_resume_at",
-    "wake_budget_remaining"}。recommended_resume_at 恒 None——本入口
-    不携带 evaluation，reset 未知时不虚构调度时刻（§31；再次 EXHAUSTED
-    的重排由主会话重走 handle_quota_exhausted 按其 evaluation 计算）。
+    返回键：既有冻结四键 {"resumed", "status", "recommended_resume_at",
+    "wake_budget_remaining"} 原样保留 + 新增 "unit_recovery"（RB-21-01：
+    unit id → {"classification", ...按分类透传的 action_required /
+    evidence / rationale}；非恢复分支为 {}）。recommended_resume_at
+    仅在 wake 强刷后 EXHAUSTED 时给出 plan_resume 口径时刻，显式
+    status 恒 None（不读缓存、不虚构）。
     """
     api = "resume_from_quota"
     st = _require_state(repo_root, task_id, api)
     source = "explicit"
+    recommended = None
     if status is None:
         from runtime.quota import resolver  # 函数内 import：monkeypatch 友好
-        resolved = resolver.resolve_quota_status(repo_root)
+        resolved = resolver.resolve_quota_status(repo_root,
+                                                 force_refresh=True)
         status = resolved["status"]
         source = resolved["source"]
+        if status == "EXHAUSTED":
+            # 强刷后的缓存 snapshot → evaluate → plan_resume（§30/§32
+            # 统一规划口径；缓存不可读 → None 不虚构）
+            recommended = _recommended_resume_at(
+                _evaluation_from_refreshed_cache(repo_root))
     result = {
         "resumed": False,
         "status": status,
-        "recommended_resume_at": None,
+        "recommended_resume_at": recommended,
         "wake_budget_remaining": _wake_budget_remaining(st),
+        "unit_recovery": {},
     }
     if status not in QUOTA_RESUME_STATUSES:
         # EXHAUSTED / UNKNOWN：保守等待，零转态（UNKNOWN 不虚构可用性）
@@ -1691,13 +1810,41 @@ def resume_from_quota(repo_root, task_id, *, status=None) -> dict:
     if st.get("status") not in ("waiting_quota", "waiting_user"):
         # 任务已不在额度等待态（重复唤醒 / 他处已恢复）：零转态幂等
         return result
+    # —— 恢复对账：逐 waiting_quota 单元按中断来源分类落点 ——
+    manual_ruling = False
     for unit in st.get("work_units") or []:
-        if isinstance(unit, dict) and unit.get("status") == "waiting_quota":
+        if not isinstance(unit, dict) \
+                or unit.get("status") != "waiting_quota":
+            continue
+        uid = unit.get("id")
+        runtime_meta = unit.get("runtime")
+        origin = (runtime_meta.get("quota_interrupted_from")
+                  if isinstance(runtime_meta, dict) else None)
+        if origin == "running":
+            # running 中断单元：先 reconcile 对账再落点，禁止盲目 ready
+            landing, entry = _reconcile_running_unit(
+                repo_root, task_id, uid)
+            if landing == "waiting_quota":
+                manual_ruling = True
+            else:
+                work_unit.transition_work_unit(unit, landing)
+                _clear_quota_interrupt_origin(unit)
+            result["unit_recovery"][uid] = entry
+        else:
+            # legacy（无中断来源标记）或来源 ready：直回 ready
+            # （向后兼容现行为）
             work_unit.transition_work_unit(unit, "ready")
+            _clear_quota_interrupt_origin(unit)
+    if manual_ruling:
+        # 人工裁决未决：任务保持 waiting_quota（不派发），已对账单元的
+        # 落点照常落盘；不落 quota_resumed / 不刷 manifest（无恢复事实）
+        state.save_state(repo_root, st)
+        return result
     st["status"] = "executing"
     state.save_state(repo_root, st)
     journal.append_event(repo_root, task_id, {
-        "event": "quota_resumed", "status": status, "source": source})
+        "event": "quota_resumed", "status": status, "source": source,
+        "unit_recovery": result["unit_recovery"]})
     _write_manifest_safe(repo_root, task_id)
     result["resumed"] = True
     result["wake_budget_remaining"] = _wake_budget_remaining(st)

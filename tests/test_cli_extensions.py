@@ -448,14 +448,15 @@ class QuotaResumeCliTest(TempDirFixture):
 
     def test_quota_resume_default_goes_through_resolver(self):
         # status 缺省 → resolver 解析（monkeypatch 零网络）；source 记
-        # resolver 层级来源而非 explicit
+        # resolver 层级来源而非 explicit；RB-21-01 起强制刷新
+        # （force_refresh=True——wake 后不得信任新鲜缓存）
         self._waiting_task()
         with mock.patch.object(quota_resolver, "resolve_quota_status",
                                return_value=dict(FAKE_RESOLVED)) as fake:
             code, payload = run_cli("quota-resume", str(self.repo), TID)
         self.assertEqual(code, 0)
         self.assertTrue(payload["resumed"])
-        fake.assert_called_once_with(str(self.repo))
+        fake.assert_called_once_with(str(self.repo), force_refresh=True)
         resumed = self.events("quota_resumed")
         self.assertEqual(resumed[0]["source"], "provider")
 

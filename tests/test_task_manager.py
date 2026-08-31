@@ -1650,5 +1650,68 @@ class RefreshReadinessTest(TaskManagerTestBase):
         self.assertEqual(plan["dispatch"], ["u1"])
 
 
+# —— RB-21-01：runtime 可选键与中断来源生命周期 ——
+
+class RuntimeInterruptOriginTest(TaskManagerTestBase):
+    """runtime 可选键校验、waiting_quota→verifying 新边、finish 兜底清除。
+
+    中断来源的写入 / 不覆盖 / 恢复清除归 tests.test_authorized_resume
+    （quota 链上下文）；这里锁定数据层与 finish_unit 兜底。
+    """
+
+    def test_runtime_optional_key_validation(self):
+        # legacy 缺字段合法（runtime 整键缺失完全合法）
+        base = wu("u1")
+        self.assertNotIn("runtime", base)
+        self.assertEqual(work_unit.validate_work_unit(base), [])
+        # runtime dict 内部形状自由（校验只查「存在时是 JSON 对象」）
+        unit = wu("u2", status="waiting_quota")
+        unit["runtime"] = {"quota_interrupted_from": "running"}
+        self.assertEqual(work_unit.validate_work_unit(unit), [])
+        # runtime 存在且非 dict → 错误（消息含 runtime）
+        for bad in ("running", ["running"], 1, True, None):
+            broken = wu("u3")
+            broken["runtime"] = bad
+            errors = work_unit.validate_work_unit(broken)
+            self.assertTrue(any("runtime" in e for e in errors),
+                            (bad, errors))
+
+    def test_state_round_trip_keeps_runtime(self):
+        # 带 runtime 的单元真实落盘读回一致（validate_state 放行）
+        unit = wu("u1", status="waiting_quota")
+        unit["runtime"] = {"quota_interrupted_from": "running"}
+        make_task(self.root, [unit])
+        reloaded = state.load_state(self.root, TID)
+        self.assertEqual(unit_of(reloaded, "u1")["runtime"],
+                         {"quota_interrupted_from": "running"})
+
+    def test_waiting_quota_to_verifying_new_edge_legal(self):
+        # §62 演进（RB-21-01）：waiting_quota → verifying 合法——额度
+        # 中断的 running 单元对账为 reuse_result 时直达验证
+        unit = wu("u1", status="waiting_quota")
+        work_unit.transition_work_unit(unit, "verifying")
+        self.assertEqual(unit["status"], "verifying")
+
+    def test_finish_clears_interrupt_origin_on_terminal(self):
+        # finish_unit 终态转换兜底清除中断来源标记（failed 不过完成门）
+        unit = wu("u1", status="verifying")
+        unit["runtime"] = {"quota_interrupted_from": "running"}
+        make_task(self.root, [unit], active=["u1"])
+        st = task_manager.finish_unit(self.root, TID, "u1",
+                                      outcome="failed")
+        self.assertEqual(unit_of(st, "u1")["status"], "failed")
+        self.assertNotIn("runtime", unit_of(st, "u1"))
+        reloaded = state.load_state(self.root, TID)
+        self.assertNotIn("runtime", unit_of(reloaded, "u1"))
+
+    def test_finish_without_runtime_is_unaffected(self):
+        # legacy 单元（无 runtime）终态收尾零影响
+        make_task(self.root, [wu("u1", status="verifying")], active=["u1"])
+        st = task_manager.finish_unit(self.root, TID, "u1",
+                                      outcome="cancelled")
+        self.assertEqual(unit_of(st, "u1")["status"], "cancelled")
+        self.assertNotIn("runtime", unit_of(st, "u1"))
+
+
 if __name__ == "__main__":
     unittest.main()
