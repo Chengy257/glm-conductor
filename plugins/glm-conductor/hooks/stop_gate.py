@@ -16,12 +16,16 @@
          一致——验证后文件又变化 → verification_stale；
       3. review：review.required 为 True 或 route 推导要求审查（mode 为
          audit / full，或 assurance 为 high——手写 state.json 无法靠漏写
-         review.required 跳过审查检查）时，verdict 为 ship 且绑定当前
-         指纹才放行——None / missing / not-required → review_missing，
-         词汇外取值（手写 state.json 的拼写偏差，如 "Ship"）同样按
-         review_missing 处理（不静默放宽为 ship 路径），fix-first /
-         rethink → review_rejected，审查后文件又变化或 verdict 已标记
-         stale → review_stale；
+         review.required 跳过审查检查）时，扫描任务目录 receipts/ 内
+         kind=="review" 的 durable receipt（v2.1 §16.5，wu-21-13 起
+         receipt 是审查裁决的唯一权威——state.review 手写字段不再作为
+         通过依据），取 observed_at 最新一张：无任何 review receipt
+         （含 receipts 目录不存在 / 空 / 只有损坏文件——legacy 任务同
+         样要求）→ review_missing，最新 receipt verdict != "ship" →
+         review_rejected，最新 receipt 指纹 != 当前任务指纹（审查后
+         文件又变化）→ review_stale；ship 且指纹一致才放行。损坏
+         receipt（非 JSON / 非 dict）跳过，取余下最新——手写损坏文件
+         不炸门、不静默放行；
       4. visual：visual_evidence 记录的视觉证据按文件自身字节哈希比对，
          记录后发生变化 → visual_stale（§22）。
     参与校验判定：ownership 声明非空 / verification.required 非空 /
@@ -139,7 +143,11 @@ fail-open 策略（RB-2 起按任务隔离）：
     + v2 升级计划工作块 B2.1 / B3.1 / B3.2 / B4.1
     + docs/GLM-Conductor-v2.0.1-Release-Hardening-Patch-Agent-Implementation-Plan.md
     （RB-2 / WU-P3：任务绑定专属仓库根，per-task 仓库求值 + 按任务隔离
-    降级，三 + 二个结构化 reason 词汇，歧义不猜）。
+    降级，三 + 二个结构化 reason 词汇，歧义不猜）
+    + docs/GLM-Conductor-v2.1-Architecture-Agent-Implementation-Plan.md
+    §16.5 + wu-21-13 实施规格（主会话锁定 2026-08-31：审查检查升级为
+    「只有 fresh ship review receipt 才能通过」——receipt 唯一权威，
+    state.review 手写字段不再作为通过依据）。
 """
 
 import json
@@ -399,16 +407,20 @@ def build_block_reason(violation, other_violations):
             "",
             "Reviewer: %s" % (detail["reviewer"] or "unassigned"),
             "",
-            "Dispatch the reviewer, then record the verdict and fingerprint via",
-            "runtime.state.record_review.",
+            "Dispatch the reviewer, then record a durable review receipt via",
+            "runtime.provenance.run_review (a fresh 'ship' receipt bound to",
+            "the current fingerprint is required).",
         ]
     elif check == "review_rejected":
         lines = [
             "Completion blocked: review verdict is '%s' (task %s)."
             % (detail["verdict"], task_id),
             "",
-            "Repair per the review findings, then obtain a fresh review and record",
-            "it via runtime.state.record_review.",
+            "Reviewer: %s" % (detail.get("reviewer") or "unassigned"),
+            "",
+            "Repair per the review findings, then obtain a fresh review and",
+            "record it via runtime.provenance.run_review (a fresh 'ship'",
+            "receipt bound to the current fingerprint is required).",
         ]
     elif check == "review_stale":
         lines = [
@@ -418,8 +430,8 @@ def build_block_reason(violation, other_violations):
             "fingerprint %s." % (detail["current"],
                                  _recorded_display(detail["recorded"])),
             "",
-            "Re-review the current change set and record the fresh verdict via",
-            "runtime.state.record_review.",
+            "Re-review the current change set and record a fresh receipt via",
+            "runtime.provenance.run_review.",
         ]
     elif check == "visual_stale":
         lines = [
@@ -468,6 +480,58 @@ def _nonempty_strs(value):
     return [item for item in value if isinstance(item, str) and item != ""]
 
 
+def latest_review_receipt(ledger, task_id):
+    """扫描任务 receipts 目录，返回 kind=="review" 的最新一张 receipt
+    （wu-21-13 §16.5：receipt 是审查裁决的唯一权威），无则返回 None。
+
+    首参语义：任务账本根——receipts/ 恒在账本根的任务目录下（与
+    state.json / events.jsonl 同位），与 git 求值根无关（RB-2）。
+      - 目录不存在 / 空 / listdir 失败 → None（review_missing 口径）；
+      - 逐文件容错读：非 JSON / 非 dict / kind != "review" / 读取
+        OSError 一律跳过（损坏 receipt 不炸门、不静默放行——只从余下
+        合法 receipt 里取最新，全部损坏等效于无 receipt）；
+      - 「最新」按 (observed_at, 文件名) 字典序取最大：observed_at 为
+        runtime 统一产出的 ISO-8601 毫秒 Z 形态（同 UTC），字典序即
+        时间序；observed_at 缺失 / 非 str 按 "" 参与排序（任何带时间戳
+        的 receipt 恒更新）；文件名为确定性 tie-break（hash8 已区分同
+        毫秒多条）。验证 receipt（kind=="verification"）不参与。
+
+    预算：目录内文件数有界（receipts 仅由 runtime 逐次追加），单次全
+    量读取排序，5s 钩子预算内。
+    """
+    from runtime import provenance, state
+
+    receipts_dir = state.task_dir(ledger, task_id) \
+        / provenance.RECEIPTS_DIRNAME
+    if not receipts_dir.is_dir():
+        return None
+    try:
+        names = sorted(os.listdir(str(receipts_dir)))
+    except OSError:
+        return None
+    candidates = []
+    for name in names:
+        path = receipts_dir / name
+        if not path.is_file():
+            continue
+        try:
+            with open(str(path), "r", encoding="utf-8",
+                      errors="replace") as fh:
+                receipt = json.load(fh)
+        except (ValueError, OSError):
+            continue  # 损坏 receipt（非 JSON / 不可读）跳过
+        if not isinstance(receipt, dict) \
+                or receipt.get("kind") != "review":
+            continue
+        observed = receipt.get("observed_at")
+        if not isinstance(observed, str):
+            observed = ""
+        candidates.append(((observed, name), receipt))
+    if not candidates:
+        return None
+    return max(candidates, key=lambda item: item[0])[1]
+
+
 def _route_requires_review(task_state):
     """route 推导的审查义务：mode ∈ (audit, full) 或 assurance == "high"
     → True（H2：手写 state.json 无法靠漏写 review.required 跳过审查检查；
@@ -499,7 +563,7 @@ def task_participates(task_state):
     return False
 
 
-def evaluate_task(task_id, task_state, repo, touched, base):
+def evaluate_task(task_id, task_state, repo, touched, base, ledger=None):
     """对单个参与任务按 §15 顺序做四重检查，首个失败即返回。
 
     返回 None（全部通过，或四项声明全空不参与）或 (check, detail)；
@@ -516,12 +580,17 @@ def evaluate_task(task_id, task_state, repo, touched, base):
     每个不同仓库根恒为 2 次 git 子调用：1 次 status + 1 次 rev-parse，
     同根多任务复用不叠加），原样透传给 fingerprint.task_fingerprint
     （与主会话记录证据同一入口，属指纹层自身契约；主会话侧用缺省调用
-    自取，两者语义等价）。
+    自取，两者语义等价）。ledger（wu-21-13，关键字专用）为任务账本根
+    ——review receipt 的扫描位（receipts/ 恒在账本根任务目录下，与
+    git 求值根分离）；None 时回退 repo（单仓 legacy 等价形态）。
 
     review 检查条件：review.required 为 True 或 route 推导要求审查
     （_route_requires_review：audit/full 或 assurance:high）——不依赖
-    「模型记得把 review.required 写对」。verdict 词汇处理与指纹比对
-    分支不变。
+    「模型记得把 review.required 写对」。判定数据源为任务 receipts/
+    内的 durable review receipt（wu-21-13：receipt 唯一权威，取
+    observed_at 最新一张；state.review 手写字段不再作为通过依据），
+    reason 词汇（review_missing / review_rejected / review_stale）
+    与 block 结构不变。
 
     classify_paths 的模式非法（OwnershipError）与 task_fingerprint 的
     结构性错误（OwnershipError / FingerprintError）自然向上抛，由调用
@@ -561,26 +630,30 @@ def evaluate_task(task_id, task_state, repo, touched, base):
                     {"recorded": recorded, "current": current})
 
     # 3) review：required 为 True 或 route 推导要求审查（audit/full 或
-    #    assurance:high——手写 state 漏写 review.required 也逃不过检查）
+    #    assurance:high——手写 state 漏写 review.required 也逃不过检查）。
+    #    wu-21-13 起 receipt 是唯一权威：扫描账本根任务目录 receipts/ 内
+    #    kind=="review" 的 durable receipt（observed_at 最新一张）——
+    #    state.review 手写字段不再作为通过依据（旧 verdict 词汇分支与
+    #    手写指纹比对拆除）
     review = _section(task_state, "review")
     if review.get("required") is True or _route_requires_review(task_state):
-        verdict = review.get("verdict")
-        if verdict is None or verdict in ("missing", "not-required"):
+        receipt = latest_review_receipt(
+            ledger if ledger is not None else repo, task_id)
+        if receipt is None:
+            # 无任何合法 review receipt（含 receipts 目录不存在 / 空 /
+            # 只有损坏文件）：legacy 任务同样要求——严格语义即本升级的
+            # 目的；state.review 手写 ship 无 receipt 同样拦（负向锚定）
             return ("review_missing", {"reviewer": review.get("reviewer")})
-        if verdict not in ("fix-first", "rethink", "stale", "ship"):
-            # 词汇外取值（手写 state.json 的拼写偏差，如 "Ship"/"ship "）
-            # 按 review_missing 处理，不静默放宽为 ship 路径（detail
-            # 携带 verdict 原值；报文模板不变）
-            return ("review_missing",
-                    {"reviewer": review.get("reviewer"), "verdict": verdict})
-        if verdict in ("fix-first", "rethink"):
-            return ("review_rejected", {"verdict": verdict})
-        # "stale"（审查者标记失效）与 "ship" 都要指纹比对（此处才惰性计算）
+        verdict = receipt.get("verdict")
+        if verdict != "ship":
+            # 最新 receipt 非 ship（fix-first / rethink / 词汇外 / 缺失
+            # 一律拦截——receipt 内缺失字段按拦截处理，不静默放宽）
+            return ("review_rejected",
+                    {"verdict": verdict,
+                     "reviewer": receipt.get("reviewer")})
+        # ship receipt：指纹必须绑定当前任务指纹（此处才惰性计算）
         current = current_fingerprint()
-        recorded = review.get("fingerprint")
-        if verdict == "stale":
-            return ("review_stale", {"recorded": recorded, "current": current})
-        # verdict == "ship"（词汇外已在上方按 review_missing 处理）
+        recorded = receipt.get("fingerprint")
         if recorded is None or recorded != current:
             return ("review_stale", {"recorded": recorded, "current": current})
 
@@ -688,7 +761,8 @@ def collect_violations(state, journal, ownership, fingerprint, ledger,
             continue
         try:
             result = evaluate_task(task_id, task_state, root,
-                                   snapshot["touched"], snapshot["base"])
+                                   snapshot["touched"], snapshot["base"],
+                                   ledger=ledger)
         except (ownership.OwnershipError,
                 fingerprint.FingerprintError) as exc:
             warn_stderr(

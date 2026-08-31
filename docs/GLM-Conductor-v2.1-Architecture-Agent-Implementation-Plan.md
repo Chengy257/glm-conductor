@@ -663,7 +663,7 @@ marker 只是 lookup key；模型手写不存在的 permit 必须 reject。
 
 ※DR（D1 锁定）：permit 义务按 `tool_input.subagent_type` 分级——插件自有实施者类型（flash-implementer / visual-implementer / glm-reviewer / visual-reviewer 及别名）必须 permit；只读类（Explore / advisor 类）免 permit。“把实施包装成只读类型”的绕路由 Layer A Stop Gate ownership 校验兜底（越界 diff 挡完成，v2.0.1 已强制）。判别字段必须是 `tool_input.subagent_type`——顶层 `agent_type` 在主会话载荷中为 undefined 省略（Phase 0 实测），不得依赖。
 
-※DR 补记（2026-08-31）：reviewer 类型（glm-reviewer / visual-reviewer）的 permit 义务**推迟至 WU-21-13 一并裁定**——第一批实施（wu-21-03）暂将 reviewer 留在豁免集（只读注入路径），详见决策记录「D1 分批裁定补记」。
+※DR 补记（2026-08-31）：reviewer 类型（glm-reviewer / visual-reviewer）的 permit 义务**推迟至 WU-21-13 一并裁定**——第一批实施（wu-21-03）暂将 reviewer 留在豁免集（只读注入路径），详见决策记录「D1 分批裁定补记」。裁定落定（wu-21-13，2026-08-31）：reviewer 类型最终**维持 permit 豁免**（`IMPLEMENTATION_EXECUTORS` 不变），审查溯源由 review receipt 绑定承担（`run_review` durable receipt + Stop 完成门「只有 fresh ship receipt 才能通过」，§16.5）。
 
 ## 6.5 Default Background
 

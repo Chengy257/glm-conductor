@@ -30,8 +30,10 @@
     wave_id）须指向 active wave 且 unit 仍在成员清单内，否则 deny
     （报文含 wave_id 与 re-prepare wave 指引）；单单元 permit 零影响。
     非实施者类型（只读类：Explore / reviewer 等）保留既有 ownership
-    advisory 注入路径原样（deny 义务第二批 WU-21-13 评估）；无活动
-    任务时零干预（v2.0.1 行为不回退）。
+    advisory 注入路径原样（D1 裁定落定，wu-21-13：reviewer 最终维持
+    permit 豁免，审查溯源由 review receipt 绑定承担——run_review +
+    Stop 完成门 receipt 检查）；无活动任务时零干预（v2.0.1 行为不
+    回退）。
 
 与 Layer A 的分工：
     - Layer B（本钩子）：提示级注入，只能「提高合规率」，无法确定性约束
@@ -80,8 +82,12 @@ MAX_POLICY_SNIPPET = 60
 # dispatch permit 义务的实施者类型词汇（※DR D1 分级，v2.1 冻结）：
 # bare 与 "glm-conductor:" 前缀两种命名形态都认（宿主子代理类型命名
 # 兼容双形态）。只读类（Explore / reviewer / general-purpose 等）不在
-# 此集合——走 advisory 注入路径；reviewer 的 permit 义务留待第二批
-# WU-21-13 review provenance 评估。
+# 此集合——走 advisory 注入路径。D1 裁定已落定（wu-21-13，2026-08-31
+# ）：reviewer 类型（glm-reviewer / visual-reviewer）最终维持 permit
+# 豁免——审查溯源由 receipt 绑定承担（runtime.provenance.run_review
+# + Stop 完成门 fresh ship receipt 检查）：permit 证明的是「派发被授
+# 权」，receipt 证明的是「审查被实际执行且绑定终态指纹」，后者才是
+# M6 要的增量；本集合自此冻结不变。
 IMPLEMENTATION_EXECUTORS = frozenset((
     "flash-implementer", "visual-implementer",
     "glm-conductor:flash-implementer", "glm-conductor:visual-implementer",

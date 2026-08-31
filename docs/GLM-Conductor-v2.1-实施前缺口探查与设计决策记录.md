@@ -65,7 +65,7 @@ Agent tool 调用在 launch 成功即「完成」，最终结果经异步通知�
 
 ### D1 分批裁定补记（2026-08-31，第一批 M1-M3 终审第 1 项）
 
-D1 锁定文本将 glm-reviewer / visual-reviewer 列入「必须 permit」的实施者集合；第一批实施（wu-21-03，`hooks/pre_tool_use.py` 的 `IMPLEMENTATION_EXECUTORS`）**暂将 reviewer 类型留在豁免集**（走只读 advisory 注入路径），理由：第一批无 review receipt 绑定机制，permit 而无 receipt 不能提升审查溯源强度，反而增加无收益摩擦。reviewer 类型的 permit 义务最终裁定（纳入义务集、或以 WU-21-13 review receipt 绑定替代）**推迟至 WU-21-13 Review Provenance 一并落定**。裁定落定前，规范口径以本补记为准——计划 §6.4 D1 文本中的实施者集合应读作「flash-implementer / visual-implementer 及别名（reviewer 类型待 WU-21-13 裁定）」。
+D1 锁定文本将 glm-reviewer / visual-reviewer 列入「必须 permit」的实施者集合；第一批实施（wu-21-03，`hooks/pre_tool_use.py` 的 `IMPLEMENTATION_EXECUTORS`）**暂将 reviewer 类型留在豁免集**（走只读 advisory 注入路径），理由：第一批无 review receipt 绑定机制，permit 而无 receipt 不能提升审查溯源强度，反而增加无收益摩擦。reviewer 类型的 permit 义务最终裁定（纳入义务集、或以 WU-21-13 review receipt 绑定替代）**推迟至 WU-21-13 Review Provenance 一并落定**。裁定落定前，规范口径以本补记为准——计划 §6.4 D1 文本中的实施者集合应读作「flash-implementer / visual-implementer 及别名（reviewer 类型待 WU-21-13 裁定）」。**裁定落定（wu-21-13，2026-08-31）：reviewer 类型（glm-reviewer / visual-reviewer）最终维持 permit 豁免**（`IMPLEMENTATION_EXECUTORS` 集合不变），审查溯源由 receipt 绑定承担（`runtime.provenance.run_review` durable review receipt + Stop 完成门「只有 fresh ship receipt 才能通过」）——permit 证明的是「派发被授权」，receipt 证明的是「审查被实际执行且绑定终态指纹」，后者才是 M6 要的增量。
 
 ## 五、计划修订对照（已执行，计划内标注 ※DR）
 

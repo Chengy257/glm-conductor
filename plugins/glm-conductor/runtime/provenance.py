@@ -1,23 +1,31 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""GLM Conductor v2.1 验证溯源层（v2.1 M5/M6，wu-21-12，§16.3/§16.4）。
+"""GLM Conductor v2.1 验证 / 审查溯源层（v2.1 M5/M6，wu-21-12/wu-21-13，
+§16.3/§16.4/§16.5）。
 
 职责：
     把「evidence 是 runtime 实际观察到的」从约定升级为机械事实（D4
     锁定：runtime 受限主动执行）。此前 record_unit_verification /
     record_verification 只登记主会话口头声称的验证结果——命令是否真
     跑过、exit code 是多少、跑完之后仓库是什么状态，全部无法机械证明。
-    本模块提供两个 runtime API，把「执行验证命令 + 观察结果 + 落 durable
-    凭证 + 接线既有证据流」固化为一次调用：
+    本模块提供三个 runtime API，把「执行验证命令 / 申报审查裁决 +
+    观察结果 + 落 durable 凭证 + 接线既有证据流」固化为一次调用：
       - verify_unit()：单元作用域——只执行该单元 state 中已声明的
         required verification command，产出 receipt 并在 exit 0 时写
         单元级验证证据（task_manager.record_unit_verification——RB-1
         完成证据门直接消费，verify_unit 之后 finish_unit 应能直接
-        通过完成证据门）；
+        通过）；
       - verify_task()：任务作用域——白名单 = state.verification.required
         （完成门口径），指纹与完成门同一入口
         （fingerprint.task_fingerprint），exit 0 时经
-        state.record_verification + save_state 落账。
+        state.record_verification + save_state 落账；
+      - run_review()（wu-21-13，§16.5）：审查作用域——主会话把 reviewer
+        对已发生审查的裁决（verdict + reviewer + tool_use_id）申报进来，
+        runtime 绑定终指纹（与完成门同一入口）落 durable review
+        receipt + journal review_receipt 事件 + state.review 同步
+        （完成门快速路径字段与 receipt 恒一致）。Stop 完成门的审查
+        检查（wu-21-13 升级）只认 fresh ship review receipt——receipt
+        是审查裁决的唯一权威，state.review 只是同一调用的镜像。
 
 四道确定性保障（D4）：
       1. 白名单闸：runtime 只执行 state 中已声明的 required 验证命令
@@ -38,7 +46,8 @@
          runner 恒为 "glm-conductor-runtime"——「runtime 亲眼所见」
          成为可审计的落盘事实，而不是会话记忆。
 
-receipt 契约（键名冻结，wu-21-12 设计决策）：
+receipt 契约（键名冻结，wu-21-12 设计决策；review receipt 由 wu-21-13
+同构落定）：
     {"kind": "verification", "scope": "unit" | "task",
      "unit": <uid>（unit 作用域）| "task": <task_id>（task 作用域）,
      "command": <str>, "exit_code": <int | None>,
@@ -53,6 +62,14 @@ receipt 契约（键名冻结，wu-21-12 设计决策）：
     串；超时凭证的 excerpt 恒为空串——TimeoutExpired 的部分输出不
     采信）。
 
+review receipt 契约（键名冻结，wu-21-13 §16.5；note 恒入键）：
+    {"kind": "review", "reviewer": <str>, "route": <None | str>,
+     "verdict": <state.REVIEW_VERDICTS 之一>, "fingerprint": <str>,
+     "tool_use_id": <str>, "observed_at": <ISO毫秒Z>,
+     "runner": "glm-conductor-runtime", "note": <str | None>}
+    凭证文件名：<task_dir>/receipts/review-<observed_at紧凑串>-<hash8>
+    .json（与验证凭证同目录、同原子写、同 hash8 区分规则）。
+
 证据接线（与既有口径正交互补）：
     - verify_unit exit_code == 0 → 惰性 import task_manager 调
       record_unit_verification(repo_root, task_id, uid, cmd, fp)（写
@@ -61,9 +78,15 @@ receipt 契约（键名冻结，wu-21-12 设计决策）：
       exit != 0 / 超时不写任何证据，只落 receipt——失败本身也是有
       价值的观察，但绝不是「通过」证据；
     - verify_task exit_code == 0 → state.record_verification(st, cmd,
-      fp) 后 state.save_state（直接 import——state 无循环导入）；
-    - receipt / verification_receipt 事件是增强层，M6 wu-21-13 评估
-      门侧消费；本模块不改 stop_gate / pre_tool_use。
+      fp) 后 state.save_state（任务级完成门口径证据；直接 import——
+      state 无循环导入）；
+    - run_review → journal review_receipt 事件 + state.record_review +
+      save_state（同一调用维护 receipt 与 state.review 快速路径字段，
+      两处恒一致）；Stop 完成门的审查检查自 wu-21-13 起只消费
+      receipts/ 内的 review receipt（receipt 唯一权威），不再单独
+      采信 state.review 手写字段；
+    - verification receipt / verification_receipt 事件为 RB-1 完成证
+      据门的增强层。
 
 RB-2 双根分离（与 task_manager 同口径）：
     账本（state.json / events.jsonl / receipts/）恒在账本根 repo_root
@@ -93,8 +116,12 @@ RB-2 双根分离（与 task_manager 同口径）：
 
 来源：
     docs/GLM-Conductor-v2.1-Architecture-Agent-Implementation-Plan.md
-    §16.3/§16.4（验证溯源）+ v2.1 M5/M6 wu-21-12 实施规格（主会话
-    锁定 2026-08-31：D4 runtime 受限主动执行 + receipt 键名冻结）
+    §16.3/§16.4（验证溯源）+ §16.5（review receipt，wu-21-13 落定）
+    + v2.1 M5/M6 wu-21-12 实施规格（主会话锁定 2026-08-31：D4 runtime
+    受限主动执行 + receipt 键名冻结）+ wu-21-13 实施规格（主会话锁定
+    2026-08-31：run_review receipt 键冻结 + Stop 完成门「只有 fresh
+    ship receipt 才能通过」+ D1 裁定落定——reviewer 维持 permit 豁免，
+    溯源由 receipt 绑定承担）
     + release hardening RB-1/RB-2（完成证据门与双根分离的既有口径）。
 """
 
@@ -115,8 +142,12 @@ from runtime import state
 RECEIPTS_DIRNAME = "receipts"
 # receipt 的 kind 取值（键名冻结契约的一部分）
 RECEIPT_KIND = "verification"
+# review receipt 的 kind 取值（wu-21-13，键名冻结契约的一部分）
+REVIEW_RECEIPT_KIND = "review"
 # runner 标识（恒定：证明该凭证由 runtime 亲自执行产生，非会话转述）
 RUNNER_ID = "glm-conductor-runtime"
+# run_review 的 route 合法取值（None 表示审查时不绑定派发模式）
+REVIEW_ROUTES = (None, "solo", "delegate", "audit", "full")
 # stdout / stderr 入 receipt 的截断上限（字符；超出部分丢弃，保留前段）
 EXCERPT_LIMIT = 4096
 # 缺省单命令超时（秒）
@@ -247,11 +278,13 @@ def _execute_command(repo_root, command, timeout_seconds) -> tuple:
 def _write_receipt(repo_root, task_id, receipt) -> str:
     """durable 落盘一份凭证（tmp + os.replace 原子写），返回最终路径。
 
-    目录：<task_dir>/receipts/；文件名：verification-<observed_at紧凑串>
+    目录：<task_dir>/receipts/；文件名：<kind>-<observed_at紧凑串>
     -<hash8>.json（紧凑串 = observed_at 去掉 - : . 分隔符；hash8 = 凭证
     规范化 JSON（UTF-8 字节）的 sha256 前 8 位——同毫秒多条凭证靠它
     区分，同内容重跑覆盖同名为幂等）。编码 UTF-8、ensure_ascii=False、
     indent 2、sort_keys；任何失败路径清理 tmp，成功后确保 tmp 不残留。
+    文件名前缀恒为 receipt 的 kind（"verification-" / "review-"，
+    wu-21-13 review 凭证与验证凭证同构、同目录共存）。
     """
     receipts_dir = state.task_dir(repo_root, task_id) / RECEIPTS_DIRNAME
     receipts_dir.mkdir(parents=True, exist_ok=True)
@@ -260,7 +293,7 @@ def _write_receipt(repo_root, task_id, receipt) -> str:
     digest8 = hashlib.sha256(content.encode("utf-8")).hexdigest()[:8]
     compact = (receipt["observed_at"].replace("-", "")
                .replace(":", "").replace(".", ""))
-    name = "verification-%s-%s.json" % (compact, digest8)
+    name = "%s-%s-%s.json" % (receipt["kind"], compact, digest8)
     path = receipts_dir / name
     tmp_path = receipts_dir / (name + ".tmp")
     try:
@@ -278,10 +311,12 @@ def _write_receipt(repo_root, task_id, receipt) -> str:
 
 
 def _record_receipt(repo_root, task_id, receipt) -> str:
-    """落盘凭证 + 追加 journal verification_receipt 事件（同字段），
-    返回凭证文件路径。事件先行校验由 journal.append_event 承担。"""
+    """落盘凭证 + 追加 journal <kind>_receipt 事件（同字段），返回凭证
+    文件路径。事件名由 receipt 的 kind 派生（"verification" →
+    verification_receipt；"review" → review_receipt）；事件先行校验由
+    journal.append_event 承担。"""
     path = _write_receipt(repo_root, task_id, receipt)
-    event = {"event": "verification_receipt"}
+    event = {"event": "%s_receipt" % receipt["kind"]}
     event.update(receipt)
     journal.append_event(repo_root, task_id, event)
     return path
@@ -464,3 +499,98 @@ def verify_task(repo_root, task_id, *, command=None,
         "exit_codes": exit_codes,
         "all_passed": all(code == 0 for code in exit_codes.values()),
     }
+
+
+# —— 审查作用域：run_review（wu-21-13，§16.5） ——
+
+def run_review(repo_root, task_id, *, reviewer, verdict, tool_use_id,
+               route=None, note=None) -> dict:
+    """申报一次已发生的审查并落 durable review receipt（wu-21-13 §16.5）。
+
+    主会话在 reviewer（glm-reviewer / visual-reviewer 等只读审查者）
+    返回裁决后调用本 API：runtime 把裁决与**终指纹**（与 Stop 完成门
+    同一入口 fingerprint.task_fingerprint）绑定，落盘 durable receipt
+    并同步既有证据流。Stop 完成门的审查检查自本单元起只认 fresh ship
+    review receipt——本函数是该 receipt 的唯一产出点。
+
+    流程：
+      1. 全量参数校验（先于任何 I/O 副作用，失败零副作用）：
+         reviewer / tool_use_id 必须是非空 str；verdict 必须 ∈
+         state.REVIEW_VERDICTS（ship / fix-first / rethink——仓库既有
+         词汇；计划 §16.5 的 "changes_requested" 是计划侧泛称，不引入
+         ）；route 必须 ∈ (None, solo, delegate, audit, full)；note
+         非 None 时必须是 str。任一违规 → ProvenanceError；
+      2. load_state（任务缺失 → ProvenanceError；JSON 损坏的
+         ValueError 自然上抛）；
+      3. 终指纹：git_root = state.resolve_repository_root（RB-2 双根：
+         绑定 repository.root 优先，legacy 回退账本根）→
+         fingerprint.task_fingerprint(git_root, st)——与 Stop 完成门
+         完成提交同一入口，receipt 因此可与完成门直接对账；
+      4. 构建冻结键 receipt → durable 落盘（tmp + os.replace 原子写，
+         文件名 review-<observed_at紧凑串>-<hash8>.json）+ journal
+         review_receipt 事件（同字段）；
+      5. state 同步：state.record_review(st, verdict, fingerprint) 后
+         state.save_state——完成门的快速路径字段（review.verdict /
+         review.fingerprint）由同一次调用维护，与 receipt 恒一致
+         （但完成门不再单独采信 state.review——receipt 是唯一权威）。
+
+    信任边界（设计决策，wu-21-13 锁定）：
+        reviewer / tool_use_id / verdict 是主会话对**已发生审查**的申
+        报输入——runtime 不回验 Agent 调用本身（不做「这个 tool_use_id
+        真的跑过一次审查吗」的密码学追查）。receipt 的价值在于：
+        durable 落盘（可审计、不随会话记忆消失）+ 终指纹绑定（审查后
+        文件再变动即 review_stale，完成门机械拦截）+ 时间戳（多张
+        receipt 取 observed_at 最新一张）。伪造申报骗过的是完成门的
+        「审查已发生」记录，骗不过的是「审查对应的就是即将提交的
+        diff」——后者由指纹绑定机械保证。
+
+    返回：
+        receipt dict（与落盘文件、journal 事件逐字段一致；键名冻结）。
+
+    纪律：参数非法 / 任务缺失零副作用（无 receipt、无事件、state.json
+    字节不变）；本函数不改任务状态机、不动租约；visual_reviewer 专属
+    流程无需分支（receipt 同构，reviewer 字段自辨）。
+    """
+    api = "run_review"
+    # 1) 全量参数校验（先于任何 I/O 副作用）
+    if not isinstance(reviewer, str) or reviewer == "":
+        raise ProvenanceError(
+            "%s：reviewer 必须是非空字符串（审查者身份申报），得到 %r"
+            % (api, reviewer))
+    if not isinstance(tool_use_id, str) or tool_use_id == "":
+        raise ProvenanceError(
+            "%s：tool_use_id 必须是非空字符串（绑定审查发生的 Agent "
+            "tool 调用），得到 %r" % (api, tool_use_id))
+    if verdict not in state.REVIEW_VERDICTS:
+        raise ProvenanceError(
+            "%s：verdict %r 不在 state.REVIEW_VERDICTS 内（%s）"
+            % (api, verdict, ", ".join(state.REVIEW_VERDICTS)))
+    if route not in REVIEW_ROUTES:
+        raise ProvenanceError(
+            "%s：route %r 不在合法取值内（%s）"
+            % (api, route, ", ".join(str(item) for item in REVIEW_ROUTES)))
+    if note is not None and not isinstance(note, str):
+        raise ProvenanceError(
+            "%s：note 必须是 None 或字符串，得到 %r" % (api, note))
+    # 2) 任务必须存在（损坏 ValueError 自然上抛）
+    st = _require_state(repo_root, task_id, api)
+    # 3) 终指纹：与 Stop 完成门同一入口（RB-2 双根：按任务绑定根求值）
+    git_root = state.resolve_repository_root(st, repo_root)
+    fp = fingerprint.task_fingerprint(git_root, st)
+    # 4) 冻结键 receipt → durable 落盘 + journal review_receipt（同字段）
+    receipt = {
+        "kind": REVIEW_RECEIPT_KIND,
+        "reviewer": reviewer,
+        "route": route,
+        "verdict": verdict,
+        "fingerprint": fp,
+        "tool_use_id": tool_use_id,
+        "observed_at": _utc_now_iso(),
+        "runner": RUNNER_ID,
+        "note": note,
+    }
+    _record_receipt(repo_root, task_id, receipt)
+    # 5) state 快速路径字段同步（同一调用维护，与 receipt 恒一致）
+    state.record_review(st, verdict, fp)
+    state.save_state(repo_root, st)
+    return receipt
