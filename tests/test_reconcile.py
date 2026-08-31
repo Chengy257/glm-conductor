@@ -68,6 +68,7 @@ import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "plugins" / "glm-conductor"))
+from runtime import agent_run
 from runtime import dependency
 from runtime import dispatcher
 from runtime import fingerprint as fingerprint_mod
@@ -1000,6 +1001,390 @@ class ReconcileUnitBindingTest(GitRepoFixture):
         report = self._report([legacy])
         self.assertEqual(report["suggestions"]["uA"]["to"], "verifying")
         self.assertEqual(report["suggestions"]["uB"]["to"], "verifying")
+
+
+# —— v2.1 M3：reconcile_agent_run 四分分类（§9 判定树 + §7.3 僵尸语义） ——
+
+class ReconcileAgentRunFixture(ReconcileFixture):
+    """reconcile_agent_run 基座：git 仓库 + state + journal + 伪造原生
+    档案根（agents_root 用仓库外独立 tempdir——档案树放进仓库会混入
+    touched 清单，污染 residue 证据）。"""
+
+    def setUp(self):
+        super().setUp()
+        self._native_tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._native_tmp.cleanup)
+        self.agents_root = Path(self._native_tmp.name)
+
+    def save_state_raw(self, units, task_id=TID):
+        """绕过 validate_state 直写 state.json（空 verification 等校验外
+        形状的边界用；文件布局与 state.save_state 一致）。"""
+        st = state.new_task_state(task_id, "reconcile agent run 目标",
+                                  dict(ROUTE))
+        st["work_units"] = units
+        path = (journal_mod.journal_path(self.repo, task_id).parent
+                / "state.json")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(str(path), "w", encoding="utf-8", newline="\n") as fh:
+            fh.write(json.dumps(st, ensure_ascii=False))
+
+    def write_native_archive(self, agent_id, status):
+        """伪造原生档案 <agents_root>/<主会话id>/<agentId>/metadata.json
+        （白名单形状对齐 agent_run.native_agent_metadata 的读取口径）。"""
+        agent_dir = self.agents_root / "session-main" / agent_id
+        agent_dir.mkdir(parents=True, exist_ok=True)
+        payload = {"agentId": agent_id, "status": status,
+                   "childSessionId": "child-%s" % agent_id,
+                   "usage": {"inputTokens": 10, "outputTokens": 5}}
+        (agent_dir / "metadata.json").write_text(
+            json.dumps(payload), encoding="utf-8")
+
+    def record_launch(self, uid, agent_id, *, tool_use_id="tu-1",
+                      permit_id="dp-1"):
+        """经 agent_run.record_agent_launch 落一条真实 agent_launched
+        （agent_id 传 None 模拟 tool_response 形状异常的派发）。"""
+        return agent_run.record_agent_launch(
+            self.repo, TID,
+            {"tool_use_id": tool_use_id,
+             "tool_response": {"agentId": agent_id} if agent_id else {}},
+            permit={"unit_id": uid, "permit_id": permit_id,
+                    "mode": "background"})
+
+    def reconcile(self, uid, **kwargs):
+        """驱动 reconcile_agent_run（agents_root 缺省指向伪造档案根）。"""
+        kwargs.setdefault("agents_root", self.agents_root)
+        return reconcile.reconcile_agent_run(str(self.repo), TID, uid,
+                                             **kwargs)
+
+    def running_unit(self, uid="wu1", owned=("src/wu1/**",)):
+        return make_unit(uid, owned, status="running",
+                         verification=(CMD_A,))
+
+
+@unittest.skipUnless(shutil.which("git"), "环境无 git 可执行，跳过 git fixture 测试")
+class ReconcileAgentRunClassificationTest(ReconcileAgentRunFixture):
+    """四分判定树逐分支正例（§9 冻结树，逐条短路）+ 冻结返回形状 +
+    边界（无 required 命令 / 倒序 agent_id / events 注入 / 端到端烟雾）。"""
+
+    def test_frozen_report_shape(self):
+        unit = self.running_unit()
+        self.save_units([unit])
+        report = self.reconcile("wu1")
+        self.assertEqual(set(report),
+                         {"classification", "rationale", "evidence"})
+        self.assertEqual(set(report["evidence"]),
+                         {"runs", "owned_residue",
+                          "unattributable_residue", "verification",
+                          "native"})
+        self.assertEqual(report["evidence"]["owned_residue"], [])
+        self.assertEqual(report["evidence"]["unattributable_residue"], [])
+        self.assertEqual(report["evidence"]["native"], None)
+
+    # —— 分支 1：找不到单元（state 缺失 / 损坏 / 无此 uid） ——
+
+    def test_unit_not_found_yields_manual_ruling(self):
+        self.save_units([self.running_unit()])
+        report = self.reconcile("ghost")
+        self.assertEqual(report["classification"], "manual_ruling")
+        self.assertEqual(report["rationale"],
+                         ["unit ghost not found in task state"])
+        self.assertEqual(report["evidence"]["runs"], [])
+        self.assertEqual(report["evidence"]["verification"], None)
+
+    def test_missing_state_yields_manual_ruling(self):
+        report = self.reconcile("wu1")  # state.json 从未写入
+        self.assertEqual(report["classification"], "manual_ruling")
+        self.assertEqual(report["rationale"],
+                         ["task state missing or unreadable",
+                          "unit wu1 not found in task state"])
+
+    def test_corrupt_state_yields_manual_ruling(self):
+        path = (journal_mod.journal_path(self.repo, TID).parent
+                / "state.json")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("{not json", encoding="utf-8")
+        report = self.reconcile("wu1")
+        self.assertEqual(report["classification"], "manual_ruling")
+        self.assertEqual(report["rationale"],
+                         ["task state missing or unreadable",
+                          "unit wu1 not found in task state"])
+
+    # —— 分支 2 / 分支 3：residue 最先分流（§7.3 repository state） ——
+
+    def test_no_runs_no_residue_yields_redispatch_clean(self):
+        unit = self.running_unit()
+        self.save_units([unit])
+        report = self.reconcile("wu1")
+        # 分支 2 先于分支 4 短路：工作区虽干净（verification 谓词仍被
+        # 求值并进入 evidence），无执行内容即全新派发
+        self.assertEqual(report["classification"], "redispatch_clean")
+        self.assertEqual(report["rationale"], ["no runs, no residue"])
+        self.assertEqual(report["evidence"]["runs"], [])
+        self.assertEqual(report["evidence"]["verification"]["required"],
+                         [CMD_A])
+
+    def test_unattributable_edits_yield_manual_ruling(self):
+        unit = self.running_unit()
+        self.save_units([unit])
+        self.write("src/rogue/x.py", b"rogue\n")  # ownership 声明之外
+        report = self.reconcile("wu1")
+        self.assertEqual(report["classification"], "manual_ruling")
+        self.assertEqual(report["rationale"],
+                         ["unattributable edits present"])
+        self.assertEqual(report["evidence"]["unattributable_residue"],
+                         ["src/rogue/x.py"])
+        self.assertEqual(report["evidence"]["owned_residue"], [])
+
+    # —— 分支 4：新鲜 pass 证据 + 档案终态 / 无档案 → reuse ——
+
+    def _reuse_scenario(self, status):
+        """reuse 前置：owned 残留 + launch 账本 + 档案 + 新鲜验证事件。"""
+        unit = self.running_unit()
+        self.save_units([unit])
+        self.write("src/wu1/a.py", b"a-v1\n")
+        self.record_launch("wu1", "agent-1")
+        self.write_native_archive("agent-1", status)
+        fp = self.current_fingerprint(unit)
+        self.record_event(self.verification_event(unit, fp))
+        return unit, fp
+
+    def test_fresh_evidence_completed_native_yields_reuse_result(self):
+        unit, fp = self._reuse_scenario("completed")
+        report = self.reconcile("wu1")
+        self.assertEqual(report["classification"], "reuse_result")
+        self.assertEqual(report["rationale"],
+                         ["agent archived terminal + fresh evidence"])
+        self.assertEqual(report["evidence"]["verification"],
+                         {"ok": True, "fingerprint": fp,
+                          "required": [CMD_A], "matched": [CMD_A],
+                          "missing": []})
+        self.assertEqual(report["evidence"]["native"]["observed_status"],
+                         "completed")
+        self.assertEqual(report["evidence"]["owned_residue"],
+                         ["src/wu1/a.py"])
+        self.assertEqual(len(report["evidence"]["runs"]), 1)
+
+    def test_fresh_evidence_stopped_native_yields_reuse_result(self):
+        self._reuse_scenario("stopped")
+        report = self.reconcile("wu1")
+        self.assertEqual(report["classification"], "reuse_result")
+        self.assertEqual(report["evidence"]["native"]["observed_status"],
+                         "stopped")
+
+    def test_fresh_evidence_without_archive_yields_reuse_result(self):
+        unit = self.running_unit()
+        self.save_units([unit])
+        self.write("src/wu1/a.py", b"a-v1\n")
+        self.record_launch("wu1", "agent-1")  # 档案缺失 → native None
+        fp = self.current_fingerprint(unit)
+        self.record_event(self.verification_event(unit, fp))
+        report = self.reconcile("wu1")
+        self.assertEqual(report["classification"], "reuse_result")
+        self.assertEqual(report["evidence"]["native"], None)
+
+    def test_fresh_evidence_failed_native_yields_manual_conflict(self):
+        self._reuse_scenario("failed")
+        report = self.reconcile("wu1")
+        self.assertEqual(report["classification"], "manual_ruling")
+        self.assertEqual(report["rationale"],
+                         ["transcript/evidence conflict"])
+
+    # —— 分支 5：有执行内容、无完整 pass 证据 → resume_with_progress ——
+
+    def test_zombie_native_partial_work_yields_resume_with_zombie_note(self):
+        unit = self.running_unit()
+        self.save_units([unit])
+        self.write("src/wu1/a.py", b"partial\n")
+        self.record_launch("wu1", "agent-1")
+        self.write_native_archive("agent-1", "running")  # 僵尸态档案
+        report = self.reconcile("wu1")
+        self.assertEqual(report["classification"],
+                         "resume_with_progress")
+        self.assertEqual(report["rationale"],
+                         ["partial work present, no fresh pass evidence",
+                          "metadata running is not truth (zombie-aware)"])
+        self.assertFalse(report["evidence"]["verification"]["ok"])
+        self.assertEqual(report["evidence"]["native"]["observed_status"],
+                         "running")
+
+    def test_partial_work_terminal_native_yields_resume_without_zombie(self):
+        unit = self.running_unit()
+        self.save_units([unit])
+        self.write("src/wu1/a.py", b"partial\n")
+        self.record_launch("wu1", "agent-1")
+        self.write_native_archive("agent-1", "completed")
+        report = self.reconcile("wu1")  # 无任何验证证据
+        self.assertEqual(report["classification"], "resume_with_progress")
+        # 档案 completed 是终态而非僵尸态：冻结树把僵尸句只绑在
+        # observed running 上，此处 rationale 不含僵尸句
+        self.assertEqual(report["rationale"],
+                         ["partial work present, no fresh pass evidence"])
+
+    def test_owned_residue_without_runs_yields_resume(self):
+        unit = self.running_unit()
+        self.save_units([unit])
+        self.write("src/wu1/a.py", b"partial\n")
+        report = self.reconcile("wu1")  # 无 launch 账本、无档案、无证据
+        self.assertEqual(report["classification"], "resume_with_progress")
+        self.assertEqual(report["evidence"]["runs"], [])
+        self.assertEqual(report["evidence"]["native"], None)
+
+    # —— 分支 6：证据与档案张力（verification ok + 档案非终态） →
+    #     manual_ruling 保守兜底 ——
+
+    def test_fresh_evidence_zombie_native_yields_conservative_manual(self):
+        unit = self.running_unit()
+        self.save_units([unit])
+        self.write("src/wu1/a.py", b"a-v1\n")
+        self.record_launch("wu1", "agent-1")
+        self.write_native_archive("agent-1", "running")
+        fp = self.current_fingerprint(unit)
+        self.record_event(self.verification_event(unit, fp))
+        report = self.reconcile("wu1")
+        # 证据齐但档案 possibly running：不凭证据判 reuse、不凭档案判
+        # 存活——禁止自动猜测（§9.4），裁决归主会话
+        self.assertEqual(report["classification"], "manual_ruling")
+        self.assertEqual(report["rationale"],
+                         ["fresh pass evidence present",
+                          "metadata running is not truth (zombie-aware)",
+                          "unresolved evidence combination; manual ruling"])
+
+    # —— 边界：无 required 命令 → verification None → 走 5 不误判 4 ——
+
+    def test_unit_without_required_commands_verification_is_none_resume(self):
+        unit = make_unit("nofix", ("src/nofix/**",), status="running",
+                         verification=())
+        self.save_state_raw([unit])  # 空 verification 绕过校验直写
+        self.write("src/nofix/n.py", b"partial\n")
+        report = self.reconcile("nofix")
+        self.assertEqual(report["evidence"]["verification"], None)
+        self.assertEqual(report["classification"], "resume_with_progress")
+        self.assertEqual(report["rationale"],
+                         ["partial work present, no fresh pass evidence"])
+
+    # —— 边界：native 取最后一个非空 agent_id（倒序扫描） ——
+
+    def test_native_uses_last_non_empty_agent_id(self):
+        unit = self.running_unit()
+        self.save_units([unit])
+        self.record_launch("wu1", "agent-1", tool_use_id="tu-1")
+        self.record_launch("wu1", None, tool_use_id="tu-2")
+        self.write_native_archive("agent-1", "running")
+        report = self.reconcile("wu1")
+        # 末次派发的 agent_id 提取失败 → 倒序回退更早的已知档案句柄
+        self.assertEqual(report["evidence"]["native"]["agent_id"],
+                         "agent-1")
+        self.assertEqual(report["evidence"]["native"]["observed_status"],
+                         "running")
+
+    def test_runs_filtered_to_requested_unit(self):
+        unit_a = self.running_unit("wu1", ("src/wu1/**",))
+        unit_b = self.running_unit("wu2", ("src/wu2/**",))
+        self.save_units([unit_a, unit_b])
+        self.record_launch("wu1", "agent-1", tool_use_id="tu-1")
+        self.record_launch("wu2", "agent-2", tool_use_id="tu-2")
+        self.write_native_archive("agent-1", "completed")
+        self.write_native_archive("agent-2", "running")
+        report = self.reconcile("wu1")
+        self.assertEqual([run["unit"]
+                          for run in report["evidence"]["runs"]], ["wu1"])
+        # native 只对 wu1 的最后 agent_id 取档案，不串到 wu2 的 run
+        self.assertEqual(report["evidence"]["native"]["agent_id"],
+                         "agent-1")
+        self.assertEqual(report["evidence"]["native"]["observed_status"],
+                         "completed")
+
+    # —— 边界：events 注入只作用于验证证据谓词 ——
+
+    def test_events_injection_controls_verification_only(self):
+        unit = self.running_unit()
+        self.save_units([unit])
+        self.write("src/wu1/a.py", b"a-v1\n")
+        self.record_launch("wu1", "agent-1")
+        self.write_native_archive("agent-1", "completed")
+        fp = self.current_fingerprint(unit)
+        # 注入新鲜证据（不落 journal）→ reuse_result
+        report = self.reconcile(
+            "wu1", events=[self.verification_event(unit, fp)])
+        self.assertEqual(report["classification"], "reuse_result")
+        # 注入坏形状（非 list）→ 谓词按 [] 容错 → 无证据 → resume
+        report_bad = self.reconcile("wu1", events=42)
+        self.assertEqual(report_bad["classification"],
+                         "resume_with_progress")
+
+    # —— 端到端烟雾（VERIFICATION 场景镜像） ——
+
+    def test_smoke_launch_completed_archive_then_fresh_evidence(self):
+        """running 单元 + record_agent_launch + completed 档案 + owned
+        残留 + 无验证证据 → resume_with_progress（档案 completed 是
+        终态、非 running，冻结树把僵尸句只绑在 observed running 上）；
+        补新鲜 pass 证据 → reuse_result。"""
+        unit = self.running_unit()
+        self.save_units([unit])
+        self.write("src/wu1/a.py", b"partial\n")
+        self.record_launch("wu1", "agent-1")
+        self.write_native_archive("agent-1", "completed")
+        report = self.reconcile("wu1")
+        self.assertEqual(report["classification"], "resume_with_progress")
+        self.assertEqual(report["rationale"],
+                         ["partial work present, no fresh pass evidence"])
+        fp = self.current_fingerprint(unit)
+        self.record_event(self.verification_event(unit, fp))
+        report2 = self.reconcile("wu1")
+        self.assertEqual(report2["classification"], "reuse_result")
+        self.assertEqual(report2["rationale"],
+                         ["agent archived terminal + fresh evidence"])
+
+
+@unittest.skipUnless(shutil.which("git"), "环境无 git 可执行，跳过 git fixture 测试")
+class ReconcileAgentRunPurityTest(ReconcileAgentRunFixture):
+    """reconcile_agent_run 纯读：零落盘（任务目录文件集与 state /
+    journal 字节均不变）。"""
+
+    def test_no_disk_writes(self):
+        unit = self.running_unit()
+        self.save_units([unit])
+        self.write("src/wu1/a.py", b"partial\n")
+        self.record_launch("wu1", "agent-1")
+        self.write_native_archive("agent-1", "running")
+        task_dir = journal_mod.journal_path(self.repo, TID).parent
+        state_path = task_dir / "state.json"
+        journal_file = journal_mod.journal_path(self.repo, TID)
+        files_before = sorted(entry.name for entry in task_dir.iterdir())
+        state_before = state_path.read_bytes()
+        journal_before = journal_file.read_bytes()
+        self.reconcile("wu1")
+        self.assertEqual(sorted(entry.name
+                                for entry in task_dir.iterdir()),
+                         files_before)
+        self.assertEqual(state_path.read_bytes(), state_before)
+        self.assertEqual(journal_file.read_bytes(), journal_before)
+
+
+class ReconcileAgentRunNonGitTest(TempDirFixture):
+    """非 git 目录容错（判定树分支 1b）：决策 API 不上抛求值异常——
+    manual_ruling + rationale 注明求值失败，residue 按无 residue 处理，
+    返回形状照旧。无 git 需求（tempdir 基座 + 原始写入 state.json）。"""
+
+    def test_non_git_repo_yields_manual_ruling_with_evaluation_note(self):
+        unit = make_unit("wu1", ("src/wu1/**",), status="running",
+                         verification=(CMD_A,))
+        st = state.new_task_state(TID, "非 git 容错", dict(ROUTE))
+        st["work_units"] = [unit]
+        path = (journal_mod.journal_path(self.repo, TID).parent
+                / "state.json")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(str(path), "w", encoding="utf-8", newline="\n") as fh:
+            fh.write(json.dumps(st, ensure_ascii=False))
+        report = reconcile.reconcile_agent_run(str(self.repo), TID, "wu1")
+        self.assertEqual(report["classification"], "manual_ruling")
+        self.assertEqual(report["rationale"][0],
+                         "repository evaluation failed: OwnershipError")
+        self.assertEqual(report["evidence"]["runs"], [])
+        self.assertEqual(report["evidence"]["owned_residue"], [])
+        self.assertEqual(report["evidence"]["unattributable_residue"], [])
+        self.assertEqual(report["evidence"]["verification"], None)
+        self.assertEqual(report["evidence"]["native"], None)
 
 
 if __name__ == "__main__":

@@ -51,7 +51,12 @@ WU_TERMINAL_STATUSES = ("completed", "failed", "cancelled")
 # 必填键（§61 Required properties）
 WU_REQUIRED_KEYS = ("id", "objective", "status", "depends_on", "executor",
                     "ownership", "verification")
-# 可选键（§61 Optional properties；lease 由后续派发层引入，暂不收录）
+# 可选键（§61 Optional properties；lease 由后续派发层引入，暂不收录）。
+# 词汇表外还有一个历史可选键 "small"（v2.0.1 压力放行语义）：v2.1
+# （wu-21-09，§12 预算接线）起 dispatcher 不再消费——PRESSURE 的预算
+# 收缩移交 execution_policy.effective_worker_budget（PRESSURE→1）。
+# 键不删除、校验不拒绝（未知键向前兼容），旧 state 中的 small 原样
+# 保留但无人读取。
 WU_OPTIONAL_KEYS = ("interfaces", "constraints", "attempt", "result")
 # executor 词汇（与 state.EXECUTORS 取值一致；见模块 docstring 依赖说明）
 WU_EXECUTORS = ("main", "flash-implementer", "visual-implementer")

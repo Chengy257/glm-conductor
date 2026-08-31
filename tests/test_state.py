@@ -14,7 +14,7 @@ import json, os, tempfile
 from unittest import mock
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "plugins" / "glm-conductor"))
-from runtime import journal, state
+from runtime import execution_policy, journal, state
 
 # —— 测试夹具 ——
 
@@ -389,7 +389,9 @@ class NewTaskStateTest(unittest.TestCase):
              "fingerprint": None})
         self.assertEqual(st["visual_evidence"], [])
         self.assertEqual(st["work_units"], [])
-        self.assertEqual(st["dispatch"], {"max_workers": 1, "active": []})
+        # v2.1 wu-21-09：并发默认 2（与 dispatcher.DEFAULT_MAX_WORKERS、
+        # execution_policy parallelism 默认块三处口径一致）
+        self.assertEqual(st["dispatch"], {"max_workers": 2, "active": []})
 
     def test_visual_evidence_key_position(self):
         # 顶层键顺序契约：visual_evidence 在 review 之后、work_units 之前
@@ -1440,6 +1442,101 @@ class RepositoryBindingTest(unittest.TestCase):
             self.assertEqual(
                 state.resolve_repository_root(broken, "ledger-root"),
                 "ledger-root", repr(broken))
+
+
+# —— execution_policy 可选顶层块（v2.1 M1 授权事实源） ——
+
+class ExecutionPolicyStateTest(unittest.TestCase):
+    """execution_policy 顶层块契约（v2.1 M1，validate_state 规则 8.7）。
+
+    覆盖：new_task_state 构造默认块且整状态合法 / legacy 缺键完全合法
+    （含保存往返不出现该键）/ 非 dict 拒绝（含 save_state 闸）/ 块内
+    非法字段经 execution_policy. 前缀上报且 save_state 拒绝 / 未知
+    子键忽略 / setter 产出的自定义合法块保存往返 / 构造默认块不受
+    setter 变换之外的途径污染。
+    """
+
+    def test_new_task_state_contains_default_block(self):
+        st = make_state()
+        self.assertEqual(
+            st["execution_policy"],
+            execution_policy.default_execution_policy())
+        self.assertEqual(state.validate_state(st), [])
+
+    def test_legacy_state_without_execution_policy_is_valid(self):
+        # R7：无 execution_policy 键完全合法（校验通过 + 往返不出现该键）
+        st = make_state()
+        del st["execution_policy"]
+        self.assertEqual(state.validate_state(st), [])
+        with tempfile.TemporaryDirectory() as tmp:
+            state.save_state(tmp, st)
+            loaded = state.load_state(tmp, TID)
+            self.assertNotIn("execution_policy", loaded)
+            self.assertEqual(state.validate_state(loaded), [])
+
+    def test_execution_policy_non_dict_rejected(self):
+        for bad in ("background", ["background"], 42, True):
+            st = make_state()
+            st["execution_policy"] = bad
+            errors = state.validate_state(st)
+            self.assertTrue(
+                any(e == "execution_policy 必须是 JSON 对象"
+                    for e in errors), repr(bad))
+        st = make_state()
+        st["execution_policy"] = 42
+        with tempfile.TemporaryDirectory() as tmp, \
+                self.assertRaises(ValueError):
+            state.save_state(tmp, st)
+
+    def test_invalid_leaf_reported_with_prefix(self):
+        # 规则 8.7 聚合：错误路径前缀 execution_policy.（与规则 7 的
+        # work_units[i] 前缀同风格）
+        st = make_state()
+        st["execution_policy"]["parallelism"]["max_workers"] = 9
+        errors = state.validate_state(st)
+        self.assertTrue(any(
+            e.startswith("execution_policy.parallelism.max_workers")
+            for e in errors))
+        # 授权不变量另一例：max_workers>2 必须 authorization.source=user
+        st2 = make_state()
+        st2["execution_policy"]["parallelism"]["max_workers"] = 3
+        self.assertTrue(any(
+            "authorization.source" in e
+            for e in state.validate_state(st2)))
+
+    def test_invalid_policy_not_saved(self):
+        st = make_state()
+        st["execution_policy"]["continuity"]["auto_resume"] = "unlimited"
+        with tempfile.TemporaryDirectory() as tmp, \
+                self.assertRaises(ValueError) as ctx:
+            state.save_state(tmp, st)
+        self.assertIn("execution_policy", str(ctx.exception))
+        # 校验先于落盘：非法块不得写出任何文件
+        self.assertFalse(state.state_path(tmp, TID).exists())
+
+    def test_unknown_policy_sub_key_ignored(self):
+        # 未知键忽略（向前兼容），块内外一致
+        st = make_state()
+        st["execution_policy"]["future_key"] = {"whatever": 1}
+        self.assertEqual(state.validate_state(st), [])
+
+    def test_custom_valid_policy_roundtrip(self):
+        # setter 链产出的合法自定义块：整状态合法 + 保存往返保持
+        confirmed = execution_policy.set_parallel_authorization(
+            execution_policy.set_resume_authorization(
+                execution_policy.default_execution_policy(),
+                auto_resume="until_done", max_quota_windows=2,
+                source="user", confirmed_at="2026-08-30T12:00:00+00:00"),
+            max_workers=4, source="user",
+            confirmed_at="2026-08-30T12:00:00+00:00")
+        st = make_state()
+        st["execution_policy"] = confirmed
+        self.assertEqual(state.validate_state(st), [])
+        with tempfile.TemporaryDirectory() as tmp:
+            state.save_state(tmp, st)
+            loaded = state.load_state(tmp, TID)
+            self.assertEqual(loaded["execution_policy"], confirmed)
+            self.assertEqual(state.validate_state(loaded), [])
 
 
 if __name__ == "__main__":

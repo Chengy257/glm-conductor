@@ -58,8 +58,9 @@
          version 字段必须等于 CHANGELOG.md 第一个 `## ` 标题行中的版本记号；
      13. 钩子清单完整性：plugins/glm-conductor/hooks/hooks.json 存在、合法
          JSON、顶层为对象且含非空 `hooks` 对象；事件键限于 SessionStart /
-         UserPromptSubmit / PreToolUse / PostToolUse / PermissionRequest /
-         Stop，且必须含 Stop 事件键（v2 完成门要求声明 Stop 钩子，缺失即
+         UserPromptSubmit / PreToolUse / PostToolUse / PostToolUseFailure
+         （v2.1 M2 官方七事件全表）、PermissionRequest / Stop，且必须含
+         Stop 事件键（v2 完成门要求声明 Stop 钩子，缺失即
          FAIL）；每个事件值为数组，数组每项为对象且含 `hooks` 数组；内层
          hook 对象 type 限于 process / command，type=process 时 command
          必须为 python3，timeoutMs 若存在必须为 >0 的整数，matcher 若存在
@@ -87,12 +88,19 @@
          evaluate / plan_resume / PRESSURE / EXHAUSTED，_http 必含
          ALLOWED_HOSTS / malformed，credentials 必含
          GLM_CONDUCTOR_QUOTA_API_KEY / builtin:bigmodel-coding-plan，
-         report 必含 --json / unavailable。
+         report 必含 --json / unavailable；
+      15. enforcement 审查 receipt 权威标记：skills/enforcement/SKILL.md
+         必含 `run_review` 或 `review-record`（v2.1 M6——Stop 完成门审查
+         检查「fresh ship review receipt 唯一权威」语义在用户侧技能的
+         同步锚定，防止文档回退到 state.review 手写口径）。
 
     扫描范围说明：检查 5/6/7/8（及 8 内的旧名负向检查）的扫描范围是显式
     列表——plugins/ 全部文件 + marketplace.json + README.md +
     docs/architecture.md。docs/history/ 与 docs/ 下其他文件不在该显式列表
-    中，天然不被扫描，无需目录排除逻辑。
+    中，天然不被扫描，无需目录排除逻辑。**编译缓存排除（v2.1 alpha2，
+    wu-21-08 幻影名根因修复）**：全部文件扫描一律跳过 `__pycache__`
+    目录与 `*.pyc` / `*.pyo` 文件——字节码缓存内的旧字符串残影曾让
+    检查 4/5/6/8 对源文件中不存在的名字报幻影 FAIL，缓存不属契约面。
 
 用法：
     python3 scripts/validate_plugin.py
@@ -205,7 +213,7 @@ PLUGIN_ROOT_REL = "plugins/glm-conductor"  # ${ZCODE_PLUGIN_ROOT} 对应的插�
 PLUGIN_ROOT_PREFIX = "${ZCODE_PLUGIN_ROOT}/"
 ALLOWED_HOOK_EVENTS = (
     "SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse",
-    "PermissionRequest", "Stop")
+    "PostToolUseFailure", "PermissionRequest", "Stop")
 ALLOWED_HOOK_TYPES = ("process", "command")
 HOOK_COMMAND = "python3"
 
@@ -315,11 +323,25 @@ def read_text(path):
         return None
 
 
+# 编译缓存排除（wu-21-08 幻影名根因修复）：字节码缓存与缓存目录不参与
+# 任何文件扫描——缓存内的旧字符串残影不属契约面，也曾造成对源文件中
+# 不存在的名字的幻影 FAIL
+PRUNED_DIR_NAMES = ("__pycache__",)
+PRUNED_FILE_SUFFIXES = (".pyc", ".pyo")
+
+
 def iter_plugins_files():
-    """plugins/ 下所有文件的绝对路径（排序保证输出稳定）。"""
+    """plugins/ 下所有文件的绝对路径（排序保证输出稳定）。
+
+    一律跳过 `__pycache__` 目录与 `*.pyc` / `*.pyo` 文件（编译缓存不属
+    契约面；wu-21-08 实录：缓存残影曾让检查 4/5/6/8 报幻影名 FAIL）。
+    """
     for dirpath, dirnames, filenames in os.walk(PLUGINS_DIR):
-        dirnames.sort()
+        dirnames[:] = sorted(
+            name for name in dirnames if name not in PRUNED_DIR_NAMES)
         for fname in sorted(filenames):
+            if fname.endswith(PRUNED_FILE_SUFFIXES):
+                continue
             yield os.path.join(dirpath, fname)
 
 
@@ -1019,6 +1041,37 @@ def check_14_runtime_state(results):
     results.append((14, title, ok, details))
 
 
+def check_15_enforcement_receipt(results):
+    """检查 15：enforcement 技能锚定审查 receipt 权威语义（v2.1 M6）。
+
+    Stop 完成门的审查检查已升级为「fresh ship review receipt 唯一权威」
+    （receipt 由 `review-record` / `runtime.provenance.run_review` 落盘）；
+    用户侧技能必须同步该口径——缺 `run_review` 与 `review-record` 任一
+    关键词即 FAIL（文档回退到 state.review 手写口径的机械防线）。
+    """
+    title = "enforcement 审查 receipt 权威标记（run_review / review-record）"
+    details = []
+    ok = True
+    text = read_text(ENFORCEMENT_SKILL)
+    shown = rel_display(ENFORCEMENT_SKILL)
+    if text is None or not os.path.isfile(ENFORCEMENT_SKILL):
+        details.append("FAIL: %s 不存在或无法读取，无法确认标记" % shown)
+        results.append((15, title, False, details))
+        return
+    hits = [marker for marker in ("run_review", "review-record")
+            if marker in text]
+    if hits:
+        details.append(
+            "PASS: %s 含审查 receipt 权威标记（%s）"
+            % (shown, " / ".join(hits)))
+    else:
+        details.append(
+            "FAIL: %s 缺少审查 receipt 权威标记（run_review / "
+            "review-record 均未出现——receipt 唯一权威语义未同步）" % shown)
+        ok = False
+    results.append((15, title, ok, details))
+
+
 CHECKS = (
     check_1_json,
     check_2_agent_frontmatter,
@@ -1034,6 +1087,7 @@ CHECKS = (
     check_12_version_consistency,
     check_13_hooks_manifest,
     check_14_runtime_state,
+    check_15_enforcement_receipt,
 )
 
 

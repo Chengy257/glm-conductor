@@ -76,9 +76,25 @@ active task（continuity 为 resumable / idle 的任务，或需要 Stop 完成�
 | checkpoint_written | checkpoint 落盘后 |
 | status_changed | 任务状态迁移后（`transition_task_status` 自动记录） |
 | gate_passed / gate_blocked / gate_degraded / gate_exhausted | 完成门放行 / 拦截 / 降级跳过 / 达上限放行（由 Stop 钩子记录） |
+| dispatch_permit_created / dispatch_permit_invalidated | `prepare_dispatch` 签发 permit / `abort_dispatch` 作废（v2.1 M2） |
+| agent_launched / agent_dispatch_failed / agent_launch_replay_skipped | PostToolUse 钩子观察到的派发生命周期（v2.1 M2——runtime-observed，与手写 implementation_started 互不替代） |
+| manifest_write_failed | resume manifest 写入失败警告（v2.1 M3——派生物降级，不阻断事务） |
+| dispatch_wave_prepared / wave_closed | `prepare_dispatch_wave` 批量准备 / 成员全部终态或 verifying 时 `finish_unit` 自动关 wave（v2.1 M4） |
+| quota_resolved | prepare 链缺省额度解析（resolver 四级层级，v2.1 M5——绝不默认 AVAILABLE） |
+| quota_waiting / quota_resumed / quota_wake_recorded / auto_resume_authorization_exhausted | 额度耗尽转态 / `quota-resume` 恢复 / wake automation 窗口扣减记账 / 授权预算耗尽转 waiting_user（v2.1 M5） |
+| verification_receipt / review_receipt | runtime 亲测验证 / 审查裁决申报的 durable receipt 落盘（v2.1 M6——receipt 是完成门证据唯一权威） |
 | completed / cancelled / failed | 进入终态时 |
 
 约束：不写入任何秘密值（密钥、Authorization 头）、不写入完整 prompt 或完整源码；它不是遥测。
+
+### 自动恢复面（v2.1 M3：SessionStart 注入 + Resume Manifest）
+
+连续性不再完全依赖模型纪律——两个 runtime 自动面已落地（新会话生效）：
+
+- **SessionStart 恢复注入**：`hooks/session_start.py`（matcher `startup|clear|compact`）在每个新会话自动发现未完成任务并注入 `GLM CONDUCTOR RESUME CONTEXT`（任务/状态/已完成单元/被中断单元（含 possibly_zombie 标注——原生档案 status=running 不是真相）/等待单元/quota-resume 授权/建议步骤）。纯本地：无网络、无模型调用、零 quota 消耗；无活动任务时完全安静。崩溃后**不需要**用户提醒模型"还有任务"。
+- **Resume Manifest**：`commit_dispatch` / `abort_dispatch` / `finish_unit` 事务后自动刷新 `tasks/<task-id>/manifest.json`（active units / verification due / agent runs / next ready candidates / quota snapshot / resume authorization）。它是**派生压缩层不是 truth**——读取用 CLI `manifest-show <repo> <task>`；写失败只记 journal 警告（manifest_write_failed），绝不阻断主事务。
+- **崩溃后 reconcile**：对 running 单元先跑 `runtime/reconcile.py` 的 `reconcile_agent_run`（四分：reuse_result 捞结果不重派 / resume_with_progress 组进度包续作 / redispatch_clean 全新派发 / manual_ruling 人工裁决）——不再一律重派；进度包组装（旧 transcript 摘要）由主会话经 ReadSessionContext 完成（runtime 只给分类与证据句柄）。同会话内对已完成的旧 agent 可用 SendMessage 轻量续接问询。
+- **runtime 调用入口**：一律 `python3 plugins/glm-conductor/runtime/cli.py <子命令>`（policy-show / policy-set-parallel / policy-set-resume / permits / permit-show / permit-consume / agent-runs [unit] / manifest-show；退出码 0/2/1）——**禁止 `python3 -c` 内联**（引号/换行陷阱实战已多次炸）。
 
 ### 证据指纹的记录时机（verification / review / visual-evidence）
 
@@ -96,6 +112,7 @@ active task（continuity 为 resumable / idle 的任务，或需要 Stop 完成�
 红线：
 
 - 指纹必须经 `runtime.fingerprint.task_fingerprint` 计算（与完成门同一入口、同一范围规则：声明了 ownership 时取「当前改动 ∩ 声明范围」，未声明时取全部当前改动）；不得手算、不得另定范围——两侧口径不一致的指纹永远无法通过比对
+- **单元级指纹口径（v2.1 实战教训）**：`record_unit_verification` 的 fingerprint 必须取**单元作用域**——直接用 `reconcile.fresh_unit_verification(repo, task, unit, events=journal.read_events(repo, task))` 返回的 `fingerprint` 字段值记录；用任务作用域 `task_fingerprint(repo, st)` 在工作树还含其他单元/任务级改动（如 .gitignore、validator）时与 RB-1 门的单元口径不一致，finish 会被拒（missing 证据）且原因晦涩
 - 记录指纹后不得再改动 owned 文件：任何后续编辑都使指纹过期——这是设计意图（任何修复使先前验证/审查失效）。确需改动 → 改完后重走「验证 →（审查）→ 记指纹」
 - fix-first / rethink 修复后的重新审查是新裁决：verdict 与 fingerprint 一并重记
 - 记录证据后执行 git commit 会改变基线修订 → 证据随之 stale（指纹公式含 base，属设计内保守行为；提交前重走「验证 →（审查）→ 记指纹」即可）
@@ -114,18 +131,14 @@ journal.append_event('<用户仓库根>', '<task-id>', {'event': 'task_created'}
 "
 ```
 
-验证 / 审查 / 视觉证据的指纹记录（时机契约见上节）同一接法：
+验证 / 审查证据的指纹记录（时机契约见上节）一律走 CLI（同上禁 `python3 -c` 内联；`verify-task` / `review-record` 以与完成门同一入口的同刻指纹自动落 receipt 并同步证据流，替代手记指纹）：
 
 ```bash
-python3 -c "
-import sys; sys.path.insert(0, r'<插件根>')
-from runtime import state, fingerprint
-st = state.load_state('<用户仓库根>', '<task-id>')
-fp = fingerprint.task_fingerprint('<用户仓库根>', st)
-state.record_verification(st, '<命令>', fp)  # 或 record_review(st, verdict, fp)
-state.save_state('<用户仓库根>', st)
-"
+python3 plugins/glm-conductor/runtime/cli.py verify-task '<用户仓库根>' '<task-id>' ['<单条命令>']
+python3 plugins/glm-conductor/runtime/cli.py review-record '<用户仓库根>' '<task-id>' '<reviewer>' '<verdict>' '<tool_use_id>' ['<route>'] ['<note>']
 ```
+
+视觉证据无 CLI 子命令：仍按上表时机以 `state.record_visual_evidence(st, path, sha256)` 后 save_state 记录。
 
 runtime 模块不可得时，按 `runtime/state.py` 的 schema 手写 state.json（字段与枚举必须逐项一致），恢复优先用模块读取（自动归一 v1.x 遗留标识）。
 
@@ -189,6 +202,25 @@ continuity 不重新实现 Goal 模式。职责分工：
 **凭证**：环境变量 `GLM_CONDUCTOR_QUOTA_API_KEY` 优先，已登录 ZCode 的 `~/.zcode/v2/config.json` provider 配置为文档化回退；凭证零落盘（不进 state.json / events.jsonl / checkpoint / 日志 / 任何输出）。凭证不可得 → unavailable 模式 → 周期性存活探针回退。
 
 **不变边界**：原生插件级 quota API（getQuotaRemaining / getQuotaResetTime / onQuotaReset 等）仍不存在，不得虚构；不硬编码 5 小时重置；不把额度观察当作路由证据；不实现常驻轮询——查询只发生在任务开始 / 路由选定后 / 大段派发前 / 里程碑后 / 调度恢复前后等刷新点。额度观察除本节 provider-api 通道外仍可来自用户告知或 UI，只作为证据使用。
+
+### 授权续跑（v2.1 M5：authorized resume）
+
+额度 EXHAUSTED 的处置不再依赖模型即兴——`quota-exhausted <repo> <task>`（CLI）走确定性转态链：执行态任务与单元转 waiting_quota，按 `execution_policy.continuity.auto_resume` 四态授权裁决：
+
+| auto_resume | 授权要求 | EXHAUSTED 行为 |
+| --- | --- | --- |
+| manual（默认） | — | 不建自动化；降级 SessionStart 恢复注入提示用户 |
+| notify | — | 只产出提醒文本（wake.required=False）——提醒允许、自动恢复不允许 |
+| auto_once | `authorization.source == "user"`（保存时强制校验） | 一次性 wake：烧穿 1 个窗口预算后停 |
+| until_done | `authorization.source == "user"` | 惰性逐窗续跑，直至完成或预算耗尽 |
+
+机制要点：
+
+- **窗口预算**：`continuity.consumed_quota_windows` / `max_quota_windows`——每真实创建一个 wake automation 记 1 窗；预算耗尽任务转 `waiting_user`（新状态词，等待用户重新授权），此后**不得再创建任何自动化唤醒**
+- **记账与 automation 存活解耦**：`wake-record`（主会话 CronCreate 成功后调用）只做窗口扣减记账——wake 未触发、automation 被清理或丢失都不回滚；正确性底线永远是 SessionStart 恢复注入，automation 只是 best-effort bridge
+- **wake prompt 自足**：`wake-prompt` 产出的 prompt 以用户 turn 注入同一会话（宿主实锚：wake=同会话续行、SessionStart 不重放），因此 task_id、账本/仓库根、恢复首步、额度检查口径、预算状态与红线（绝不重试 CronDelete/CronUpdate、发布动作征询用户、RB-1 指纹口径）全部内置；主会话照 prompt 建 automation（recurring=false、maxRuns=1）
+- **恢复首步**：额度唤醒触发或新会话恢复时第一步 `quota-resume <repo> <task>`——AVAILABLE/PRESSURE → 任务转回 executing、waiting_quota 单元回 ready，按账本就绪顺序继续派发（SELECTIVE ROUTE、permit 门与租约时序不得绕过）；EXHAUSTED/UNKNOWN → 零转态保守等待，不派发、不重建唤醒
+- **SessionStart 兜底不变**：无论四态授权如何，automation 不可用时恢复语义始终回退 SessionStart 注入——automation 永远是加速器，不是正确性前提
 
 ## Completion Cleanup
 

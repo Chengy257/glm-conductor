@@ -33,6 +33,12 @@
         state.json / events.jsonl / 租约）恒在账本根——两根分离是多仓
         隔离的基础；无 repository 键即 legacy 形态，行为与单仓时代
         完全一致。
+      - 执行策略（v2.1 M1，自动化强度授权事实源）：可选顶层
+        "execution_policy" 块——new_task_state() 构造默认块
+        （runtime.execution_policy.default_execution_policy），
+        validate_state 规则 8.7 复用 runtime.execution_policy 校验
+        （错误路径前缀 execution_policy.）；无该键即 legacy 形态，
+        完全合法，由消费方按保守默认块解释。
     本文件是 Stop 完成门钩子等强制状态源的确定性来源。
 
 路径布局：
@@ -51,8 +57,10 @@ legacy 标识归一：
     仅 Python 3 标准库（json / os / pathlib / re）+ runtime.quota.parser
     （quota 状态词汇 QUOTA_STATUSES，§39；quota/* 不 import 本模块，
     无循环导入）+ runtime.work_unit（work unit 逐项校验，B8.1；
-    本模块单向导入它，它不导入本模块，无循环导入），零第三方依赖，
-    `python3 -S` 可运行（无 site-packages）。
+    本模块单向导入它，它不导入本模块，无循环导入）+
+    runtime.execution_policy（v2.1 M1 授权事实源：默认块构造与块内
+    校验；它只依赖 runtime.quota.parser，不导入本模块，无循环导入），
+    零第三方依赖，`python3 -S` 可运行（无 site-packages）。
 """
 
 import json
@@ -60,6 +68,8 @@ import os
 import pathlib
 import re
 
+from runtime.execution_policy import (default_execution_policy,
+                                      validate_execution_policy)
 from runtime.quota.parser import QUOTA_STATUSES
 from runtime.work_unit import validate_work_unit
 
@@ -91,11 +101,14 @@ IMPLEMENTER_EXECUTORS = ("flash-implementer", "visual-implementer")
 # 连续性三模式
 CONTINUITY_MODES = ("foreground", "resumable", "idle")
 # 任务全生命周期状态（finalizing = 完成请求态：进入即请求完成，
-# completed 只能由 Stop 完成门在其四重检查全部通过后提交）
+# completed 只能由 Stop 完成门在其四重检查全部通过后提交；
+# waiting_user = v2.1 §14.5 自动续跑授权耗尽态：auto_once / until_done
+# 的窗口预算用尽后等待用户重新授权，重新授权后经 waiting_user →
+# executing 回到执行态族）
 TASK_STATUSES = (
     "created", "preflight", "routed", "decomposed", "executing",
     "joining", "verifying", "reviewing", "finalizing", "completed",
-    "waiting_quota", "blocked", "cancelled", "failed")
+    "waiting_quota", "waiting_user", "blocked", "cancelled", "failed")
 # 终态：discover_tasks 归入 terminal 桶（find_active_tasks 不再返回）
 TERMINAL_STATUSES = ("completed", "cancelled", "failed")
 # 顶层状态转换表：键 = 旧 status，值 = 允许的直接后继（终态无表项 =
@@ -117,7 +130,12 @@ TASK_TRANSITIONS = {
                   "failed", "cancelled"),
     "reviewing": ("finalizing", "executing", "blocked", "failed",
                   "cancelled"),
-    "waiting_quota": ("executing", "blocked", "failed", "cancelled"),
+    "waiting_quota": ("executing", "waiting_user", "blocked", "failed",
+                      "cancelled"),
+    # waiting_user（v2.1 §14.5）：自动续跑授权耗尽后等待用户重新授权；
+    # 用户重新授权（或主会话经授权升档）后回到 executing，公共尾巴
+    # （blocked/failed/cancelled）与 waiting_quota 同款
+    "waiting_user": ("executing", "blocked", "failed", "cancelled"),
     "blocked": ("preflight", "routed", "decomposed", "executing",
                 "joining", "verifying", "reviewing", "waiting_quota",
                 "finalizing", "failed", "cancelled"),
@@ -379,8 +397,87 @@ def _validate_visual_evidence(entries):
     return errors
 
 
+def _validate_dispatch_waves(waves) -> "list[str]":
+    """校验可选 dispatch.waves 数组（v2.1 M4 wu-21-08 wave 记录）。
+
+    键名冻结：wave_id（非空 str 且列表内唯一）/ units（非空字符串
+    数组）/ worker_budget（>= 1 整数）/ quota_status（四态）/
+    created_at（非空 str，ISO-8601 落盘口径）/ status（active|closed）/
+    closed_at（非空 str 或 None；status="closed" 时必须非 None）。
+    缺 waves 键 = legacy 合法（调用方把关）；逐条聚合全部错误不短路，
+    错误消息中文、前缀 dispatch.waves[i]。
+    """
+    if not isinstance(waves, list):
+        return ["dispatch.waves 必须是数组"]
+    errors = []
+    seen_wave_ids = set()
+    for index, wave in enumerate(waves):
+        prefix = "dispatch.waves[%d]" % index
+        if not isinstance(wave, dict):
+            errors.append("%s 必须是 JSON 对象" % prefix)
+            continue
+        for key in ("wave_id", "units", "worker_budget", "quota_status",
+                    "created_at", "status", "closed_at"):
+            if key not in wave:
+                errors.append("%s 缺少必填键 %s" % (prefix, key))
+        if "wave_id" in wave:
+            wave_id = wave["wave_id"]
+            if not isinstance(wave_id, str) or wave_id == "":
+                errors.append("%s.wave_id 必须是非空字符串" % prefix)
+            elif wave_id in seen_wave_ids:
+                errors.append(
+                    "%s.wave_id %r 重复（wave_id 必须在列表内唯一）"
+                    % (prefix, wave_id))
+            else:
+                seen_wave_ids.add(wave_id)
+        if "units" in wave:
+            units = wave["units"]
+            if not isinstance(units, list) or not units:
+                errors.append("%s.units 必须是非空数组" % prefix)
+            else:
+                errors.extend(
+                    "%s.units[%d] 必须是非空字符串" % (prefix, u_index)
+                    for u_index, item in enumerate(units)
+                    if not isinstance(item, str) or item == "")
+        if "worker_budget" in wave:
+            worker_budget = wave["worker_budget"]
+            # bool 是 int 的子类，但 True/False 不应充当 worker_budget
+            if isinstance(worker_budget, bool) \
+                    or not isinstance(worker_budget, int) or worker_budget < 1:
+                errors.append("%s.worker_budget 必须是 >= 1 的整数" % prefix)
+        if "quota_status" in wave:
+            quota_status = wave["quota_status"]
+            if quota_status not in QUOTA_STATUSES:
+                errors.append(_enum_error(prefix + ".quota_status",
+                                          quota_status, QUOTA_STATUSES))
+        if "created_at" in wave:
+            created_at = wave["created_at"]
+            if not isinstance(created_at, str) or created_at == "":
+                errors.append(
+                    "%s.created_at 必须是非空字符串（ISO-8601）" % prefix)
+        if "status" in wave:
+            status = wave["status"]
+            if status not in ("active", "closed"):
+                errors.append(_enum_error(prefix + ".status", status,
+                                          ("active", "closed")))
+        if "closed_at" in wave:
+            closed_at = wave["closed_at"]
+            if closed_at is not None and (
+                    not isinstance(closed_at, str) or closed_at == ""):
+                errors.append(
+                    "%s.closed_at 必须是非空字符串（ISO-8601）或 null"
+                    % prefix)
+            if wave.get("status") == "closed" and (
+                    not isinstance(closed_at, str) or closed_at == ""):
+                errors.append(
+                    "%s.closed_at 与 status=\"closed\" 矛盾：closed 波必须"
+                    "携带 closed_at" % prefix)
+    return errors
+
+
 def _validate_dispatch(dispatch):
-    """校验 dispatch 子对象（max_workers 为 1-§82 上限的整数 + active 数组）。"""
+    """校验 dispatch 子对象（max_workers 为 1-§82 上限的整数 + active 数组
+    + 可选 waves 数组，wu-21-08）。"""
     if not isinstance(dispatch, dict):
         return ["dispatch 必须是 JSON 对象"]
     from runtime.lease import DEFAULT_MAX_WORKERS_LIMIT
@@ -396,6 +493,9 @@ def _validate_dispatch(dispatch):
             % (DEFAULT_MAX_WORKERS_LIMIT, DEFAULT_MAX_WORKERS_LIMIT))
     if not isinstance(dispatch.get("active", []), list):
         errors.append("dispatch.active 必须是数组")
+    # 可选 waves 键（wu-21-08 wave 记录）：缺键 = legacy 合法
+    if "waves" in dispatch:
+        errors.extend(_validate_dispatch_waves(dispatch["waves"]))
     return errors
 
 
@@ -453,6 +553,10 @@ def validate_state(state) -> "list[str]":
     未知顶层键忽略（向前兼容），不报错。
     可选顶层 repository 块（RB-2）：存在时必须为 dict 且 root 为非空
     字符串；缺失时完全合法（legacy 无绑定形态）。
+    可选顶层 execution_policy 块（v2.1 M1 授权事实源）：存在时必须为
+    dict 且复用 validate_execution_policy（§3 冻结 schema + §5.4
+    授权不变量，错误路径前缀 execution_policy.）；缺失时完全合法
+    （legacy 保守默认形态，R7）。
     """
     if not isinstance(state, dict):
         return ["state 必须是 JSON 对象"]
@@ -525,6 +629,20 @@ def validate_state(state) -> "list[str]":
     if "repository" in state:
         errors.extend(_validate_repository(state["repository"]))
 
+    # 规则 8.7：execution_policy（v2.1 M1 可选顶层授权事实源块；无该键
+    # 完全合法——legacy 保守默认形态，消费方按 default_execution_policy
+    # 解释；存在时复用 runtime.execution_policy 全量校验（§3 冻结
+    # schema + §5.4 授权不变量），错误路径前缀 execution_policy.，
+    # 聚合不短路——与规则 7 的 work_units[i] 前缀同风格）
+    if "execution_policy" in state:
+        policy_block = state["execution_policy"]
+        if not isinstance(policy_block, dict):
+            errors.append("execution_policy 必须是 JSON 对象")
+        else:
+            errors.extend(
+                "execution_policy.%s" % policy_error
+                for policy_error in validate_execution_policy(policy_block))
+
     # 规则 9：status ∈ TASK_STATUSES
     if "status" in state:
         status = state["status"]
@@ -561,6 +679,16 @@ def new_task_state(task_id, goal, route, *, ownership_files=(),
     Git 仓库根（经 bind_repository_root 归一为绝对路径写入顶层
     "repository" 块）；None（缺省）→ 整键省略（legacy 无绑定形态）。
     非法输入（空串 / 非路径类型）抛 ValueError。
+
+    v2.1 M1：构造结果恒含顶层 "execution_policy" 默认块
+    （runtime.execution_policy.default_execution_policy() 的保守
+    默认——授权事实源的初始形状；升档经 set_*_authorization 变换）。
+
+    v2.1 §11.5（wu-21-09）：dispatch.max_workers 默认 1 → 2——与
+    dispatcher.DEFAULT_MAX_WORKERS=2、execution_policy parallelism
+    默认块（default_workers=max_workers=2）三处口径一致；真实并发
+    预算另按 quota 四态经 execution_policy.effective_worker_budget
+    折算（§12 表，接线在 task_manager._effective_worker_cap）。
     """
     if not isinstance(route, dict):
         raise TypeError(
@@ -593,8 +721,11 @@ def new_task_state(task_id, goal, route, *, ownership_files=(),
         },
         "visual_evidence": [],
         "work_units": [],
-        "dispatch": {"max_workers": 1, "active": []},
+        "dispatch": {"max_workers": 2, "active": []},
         "status": status,
+        # v2.1 M1：执行策略授权事实源（§3 冻结 schema 的保守默认块；
+        # 授权升档经 execution_policy.set_*_authorization 变换后写入）
+        "execution_policy": default_execution_policy(),
     }
     if repository_root is not None:
         bind_repository_root(st, repository_root)

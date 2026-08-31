@@ -36,10 +36,10 @@ hooks.json：Stop、PreToolUse（Agent|Task 与 Bash 两条）条目并存。
 """
 
 import sys, unittest
-import json, os, subprocess, tempfile
+import json, os, subprocess, tempfile, time
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "plugins" / "glm-conductor"))
-from runtime import state
+from runtime import dispatch_wave, state, task_manager
 
 # 被测钩子脚本：仓库根 plugins/glm-conductor/hooks/pre_tool_use.py
 PRE_TOOL_USE = (Path(__file__).resolve().parents[1]
@@ -381,6 +381,174 @@ class NonBashDispatchCompatTest(unittest.TestCase):
             self.assertEqual(result.returncode, 0)
             self.assertEqual(result.stdout, "")
             self.assertEqual(result.stderr, "")
+
+
+# —— v2.1 M2 dispatch permit 门（wu-21-03，§20.2/§20.3 hook 侧） ——
+
+PT_TID = "permit-gate-test-1a2b3c"
+# delegate 路由（矩阵合法：delegability high + assurance standard）
+PT_ROUTE = {"mode": "delegate", "delegability": "high",
+            "assurance": "standard", "executor": "flash-implementer",
+            "continuity": "foreground"}
+PT_UNIT = {"id": "wu-1", "objective": "permit gate fixture unit",
+           "status": "pending", "depends_on": [],
+           "executor": "flash-implementer",
+           "ownership": ["src/a.py"],
+           "verification": ["python3 -m unittest -h"]}
+
+
+def pt_save_task(repo):
+    """构造带 work unit 的活动任务（executing），返回 state dict。"""
+    st = state.new_task_state(
+        PT_TID, "permit gate fixture", dict(PT_ROUTE),
+        ownership_files=["src/a.py"],
+        verification_required=["python3 -m unittest -h"], status="executing")
+    st["work_units"] = [dict(PT_UNIT)]
+    state.save_state(repo, st)
+    return st
+
+
+def pt_agent_stdin(permit_id=None, subagent_type="flash-implementer",
+                   run_in_background=None, where="prompt"):
+    """构造 Agent 派发的 PreToolUse 事件 stdin（marker 可选）。"""
+    tool_input = {"subagent_type": subagent_type,
+                  "description": "fixture dispatch",
+                  "prompt": "implement the unit"}
+    if permit_id is not None:
+        marker = dispatch_wave.marker_for(permit_id)
+        if where == "prompt":
+            tool_input["prompt"] = "implement %s" % marker
+        else:
+            tool_input["description"] = "fixture %s" % marker
+    if run_in_background is not None:
+        tool_input["run_in_background"] = run_in_background
+    return json.dumps({"tool_name": "Agent", "tool_input": tool_input})
+
+
+def pt_decision(result):
+    """解析 hook stdout 的 hookSpecificOutput（单行 JSON）."""
+    return parse_single_line_json(result.stdout)["hookSpecificOutput"]
+
+
+class PermitGateDenyTest(unittest.TestCase):
+    """§20.2 hook 侧拒绝集：无 marker / 伪造 / 过期 / 重放一律 deny。"""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.repo = self._tmp.name
+        pt_save_task(self.repo)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _deny_reason(self, result):
+        block = pt_decision(result)
+        self.assertEqual(block["permissionDecision"], "deny")
+        return block["permissionDecisionReason"]
+
+    def test_executor_without_marker_denied(self):
+        result = run_hook(pt_agent_stdin(), self.repo)
+        reason = self._deny_reason(result)
+        self.assertIn("no dispatch marker found", reason)
+        self.assertIn("GLM_CONDUCTOR_DISPATCH=", reason)
+
+    def test_fake_permit_denied(self):
+        result = run_hook(pt_agent_stdin("dp-000000000000"), self.repo)
+        self.assertIn("permit not found", self._deny_reason(result))
+
+    def test_consumed_permit_denied(self):
+        from runtime import dispatch_wave as dw
+        permit = dw.create_permit(self.repo, PT_TID, "wu-1")
+        dw.consume_permit(self.repo, PT_TID, permit["permit_id"])
+        result = run_hook(pt_agent_stdin(permit["permit_id"]), self.repo)
+        self.assertIn("permit not found", self._deny_reason(result))
+
+    def test_expired_permit_denied(self):
+        # TTL=1 秒的 permit：跨过过期点后必须 deny（§20.2）
+        permit = dispatch_wave.create_permit(self.repo, PT_TID, "wu-1",
+                                             ttl_seconds=1)
+        time.sleep(1.2)
+        result = run_hook(pt_agent_stdin(permit["permit_id"]), self.repo)
+        self.assertIn("permit expired", self._deny_reason(result))
+
+    def test_readonly_type_not_gated(self):
+        # 只读类型（Explore）：permit 门不适用——有声明 ownership 的
+        # 活动任务时仍走既有注入路径（additionalContext，无 deny）
+        st = state.load_state(self.repo, PT_TID)
+        st["ownership"]["files"] = ["src/a.py", "src/b.py"]
+        state.save_state(self.repo, st)
+        result = run_hook(pt_agent_stdin(subagent_type="Explore"), self.repo)
+        self.assertEqual(result.returncode, 0)
+        block = pt_decision(result)
+        self.assertNotIn("permissionDecision", block)
+        self.assertIn("additionalContext", block)
+
+    def test_no_active_task_zero_intervention(self):
+        with tempfile.TemporaryDirectory() as empty:
+            result = run_hook(pt_agent_stdin(), empty)
+            self.assertEqual((result.returncode, result.stdout), (0, ""))
+
+
+class PermitGateAllowTest(unittest.TestCase):
+    """§20.3：background 强制改写 / foreground 同步放行。"""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.repo = self._tmp.name
+        pt_save_task(self.repo)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _prepare_permit(self, mode=None):
+        task_manager.refresh_readiness(self.repo, PT_TID)
+        if mode is None:
+            result = task_manager.prepare_dispatch(
+                self.repo, PT_TID, "wu-1", quota_status="AVAILABLE")
+            return result["permit"]["permit_id"]
+        return dispatch_wave.create_permit(
+            self.repo, PT_TID, "wu-1", mode=mode,
+            reason="synchronous_dependency"
+            if mode == "foreground" else None)["permit_id"]
+
+    def test_background_forces_run_in_background(self):
+        permit_id = self._prepare_permit()
+        result = run_hook(pt_agent_stdin(permit_id,
+                                         run_in_background=None),
+                          self.repo)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        block = pt_decision(result)
+        self.assertNotIn("permissionDecision", block)
+        updated = block["updatedInput"]
+        self.assertIs(updated["run_in_background"], True)
+        # 全量替换：原有字段全部保留
+        self.assertEqual(updated["subagent_type"], "flash-implementer")
+        self.assertIn("GLM_CONDUCTOR_DISPATCH=", updated["prompt"])
+        self.assertIn("join", block["additionalContext"])
+
+    def test_background_already_true_passthrough(self):
+        permit_id = self._prepare_permit()
+        result = run_hook(pt_agent_stdin(permit_id,
+                                         run_in_background=True), self.repo)
+        block = pt_decision(result)
+        self.assertNotIn("permissionDecision", block)
+        self.assertNotIn("updatedInput", block)
+
+    def test_foreground_permit_sync_allowed(self):
+        permit_id = self._prepare_permit(mode="foreground")
+        result = run_hook(pt_agent_stdin(permit_id,
+                                         run_in_background=None),
+                          self.repo)
+        block = pt_decision(result)
+        self.assertNotIn("permissionDecision", block)
+        self.assertNotIn("updatedInput", block)
+
+    def test_marker_in_description_located(self):
+        permit_id = self._prepare_permit()
+        result = run_hook(pt_agent_stdin(permit_id, where="description"),
+                          self.repo)
+        block = pt_decision(result)
+        self.assertNotIn("permissionDecision", block)
 
 
 if __name__ == "__main__":

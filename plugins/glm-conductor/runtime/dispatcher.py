@@ -11,30 +11,28 @@ B10.1 租约集成）。
       - patterns_conflict()：两组 ownership 声明是否可能命中同一文件
         （§66 不相交判定的保守近似，见函数 docstring）；
       - plan_dispatch()：候选 = dependency.ready_units() 按 topo_order
-        排列，逐候选过五道闸门（配额 → 压力 → ownership 冲突 →
-        租约冲突 → 并发余量），产出确定性决策 dict。
+        排列，逐候选过四道闸门（配额 → ownership 冲突 → 租约冲突 →
+        并发余量），产出确定性决策 dict。
 
 闸门顺序（§64/§67/§78，逐候选，先到先裁决）：
       1. quota：EXHAUSTED → waiting_quota 组（§67 建议转态，图不
-         腐化）；UNKNOWN → deferred("unknown_suppressed")（§67 保守：
-         配额不可知时宁可整批挂起，也不把 ready 单元转成
-         waiting_quota 之外的状态——图词汇不腐化）；
-      2. 压力：PRESSURE 且未放开 small → 全部
-         deferred("pressure_suppressed")；allow_small_under_pressure=
-         True 时仅 "small": True 的候选放行过闸（work_unit 可选未知
-         键，向前兼容），其余 deferred("small_only")——压力下只放行
-         small 时，非 small 落选的理由是「仅限 small」而非压力本身；
-      3. ownership 冲突：候选 ownership 与（active 单元 ownership ∪
+         腐化）。v2.1（wu-21-09）起 UNKNOWN / PRESSURE 不再在本层
+         挂起——预算收缩职责移交调用方（task_manager 经
+         execution_policy.effective_worker_budget 按 §12 表折算：
+         AVAILABLE→策略 max_workers / PRESSURE→1 / UNKNOWN→1 /
+         EXHAUSTED→0），本函数只按调用方传入的 max_workers 放行；
+         这比旧的「UNKNOWN → 整批停止」更可用，同时仍然保守；
+      2. ownership 冲突：候选 ownership 与（active 单元 ownership ∪
          已批准候选 ownership）任一 patterns_conflict →
          deferred("ownership_conflict")。§66 保守近似（宁可少并行
-         不可越界并行）；B10.1 起与租约闸正交叠加（见闸门 4），
+         不可越界并行）；B10.1 起与租约闸正交叠加（见闸门 3），
          本闸自身保持保守不变——有租约不豁免 ownership 闸；
-      4. 租约冲突（B10.1，§78/§81）：候选 ownership 与「owner ≠
+      3. 租约冲突（B10.1，§78/§81）：候选 ownership 与「owner ≠
          候选 id」的租约 key 任一 patterns_conflict →
          deferred("lease_conflict")。详见下方「租约闸」；
-      5. 并发余量：余量 = max_workers - len(active) - 已批准数，
+      4. 并发余量：余量 = max_workers - len(active) - 已批准数，
          耗尽 → deferred("concurrency")；
-      6. 通过 → dispatch 组，其 ownership 并入已批准集合。
+      5. 通过 → dispatch 组，其 ownership 并入已批准集合。
 
 租约闸（B10.1，§78/§81/§82）：
     并行启用的安全前提是「ownership 声明判定可并行（§66）且无外
@@ -83,12 +81,15 @@ from runtime import ownership
 from runtime.lease import DEFAULT_MAX_WORKERS_LIMIT
 from runtime.quota.parser import QUOTA_STATUSES
 
-# 缺省并发上限（保守：无显式配置时只跑一个 worker）
-DEFAULT_MAX_WORKERS = 1
+# 缺省并发上限（v2.1 §11.5：并发默认 2——与 state.new_task_state 的
+# dispatch.max_workers=2、execution_policy parallelism 默认块口径一致；
+# 仍受 §82 上限 4 约束，预算再按 quota 四态由调用方折算收缩）
+DEFAULT_MAX_WORKERS = 2
 
-# deferred 理由词汇（§64/§66/§78/§67；六个理由全部可达，覆盖映射见测试）
-DEFER_REASONS = ("concurrency", "lease_conflict", "ownership_conflict",
-                 "pressure_suppressed", "unknown_suppressed", "small_only")
+# deferred 理由词汇（§64/§66/§78；v2.1 wu-21-09 起三个理由全部可达，
+# 覆盖映射见测试——unknown_suppressed / pressure_suppressed / small_only
+# 随 §12 预算接线移除，quota 状态不再产生挂起理由）
+DEFER_REASONS = ("concurrency", "lease_conflict", "ownership_conflict")
 
 
 # —— ownership 冲突保守近似（§66） ——
@@ -212,8 +213,7 @@ def _units_by_id(units) -> dict:
 
 
 def plan_dispatch(units, *, max_workers=DEFAULT_MAX_WORKERS, active=(),
-                  quota_status="AVAILABLE",
-                  allow_small_under_pressure=False, leases=None) -> dict:
+                  quota_status="AVAILABLE", leases=None) -> dict:
     """§64/§65/§67/§78 派发准入决策：产出「谁可派发」的确定性决策 dict。
 
     本函数是纯决策器——主会话仍是唯一编排者（§65），它只调用本函数
@@ -225,14 +225,18 @@ def plan_dispatch(units, *, max_workers=DEFAULT_MAX_WORKERS, active=(),
       - max_workers：并发上限，int 且 1 ≤ n ≤
         DEFAULT_MAX_WORKERS_LIMIT（§82 并行上限 4；bool 拒绝——它是
         int 子类但不充当槽位数），非法抛 ValueError（消息注明 §82
-        上限与 experimental 状态）；
+        上限与 experimental 状态）。缺省 DEFAULT_MAX_WORKERS=2
+        （v2.1 §11.5）；quota 对预算的收缩（§12 表）由调用方经
+        execution_policy.effective_worker_budget 折算后传入——
+        本函数不做 quota × 预算的解释；
       - active：当前 running 单元 id 列表（缺省空）。容错锁定：
         id 在 units 中找到单元就用其 ownership（不核验状态），
         找不到按空 ownership（不参与冲突）；len(active) 原样计数；
       - quota_status：QUOTA_STATUSES 之一（§28 词汇），非法抛
-        ValueError；
-      - allow_small_under_pressure：PRESSURE 下是否放行
-        "small": True 的候选（work_unit 可选未知键，向前兼容）；
+        ValueError。v2.1（wu-21-09）四态语义：EXHAUSTED → 候选全转
+        waiting_quota（不变）；AVAILABLE / PRESSURE / UNKNOWN → 候选
+        照常过余下闸门（§12 预算收缩——PRESSURE/UNKNOWN→1——由调用方
+        折算进 max_workers，本层不再挂起任何候选）；
       - leases：已落盘租约的 {path/pattern: owner} dict（缺省 None
         按空处理；非 dict 非 None 抛 ValueError）。B10.1 集成时点：
         Task Manager 在每次 plan 前从 runtime.lease.lease_state 读出
@@ -243,7 +247,7 @@ def plan_dispatch(units, *, max_workers=DEFAULT_MAX_WORKERS, active=(),
         文件），命中 → deferred("lease_conflict")。非法租约 key 的
         OwnershipError 属结构性错误，向上传播。
 
-    决策流程（候选 = ready_units ∩ topo_order，逐候选五道闸门，
+    决策流程（候选 = ready_units ∩ topo_order，逐候选四道闸门，
     顺序与细节见模块 docstring；租约闸与 ownership 闸正交叠加——
     有租约不豁免 ownership 闸，两闸都过才放行）。
 
@@ -302,29 +306,19 @@ def plan_dispatch(units, *, max_workers=DEFAULT_MAX_WORKERS, active=(),
         unit = by_id[uid]
         owned = _ownership_of(unit)
         # 闸门 1：配额（§67。EXHAUSTED 建议转 waiting_quota——状态
-        # 词汇内转态，图不腐化；UNKNOWN 保守挂起，绝不猜）
+        # 词汇内转态，图不腐化。v2.1 wu-21-09：UNKNOWN / PRESSURE 不再
+        # 在本层挂起——预算收缩职责移交调用方（task_manager 经
+        # execution_policy.effective_worker_budget 按 §12 表折算），
+        # 本函数只按调用方给的 max_workers 放行）
         if quota_status == "EXHAUSTED":
             waiting_quota.append(uid)
             continue
-        if quota_status == "UNKNOWN":
-            deferred.append({"id": uid, "reason": "unknown_suppressed"})
-            continue
-        # 闸门 2：压力（§67 保守：默认整批抑制；放开 small 时仅
-        # "small": True 过闸，非 small 落选理由记 small_only）
-        if quota_status == "PRESSURE":
-            if not allow_small_under_pressure:
-                deferred.append(
-                    {"id": uid, "reason": "pressure_suppressed"})
-                continue
-            if unit.get("small") is not True:
-                deferred.append({"id": uid, "reason": "small_only"})
-                continue
-        # 闸门 3：ownership 冲突（§66 保守近似；B10.1 起与租约闸
+        # 闸门 2：ownership 冲突（§66 保守近似；B10.1 起与租约闸
         # 正交叠加——有租约不豁免本闸，两闸都过才放行）
         if owned and patterns_conflict(owned, taken_patterns):
             deferred.append({"id": uid, "reason": "ownership_conflict"})
             continue
-        # 闸门 4：租约冲突（B10.1；§78 同 owner 放行 / 异 owner 拒绝）。
+        # 闸门 3：租约冲突（B10.1；§78 同 owner 放行 / 异 owner 拒绝）。
         # 只与「owner ≠ 候选 id」的租约 key 混判（租约 key 可以是模式
         # 也可以是具体文件，patterns_conflict 本就支持混判）
         if owned and lease_items:
@@ -333,11 +327,11 @@ def plan_dispatch(units, *, max_workers=DEFAULT_MAX_WORKERS, active=(),
             if foreign_keys and patterns_conflict(owned, foreign_keys):
                 deferred.append({"id": uid, "reason": "lease_conflict"})
                 continue
-        # 闸门 5：并发余量 = max_workers - len(active) - 已批准数
+        # 闸门 4：并发余量 = max_workers - len(active) - 已批准数
         if len(dispatch) >= max_workers - len(active_ids):
             deferred.append({"id": uid, "reason": "concurrency"})
             continue
-        # 闸门 6：全部通过 → 派发，ownership 并入已占集合
+        # 闸门 5：全部通过 → 派发，ownership 并入已占集合
         dispatch.append(uid)
         taken_patterns.extend(owned)
 

@@ -301,6 +301,29 @@ R4 delegate/full 实质性：ownership.files 与 verification.required 必须非
 
 强制层的用户可见解释（自检、报文含义、被拦截恢复方法）见 `skills/enforcement`。
 
+## 9.5 控制平面收口（v2.1 alpha1，M1-M3）
+
+v2.1 第一批把「存在但可被 advisory 文本绕过」的能力收进机器可查的控制平面（计划与 ※DR 决策记录见 docs/GLM-Conductor-v2.1-Architecture-Agent-Implementation-Plan.md）：
+
+- **execution_policy（M1）**：state 可选顶层块——自动化授权的事实源（worker 模式默认 background、并发默认 2 / 硬上限 4 冻结、auto_resume 默认 manual、升档须 authorization.source=user 且保存时校验）；legacy 缺块按保守默认解释。`runtime/execution_policy.py` 五个纯 API + CLI policy-* 子命令
+- **dispatch permit（M2）**：`prepare_dispatch` 为单元签发持久 permit（`runtime/dispatch_wave.py`：每 permit 一文件、原子 rename 消费防重放、TTL 兜底、路径逃逸闸）；派发 prompt 必须携带 `GLM_CONDUCTOR_DISPATCH=<permit_id>` marker——新会话中 PreToolUse(Agent|Task) 对实施者类型无有效 permit 的派发直接 deny（D1 分级：只读类型豁免、Layer A 兜底）；background permit 由 hook 经 updatedInput 强制后台
+- **runtime-observed 生命周期（M2）**：PostToolUse/PostToolUseFailure 自动消费/作废 permit 并 journal `agent_launched` / `agent_dispatch_failed`（tool_use_id ↔ permit ↔ unit ↔ agent_id 绑定）——与手写 implementation_started 互不替代；后台 Agent 结果回收 = 模型转述 + 原生档案对账两路（H2）
+- **agent run 账本与档案 adapter（M3）**：`runtime/agent_run.py` 读取面（list_agent_runs / native_agent_metadata 白名单只读 adapter / run_lifecycle）——僵尸语义：原生档案 status=running 永不解读为存活（§7.3）
+- **SessionStart 恢复注入（M3）**：`hooks/session_start.py` + `runtime/recovery.py`——新会话自动注入 RESUME CONTEXT（纯本地零 quota，无任务时安静），闭合连续性缺口 R2
+- **四分 reconcile（M3）**：`reconcile_agent_run` 纯读分类（reuse_result / resume_with_progress / redispatch_clean / manual_ruling），证据优先级 repo 残留 > 新鲜验证 > 原生档案；进度包组装归模型侧（两层分工）
+- **resume manifest（M3）**：commit/abort/finish 事务后自动刷新派生快照（写失败仅记警告、绝不阻断 state truth）
+- **runtime CLI（WU-21-15）**：`runtime/cli.py` 取代 python3 -c 内联（policy/permits/agent-runs/manifest-show，退出码 0/2/1）
+
+宿主硬约束（探查实测定型，计划 §2.3）：子代理内 hooks 不触发（H1）；后台 PostToolUse 只见 launch 确认（H2）；automation 20 槽上限（H3）；hook 失败三层语义（H4）——派发面 fail-open + 完成面 fail-closed 分层不变。第二批（M4-M6：wave 并行、quota 授权续跑、验证/审查溯源）见 §9.6。
+
+## 9.6 第二批收口（v2.1 alpha2，M4-M6）
+
+v2.1 第二批把并行派发、额度决策与证据溯源从模型纪律收进 runtime 确定性事实（计划 §21）：
+
+- **dispatch wave 批量事务（M4）**：`task_manager.prepare_dispatch_wave`（CLI `wave-prepare`）一次调用完成「额度解析 → plan_dispatch 全量决策 → 逐单元租约 → wave 记录 + 全员 permit 签发 → 单条 `dispatch_wave_prepared` 事件」，事务性 all-or-safe-degrade——决策-租约循环对租约冲突单元剔除重试（excluded 单调增长保证有界终止），wave 记录落盘时其全部成员租约已在位，绝不出现「wave 记录 2 单元但只有 1 张租约」；成员全部终态/verifying 时 `finish_unit` 自动关闭 wave（`wave_closed`）。**预算矩阵（wu-21-09）**：cap_base 优先级「显式参数 → execution_policy.parallelism.max_workers → dispatch.max_workers（legacy）→ 2（默认并行，硬上限 4 冻结）」，eff = min(cap_base, effective_worker_budget)——AVAILABLE→策略值、PRESSURE/UNKNOWN→1、EXHAUSTED→0；eff=0 时传 1 进 plan，由 quota 闸自然全转 waiting_quota（dispatcher 不再整批挂起 UNKNOWN/PRESSURE）。**wave launch contract（§11.5）**：wave.units > 1 时全部成员同一回合并发派出、禁止「等第一个返回再派下一个」，主会话并行做验证规划与结果收集；PreToolUse permit 门追加 wave 成员资格环（检查序 5.5：wave permit 须指向 active wave 且 unit 在成员清单，deny 报文含 re-prepare wave 指引）
+- **运行时额度解析（M5，wu-21-10）**：`quota/resolver.py` 的 `resolve_quota_status()` 纯入口——prepare 链的 quota_status 缺省从显式字符串改为 None 触发运行时解析（**绝不默认 AVAILABLE**），四级层级：新鲜缓存（≤300s 直采不发网络）→ provider 抓取（解析凭证 + 四态评估 + 原子写缓存）→ 陈旧缓存回退 → UNKNOWN（fail-open，预算折 1 不阻塞派发）；纪律：绝不重试网络、异常不外泄（只取 kind / 类型名）、凭证零落盘、缓存只存标准化 snapshot。**授权续跑链（wu-21-11）**：`handle_quota_exhausted`（CLI `quota-exhausted`）确定性转态链——执行态任务/单元转 waiting_quota，按 `execution_policy.continuity.auto_resume` 四态授权矩阵裁决（manual 不建自动化 / notify 只允许提醒 / auto_once 一次性 / until_done 逐窗续跑，后两者须 `authorization.source == "user"` 保存时校验）；wake.required 时返回 `quota_wake_prompt` 自足文本（宿主实锚：wake=同会话续行、SessionStart 不重放，故 task_id / 账本与仓库根 / 恢复首步 / 额度口径 / 预算状态 / 红线全部内置；maxRuns=1 一次性语义），主会话 CronCreate 成功后 `wake-record` 记窗口扣减（`consumed_quota_windows`，与 automation 存活解耦——wake 未触发不回滚）；预算耗尽任务转 `waiting_user`（新状态词：等待用户重新授权）且不得再建任何自动化唤醒；恢复首步恒为 `quota-resume`（AVAILABLE/PRESSURE → executing + waiting 单元回 ready；EXHAUSTED/UNKNOWN → 零转态保守等待）
+- **验证 / 审查溯源（M6）**：`runtime/provenance.py` 把「evidence 是 runtime 实际观察到的」从声明固化为机械事实（D4：runtime 受限主动执行）——`verify_unit` / `verify_task`（CLI `verify-unit` / `verify-task`）只执行 state 已声明的 required 验证命令（白名单闸 + policy 闸双闸），进程退出后零 TOCTOU 计算同刻指纹（单元作用域与 RB-1 门同口径、任务作用域与完成门同入口），每次观察落 durable verification receipt（tmp + os.replace 原子写 + journal `verification_receipt` 事件，runner 恒 "glm-conductor-runtime"），exit 0 时自动接线单元级 / 任务级既有证据流（exit != 0 只落 receipt 不写证据——失败本身是有价值的观察）；`run_review`（CLI `review-record`）由主会话申报已发生审查的裁决（verdict + reviewer + tool_use_id），绑定终指纹落 review receipt + journal `review_receipt` + state.review 同步镜像。**门消费（wu-21-13）**：Stop 完成门审查检查改为「fresh ship review receipt 唯一权威」——扫描任务 `receipts/` 取 observed_at 最新一张（损坏 receipt 跳过取余下），无任何 receipt → `review_missing`、最新非 ship → `review_rejected`、指纹过期 → `review_stale`；state.review 手写字段不再作为通过依据
+
 ## 10. 运行时边界（ZCode 约束）
 
 - 连续性编排基于 ZCode 原生的本地会话生命周期机制，不是独立的云调度器或后台守护进程；桌面客户端需保持运行、机器需保持唤醒
@@ -312,8 +335,8 @@ R4 delegate/full 实质性：ownership.files 与 verification.required 必须非
 
 ## 11. 静态校验与发布
 
-- `scripts/validate_plugin.py`（纯标准库，14 项检查）+ CI（`.github/workflows/validate.yml`，静态校验 + 单元测试）维护契约一致性：扫描 `plugins/`、`README.md`、`marketplace.json` 与本文档，`docs/history/` 不参与当前契约校验
-- 检查覆盖：旧名清理、禁词、quota 否定式声明、任务专属 checkpoint 路径、视觉协议标记、TASK_ID 必含、视觉新调用规范措辞、`plugin.json` 与 CHANGELOG 的版本一致性、钩子清单完整性（含脚本存在性）、runtime 状态层与技能契约标记
+- `scripts/validate_plugin.py`（纯标准库，15 项检查）+ CI（`.github/workflows/validate.yml`，静态校验 + 单元测试）维护契约一致性：扫描 `plugins/`、`README.md`、`marketplace.json` 与本文档，`docs/history/` 不参与当前契约校验；全部文件扫描一律跳过 `__pycache__` 目录与 `*.pyc` / `*.pyo` 字节码（v2.1 alpha2——编译缓存残影曾造成幻影名 FAIL，wu-21-08 实录根因）
+- 检查覆盖：旧名清理、禁词、quota 否定式声明、任务专属 checkpoint 路径、视觉协议标记、TASK_ID 必含、视觉新调用规范措辞、`plugin.json` 与 CHANGELOG 的版本一致性、钩子清单完整性（含脚本存在性）、runtime 状态层与技能契约标记、enforcement 审查 receipt 权威标记（v2.1 alpha2 新增检查 15）
 - 运行时模块（`runtime/`）、钩子（`hooks/`）与 quota 子系统各配单元测试与子进程冒烟（`tests/`，828 用例：状态层 133、日志 26、ownership 38、指纹 59、stop_gate 66、pre_tool_use 18、policy 20、work_unit 57、dependency 52、dispatcher 55、task_manager 72、reconcile 46、lease 37、quota 解析 29/抽象 12/适配器 29/调度器 37/凭证 25/诊断 17，含 §98 集成冒烟、§45 调度场景、§68-§69 恢复对账三场景与策略/传输端到端），随 CI 执行
 - 版本策略：`plugin.json` 版本、CHANGELOG 最新条目、git tag / GitHub Release 三者保持一致
 

@@ -1,6 +1,22 @@
 {
   "description": "GLM Conductor v2 enforcement hooks (ZCode plugin layout under hooks/hooks.json).",
   "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|clear|compact",
+        "hooks": [
+          {
+            "type": "process",
+            "command": "python3",
+            "args": [
+              "${ZCODE_PLUGIN_ROOT}/hooks/session_start.py"
+            ],
+            "timeoutMs": 5000,
+            "statusMessage": "glm-conductor: building resume context…"
+          }
+        ]
+      }
+    ],
     "Stop": [
       {
         "hooks": [
@@ -27,7 +43,7 @@
               "${ZCODE_PLUGIN_ROOT}/hooks/pre_tool_use.py"
             ],
             "timeoutMs": 3000,
-            "statusMessage": "glm-conductor: injecting ownership contract…"
+            "statusMessage": "glm-conductor: checking dispatch permit…"
           }
         ]
       },
@@ -42,6 +58,38 @@
             ],
             "timeoutMs": 3000,
             "statusMessage": "glm-conductor: evaluating bash policy…"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Agent|Task",
+        "hooks": [
+          {
+            "type": "process",
+            "command": "python3",
+            "args": [
+              "${ZCODE_PLUGIN_ROOT}/hooks/post_tool_use.py"
+            ],
+            "timeoutMs": 3000,
+            "statusMessage": "glm-conductor: recording agent run…"
+          }
+        ]
+      }
+    ],
+    "PostToolUseFailure": [
+      {
+        "matcher": "Agent|Task",
+        "hooks": [
+          {
+            "type": "process",
+            "command": "python3",
+            "args": [
+              "${ZCODE_PLUGIN_ROOT}/hooks/post_tool_use.py"
+            ],
+            "timeoutMs": 3000,
+            "statusMessage": "glm-conductor: recording agent failure…"
           }
         ]
       }

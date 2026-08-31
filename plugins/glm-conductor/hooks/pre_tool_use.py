@@ -19,6 +19,22 @@
     静默（stdout 恒空）。本层只覆盖 Bash 主会话调用；角色级 deny
     （reviewer 等）由 agent 工具白名单负责，不在本钩子。
 
+职责三（deny，v2.1 M2 dispatch permit 门，wu-21-03）：Agent|Task 路径
+    按 ※DR D1 分级升级——活动任务存在且 tool_input.subagent_type 是
+    实施者类型（IMPLEMENTATION_EXECUTORS）时，必须携带有效 dispatch
+    marker（GLM_CONDUCTOR_DISPATCH=<permit_id>，§6.4）且 permit 通过
+    runtime.dispatch_wave.validate_permit（存在/未消费/未过期/任务匹配）
+    才放行；background permit 经 updatedInput 全量改写强制后台（§6.5）。
+    无 marker / permit 无效 → permissionDecision deny（可行动英文报文）。
+    v2.1 M4（wu-21-08）追加 wave 成员资格环：wave permit（permit 带
+    wave_id）须指向 active wave 且 unit 仍在成员清单内，否则 deny
+    （报文含 wave_id 与 re-prepare wave 指引）；单单元 permit 零影响。
+    非实施者类型（只读类：Explore / reviewer 等）保留既有 ownership
+    advisory 注入路径原样（D1 裁定落定，wu-21-13：reviewer 最终维持
+    permit 豁免，审查溯源由 review receipt 绑定承担——run_review +
+    Stop 完成门 receipt 检查）；无活动任务时零干预（v2.0.1 行为不
+    回退）。
+
 与 Layer A 的分工：
     - Layer B（本钩子）：提示级注入，只能「提高合规率」，无法确定性约束
       子代理行为——advisory only，绝不 deny、绝不阻断派发；
@@ -62,6 +78,25 @@ MAX_INJECTED_TASKS = 3
 
 # Bash 策略 ask/deny 决策理由中命令片段的截断长度（控制决策文本体积）
 MAX_POLICY_SNIPPET = 60
+
+# dispatch permit 义务的实施者类型词汇（※DR D1 分级，v2.1 冻结）：
+# bare 与 "glm-conductor:" 前缀两种命名形态都认（宿主子代理类型命名
+# 兼容双形态）。只读类（Explore / reviewer / general-purpose 等）不在
+# 此集合——走 advisory 注入路径。D1 裁定已落定（wu-21-13，2026-08-31
+# ）：reviewer 类型（glm-reviewer / visual-reviewer）最终维持 permit
+# 豁免——审查溯源由 receipt 绑定承担（runtime.provenance.run_review
+# + Stop 完成门 fresh ship receipt 检查）：permit 证明的是「派发被授
+# 权」，receipt 证明的是「审查被实际执行且绑定终态指纹」，后者才是
+# M6 要的增量；本集合自此冻结不变。
+IMPLEMENTATION_EXECUTORS = frozenset((
+    "flash-implementer", "visual-implementer",
+    "glm-conductor:flash-implementer", "glm-conductor:visual-implementer",
+))
+
+# permit 门 allow 路径的 join 提醒（advisory，§1.4 background ≠
+# fire-and-forget：background worker 必须最终 join/验证/收尾）
+JOIN_REMINDER = ("GLM CONDUCTOR: worker dispatched; it MUST be joined "
+                 "(collect result, verify, finish_unit).")
 
 
 def repo_root():
@@ -224,31 +259,70 @@ def bash_policy_gate(payload):
     return 0
 
 
-def main():
-    """主流程：读 stdin（容错）→ 按 tool_name 分发两条路径。
+# —— 职责三：Agent|Task dispatch permit 门（v2.1 M2，※DR D1 分级） ——
 
-    - tool_name == "Bash" → 策略门控路径（bash_policy_gate）；
-    - 其余（Agent / Task / tool_name 缺失 / 空 payload）→ 既有注入路径：
-      发现声明 ownership 的活动任务，无 → 静默放行（stdout 恒空），
-      有 → stdout 输出单行 JSON hookSpecificOutput（PreToolUse /
-      additionalContext）后放行。任何路径 return 0；注入路径绝不
-      deny、绝不 block（策略路径的 ask/deny 由 ZCode 按决策处理）。
+def _deny_dispatch(reason):
+    """输出 permit 门的 deny 决策（英文可行动报文）并返回 0。
+
+    报文冻结格式（§6.4）：指明拦截原因 + 如何获得 permit + marker
+    写法——主会话照报文即可自救（prepare_dispatch → marker 入 prompt）。
     """
-    # 1) 读 stdin 并解析（容错为 {}）；按 tool_name 分发（缺失按现状
-    #    走注入路径，见模块 docstring「分发与兼容选择」）
-    payload = read_payload()
-    if payload.get("tool_name") == "Bash":
-        return bash_policy_gate(payload)
+    text = ("Agent dispatch blocked: %s. Plan/prepare a dispatch "
+            "(task_manager.prepare_dispatch) first and include the marker "
+            "GLM_CONDUCTOR_DISPATCH=<permit_id> in the prompt." % reason)
+    output = {
+        "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": "deny",
+            "permissionDecisionReason": text,
+        }
+    }
+    sys.stdout.write(json.dumps(output) + "\n")
+    return 0
 
-    # 2) 注入路径：发现声明了非空 ownership.files 的活动任务；
-    #    无 → 静默放行
-    ownership_pairs = declared_ownership_tasks(repo_root())
+
+def _deny_wave(reason, wave_id):
+    """输出 wave 成员资格 deny 决策（v2.1 M4 wu-21-08，英文可行动报文）。
+
+    与 _deny_dispatch 同形态；报文含 wave_id 与「re-prepare wave」
+    指引——wave 已关闭 / 成员变更时，主会话照报文重备 wave（
+    prepare_dispatch_wave）并以新 permit marker 重新派发即可自救。
+    """
+    text = ("Agent dispatch blocked: %s (wave_id=%s). This wave permit is "
+            "no longer valid for its unit; re-prepare the wave with "
+            "task_manager.prepare_dispatch_wave and dispatch with the "
+            "fresh marker GLM_CONDUCTOR_DISPATCH=<permit_id>."
+            % (reason, wave_id))
+    output = {
+        "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": "deny",
+            "permissionDecisionReason": text,
+        }
+    }
+    sys.stdout.write(json.dumps(output) + "\n")
+    return 0
+
+
+def _marker_text(tool_input):
+    """把 tool_input 的 prompt / description 拼为 marker 检索面（容错）。"""
+    parts = []
+    for key in ("prompt", "description"):
+        value = tool_input.get(key) if isinstance(tool_input, dict) else None
+        if isinstance(value, str) and value:
+            parts.append(value)
+    return "\n".join(parts)
+
+
+def ownership_injection(repo):
+    """既有 ownership advisory 注入路径（v2.0.1 行为原样，供非实施者
+    类型与 legacy 场景复用）：发现声明 ownership 的活动任务即注入
+    提醒，无则静默。"""
+    from runtime import state
+
+    ownership_pairs = declared_ownership_tasks(repo)
     if not ownership_pairs:
         return 0
-
-    # 3) 唯一 stdout 写点：单行 JSON（ensure_ascii=True 保证 Windows 任意
-    #    控制台编码下可安全写出，非 ASCII 字符以 \uXXXX 转义，仍为合法
-    #    JSON；形态与 Zod 严格校验一致，无多余顶层键）
     reminder = build_reminder(ownership_pairs)
     output = {
         "hookSpecificOutput": {
@@ -258,6 +332,110 @@ def main():
     }
     sys.stdout.write(json.dumps(output) + "\n")
     return 0
+
+
+def agent_permit_gate(payload):
+    """Agent|Task 路径（v2.1 M2 升级）：D1 分级 permit 门 + 注入兜底。
+
+    校验链（§6.4 修订版，任一失败即 deny）：
+      1. 无活动任务 → 零干预放行（v2.0.1 行为不回退）；
+      2. tool_input.subagent_type 非实施者类型 → 既有注入路径原样；
+      3. 实施者类型 → marker 解析（prompt/description）→ 无 marker
+         即 deny；
+      4. permit 归属活动任务（逐任务 load；consumed/invalidated 视同
+         不存在）→ 无归属即 deny "permit not found"；
+      5. validate_permit（存在/任务匹配/未过期；unit/wave 维由 permit
+         内容保证，hook 不传）→ 不过即 deny（原因透出）；
+      5.5 wave 成员资格（v2.1 M4 wu-21-08）：permit 带 wave_id 时经
+         dispatch_wave.validate_wave_membership 校验（wave 存在且
+         active 且 unit 仍在成员清单）→ 失败 deny（报文含 wave_id 与
+         re-prepare 指引）；单单元 permit（wave_id None）不受影响；
+      6. mode 一致性：background 且 run_in_background 非 True →
+         updatedInput 全量替换强制后台；foreground / 已后台 → 放行
+         （附 join 提醒）。
+    """
+    from runtime import dispatch_wave, state
+
+    repo = repo_root()
+    active = state.find_active_tasks(repo)
+    if not active:
+        return 0
+
+    tool_input = payload.get("tool_input")
+    tool_input = tool_input if isinstance(tool_input, dict) else {}
+    subagent_type = tool_input.get("subagent_type")
+    if not (isinstance(subagent_type, str)
+            and subagent_type in IMPLEMENTATION_EXECUTORS):
+        return ownership_injection(repo)
+
+    permit_id = dispatch_wave.parse_marker(_marker_text(tool_input))
+    if permit_id is None:
+        return _deny_dispatch("no dispatch marker found")
+
+    owner_task = None
+    permit = None
+    for task_id in active:
+        loaded = dispatch_wave.load_permit(repo, task_id, permit_id)
+        if loaded is not None:
+            owner_task, permit = task_id, loaded
+            break
+    if permit is None:
+        return _deny_dispatch("permit not found")
+
+    ok, reason = dispatch_wave.validate_permit(repo, owner_task, permit_id)
+    if not ok:
+        return _deny_dispatch(reason)
+
+    # wave 成员资格校验（v2.1 M4 wu-21-08）：wave permit 须指向 active
+    # wave 且 unit 仍在成员清单内——closed / 重组后的旧 wave permit 不
+    # 得再放行；单单元 permit（wave_id None）恒放行，零行为变化
+    wave_id = permit.get("wave_id")
+    if wave_id is not None:
+        wave_ok, wave_reason = dispatch_wave.validate_wave_membership(
+            repo, owner_task, permit)
+        if not wave_ok:
+            return _deny_wave(wave_reason, wave_id)
+
+    # mode 一致性（§6.5）：background 许可强制后台——未显式 True 即经
+    # updatedInput 全量替换回写（全部原有字段 + run_in_background=True）；
+    # foreground 许可同步放行不改写
+    if permit.get("mode") == "background" \
+            and tool_input.get("run_in_background") is not True:
+        updated = dict(tool_input)
+        updated["run_in_background"] = True
+        output = {
+            "hookSpecificOutput": {
+                "hookEventName": "PreToolUse",
+                "updatedInput": updated,
+                "additionalContext": JOIN_REMINDER,
+            }
+        }
+    else:
+        output = {
+            "hookSpecificOutput": {
+                "hookEventName": "PreToolUse",
+                "additionalContext": JOIN_REMINDER,
+            }
+        }
+    sys.stdout.write(json.dumps(output) + "\n")
+    return 0
+
+
+def main():
+    """主流程：读 stdin（容错）→ 按 tool_name 分发三条路径。
+
+    - tool_name == "Bash" → 策略门控路径（bash_policy_gate）；
+    - 其余（Agent / Task / tool_name 缺失 / 空 payload）→ permit 门
+      路径（agent_permit_gate：无活动任务零干预、非实施者类型走
+      advisory 注入、实施者类型按 permit 链 allow/deny）。任何路径
+      return 0；deny 由 ZCode 按 permissionDecision 处理。
+    """
+    # 1) 读 stdin 并解析（容错为 {}）；按 tool_name 分发（缺失按现状
+    #    走 Agent|Task 路径，见模块 docstring「分发与兼容选择」）
+    payload = read_payload()
+    if payload.get("tool_name") == "Bash":
+        return bash_policy_gate(payload)
+    return agent_permit_gate(payload)
 
 
 if __name__ == "__main__":

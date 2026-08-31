@@ -13,6 +13,12 @@
     review_rejected / review_stale / visual_stale 六种新 check 的 block
     报文与 journal 事件字段；指纹用 fingerprint.task_fingerprint 真算
     （与门同一入口）；全部新鲜 → 静默放行 + gate_passed 记账；
+  - wu-21-13 review receipt 语义（§16.5）：审查检查只认任务 receipts/
+    内的 durable review receipt（observed_at 最新一张）——state.review
+    手写 ship 无 receipt → review_missing（receipt 唯一权威的负向锚定
+    ）；最新 receipt 非 ship → review_rejected（detail 含 verdict 与
+    reviewer）；receipt 指纹过期 → review_stale；损坏 receipt 文件跳过
+    不炸门；ship 且指纹一致才放行；
   - journal 尾部连续 gate_blocked 达上限：放行 + stderr 报
     ENFORCEMENT GATE EXHAUSTED + journal 记 gate_exhausted；
     链中出现其他事件即断链重新计数（上限对新 check 同样生效）；
@@ -64,6 +70,7 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "plugins" / "glm-conductor"))
 from runtime import fingerprint as fingerprint_mod
 from runtime import journal as journal_mod
+from runtime import provenance
 from runtime import state
 # H1/H3：钩子模块直接导入——commit_finalizing_completions 的完成提交
 # 通道与失败隔离（H1）、_corrupt_requires_fail_closed 证据规则与
@@ -202,6 +209,14 @@ class TempDirFixture(unittest.TestCase):
         """读取任务 journal 全部事件（无文件返回 []）。"""
         return journal_mod.read_events(self.repo, task_id)
 
+    def gate_journal_events(self, task_id=TID):
+        """读取任务 journal 的门生命周期事件（过滤 runtime 溯源层凭证
+        事件）。wu-21-13 起 run_review 落证会先写 review_receipt 事件
+        （verify_* 写 verification_receipt）——用例 setup 阶段的这些
+        事件不是门行为，门事件序断言经本助手过滤后保持既有语义。"""
+        return [event for event in self.journal_events(task_id)
+                if not str(event.get("event", "")).endswith("_receipt")]
+
     def add_corrupt_task(self, task_id, state_text="{broken"):
         """写入一个 state.json 损坏的任务目录（H3 四分类发现用）。"""
         directory = state.task_dir(self.repo, task_id)
@@ -221,6 +236,54 @@ class TempDirFixture(unittest.TestCase):
             {"event": "route_selected", "mode": "solo",
              "delegability": "low", "assurance": "standard"})
         return task_id
+
+    def add_review_receipt(self, task_id=TID, verdict="ship",
+                           observed_at="2026-01-01T00:00:00.000Z",
+                           reviewer="reviewer-a", fingerprint=None,
+                           route=None, note=None,
+                           tool_use_id="toolu-fixture-001"):
+        """直落一份 review receipt 文件 fixture（wu-21-13 receipt 语义）。
+
+        run_review 的正规入口会同步写 state / journal，部分场景（手写
+        full 路由绕过 save_state 校验、构造指定 observed_at / 空指纹等
+        形状）需要绕开它直接构造 durable receipt——冻结键契约与文件名
+        形态（review-<observed_at紧凑串>-<hash8>.json）与
+        runtime.provenance._write_receipt 同构。
+        """
+        receipt = {
+            "kind": "review",
+            "reviewer": reviewer,
+            "route": route,
+            "verdict": verdict,
+            "fingerprint": fingerprint,
+            "tool_use_id": tool_use_id,
+            "observed_at": observed_at,
+            "runner": "glm-conductor-runtime",
+            "note": note,
+        }
+        receipts_dir = state.task_dir(self.repo, task_id) / "receipts"
+        receipts_dir.mkdir(parents=True, exist_ok=True)
+        compact = (observed_at.replace("-", "").replace(":", "")
+                   .replace(".", ""))
+        digest8 = hashlib.sha256(
+            json.dumps(receipt, ensure_ascii=False, indent=2,
+                       sort_keys=True).encode("utf-8")).hexdigest()[:8]
+        name = "review-%s-%s.json" % (compact, digest8)
+        with open(str(receipts_dir / name), "w", encoding="utf-8",
+                  newline="\n") as fh:
+            json.dump(receipt, fh, ensure_ascii=False, indent=2,
+                      sort_keys=True)
+        return receipt
+
+    def add_corrupt_receipt(self, task_id, name, text="{torn line"):
+        """向任务 receipts 目录直写一份损坏 receipt 文件（wu-21-13：
+        损坏 receipt 跳过不炸门的场景构造）。"""
+        receipts_dir = state.task_dir(self.repo, task_id) / "receipts"
+        receipts_dir.mkdir(parents=True, exist_ok=True)
+        with open(str(receipts_dir / name), "w", encoding="utf-8",
+                  newline="\n") as fh:
+            fh.write(text)
+        return str(receipts_dir / name)
 
 
 class GitRepoFixture(TempDirFixture):
@@ -635,20 +698,26 @@ class StopGateVerificationCheckTest(GitRepoFixture):
         self.assertIn(events[-1]["current"], reason)
 
 
-# —— B4.1 四重检查：review（missing / rejected / stale） ——
+# —— B4.1 四重检查：review（wu-21-13 receipt 语义：receipt 唯一权威） ——
 
 @unittest.skipUnless(shutil.which("git"), "环境无 git 可执行，跳过 git fixture 测试")
 class StopGateReviewCheckTest(GitRepoFixture):
-    """review.required 检查：三类拦截 + reviewer / verdict / 指纹字段。"""
-
-    def _review_task(self, verdict, fingerprint=None):
-        """建一个 review.required 任务并记录指定裁决（指纹可选绑定）。"""
-        self.add_active_task(review_required=True, reviewer="reviewer-a")
-        st = state.load_state(self.repo, TID)
-        state.record_review(st, verdict, fingerprint)
-        self.set_state(st)
+    """review.required 检查（wu-21-13 §16.5）：判定数据源为任务
+    receipts/ 内的 durable review receipt（observed_at 最新一张），
+    reason 词汇（review_missing / review_rejected / review_stale）与
+    block 结构不变、报文指引改指 run_review：
+      - 无任何合法 review receipt（目录不存在 / 空 / 只有损坏文件）
+        → review_missing——legacy 任务同样要求（严格语义）；
+      - state.review 手写 ship 无 receipt → review_missing（receipt
+        唯一权威的负向锚定）；
+      - 最新 receipt verdict != "ship" → review_rejected（detail 含
+        verdict 与 reviewer）；
+      - 最新 receipt 指纹过期 / 缺失 → review_stale；
+      - ship 且指纹一致 → 放行；损坏 receipt 跳过不炸门。"""
 
     def test_review_missing_blocks_with_reviewer(self):
+        # 无 review receipt（receipts 目录不存在）→ review_missing；
+        # 报文指引 run_review（wu-21-13 起替代旧 record_review 指引）
         self.add_active_task(review_required=True, reviewer="reviewer-a")
         result = run_gate("{}", self.repo)
         self.assertEqual(result.returncode, 0)
@@ -657,7 +726,8 @@ class StopGateReviewCheckTest(GitRepoFixture):
         reason = payload["reason"]
         self.assertIn("review required but not completed", reason)
         self.assertIn("reviewer-a", reason)
-        self.assertIn("runtime.state.record_review", reason)
+        self.assertIn("runtime.provenance.run_review", reason)
+        self.assertNotIn("record_review", reason)
         events = self.journal_events()
         self.assertEqual(events[0]["check"], "review_missing")
         self.assertEqual(events[0]["task_id"], TID)
@@ -670,37 +740,32 @@ class StopGateReviewCheckTest(GitRepoFixture):
         self.assertIn("Reviewer: unassigned", reason)
         self.assertIsNone(self.journal_events()[0]["reviewer"])
 
-    def test_review_rejected_blocks_with_verdict(self):
-        self._review_task("fix-first")
+    def test_review_rejected_blocks_with_verdict_and_reviewer(self):
+        # 最新 receipt verdict != ship（fix-first）→ review_rejected；
+        # detail 含 verdict 与 reviewer（均取自 receipt）
+        self.add_active_task(review_required=True, reviewer="reviewer-a")
+        provenance.run_review(
+            str(self.repo), TID, reviewer="reviewer-a", verdict="fix-first",
+            tool_use_id="toolu-rej-001", note="needs fixes")
         result = run_gate("{}", self.repo)
         payload = json.loads(result.stdout)
         self.assertEqual(payload["decision"], "block")
         reason = payload["reason"]
         self.assertIn("review verdict is 'fix-first'", reason)
-        self.assertIn("runtime.state.record_review", reason)
-        events = self.journal_events()
+        self.assertIn("reviewer-a", reason)
+        self.assertIn("runtime.provenance.run_review", reason)
+        events = self.gate_journal_events()
         self.assertEqual(events[0]["check"], "review_rejected")
         self.assertEqual(events[0]["verdict"], "fix-first")
-
-    def test_review_stale_with_null_fingerprint_blocks(self):
-        self._review_task("ship")  # ship 但未绑定指纹
-        result = run_gate("{}", self.repo)
-        reason = json.loads(result.stdout)["reason"]
-        self.assertIn("review evidence is stale", reason)
-        self.assertIn("review fingerprint none", reason)
-        self.assertIn("Re-review the current change set", reason)
-        events = self.journal_events()
-        self.assertEqual(events[0]["check"], "review_stale")
-        self.assertIsNone(events[0]["recorded"])
-        self.assertTrue(events[0]["current"].startswith("sha256:"))
+        self.assertEqual(events[0]["reviewer"], "reviewer-a")
 
     def test_review_stale_after_later_change_blocks(self):
+        # ship receipt 落盘后改动文件 → receipt 指纹过期 → review_stale
         self.write("src/a.py", b"v1\n")
         self.add_active_task(review_required=True, reviewer="reviewer-a")
-        st = state.load_state(self.repo, TID)
-        state.record_review(st, "ship", self.task_fingerprint(st))
-        self.set_state(st)
-        # 审查后改动文件 → 审查证据失效 → block（recorded 为旧指纹）
+        provenance.run_review(
+            str(self.repo), TID, reviewer="reviewer-a", verdict="ship",
+            tool_use_id="toolu-stale-001")
         self.write("src/a.py", b"v2\n")
         result = run_gate("{}", self.repo)
         payload = json.loads(result.stdout)
@@ -708,21 +773,36 @@ class StopGateReviewCheckTest(GitRepoFixture):
         reason = payload["reason"]
         self.assertIn("review evidence is stale", reason)
         self.assertIn("Files changed after review", reason)
-        events = self.journal_events()
+        self.assertIn("runtime.provenance.run_review", reason)
+        events = self.gate_journal_events()
         self.assertEqual(events[0]["check"], "review_stale")
         self.assertNotEqual(events[0]["recorded"], events[0]["current"])
 
-    def test_out_of_vocabulary_verdict_blocks_as_review_missing(self):
-        # 回归（终审 P2）：verdict 词汇外（手写 state.json 拼写偏差，如
-        # 大写 "Ship"）不得沿 ship 路径仅做指纹比对后放行——按
-        # review_missing 处理，detail 携带 verdict 原值，报文模板不变
+    def test_review_stale_with_null_fingerprint_receipt_blocks(self):
+        # 手写 ship receipt 无指纹（fingerprint None）→ 同样 review_stale
+        #（receipt 缺失绑定按拦截处理，不静默放宽）
+        self.add_active_task(review_required=True, reviewer="reviewer-a")
+        self.add_review_receipt(verdict="ship", fingerprint=None)
+        result = run_gate("{}", self.repo)
+        reason = json.loads(result.stdout)["reason"]
+        self.assertIn("review evidence is stale", reason)
+        self.assertIn("review fingerprint none", reason)
+        events = self.journal_events()
+        self.assertEqual(events[0]["check"], "review_stale")
+        self.assertIsNone(events[0]["recorded"])
+        self.assertTrue(events[0]["current"].startswith("sha256:"))
+
+    def test_handwritten_state_ship_without_receipt_blocks_review_missing(self):
+        # 负向锚定（wu-21-13）：state.review 手写 ship 且绑定当前指纹，
+        # 但无任何 receipt → 仍 review_missing——receipt 是唯一权威，
+        # 手写 state 字段不再是通过依据
         self.write("src/a.py", b"v1\n")
         self.add_active_task(review_required=True, reviewer="reviewer-a")
         st = state.load_state(self.repo, TID)
         current = self.task_fingerprint(st)
-        # 指纹绑定当前状态（若被误当 ship 处理则此处会静默放行）
+
         def mutate(raw):
-            raw["review"]["verdict"] = "Ship"
+            raw["review"]["verdict"] = "ship"
             raw["review"]["fingerprint"] = current
         self.patch_state_file_raw(TID, mutate)
         result = run_gate("{}", self.repo)
@@ -732,12 +812,50 @@ class StopGateReviewCheckTest(GitRepoFixture):
         reason = payload["reason"]
         self.assertIn("review required but not completed", reason)
         self.assertIn("reviewer-a", reason)
-        self.assertIn("runtime.state.record_review", reason)
+        self.assertIn("runtime.provenance.run_review", reason)
         events = self.journal_events()
         self.assertEqual(events[0]["check"], "review_missing")
-        self.assertEqual(events[0]["task_id"], TID)
         self.assertEqual(events[0]["reviewer"], "reviewer-a")
-        self.assertEqual(events[0]["verdict"], "Ship")
+
+    def test_corrupt_receipt_skipped_not_fatal(self):
+        # 损坏 receipt（非 JSON）跳过：只有损坏文件时等效无 receipt
+        # （review_missing），补一张合法 ship receipt 后照常放行
+        self.add_active_task(review_required=True, reviewer="reviewer-a")
+        self.add_corrupt_receipt(
+            TID, "review-20200101T000000000Z-deadbeef.json", "{torn line")
+        first = run_gate("{}", self.repo)
+        self.assertEqual(first.returncode, 0)
+        self.assertEqual(
+            self.journal_events()[0]["check"], "review_missing")
+        # 合法 ship receipt（绑定当前指纹）入列后：跳过损坏、放行
+        st = state.load_state(self.repo, TID)
+        self.add_review_receipt(
+            verdict="ship",
+            observed_at="2026-06-01T00:00:00.000Z",
+            fingerprint=self.task_fingerprint(st))
+        second = run_gate("{}", self.repo)
+        self.assertEqual(second.returncode, 0)
+        self.assertEqual(second.stdout, "")
+        self.assertEqual(second.stderr, "")
+        self.assertEqual(
+            [e["event"] for e in self.journal_events()],
+            ["gate_blocked", "gate_passed"])
+
+    def test_ship_receipt_passes_review_gate(self):
+        # ship receipt 且指纹一致 → 审查检查通过（receipt 唯一权威的
+        # 正向锚定；state.review 未手写也放行）
+        self.write("src/a.py", b"v1\n")
+        self.add_active_task(review_required=True, reviewer="reviewer-a")
+        provenance.run_review(
+            str(self.repo), TID, reviewer="reviewer-a", verdict="ship",
+            tool_use_id="toolu-ship-001")
+        result = run_gate("{}", self.repo)
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stdout, "")
+        self.assertEqual(result.stderr, "")
+        self.assertEqual(
+            [e["event"] for e in self.gate_journal_events()],
+            ["gate_passed"])
 
 
 # —— B4.1 四重检查：visual evidence（stale） ——
@@ -826,8 +944,9 @@ class StopGateVisualEvidenceCheckTest(GitRepoFixture):
 
 @unittest.skipUnless(shutil.which("git"), "环境无 git 可执行，跳过 git fixture 测试")
 class StopGateAllFreshPassTest(GitRepoFixture):
-    """verification 完成 + 指纹新鲜 + review ship + 指纹新鲜 → 静默放行，
-    gate_passed 记到该任务（无 ownership 声明也记账——参与集合语义）。"""
+    """verification 完成 + 指纹新鲜 + review ship receipt（指纹一致）
+    → 静默放行，gate_passed 记到该任务（无 ownership 声明也记账——
+    参与集合语义；wu-21-13 起审查通过凭 durable receipt）。"""
 
     def test_all_fresh_passes_silently_with_accounting(self):
         self.write("src/a.py", b"v1\n")
@@ -836,13 +955,17 @@ class StopGateAllFreshPassTest(GitRepoFixture):
         st = state.load_state(self.repo, TID)
         current = self.task_fingerprint(st)
         state.record_verification(st, "pytest tests/a.py", current)
-        state.record_review(st, "ship", current)
         self.set_state(st)
+        # 审查裁决经 run_review 落 durable ship receipt（绑定同一指纹）
+        receipt = provenance.run_review(
+            str(self.repo), TID, reviewer="reviewer-a", verdict="ship",
+            tool_use_id="toolu-fresh-001")
+        self.assertEqual(receipt["fingerprint"], current)
         result = run_gate("{}", self.repo)
         self.assertEqual(result.returncode, 0)
         self.assertEqual(result.stdout, "")
         self.assertEqual(result.stderr, "")
-        events = self.journal_events()
+        events = self.gate_journal_events()
         self.assertEqual([e["event"] for e in events], ["gate_passed"])
         self.assertEqual(events[0]["tasks"], [TID])
 
@@ -944,11 +1067,11 @@ class StopGateEvaluationErrorDegradeTest(GitRepoFixture):
 
 @unittest.skipUnless(shutil.which("git"), "环境无 git 可执行，跳过 git fixture 测试")
 class StopGateIntegrationSmokeTest(GitRepoFixture):
-    """§98 集成冒烟场景 3-6（B4.3）。
+    """§98 集成冒烟场景 3-6（B4.3；wu-21-13 起审查落证经 run_review）。
 
     区别于 B4.1 的单检查用例：每个场景是「多次 run_gate 的完整流」——
     第一次 Stop 拦截 → 模拟主会话修复（record_verification /
-    record_review 落证）→ 第二次 Stop 放行。逐场景断言两次 Stop 的
+    run_review 落证）→ 第二次 Stop 放行。逐场景断言两次 Stop 的
     stdout/stderr 精确形态（block 次 = 单行 JSON；放行次 = 全空）、
     journal 事件序（含 check 字段）与 block reason 关键子串。
     """
@@ -1022,17 +1145,18 @@ class StopGateIntegrationSmokeTest(GitRepoFixture):
         self.assertEqual(events[0]["check"], "review_missing")
         self.assertEqual(events[0]["task_id"], TID)
         self.assertEqual(events[0]["reviewer"], "glm-reviewer")
-        # 模拟主会话裁决：ship + 当前指纹 → 全部新鲜
-        st = state.load_state(self.repo, TID)
-        state.record_review(st, "ship", self.task_fingerprint(st))
-        self.set_state(st)
+        # 模拟主会话裁决：run_review 落 durable ship receipt（绑定终
+        # 指纹——与完成门同一入口，receipt 唯一权威）
+        provenance.run_review(
+            str(self.repo), TID, reviewer="glm-reviewer", verdict="ship",
+            tool_use_id="toolu-s4-001")
         # 第二次 Stop：完全静默放行 + journal 尾部 gate_passed
         second = run_gate("{}", self.repo)
         self.assertEqual(second.returncode, 0)
         self.assertEqual(second.stdout, "")
         self.assertEqual(second.stderr, "")
         self.assertEqual(
-            [e["event"] for e in self.journal_events()],
+            [e["event"] for e in self.gate_journal_events()],
             ["gate_blocked", "gate_passed"])
 
     # —— 场景 5：审查后编辑 → review stale 拦截 ——
@@ -1042,10 +1166,10 @@ class StopGateIntegrationSmokeTest(GitRepoFixture):
             ownership_files=["src/**"], review_required=True,
             reviewer="glm-reviewer")
         self._write_owned(b"v1\n")
-        # 先落一个新鲜裁决（ship + 当前证据指纹）
-        st = state.load_state(self.repo, TID)
-        state.record_review(st, "ship", self.task_fingerprint(st))
-        self.set_state(st)
+        # 先落一个新鲜裁决（run_review ship receipt，绑定当前证据指纹）
+        provenance.run_review(
+            str(self.repo), TID, reviewer="glm-reviewer", verdict="ship",
+            tool_use_id="toolu-s5-001")
         # 审查后修复：编辑 owned 文件内容 → 审查证据失效
         self._write_owned(b"v2\n")
         result = run_gate("{}", self.repo)
@@ -1056,7 +1180,7 @@ class StopGateIntegrationSmokeTest(GitRepoFixture):
         reason = payload["reason"]
         self.assertIn("review evidence is stale", reason)
         self.assertIn("Files changed after review", reason)
-        events = self.journal_events()
+        events = self.gate_journal_events()
         self.assertEqual([e["event"] for e in events], ["gate_blocked"])
         self.assertEqual(events[0]["check"], "review_stale")
         self.assertEqual(events[0]["task_id"], TID)
@@ -1071,12 +1195,15 @@ class StopGateIntegrationSmokeTest(GitRepoFixture):
             ownership_files=["src/**"], verification_required=[self.CMD],
             review_required=True, reviewer="glm-reviewer")
         self._write_owned(b"v1\n")
-        # 初始全部新鲜：verification 与 review 指纹都 = task_fingerprint
+        # 初始全部新鲜：verification 指纹 = task_fingerprint，审查经
+        # run_review 落 durable ship receipt（同一指纹）
         st = state.load_state(self.repo, TID)
         fresh = self.task_fingerprint(st)
         state.record_verification(st, self.CMD, fresh)
-        state.record_review(st, "ship", fresh)
         self.set_state(st)
+        provenance.run_review(
+            str(self.repo), TID, reviewer="glm-reviewer", verdict="ship",
+            tool_use_id="toolu-s6-001")
         # 一次修复：两枚证据同时过期（§93 例）
         self._write_owned(b"v2\n")
         first = run_gate("{}", self.repo)
@@ -1086,23 +1213,27 @@ class StopGateIntegrationSmokeTest(GitRepoFixture):
         self.assertEqual(payload["decision"], "block")
         # §15 顺序验证在前：两枚同坏时先报 verification_stale
         self.assertIn("verification evidence is stale", payload["reason"])
-        events = self.journal_events()
+        events = self.gate_journal_events()
         self.assertEqual([e["event"] for e in events], ["gate_blocked"])
         self.assertEqual(events[0]["check"], "verification_stale")
         self.assertEqual(events[0]["task_id"], TID)
-        # 模拟重验 + 重审：两枚证据都重新绑定当前指纹
+        # 模拟重验 + 重审：verification 重新绑定当前指纹；审查重审经
+        # run_review 落新 receipt（多张 receipt 取 observed_at 最新一张
+        # ——新 receipt 指纹一致，旧 receipt 过期不再参与判定）
         st = state.load_state(self.repo, TID)
         current = self.task_fingerprint(st)
         state.record_verification(st, self.CMD, current)
-        state.record_review(st, "ship", current)
         self.set_state(st)
+        provenance.run_review(
+            str(self.repo), TID, reviewer="glm-reviewer", verdict="ship",
+            tool_use_id="toolu-s6-002")
         # 第二次 Stop：静默放行 + journal 尾部 [gate_blocked, gate_passed]
         second = run_gate("{}", self.repo)
         self.assertEqual(second.returncode, 0)
         self.assertEqual(second.stdout, "")
         self.assertEqual(second.stderr, "")
         self.assertEqual(
-            [e["event"] for e in self.journal_events()],
+            [e["event"] for e in self.gate_journal_events()],
             ["gate_blocked", "gate_passed"])
 
 
@@ -1128,8 +1259,11 @@ class StopGateCompletionCommitTest(GitRepoFixture):
         st = state.load_state(self.repo, TID)
         current = self.task_fingerprint(st)
         state.record_verification(st, self.CMD, current)
-        state.record_review(st, "ship", current)
         self.set_state(st)
+        # 审查证据：run_review 落 durable ship receipt（绑定同一指纹）
+        provenance.run_review(
+            str(self.repo), TID, reviewer="reviewer-a", verdict="ship",
+            tool_use_id="toolu-commit-001")
         return current
 
     def test_all_green_finalizing_committed_to_completed(self):
@@ -1141,7 +1275,7 @@ class StopGateCompletionCommitTest(GitRepoFixture):
         # 盘上状态被门提交为 completed（模型/公共 API 无法直达，钩子提交）
         self.assertEqual(
             state.load_state(self.repo, TID)["status"], "completed")
-        events = self.journal_events()
+        events = self.gate_journal_events()
         self.assertEqual(
             [e["event"] for e in events], ["gate_passed", "completed"])
         done = events[-1]
@@ -1210,7 +1344,7 @@ class StopGateCompletionCommitTest(GitRepoFixture):
         self.assertEqual(
             state.load_state(self.repo, TID)["status"], "executing")
         self.assertEqual(
-            [e["event"] for e in self.journal_events()], ["gate_passed"])
+            [e["event"] for e in self.gate_journal_events()], ["gate_passed"])
 
 
 # —— H2 路由不变量：门侧按 route 推导审查义务（手写 state 也逃不过） ——
@@ -1218,9 +1352,10 @@ class StopGateCompletionCommitTest(GitRepoFixture):
 @unittest.skipUnless(shutil.which("git"), "环境无 git 可执行，跳过 git fixture 测试")
 class StopGateRouteDerivedReviewTest(GitRepoFixture):
     """检查 3 的条件不依赖 review.required 标志（H2/P0-2）：手写 full 路由
-    + review.required=false + verdict 缺失 → block review_missing；同状态
-    补 ship 裁决 + 新鲜指纹 → 放行。漏写标志无法绕过 high-assurance 审查
-    约束（state.json 直接打补丁构造，绕过 save_state 校验）。"""
+    + review.required=false + 无 receipt → block review_missing；同状态
+    补 ship receipt + 新鲜指纹 → 放行。漏写标志无法绕过 high-assurance
+    审查约束（state.json 直接打补丁构造，绕过 save_state 校验；wu-21-13
+    起通过凭 route 推导 + durable receipt，而非凭标志）。"""
 
     FULL_ROUTE = {"mode": "full", "delegability": "high", "assurance": "high",
                   "executor": "flash-implementer", "continuity": "foreground"}
@@ -1235,7 +1370,8 @@ class StopGateRouteDerivedReviewTest(GitRepoFixture):
     def test_full_route_derived_review_blocks_then_fresh_ship_passes(self):
         self._handwritten_full_route_task()
         # 第一次 Stop：review.required 仍为 false，但 full 路由推导要求
-        # 审查且 verdict 缺失 → review_missing 拦截（参与判定同样按推导）
+        # 审查且无任何 receipt → review_missing 拦截（参与判定同样按
+        # 推导；报文指引 run_review）
         first = run_gate("{}", self.repo)
         self.assertEqual(first.returncode, 0)
         payload = json.loads(first.stdout)
@@ -1243,21 +1379,19 @@ class StopGateRouteDerivedReviewTest(GitRepoFixture):
         reason = payload["reason"]
         self.assertIn("review required but not completed", reason)
         self.assertIn("Reviewer: unassigned", reason)
-        self.assertIn("runtime.state.record_review", reason)
+        self.assertIn("runtime.provenance.run_review", reason)
         events = self.journal_events()
         self.assertEqual([e["event"] for e in events], ["gate_blocked"])
         self.assertEqual(events[0]["check"], "review_missing")
         self.assertEqual(events[0]["task_id"], TID)
         self.assertIsNone(events[0]["reviewer"])
-        # 同状态补 ship 裁决 + 新鲜指纹（仍绕过 save_state：required 保持
-        # false——放行凭 route 推导 + 证据，而非凭标志）
+        # 同状态补 ship receipt（直落 fixture：绕开 run_review 的
+        # save_state——required 保持 false 的手写 state 无法通过 R3 校验
+        # ，恰证明放行凭 route 推导 + durable receipt，而非凭标志）
         st = state.load_state(self.repo, TID)
-        current = self.task_fingerprint(st)
-
-        def mutate(raw):
-            raw["review"]["verdict"] = "ship"
-            raw["review"]["fingerprint"] = current
-        self.patch_state_file_raw(TID, mutate)
+        self.add_review_receipt(
+            reviewer="glm-reviewer",
+            fingerprint=self.task_fingerprint(st))
         second = run_gate("{}", self.repo)
         self.assertEqual(second.returncode, 0)
         self.assertEqual(second.stdout, "")
@@ -1720,8 +1854,13 @@ class DogfoodCompletionTest(SplitLedgerFixture):
         st = state.load_state(self.repo, TID)
         current = self.inner_fingerprint(inner, st)
         state.record_verification(st, self.CMD, current)
-        state.record_review(st, "ship", current)
         self.set_state(st)
+        # 审查证据：run_review 以账本根为入口——终指纹按任务绑定根
+        # （inner）求值，与完成门同一指纹（wu-21-13 receipt 唯一权威）
+        receipt = provenance.run_review(
+            str(self.repo), TID, reviewer="reviewer-a", verdict="ship",
+            tool_use_id="toolu-df-001")
+        self.assertEqual(receipt["fingerprint"], current)
         result = run_gate("{}", self.repo)
         self.assertEqual(result.returncode, 0)
         self.assertEqual(result.stdout, "")
@@ -1730,7 +1869,7 @@ class DogfoodCompletionTest(SplitLedgerFixture):
         # 盘上提交 completed + journal 记 gate_passed 与 completed
         self.assertEqual(
             state.load_state(self.repo, TID)["status"], "completed")
-        events = self.journal_events()
+        events = self.gate_journal_events()
         self.assertEqual(
             [e["event"] for e in events], ["gate_passed", "completed"])
         done = events[-1]

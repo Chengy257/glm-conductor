@@ -1,0 +1,568 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""GLM Conductor v2.1 Execution Policy 数据层（M1，计划 §3/§5/§12）。
+
+职责：
+    execution_policy 是 v2.1 的「自动化强度授权事实源」——v2.0.1 里
+    并发预算 / 续跑授权只存在于技能文本（主会话可绕过），v2.1 把它
+    变为 state 顶层可选块中的运行时事实。本模块是该事实源的纯数据层
+    （零 I/O、零网络、零第三方依赖）：
+      - 构造：default_execution_policy() 返回 §3 冻结 schema 的保守
+        默认块（全新拷贝，调用方可自由改写不影响模块常量）；
+      - 校验：validate_execution_policy() 返回中文错误列表（空列表 =
+        合法），聚合全部错误不短路；供 runtime.state.validate_state
+        规则 8.7 以 execution_policy. 前缀聚合调用；
+      - 授权写入：set_parallel_authorization() /
+        set_resume_authorization() 两个纯 dict 变换（返回新 dict，
+        不改入参、不触碰磁盘，调用方负责 save_state）；非法输入抛
+        ValueError（中文消息含字段名），先全量校验后修改，失败零副作用；
+      - 预算求值：effective_worker_budget() 按 quota 四态把策略
+        max_workers 折算为有效并发预算（计划 §12 表）。
+    本模块不接线任何 hook / task_manager 消费方（那是 M2+ 的事）。
+
+冻结 schema（计划 §3，逐字段；新增字段走版本演进，不在本层放宽）：
+    {
+      "worker_execution": {"default_mode": "background"},
+      "parallelism": {"mode": "standard", "default_workers": 2,
+                       "max_workers": 2, "hard_limit": 4},
+      "continuity": {"mode": "resumable", "auto_resume": "manual",
+                      "max_quota_windows": 0},
+      "authorization": {"source": "default", "confirmed_at": null,
+                         "scope": "task"}
+    }
+    hard_limit == 4 且不可变（>4 v2.1 直接拒绝）；legacy state 缺
+    execution_policy 顶层键完全合法（R7，按本默认块解释）。
+
+授权不变量（计划 §5.4 全表，全部强制，validate_execution_policy 逐条落）：
+    hard_limit == 4；1 <= max_workers <= 4；
+    parallelism.mode ∈ {serial, standard}，serial → max_workers == 1，
+    standard → max_workers ∈ [2, 4]；
+    default_workers 同受 1..4 约束且 <= max_workers；
+    worker_execution.default_mode ∈ {background, foreground}；
+    continuity.mode ∈ {foreground, resumable, idle}；
+    auto_resume ∈ {manual, notify, auto_once, until_done}；
+    auto_resume == manual/notify → max_quota_windows == 0；
+    auto_resume == auto_once → max_quota_windows == 1；
+    auto_resume == until_done → max_quota_windows >= 1；
+    auto_resume ∈ {auto_once, until_done} → authorization.source == "user"；
+    max_workers > 2 → authorization.source == "user"；
+    authorization.source ∈ {default, user}；
+    confirmed_at 为 ISO8601 字符串或 null（source=="user" 时必须非 null）；
+    authorization.scope == "task"。
+
+window 预算记账（v2.1 §14，wu-21-11）：
+    continuity.consumed_quota_windows 是可选键（已消耗的自动续跑窗口
+    预算计数，task_manager.record_quota_wake 在主会话 CronCreate 成功
+    后递增）：缺键完全合法（按 0 解释——validate 容错缺省，默认块不
+    含该键，legacy / 新任务形状不变）；存在时必须是 >= 0 的 int
+    （bool 拒绝）。消费方经 consumed_quota_windows() 容错读，与
+    max_quota_windows 的差即剩余窗口预算。
+
+有效并发预算（计划 §12 表）：
+    AVAILABLE → 策略 max_workers；PRESSURE → 1；UNKNOWN → 1；
+    EXHAUSTED → 0；quota_status 非法 / 未映射 → 0（保守）。
+    policy 形状非法 / 缺失（legacy）→ 按默认策略的 max_workers 求值。
+
+依赖方向（避免循环导入，锁死）：
+    本模块 → runtime.quota.parser（仅 quota 四态词汇 QUOTA_STATUSES；
+    quota/* 不导入本模块）；runtime.state 单向导入本模块（规则 8.7
+    与 new_task_state 默认块）；本模块绝不 import runtime.state。
+    零第三方依赖，`python3 -S` 可运行。
+
+来源：
+    docs/GLM-Conductor-v2.1-Architecture-Agent-Implementation-Plan.md
+    §3（schema 冻结）/ §5（M1 API 与不变量）/ §12（有效预算表）；
+    docs/GLM-Conductor-v2.1-实施前缺口探查与设计决策记录.md §四 R7
+    （legacy 兼容：缺键合法）。
+"""
+
+import datetime
+
+from runtime.quota.parser import QUOTA_STATUSES
+
+# —— 词汇表常量（枚举校验用） ——
+
+# worker 执行模式（§3.1）：background 默认；foreground 仅用于结论
+# 决定下一步分解 / 无其他有价值动作 / 短诊断 / 明确要求立即 join
+WORKER_MODES = ("background", "foreground")
+# 并发策略模式（§3.2）：v2.1 暂不实现 extended
+PARALLELISM_MODES = ("serial", "standard")
+# 连续性模式（§3.3；与 state.CONTINUITY_MODES 取值一致——独立声明，
+# 本模块不导入 state，避免反向依赖）
+CONTINUITY_MODES = ("foreground", "resumable", "idle")
+# 自动续跑授权词汇（§3.3）：manual 默认；notify 只提醒不自动实施；
+# auto_once 跨 1 个 quota reset；until_done 在窗口预算内持续到完成
+# （不存在真正无限的 unlimited）
+AUTO_RESUME_MODES = ("manual", "notify", "auto_once", "until_done")
+# 授权来源词汇（§3.4）：default 保守默认；user 用户明确授权
+AUTH_SOURCES = ("default", "user")
+# 授权范围（§3.4）：v2.1 冻结在任务级
+AUTH_SCOPE = "task"
+
+# 并发硬上限（§3.2 冻结：hard_limit == 4 且不可变；>4 直接拒绝）
+HARD_WORKER_LIMIT = 4
+# serial 模式的唯一合法并发数
+SERIAL_MAX_WORKERS = 1
+
+# execution_policy 必填子块（§3 冻结 schema 四块；缺一即非法——
+# 授权事实源不允许半定义形状，完整性由 validate_state 在保存闸拒绝）
+POLICY_SUB_BLOCKS = ("worker_execution", "parallelism", "continuity",
+                     "authorization")
+
+# §3 冻结 schema 的保守默认块（模块常量只读；default_execution_policy()
+# 每次返回全新拷贝，防止调用方改动波及本常量）
+DEFAULT_EXECUTION_POLICY = {
+    "worker_execution": {"default_mode": "background"},
+    "parallelism": {"mode": "standard", "default_workers": 2,
+                    "max_workers": 2, "hard_limit": HARD_WORKER_LIMIT},
+    "continuity": {"mode": "resumable", "auto_resume": "manual",
+                   "max_quota_windows": 0},
+    "authorization": {"source": "default", "confirmed_at": None,
+                      "scope": AUTH_SCOPE},
+}
+
+# —— 构造 ——
+
+
+def default_execution_policy() -> dict:
+    """返回 §3 冻结 schema 保守默认块的全新拷贝。
+
+    每次调用构造新 dict（子块同样新造），调用方改写返回值不影响
+    模块常量 DEFAULT_EXECUTION_POLICY，也不影响其他调用方。
+    """
+    return {name: dict(block) for name, block in DEFAULT_EXECUTION_POLICY.items()}
+
+
+# —— 校验 ——
+
+
+def _enum_error(path, value, allowed):
+    """构造枚举取值错误的中文消息（含字段路径与合法取值清单）。"""
+    return "%s %r 不在合法取值内（%s）" % (path, value, ", ".join(allowed))
+
+
+def _is_iso8601(value) -> bool:
+    """判断 value 是否为可解析的 ISO8601 时间字符串。
+
+    兼容结尾 Z/z 后缀（先归一为 +00:00 再解析——Python 3.11 之前
+    fromisoformat 不认 Z）。非字符串 / 空串 / 解析失败 → False。
+    """
+    if not isinstance(value, str) or value == "":
+        return False
+    probe = value[:-1] + "+00:00" if value.endswith(("Z", "z")) else value
+    try:
+        datetime.datetime.fromisoformat(probe)
+    except ValueError:
+        return False
+    return True
+
+
+def _is_count(value) -> bool:
+    """判断 value 是否为可用于计数/上限的正整数语义 int（bool 排除——
+    bool 是 int 子类，True/False 不得充当并发数或窗口数）。"""
+    return not isinstance(value, bool) and isinstance(value, int)
+
+
+def validate_execution_policy(policy) -> "list[str]":
+    """校验 execution_policy 块，返回错误消息列表（中文，含字段路径）。
+
+    空列表 = 合法。不抛异常；policy 非 dict →
+    ["execution_policy 必须是 JSON 对象"]。
+    错误路径为块内路径（parallelism.max_workers ...），由调用方
+    （state.validate_state 规则 8.7）聚合时统一加 execution_policy.
+    前缀；本函数独立使用时路径同样可读。
+
+    规则（§3 冻结 schema + §5.4 授权不变量全表）：
+      - 四个必填子块齐全且为 dict（缺失报「缺少必填子块」，非 dict
+        报「必须是 JSON 对象」；子块形状损坏时其叶子校验跳过）；
+      - 叶子字段齐全（缺失报「缺少必填键 <路径>」）+ 枚举 / 类型 /
+        范围校验（§5.4 全表，见模块 docstring）；
+      - 跨字段耦合（mode↔max_workers、auto_resume↔max_quota_windows、
+        auto_resume↔source、max_workers↔source、user↔confirmed_at）
+        仅在涉及字段均合法时判定——非法值已有基线错误，不重复报；
+      - 未知键忽略（向前兼容），不报错。
+    多处非法时聚合全部错误，不短路。
+    """
+    if not isinstance(policy, dict):
+        return ["execution_policy 必须是 JSON 对象"]
+    errors = []
+
+    # 子块形状：四块齐全且为 dict
+    blocks = {}
+    for name in POLICY_SUB_BLOCKS:
+        if name not in policy:
+            errors.append("缺少必填子块 %s" % name)
+        elif not isinstance(policy[name], dict):
+            errors.append("%s 必须是 JSON 对象" % name)
+        else:
+            blocks[name] = policy[name]
+
+    # —— worker_execution ——
+    we = blocks.get("worker_execution")
+    if we is not None:
+        if "default_mode" not in we:
+            errors.append("缺少必填键 worker_execution.default_mode")
+        elif we["default_mode"] not in WORKER_MODES:
+            errors.append(_enum_error(
+                "worker_execution.default_mode", we["default_mode"],
+                WORKER_MODES))
+
+    # —— parallelism ——
+    par = blocks.get("parallelism")
+    mode = None
+    max_workers = None
+    mode_ok = False
+    max_ok = False
+    if par is not None:
+        for key in ("mode", "default_workers", "max_workers", "hard_limit"):
+            if key not in par:
+                errors.append("缺少必填键 parallelism.%s" % key)
+        mode = par.get("mode")
+        mode_ok = mode in PARALLELISM_MODES
+        if "mode" in par and not mode_ok:
+            errors.append(_enum_error(
+                "parallelism.mode", mode, PARALLELISM_MODES))
+        hard_limit = par.get("hard_limit")
+        if "hard_limit" in par and (
+                not _is_count(hard_limit) or hard_limit != HARD_WORKER_LIMIT):
+            errors.append(
+                "parallelism.hard_limit 必须为 %d（v2.1 冻结上限，"
+                "不可变更）" % HARD_WORKER_LIMIT)
+        max_workers = par.get("max_workers")
+        if "max_workers" in par:
+            if not _is_count(max_workers) or not (
+                    1 <= max_workers <= HARD_WORKER_LIMIT):
+                errors.append(
+                    "parallelism.max_workers 必须是 1-%d 的整数"
+                    "（hard_limit=%d 冻结）"
+                    % (HARD_WORKER_LIMIT, HARD_WORKER_LIMIT))
+            else:
+                max_ok = True
+        default_workers = par.get("default_workers")
+        if "default_workers" in par:
+            if not _is_count(default_workers) or not (
+                    1 <= default_workers <= HARD_WORKER_LIMIT):
+                errors.append(
+                    "parallelism.default_workers 必须是 1-%d 的整数"
+                    % HARD_WORKER_LIMIT)
+            elif max_ok and default_workers > max_workers:
+                errors.append(
+                    "parallelism.default_workers=%d 超过 "
+                    "parallelism.max_workers=%d（default_workers 不得超过 "
+                    "max_workers）" % (default_workers, max_workers))
+
+    # —— continuity ——
+    con = blocks.get("continuity")
+    auto_resume = None
+    windows = None
+    resume_ok = False
+    windows_ok = False
+    if con is not None:
+        for key in ("mode", "auto_resume", "max_quota_windows"):
+            if key not in con:
+                errors.append("缺少必填键 continuity.%s" % key)
+        c_mode = con.get("mode")
+        if "mode" in con and c_mode not in CONTINUITY_MODES:
+            errors.append(_enum_error(
+                "continuity.mode", c_mode, CONTINUITY_MODES))
+        auto_resume = con.get("auto_resume")
+        resume_ok = auto_resume in AUTO_RESUME_MODES
+        if "auto_resume" in con and not resume_ok:
+            errors.append(_enum_error(
+                "continuity.auto_resume", auto_resume, AUTO_RESUME_MODES))
+        windows = con.get("max_quota_windows")
+        if "max_quota_windows" in con:
+            if not _is_count(windows) or windows < 0:
+                errors.append(
+                    "continuity.max_quota_windows 必须是 >= 0 的整数")
+            else:
+                windows_ok = True
+        # 可选键 consumed_quota_windows（v2.1 §14 wu-21-11 window 预算
+        # 记账）：缺键合法（按 0 解释）；存在时必须 >= 0 int（bool 拒绝）
+        if "consumed_quota_windows" in con:
+            consumed = con.get("consumed_quota_windows")
+            if not _is_count(consumed) or consumed < 0:
+                errors.append(
+                    "continuity.consumed_quota_windows 必须是 >= 0 的整数"
+                    "（可选键，缺省按 0 解释）")
+
+    # —— authorization ——
+    auth = blocks.get("authorization")
+    source = None
+    confirmed_at = None
+    source_ok = False
+    if auth is not None:
+        for key in ("source", "confirmed_at", "scope"):
+            if key not in auth:
+                errors.append("缺少必填键 authorization.%s" % key)
+        source = auth.get("source")
+        source_ok = source in AUTH_SOURCES
+        if "source" in auth and not source_ok:
+            errors.append(_enum_error(
+                "authorization.source", source, AUTH_SOURCES))
+        confirmed_at = auth.get("confirmed_at")
+        if "confirmed_at" in auth and confirmed_at is not None \
+                and not _is_iso8601(confirmed_at):
+            errors.append(
+                "authorization.confirmed_at 必须是 ISO8601 字符串或 null")
+        scope = auth.get("scope")
+        if "scope" in auth and scope != AUTH_SCOPE:
+            errors.append(
+                "authorization.scope %r 不在合法取值内（%s）——v2.1 授权"
+                "范围冻结在任务级" % (scope, AUTH_SCOPE))
+        if source_ok and source == "user" and "confirmed_at" in auth \
+                and confirmed_at is None:
+            errors.append(
+                'authorization.source="user" 要求 '
+                "authorization.confirmed_at 非 null（用户授权必须记录"
+                "确认时间）")
+
+    # —— 跨字段耦合（涉及字段均合法时才判，不重复报基线错误）——
+
+    # §5.4：parallelism.mode ↔ max_workers
+    if mode_ok and max_ok:
+        if mode == "serial" and max_workers != SERIAL_MAX_WORKERS:
+            errors.append(
+                "parallelism.mode=serial 要求 parallelism.max_workers == %d"
+                "（串行即单 worker），得到 %d"
+                % (SERIAL_MAX_WORKERS, max_workers))
+        if mode == "standard" and not (2 <= max_workers <= HARD_WORKER_LIMIT):
+            errors.append(
+                "parallelism.mode=standard 要求 parallelism.max_workers "
+                "在 2-%d 内，得到 %d" % (HARD_WORKER_LIMIT, max_workers))
+
+    # §5.4：auto_resume ↔ max_quota_windows
+    if resume_ok and windows_ok:
+        if auto_resume in ("manual", "notify") and windows != 0:
+            errors.append(
+                "continuity.auto_resume=%r 要求 "
+                "continuity.max_quota_windows == 0（%r 不自动跨额度窗口"
+                "续跑），得到 %d" % (auto_resume, auto_resume, windows))
+        if auto_resume == "auto_once" and windows != 1:
+            errors.append(
+                "continuity.auto_resume=\"auto_once\" 要求 "
+                "continuity.max_quota_windows == 1（只允许自动续跑一次），"
+                "得到 %d" % windows)
+        if auto_resume == "until_done" and windows < 1:
+            errors.append(
+                "continuity.auto_resume=\"until_done\" 要求 "
+                "continuity.max_quota_windows >= 1（窗口预算必须至少 1），"
+                "得到 %d" % windows)
+
+    # §5.4：auto_resume ∈ {auto_once, until_done} → source == "user"
+    if resume_ok and auto_resume in ("auto_once", "until_done") \
+            and source_ok and source != "user":
+        errors.append(
+            "continuity.auto_resume=%r 要求 authorization.source 为 "
+            '"user"（跨额度窗口自动续跑必须用户明确授权）' % auto_resume)
+
+    # §5.4：max_workers > 2 → source == "user"
+    if max_ok and max_workers > 2 and source_ok and source != "user":
+        errors.append(
+            "parallelism.max_workers=%d 要求 authorization.source 为 "
+            '"user"（超过默认 2 的并发必须用户确认）' % max_workers)
+
+    return errors
+
+
+# —— 授权写入（纯 dict 变换：不改入参、不触碰磁盘） ——
+
+
+def _require_policy_dict(policy):
+    """policy 非 dict 时抛 ValueError（setter 共用的入参闸）。"""
+    if not isinstance(policy, dict):
+        raise ValueError(
+            "execution_policy 写入失败：policy 必须是 JSON 对象，得到 %s"
+            % type(policy).__name__)
+
+
+def _copy_policy(policy) -> dict:
+    """以默认块为底、入参子块覆盖，构造全新 policy dict（入参只读）。
+
+    入参缺子块 / 子块形状异常时按默认块补齐（setter 的职责是产出
+    可校验的完整块，legacy 半块不被放大）；子块浅拷贝即可——冻结
+    schema 的叶子均为标量（str / int / None），未知键原样保留
+    （向前兼容）。
+    """
+    updated = default_execution_policy()
+    for name in POLICY_SUB_BLOCKS:
+        block = policy.get(name)
+        if isinstance(block, dict):
+            updated[name] = dict(block)
+    return updated
+
+
+def _validate_authorization_inputs(func_name, source, confirmed_at):
+    """校验两个 setter 共用的 source / confirmed_at 入参（§3.4）。"""
+    if source not in AUTH_SOURCES:
+        raise ValueError(
+            "%s：source %r 不在合法取值内（%s）"
+            % (func_name, source, ", ".join(AUTH_SOURCES)))
+    if confirmed_at is not None and not _is_iso8601(confirmed_at):
+        raise ValueError(
+            "%s：confirmed_at 必须是 ISO8601 字符串或 null，得到 %r"
+            % (func_name, confirmed_at))
+    if source == "user" and confirmed_at is None:
+        raise ValueError(
+            '%s：source="user" 要求 confirmed_at 非 null（用户授权必须'
+            "记录确认时间）" % func_name)
+
+
+def set_parallel_authorization(policy, *, max_workers, source,
+                               confirmed_at) -> dict:
+    """写入并发授权（§3.2 + §5.4），返回更新后的全新 policy dict。
+
+    纯变换：不改入参、不写盘（调用方负责 save_state）。
+      - max_workers：1..hard_limit(4) 的 int（bool 拒绝）；写入时按
+        §3.2 语义派生 parallelism.mode（1 → serial，2-4 → standard）；
+        default_workers 超过新 max_workers 时同步下调到 max_workers
+        （只降不升——并发预算收紧时默认值跟随，放宽时保持保守）；
+      - source / confirmed_at：§3.4 授权元数据；source="user" 必须
+        给非 null confirmed_at；max_workers > 2 必须 source="user"；
+      - hard_limit 不在本函数可写范围（冻结 == 4，不可变）。
+    非法输入抛 ValueError（中文消息含字段名）；先全量校验后构造，
+    失败时入参零副作用。
+    """
+    _require_policy_dict(policy)
+    func_name = "set_parallel_authorization"
+    if not _is_count(max_workers) or not (
+            1 <= max_workers <= HARD_WORKER_LIMIT):
+        raise ValueError(
+            "%s：max_workers=%r 不在合法范围（1-%d，hard_limit=%d 冻结"
+            "不可变）" % (func_name, max_workers, HARD_WORKER_LIMIT,
+                         HARD_WORKER_LIMIT))
+    _validate_authorization_inputs(func_name, source, confirmed_at)
+    if max_workers > 2 and source != "user":
+        raise ValueError(
+            '%s：max_workers=%d 要求 source="user"（超过默认 2 的并发'
+            "必须用户确认），得到 %r" % (func_name, max_workers, source))
+    updated = _copy_policy(policy)
+    par = updated["parallelism"]
+    old_default = par.get("default_workers")
+    if not _is_count(old_default) or old_default < 1:
+        old_default = DEFAULT_EXECUTION_POLICY["parallelism"]["default_workers"]
+    par["mode"] = "serial" if max_workers == SERIAL_MAX_WORKERS else "standard"
+    par["max_workers"] = max_workers
+    par["default_workers"] = min(old_default, max_workers)
+    updated["authorization"] = {"source": source, "confirmed_at": confirmed_at,
+                                "scope": AUTH_SCOPE}
+    return updated
+
+
+def set_resume_authorization(policy, *, auto_resume, max_quota_windows,
+                             source, confirmed_at) -> dict:
+    """写入续跑授权（§3.3 + §5.4），返回更新后的全新 policy dict。
+
+    纯变换：不改入参、不写盘（调用方负责 save_state）。
+      - auto_resume ∈ {manual, notify, auto_once, until_done}；
+      - max_quota_windows：>= 0 的 int（bool 拒绝），且受 §5.4 耦合：
+        manual/notify → 0；auto_once → 1；until_done >= 1；
+      - auto_resume ∈ {auto_once, until_done} 必须 source="user"；
+      - continuity.mode 不在本函数可写范围（它属于路由连续性选择，
+        由任务编排层决定）。
+    非法输入抛 ValueError（中文消息含字段名）；先全量校验后构造，
+    失败时入参零副作用。
+    """
+    _require_policy_dict(policy)
+    func_name = "set_resume_authorization"
+    if auto_resume not in AUTO_RESUME_MODES:
+        raise ValueError(
+            "%s：auto_resume %r 不在合法取值内（%s）"
+            % (func_name, auto_resume, ", ".join(AUTO_RESUME_MODES)))
+    if not _is_count(max_quota_windows) or max_quota_windows < 0:
+        raise ValueError(
+            "%s：max_quota_windows=%r 必须是 >= 0 的整数"
+            % (func_name, max_quota_windows))
+    _validate_authorization_inputs(func_name, source, confirmed_at)
+    if auto_resume in ("manual", "notify") and max_quota_windows != 0:
+        raise ValueError(
+            "%s：auto_resume=%r 要求 max_quota_windows == 0（%r 不自动"
+            "跨额度窗口续跑），得到 %d"
+            % (func_name, auto_resume, auto_resume, max_quota_windows))
+    if auto_resume == "auto_once" and max_quota_windows != 1:
+        raise ValueError(
+            "%s：auto_resume=\"auto_once\" 要求 max_quota_windows == 1"
+            "（只允许自动续跑一次），得到 %d"
+            % (func_name, max_quota_windows))
+    if auto_resume == "until_done" and max_quota_windows < 1:
+        raise ValueError(
+            "%s：auto_resume=\"until_done\" 要求 max_quota_windows >= 1"
+            "（窗口预算必须至少 1），得到 %d" % (func_name, max_quota_windows))
+    if auto_resume in ("auto_once", "until_done") and source != "user":
+        raise ValueError(
+            '%s：auto_resume=%r 要求 source="user"（跨额度窗口自动续跑'
+            "必须用户明确授权），得到 %r" % (func_name, auto_resume, source))
+    updated = _copy_policy(policy)
+    con = updated["continuity"]
+    con["auto_resume"] = auto_resume
+    con["max_quota_windows"] = max_quota_windows
+    updated["authorization"] = {"source": source, "confirmed_at": confirmed_at,
+                                "scope": AUTH_SCOPE}
+    return updated
+
+
+# —— window 预算记账读取（v2.1 §14，wu-21-11） ——
+
+
+def consumed_quota_windows(policy) -> int:
+    """容错读 continuity.consumed_quota_windows（已消耗自动续跑窗口数）。
+
+    validate 容错缺省 0 的读取面对应物：policy 非 dict / continuity
+    缺块 / 键缺失 / 值形状非法（bool / 负数 / 非整数）→ 一律 0（手写
+    state 不炸消费方，形状纠错归 validate_execution_policy）。
+    纯函数：只读入参、零 I/O。剩余窗口预算 =
+    max(0, continuity.max_quota_windows - 本函数返回值)，由消费方
+    （task_manager 的授权矩阵 / recovery 渲染）自行折算。
+    """
+    continuity = (policy.get("continuity")
+                  if isinstance(policy, dict) else None)
+    consumed = (continuity.get("consumed_quota_windows")
+                if isinstance(continuity, dict) else None)
+    if _is_count(consumed) and consumed >= 0:
+        return consumed
+    return 0
+
+
+# —— 有效并发预算（计划 §12 表） ——
+
+# quota_status → 有效预算的映射哨兵：AVAILABLE 无固定值（用策略
+# max_workers 折算）；未映射的未来词汇一律 0（保守）
+_BUDGET_FROM_POLICY = object()
+_QUOTA_BUDGETS = {
+    "AVAILABLE": _BUDGET_FROM_POLICY,
+    "PRESSURE": 1,
+    "UNKNOWN": 1,
+    "EXHAUSTED": 0,
+}
+
+
+def _policy_max_workers(policy) -> int:
+    """容错读策略 max_workers：形状非法 / 缺失（legacy）→ 按默认块；
+    超过冻结上限时截断到 hard_limit（手写 state 不炸消费方）。"""
+    parallelism = (
+        policy.get("parallelism") if isinstance(policy, dict) else None)
+    max_workers = (
+        parallelism.get("max_workers")
+        if isinstance(parallelism, dict) else None)
+    if not _is_count(max_workers) or max_workers < 1:
+        max_workers = DEFAULT_EXECUTION_POLICY["parallelism"]["max_workers"]
+    return min(max_workers, HARD_WORKER_LIMIT)
+
+
+def effective_worker_budget(policy, quota_status) -> int:
+    """按 quota 四态折算有效并发预算（计划 §12 表），返回 int。
+
+      - AVAILABLE → 策略 max_workers（policy 形状非法 / 缺失 → 默认
+        块的 2；超过冻结上限截断到 hard_limit）；
+      - PRESSURE → 1；UNKNOWN → 1；EXHAUSTED → 0；
+      - quota_status 非法（不在 runtime.quota.parser.QUOTA_STATUSES
+        词汇内）或未来未映射的新状态 → 0（保守）。
+    纯函数：零 I/O、不改入参。消费方（M2+ 的 hooks / dispatcher）
+    在派发前用本函数求值，不再自行解释 quota 状态。
+    """
+    if quota_status not in QUOTA_STATUSES:
+        return 0
+    budget = _QUOTA_BUDGETS.get(quota_status, 0)
+    if budget is _BUDGET_FROM_POLICY:
+        return _policy_max_workers(policy)
+    return budget

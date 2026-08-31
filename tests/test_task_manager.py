@@ -18,14 +18,18 @@ validate_state 拒绝「无验证命令的单元」（不可派发），因此�
 覆盖：
     - prepare_dispatch happy path：决策快照返回（dispatch 组含 uid）/
       租约落盘（owner==uid）/ dispatch_prepared 事件（leased=归一路径
-      排序）/ 单元状态与 state.json 字节不被改动（无 state 副作用）/
-      反斜杠 ownership 归一 / 同 owner 重复 prepare 幂等 /
-      max_workers 缺省取 dispatch.max_workers（显式传参覆盖）；
+      排序 + effective_max_workers=§12 折算后的有效预算）/ 单元状态与
+      state.json 字节不被改动（无 state 副作用）/ 反斜杠 ownership
+      归一 / 同 owner 重复 prepare 幂等 / max_workers 预算接线
+      （wu-21-09：cap_base 显式参数 → execution_policy.parallelism.
+      max_workers → dispatch.max_workers（legacy）→ 2，再按 quota
+      四态 min 折算，见 BudgetWiringTest）；
     - prepare 失败：单元缺失 / 单元非 ready（消息含当前状态）/ plan
       落选 quota EXHAUSTED（消息含 quota EXHAUSTED）/ plan 落选
-      deferred（消息含 reason）/ 依赖未满足未进候选（fallback 理由）/
-      落选零副作用（不写租约不写事件）/ 非法 quota_status ValueError
-      透传；
+      deferred（消息含 reason，ownership_conflict 口径）/ 依赖未满足
+      未进候选（fallback 理由）/ 落选零副作用（不写租约不写事件）/
+      非法 quota_status ValueError 透传 / PRESSURE 不再整批抑制
+      （wu-21-09：预算收缩为 1 后单单元照常准入）；
     - commit happy：ready→running / active 记账 / 任务级 created/
       decomposed→executing 直达边（executing、joining 不被翻动）/
       落盘读回一致 / implementation_started 事件（含 executor）/
@@ -80,7 +84,16 @@ validate_state 拒绝「无验证命令的单元」（不可派发），因此�
     - RELEASE（refresh_readiness）：pending+依赖满足提升并返回 /
       waiting_dependency 提升 / 依赖未满足不提升零写入 / 全 ready 与
       空图零写入零返回零 journal / 提升序按 units 出现序 / 提升后
-      prepare_dispatch 直接准入（集成）。
+      prepare_dispatch 直接准入（集成）；
+    - v2.1 M2 前半（permit 接线，WU-21-02）：prepare 返回 "permit" 增量
+      键（冻结形状 + 落盘读回一致）/ dispatch_permit_created 事件与
+      prepared→created 事件序 / 落选零 permit / mode 取 execution_policy
+      default_mode（legacy 缺块兜底 background；foreground 须显式
+      reason）/ 显式 mode 覆盖 / 非法 mode/reason ValueError 零副作用 /
+      commit 不消费 permit / abort 作废 + dispatch_permit_invalidated
+      事件序 / 无 permit 零噪声 / 重复 prepare 全作废 / 按单元精确
+      作废 / abort 后重备新 permit（数据层原语全集见
+      tests/test_dispatch_wave.py）。
 
 运行：
     cd <repo_root> && python3 -m unittest tests.test_task_manager -v
@@ -97,6 +110,8 @@ import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "plugins" / "glm-conductor"))
+from runtime import dispatch_wave
+from runtime import execution_policy
 from runtime import fingerprint as fingerprint_mod
 from runtime import journal
 from runtime import lease
@@ -136,7 +151,12 @@ def wu(uid, owned=("src/a/**",), deps=(), status="ready",
 
 def make_task(root, units, *, status="decomposed", max_workers=1,
               active=()):
-    """在临时目录真实落盘一个任务 state（new_task_state 构造 + save）。"""
+    """在临时目录真实落盘一个任务 state（new_task_state 构造 + save）。
+
+    max_workers 写进 dispatch 块（legacy 账面口径）。wu-21-09 起真实
+    并发预算按 _effective_worker_cap 折算：state 恒含 execution_policy
+    默认块（parallelism.max_workers=2）时 policy 优先于本字段——
+    显式 prepare 传参仍最高优先。"""
     st = state.new_task_state(
         TID, "事务边界测试目标",
         {"mode": "delegate", "delegability": "high",
@@ -270,16 +290,18 @@ class PrepareHappyTest(TaskManagerTestBase):
         make_task(self.root, [wu("u1", ("src/a/**",))])
 
     def test_prepare_returns_plan_and_acquires_lease(self):
-        plan = task_manager.prepare_dispatch(self.root, TID, "u1")
+        plan = task_manager.prepare_dispatch(self.root, TID, "u1", quota_status="AVAILABLE")
         self.assertEqual(plan["dispatch"], ["u1"])
-        self.assertEqual(plan["max_workers"], 1)
+        # wu-21-09：预算取 policy parallelism.max_workers（默认块 2），
+        # dispatch 块的 legacy max_workers=1 不再优先
+        self.assertEqual(plan["max_workers"], 2)
         self.assertEqual(plan["quota_status"], "AVAILABLE")
         leases = lease.lease_state(self.root, TID)
         self.assertEqual(set(leases), {"src/a/**"})
         self.assertEqual(leases["src/a/**"]["owner"], "u1")
 
     def test_prepare_journals_dispatch_prepared_with_normalized_paths(self):
-        task_manager.prepare_dispatch(self.root, TID, "u1")
+        task_manager.prepare_dispatch(self.root, TID, "u1", quota_status="AVAILABLE")
         records = events(self.root, "dispatch_prepared")
         self.assertEqual(len(records), 1)
         self.assertEqual(records[0]["unit"], "u1")
@@ -287,7 +309,7 @@ class PrepareHappyTest(TaskManagerTestBase):
 
     def test_prepare_leaves_unit_status_and_state_bytes_untouched(self):
         before = state_bytes(self.root)
-        task_manager.prepare_dispatch(self.root, TID, "u1")
+        task_manager.prepare_dispatch(self.root, TID, "u1", quota_status="AVAILABLE")
         # prepare 对 state.json 零副作用（不落盘、不改单元状态）
         self.assertEqual(state_bytes(self.root), before)
         st = state.load_state(self.root, TID)
@@ -295,7 +317,7 @@ class PrepareHappyTest(TaskManagerTestBase):
 
     def test_prepare_normalizes_backslash_ownership(self):
         make_task(self.root, [wu("u2", ("src\\b\\main.ts",))])
-        task_manager.prepare_dispatch(self.root, TID, "u2")
+        task_manager.prepare_dispatch(self.root, TID, "u2", quota_status="AVAILABLE")
         record = events(self.root, "dispatch_prepared")[0]
         self.assertEqual(record["leased"], ["src/b/main.ts"])
         self.assertEqual(set(lease.lease_state(self.root, TID)),
@@ -303,8 +325,8 @@ class PrepareHappyTest(TaskManagerTestBase):
 
     def test_repeated_prepare_is_idempotent_on_leases(self):
         # §78 同 owner 幂等：崩溃后重备安全，不产生重复租约条目
-        task_manager.prepare_dispatch(self.root, TID, "u1")
-        task_manager.prepare_dispatch(self.root, TID, "u1")
+        task_manager.prepare_dispatch(self.root, TID, "u1", quota_status="AVAILABLE")
+        task_manager.prepare_dispatch(self.root, TID, "u1", quota_status="AVAILABLE")
         self.assertEqual(set(lease.lease_state(self.root, TID)),
                          {"src/a/**"})
         self.assertEqual(len(events(self.root, "dispatch_prepared")), 2)
@@ -313,11 +335,11 @@ class PrepareHappyTest(TaskManagerTestBase):
         make_task(self.root, [wu("u1", ("src/a/**",)),
                               wu("u2", ("src/b/**",))],
                   max_workers=2)
-        plan = task_manager.prepare_dispatch(self.root, TID, "u1")
+        plan = task_manager.prepare_dispatch(self.root, TID, "u1", quota_status="AVAILABLE")
         self.assertEqual(plan["max_workers"], 2)
         self.assertEqual(sorted(plan["dispatch"]), ["u1", "u2"])
         plan = task_manager.prepare_dispatch(self.root, TID, "u1",
-                                             max_workers=1)
+                                             max_workers=1, quota_status="AVAILABLE")
         self.assertEqual(plan["max_workers"], 1)
         self.assertEqual(plan["dispatch"], ["u1"])
 
@@ -329,13 +351,13 @@ class PrepareFailureTest(TaskManagerTestBase):
     def test_unit_not_found_raises(self):
         make_task(self.root, [wu("u1")])
         with self.assertRaises(task_manager.TaskManagerError) as ctx:
-            task_manager.prepare_dispatch(self.root, TID, "ghost")
+            task_manager.prepare_dispatch(self.root, TID, "ghost", quota_status="AVAILABLE")
         self.assertIn("ghost", str(ctx.exception))
 
     def test_unit_not_ready_raises_with_current_status(self):
         make_task(self.root, [wu("u1", status="running")])
         with self.assertRaises(task_manager.TaskManagerError) as ctx:
-            task_manager.prepare_dispatch(self.root, TID, "u1")
+            task_manager.prepare_dispatch(self.root, TID, "u1", quota_status="AVAILABLE")
         self.assertIn("u1", str(ctx.exception))
         self.assertIn("running", str(ctx.exception))
         # 失败零副作用：不写租约、不写事件
@@ -354,29 +376,139 @@ class PrepareFailureTest(TaskManagerTestBase):
         self.assertEqual(journal.read_events(self.root, TID), [])
 
     def test_deferred_reason_surfaced(self):
-        make_task(self.root, [wu("u1")])
-        # PRESSURE 默认整批抑制 → deferred("pressure_suppressed")
+        # 落选理由透传：u2 与 u1 ownership 重叠 → plan 只批 topo 头一个
+        # u1，prepare(u2) 落选，deferred reason 进错误消息
+        make_task(self.root, [wu("u1", ("src/a/**",)),
+                              wu("u2", ("src/a/**",))])
         with self.assertRaises(task_manager.TaskManagerError) as ctx:
-            task_manager.prepare_dispatch(self.root, TID, "u1",
-                                          quota_status="PRESSURE")
-        self.assertIn("pressure_suppressed", str(ctx.exception))
+            task_manager.prepare_dispatch(self.root, TID, "u2", quota_status="AVAILABLE")
+        self.assertIn("ownership_conflict", str(ctx.exception))
         self.assertEqual(lease.lease_state(self.root, TID), {})
+
+    def test_pressure_no_longer_suppresses_budget_one_admits(self):
+        # wu-21-09：PRESSURE 不再整批抑制（pressure_suppressed 分支
+        # 删除）——预算按 §12 收缩为 1，单就绪单元照常准入
+        make_task(self.root, [wu("u1", ("src/a/**",))])
+        plan = task_manager.prepare_dispatch(self.root, TID, "u1",
+                                             quota_status="PRESSURE")
+        self.assertEqual(plan["max_workers"], 1)
+        self.assertEqual(plan["dispatch"], ["u1"])
+        prepared = events(self.root, "dispatch_prepared")[0]
+        self.assertEqual(prepared["effective_max_workers"], 1)
+
+    def test_unknown_no_longer_suppresses_budget_one_admits(self):
+        # wu-21-09：UNKNOWN 不再整批挂起（unknown_suppressed 分支删除）
+        # ——预算按 §12 收缩为 1，单就绪单元照常准入
+        make_task(self.root, [wu("u1", ("src/a/**",))])
+        plan = task_manager.prepare_dispatch(self.root, TID, "u1",
+                                             quota_status="UNKNOWN")
+        self.assertEqual(plan["max_workers"], 1)
+        self.assertEqual(plan["dispatch"], ["u1"])
 
     def test_unmet_dependencies_not_candidate(self):
         make_task(self.root, [wu("dep", status="pending"),
                               wu("u1", ("src/a/**",), deps=("dep",))])
         # u1 status ready 但依赖未 completed → 不进任何决策组 → fallback 理由
         with self.assertRaises(task_manager.TaskManagerError) as ctx:
-            task_manager.prepare_dispatch(self.root, TID, "u1")
+            task_manager.prepare_dispatch(self.root, TID, "u1", quota_status="AVAILABLE")
         self.assertIn("候选", str(ctx.exception))
         self.assertEqual(lease.lease_state(self.root, TID), {})
 
     def test_invalid_quota_status_value_error_propagates(self):
-        # plan_dispatch 的参数校验 ValueError 不被吞
+        # plan_dispatch 的参数校验 ValueError 不被吞（词汇校验不变：
+        # 非法词汇被 effective_worker_budget 保守折 0 后仍进 plan 校验）
         make_task(self.root, [wu("u1")])
         with self.assertRaises(ValueError):
             task_manager.prepare_dispatch(self.root, TID, "u1",
                                           quota_status="MEGA")
+
+
+# —— wu-21-09 预算接线：_effective_worker_cap 的 cap_base × §12 折算 ——
+
+class BudgetWiringTest(TaskManagerTestBase):
+    """prepare_dispatch / prepare_dispatch_wave 共享的并发预算接线。
+
+    cap_base 优先级：显式 max_workers 参数 → execution_policy.
+    parallelism.max_workers（合法 1..4 int）→ dispatch.max_workers
+    （legacy）→ 2；有效预算 eff = min(cap_base, effective_worker_budget(
+    policy, quota_status))——§12 表 AVAILABLE→策略 max_workers /
+    PRESSURE→1 / UNKNOWN→1 / EXHAUSTED→0。§12 矩阵的 policy
+    max_workers=4 端到端形态在 tests/test_parallel_activation.py。
+    """
+
+    def test_explicit_param_tightens_below_policy(self):
+        # 显式 1 在 policy max=2 下收紧到 1
+        make_task(self.root, [wu("u1", ("src/a/**",))])
+        plan = task_manager.prepare_dispatch(self.root, TID, "u1",
+                                             max_workers=1, quota_status="AVAILABLE")
+        self.assertEqual(plan["max_workers"], 1)
+
+    def test_explicit_param_capped_by_policy_budget(self):
+        # 显式 3 在 policy max=2 下被压回 2（min 语义）
+        make_task(self.root, [wu("u1", ("src/a/**",))])
+        plan = task_manager.prepare_dispatch(self.root, TID, "u1",
+                                             max_workers=3, quota_status="AVAILABLE")
+        self.assertEqual(plan["max_workers"], 2)
+
+    def test_policy_max_workers_used_over_legacy_dispatch_block(self):
+        # policy 优先于 dispatch 块的 legacy 账面值（make_task 写 1）
+        make_task(self.root, [wu("u1", ("src/a/**",))])
+        st = state.load_state(self.root, TID)
+        st["execution_policy"] = execution_policy.set_parallel_authorization(
+            st["execution_policy"], max_workers=4, source="user",
+            confirmed_at="2026-08-31T00:00:00.000Z")
+        state.save_state(self.root, st)
+        plan = task_manager.prepare_dispatch(self.root, TID, "u1", quota_status="AVAILABLE")
+        self.assertEqual(plan["max_workers"], 4)
+        prepared = events(self.root, "dispatch_prepared")[0]
+        self.assertEqual(prepared["effective_max_workers"], 4)
+
+    def test_legacy_state_without_policy_block_uses_dispatch_block(self):
+        # legacy 缺 execution_policy：cap_base 落回 dispatch.max_workers
+        # （make_task 默认 1），budget 按默认块 2 折算 → min 1
+        make_task(self.root, [wu("u1", ("src/a/**",))])
+        st = state.load_state(self.root, TID)
+        del st["execution_policy"]
+        state.save_state(self.root, st)
+        plan = task_manager.prepare_dispatch(self.root, TID, "u1", quota_status="AVAILABLE")
+        self.assertEqual(plan["max_workers"], 1)
+        prepared = events(self.root, "dispatch_prepared")[0]
+        self.assertEqual(prepared["effective_max_workers"], 1)
+
+    def test_effective_worker_cap_fallback_chain_and_quota_matrix(self):
+        # 助手级锚定：cap_base 兜底链 + §12 四态折算（纯函数直测，
+        # 非法形状无法过 save_state 校验，只能以内存 dict 触达）
+        # policy 值非法（非 int）：cap_base 落 legacy dispatch.max_workers=3，
+        # 但 budget 侧按默认块 2 折算（effective_worker_budget 兜底）
+        # → min 2
+        st = {"execution_policy": {"parallelism": {"max_workers": "2"}},
+              "dispatch": {"max_workers": 3}}
+        self.assertEqual(
+            task_manager._effective_worker_cap(st, "AVAILABLE", None), 2)
+        # 同形状下 PRESSURE/UNKNOWN 恒 1、EXHAUSTED 恒 0（§12 优先）
+        self.assertEqual(
+            task_manager._effective_worker_cap(st, "PRESSURE", None), 1)
+        # policy 缺块：cap_base=3、budget 按默认块 2 折算 → min 2
+        st = {"dispatch": {"max_workers": 3}}
+        self.assertEqual(
+            task_manager._effective_worker_cap(st, "AVAILABLE", None), 2)
+        # 双缺 → 缺省 2（dispatcher.DEFAULT_MAX_WORKERS 口径）
+        self.assertEqual(
+            task_manager._effective_worker_cap({"dispatch": {}},
+                                               "AVAILABLE", None), 2)
+        # 显式参数优先于一切；quota 四态恒定折算
+        st = {"execution_policy": {"parallelism": {"max_workers": 4}},
+              "dispatch": {"max_workers": 1}}
+        self.assertEqual(
+            task_manager._effective_worker_cap(st, "AVAILABLE", 3), 3)
+        self.assertEqual(
+            task_manager._effective_worker_cap(st, "AVAILABLE", None), 4)
+        self.assertEqual(
+            task_manager._effective_worker_cap(st, "PRESSURE", None), 1)
+        self.assertEqual(
+            task_manager._effective_worker_cap(st, "UNKNOWN", None), 1)
+        self.assertEqual(
+            task_manager._effective_worker_cap(st, "EXHAUSTED", None), 0)
 
 
 # —— commit happy path ——
@@ -385,7 +517,7 @@ class CommitHappyTest(TaskManagerTestBase):
 
     def test_commit_transitions_books_active_and_flips_task_status(self):
         make_task(self.root, [wu("u1")], status="decomposed")
-        task_manager.prepare_dispatch(self.root, TID, "u1")
+        task_manager.prepare_dispatch(self.root, TID, "u1", quota_status="AVAILABLE")
         st = task_manager.commit_dispatch(self.root, TID, "u1")
         self.assertEqual(unit_of(st, "u1")["status"], "running")
         self.assertEqual(st["dispatch"]["active"], ["u1"])
@@ -398,7 +530,7 @@ class CommitHappyTest(TaskManagerTestBase):
 
     def test_commit_journals_implementation_started_with_executor(self):
         make_task(self.root, [wu("u1")])
-        task_manager.prepare_dispatch(self.root, TID, "u1")
+        task_manager.prepare_dispatch(self.root, TID, "u1", quota_status="AVAILABLE")
         task_manager.commit_dispatch(self.root, TID, "u1")
         records = events(self.root, "implementation_started")
         self.assertEqual(len(records), 1)
@@ -407,26 +539,26 @@ class CommitHappyTest(TaskManagerTestBase):
 
     def test_commit_from_created_status_flips_to_executing(self):
         make_task(self.root, [wu("u1")], status="created")
-        task_manager.prepare_dispatch(self.root, TID, "u1")
+        task_manager.prepare_dispatch(self.root, TID, "u1", quota_status="AVAILABLE")
         st = task_manager.commit_dispatch(self.root, TID, "u1")
         self.assertEqual(st["status"], "executing")
 
     def test_commit_keeps_executing_status(self):
         make_task(self.root, [wu("u1")], status="executing")
-        task_manager.prepare_dispatch(self.root, TID, "u1")
+        task_manager.prepare_dispatch(self.root, TID, "u1", quota_status="AVAILABLE")
         st = task_manager.commit_dispatch(self.root, TID, "u1")
         self.assertEqual(st["status"], "executing")
 
     def test_commit_keeps_joining_status(self):
         # joining 已是执行态：不翻动（只处理四种非执行态）
         make_task(self.root, [wu("u1")], status="joining")
-        task_manager.prepare_dispatch(self.root, TID, "u1")
+        task_manager.prepare_dispatch(self.root, TID, "u1", quota_status="AVAILABLE")
         st = task_manager.commit_dispatch(self.root, TID, "u1")
         self.assertEqual(st["status"], "joining")
 
     def test_commit_active_append_is_idempotent(self):
         make_task(self.root, [wu("u1")])
-        task_manager.prepare_dispatch(self.root, TID, "u1")
+        task_manager.prepare_dispatch(self.root, TID, "u1", quota_status="AVAILABLE")
         # 手工制造「已在 active」的中间态（异常残留）→ commit 不重复追加
         st = state.load_state(self.root, TID)
         st["dispatch"]["active"] = ["u1", "ghost-x"]
@@ -453,7 +585,7 @@ class CommitFailureTest(TaskManagerTestBase):
 
     def test_commit_with_lost_lease_suggests_abort(self):
         make_task(self.root, [wu("u1")])
-        task_manager.prepare_dispatch(self.root, TID, "u1")
+        task_manager.prepare_dispatch(self.root, TID, "u1", quota_status="AVAILABLE")
         lease.release_lease(self.root, TID, "u1")  # 模拟租约外部丢失
         with self.assertRaises(task_manager.TaskManagerError) as ctx:
             task_manager.commit_dispatch(self.root, TID, "u1")
@@ -467,7 +599,7 @@ class CommitFailureTest(TaskManagerTestBase):
 
     def test_duplicate_commit_rejected(self):
         make_task(self.root, [wu("u1")])
-        task_manager.prepare_dispatch(self.root, TID, "u1")
+        task_manager.prepare_dispatch(self.root, TID, "u1", quota_status="AVAILABLE")
         task_manager.commit_dispatch(self.root, TID, "u1")
         with self.assertRaises(task_manager.TaskManagerError) as ctx:
             task_manager.commit_dispatch(self.root, TID, "u1")
@@ -480,7 +612,7 @@ class AbortTest(TaskManagerTestBase):
 
     def test_running_unit_cannot_abort(self):
         make_task(self.root, [wu("u1")])
-        task_manager.prepare_dispatch(self.root, TID, "u1")
+        task_manager.prepare_dispatch(self.root, TID, "u1", quota_status="AVAILABLE")
         task_manager.commit_dispatch(self.root, TID, "u1")
         with self.assertRaises(task_manager.TaskManagerError) as ctx:
             task_manager.abort_dispatch(self.root, TID, "u1")
@@ -490,7 +622,7 @@ class AbortTest(TaskManagerTestBase):
 
     def test_abort_releases_lease_journals_and_spares_state(self):
         make_task(self.root, [wu("u1")])
-        task_manager.prepare_dispatch(self.root, TID, "u1")
+        task_manager.prepare_dispatch(self.root, TID, "u1", quota_status="AVAILABLE")
         before = state_bytes(self.root)
         st = task_manager.abort_dispatch(self.root, TID, "u1")
         self.assertEqual(lease.lease_state(self.root, TID), {})
@@ -503,7 +635,7 @@ class AbortTest(TaskManagerTestBase):
 
     def test_abort_cleans_active_residue_and_saves(self):
         make_task(self.root, [wu("u1")])
-        task_manager.prepare_dispatch(self.root, TID, "u1")
+        task_manager.prepare_dispatch(self.root, TID, "u1", quota_status="AVAILABLE")
         # 手工制造异常残留：active 里出现 u1（正常流程 commit 才记账）
         st = state.load_state(self.root, TID)
         st["dispatch"]["active"] = ["u1"]
@@ -526,7 +658,7 @@ class FinishTest(TaskManagerTestBase):
     def _run_to_running(self):
         """prepare + commit 到 running（带租约与 active 记账）。"""
         make_task(self.root, [wu("u1")])
-        task_manager.prepare_dispatch(self.root, TID, "u1")
+        task_manager.prepare_dispatch(self.root, TID, "u1", quota_status="AVAILABLE")
         task_manager.commit_dispatch(self.root, TID, "u1")
 
     def test_running_to_failed_single_step(self):
@@ -579,7 +711,7 @@ class CrashWindowTest(TaskManagerTestBase):
 
     def test_crash_after_prepare_then_commit_succeeds(self):
         make_task(self.root, [wu("u1")])
-        task_manager.prepare_dispatch(self.root, TID, "u1")
+        task_manager.prepare_dispatch(self.root, TID, "u1", quota_status="AVAILABLE")
         # —— 崩溃点：单元仍 ready + 租约在位 + 无 running/active ——
         st = state.load_state(self.root, TID)
         self.assertEqual(unit_of(st, "u1")["status"], "ready")
@@ -591,11 +723,12 @@ class CrashWindowTest(TaskManagerTestBase):
         self.assertEqual(st["dispatch"]["active"], ["u1"])
         names = [e["event"] for e in journal.read_events(self.root, TID)]
         self.assertEqual(names, ["dispatch_prepared",
+                                 "dispatch_permit_created",
                                  "implementation_started"])
 
     def test_crash_after_prepare_then_abort_releases(self):
         make_task(self.root, [wu("u1")])
-        task_manager.prepare_dispatch(self.root, TID, "u1")
+        task_manager.prepare_dispatch(self.root, TID, "u1", quota_status="AVAILABLE")
         # 恢复路径二：abort 回退——租约清空、单元仍 ready、事件在案
         task_manager.abort_dispatch(self.root, TID, "u1")
         self.assertEqual(lease.lease_state(self.root, TID), {})
@@ -603,7 +736,7 @@ class CrashWindowTest(TaskManagerTestBase):
         self.assertEqual(unit_of(st, "u1")["status"], "ready")
         self.assertEqual(len(events(self.root, "dispatch_aborted")), 1)
         # 回退后可重新 prepare（全有或全无重来一遍）
-        task_manager.prepare_dispatch(self.root, TID, "u1")
+        task_manager.prepare_dispatch(self.root, TID, "u1", quota_status="AVAILABLE")
         self.assertEqual(lease.held_by(self.root, TID, "u1"), ["src/a/**"])
 
 
@@ -647,7 +780,7 @@ class PrepareTtlTest(TaskManagerTestBase):
 
     def test_prepare_acquires_with_default_ttl_and_journals_it(self):
         make_task(self.root, [wu("u1")])
-        task_manager.prepare_dispatch(self.root, TID, "u1")
+        task_manager.prepare_dispatch(self.root, TID, "u1", quota_status="AVAILABLE")
         record = lease.lease_state(self.root, TID)["src/a/**"]
         # H5 record 形状：TTL + generation + 心跳 + 会话标识
         self.assertIn("expires_at", record)
@@ -665,11 +798,234 @@ class PrepareTtlTest(TaskManagerTestBase):
     def test_reprepare_keeps_unexpired_record(self):
         # 同 owner 未过期幂等跳过：generation 与 acquired_at 不动
         make_task(self.root, [wu("u1")])
-        task_manager.prepare_dispatch(self.root, TID, "u1")
+        task_manager.prepare_dispatch(self.root, TID, "u1", quota_status="AVAILABLE")
         before = _read_lease_map(self.root)["src/a/**"]
-        task_manager.prepare_dispatch(self.root, TID, "u1")
+        task_manager.prepare_dispatch(self.root, TID, "u1", quota_status="AVAILABLE")
         self.assertEqual(_read_lease_map(self.root)["src/a/**"], before)
         self.assertEqual(before["generation"], 1)
+
+
+# —— v2.1 M2 前半：派发 permit 接线（WU-21-02，§6.3/§6.6/§20.2） ——
+
+def permits_dir(root, task_id=TID):
+    """任务目录下的 permits/ 子目录路径（测试辅助）。"""
+    return (Path(root) / ".glm-conductor" / "tasks" / task_id / "permits")
+
+
+class PermitWiringTest(TaskManagerTestBase):
+    """prepare_dispatch 签发 permit / abort_dispatch 作废 permit 的接线。
+
+    数据层原语（validate / consume / marker / TTL）的全集在
+    tests/test_dispatch_wave.py；本类锚定 task_manager 的接缝：
+    返回 dict 的 "permit" 增量键、事件序、mode 策略来源、失败零副作用
+    与 abort 按单元作废。commit / finish 行为不变（消费归 wu-21-03
+    的 hook 侧，未消费 permit 随 TTL 自然过期兜底）。
+    """
+
+    def setUp(self):
+        super().setUp()
+        make_task(self.root, [wu("u1")])
+
+    def test_prepare_returns_permit_with_frozen_shape(self):
+        # 现有键全部保留（向后兼容增量）+ permit 冻结形状
+        plan = task_manager.prepare_dispatch(self.root, TID, "u1", quota_status="AVAILABLE")
+        self.assertEqual(plan["dispatch"], ["u1"])
+        # wu-21-09：预算取 policy parallelism.max_workers（默认块 2）
+        self.assertEqual(plan["max_workers"], 2)
+        self.assertEqual(plan["quota_status"], "AVAILABLE")
+        permit = plan["permit"]
+        self.assertEqual(permit["task_id"], TID)
+        self.assertEqual(permit["unit_id"], "u1")
+        self.assertIsNone(permit["wave_id"])
+        self.assertEqual(permit["mode"], "background")  # 默认策略
+        self.assertIsNone(permit["reason"])  # background 恒 null
+        self.assertFalse(permit["consumed"])
+        self.assertRegex(permit["permit_id"], r"^dp-[0-9a-f]{12}$")
+        self.assertIn("created_at", permit)
+        self.assertIn("expires_at", permit)
+        # 落盘读回一致（每 permit 一文件）
+        self.assertEqual(
+            dispatch_wave.load_permit(self.root, TID, permit["permit_id"]),
+            permit)
+
+    def test_prepare_journals_permit_created_after_prepared(self):
+        task_manager.prepare_dispatch(self.root, TID, "u1", quota_status="AVAILABLE")
+        created = events(self.root, "dispatch_permit_created")
+        self.assertEqual(len(created), 1)
+        self.assertEqual(created[0]["unit"], "u1")
+        self.assertEqual(created[0]["mode"], "background")
+        names = [e["event"] for e in journal.read_events(self.root, TID)]
+        self.assertEqual(names, ["dispatch_prepared",
+                                 "dispatch_permit_created"])
+        # 事件 permit_id 与盘上活跃 permit 一致
+        self.assertEqual(
+            [p["permit_id"] for p in
+             dispatch_wave.list_permits(self.root, TID)],
+            [created[0]["permit_id"]])
+
+    def test_prepare_leaves_state_bytes_untouched_with_permit(self):
+        # permit 落在 permits/ 子目录：state.json 字节仍零副作用
+        before = state_bytes(self.root)
+        task_manager.prepare_dispatch(self.root, TID, "u1", quota_status="AVAILABLE")
+        self.assertEqual(state_bytes(self.root), before)
+        self.assertEqual(len(dispatch_wave.list_permits(self.root, TID)), 1)
+
+    def test_marker_round_trip_from_prepared_permit(self):
+        # §6.4 流程形态：prepare → marker 进 prompt → parse 回 permit_id
+        plan = task_manager.prepare_dispatch(self.root, TID, "u1", quota_status="AVAILABLE")
+        marker = dispatch_wave.marker_for(plan["permit"]["permit_id"])
+        self.assertEqual(dispatch_wave.parse_marker("实施单 u1：%s" % marker),
+                         plan["permit"]["permit_id"])
+
+    def test_prepare_failure_creates_no_permit(self):
+        # 决策未批准 → 零租约零 permit 零事件（失败零副作用锚定延伸）
+        make_task(self.root, [wu("u1")])
+        with self.assertRaises(task_manager.TaskManagerError):
+            task_manager.prepare_dispatch(self.root, TID, "u1",
+                                          quota_status="EXHAUSTED")
+        self.assertEqual(dispatch_wave.list_permits(self.root, TID), [])
+        self.assertFalse(permits_dir(self.root).exists())
+        self.assertEqual(lease.lease_state(self.root, TID), {})
+        self.assertEqual(journal.read_events(self.root, TID), [])
+
+    def test_mode_comes_from_execution_policy_default(self):
+        # mode 取 state execution_policy.worker_execution.default_mode
+        make_task(self.root, [wu("u1")])
+        st = state.load_state(self.root, TID)
+        st["execution_policy"]["worker_execution"]["default_mode"] = \
+            "foreground"
+        state.save_state(self.root, st)
+        # foreground 默认策略必须显式给 reason（§6.6）
+        with self.assertRaises(task_manager.TaskManagerError) as ctx:
+            task_manager.prepare_dispatch(self.root, TID, "u1", quota_status="AVAILABLE")
+        self.assertIn("reason", str(ctx.exception))
+        # 给出 reason → foreground permit + 事件 mode 同步
+        plan = task_manager.prepare_dispatch(
+            self.root, TID, "u1", reason="short_diagnostic", quota_status="AVAILABLE")
+        self.assertEqual(plan["permit"]["mode"], "foreground")
+        self.assertEqual(plan["permit"]["reason"], "short_diagnostic")
+        self.assertEqual(
+            events(self.root, "dispatch_permit_created")[0]["mode"],
+            "foreground")
+
+    def test_legacy_state_without_policy_block_defaults_background(self):
+        # legacy 缺 execution_policy 块 → 按默认块兜底（background）
+        make_task(self.root, [wu("u1")])
+        st = state.load_state(self.root, TID)
+        del st["execution_policy"]
+        state.save_state(self.root, st)
+        plan = task_manager.prepare_dispatch(self.root, TID, "u1", quota_status="AVAILABLE")
+        self.assertEqual(plan["permit"]["mode"], "background")
+
+    def test_explicit_mode_overrides_policy(self):
+        make_task(self.root, [wu("u1")])
+        plan = task_manager.prepare_dispatch(
+            self.root, TID, "u1", mode="foreground",
+            reason="synchronous_dependency", quota_status="AVAILABLE")
+        self.assertEqual(plan["permit"]["mode"], "foreground")
+        self.assertEqual(plan["permit"]["reason"],
+                         "synchronous_dependency")
+
+    def test_bad_mode_or_reason_value_error_zero_side_effects(self):
+        make_task(self.root, [wu("u1")])
+        for kwargs in ({"mode": "sync"},
+                       {"mode": "foreground", "reason": "because"}):
+            with self.subTest(kwargs=kwargs):
+                with self.assertRaises(ValueError) as ctx:
+                    task_manager.prepare_dispatch(self.root, TID, "u1",
+                                                  **kwargs, quota_status="AVAILABLE")
+                # 消息含字段名
+                self.assertTrue(
+                    "mode" in str(ctx.exception)
+                    or "reason" in str(ctx.exception))
+        # 零副作用：不写租约、不写 permit、不写事件
+        self.assertEqual(lease.lease_state(self.root, TID), {})
+        self.assertEqual(dispatch_wave.list_permits(self.root, TID), [])
+        self.assertEqual(journal.read_events(self.root, TID), [])
+
+    def test_commit_leaves_permit_active_for_hook_consumption(self):
+        # commit / finish 行为不变：不消费不失效（消费归 wu-21-03 hook）
+        make_task(self.root, [wu("u1")])
+        plan = task_manager.prepare_dispatch(self.root, TID, "u1", quota_status="AVAILABLE")
+        pid = plan["permit"]["permit_id"]
+        task_manager.commit_dispatch(self.root, TID, "u1")
+        self.assertEqual(
+            dispatch_wave.validate_permit(self.root, TID, pid,
+                                          unit_id="u1"),
+            (True, "ok"))
+        self.assertEqual(len(dispatch_wave.list_permits(self.root, TID)), 1)
+
+    def test_abort_invalidates_permit_and_journals(self):
+        make_task(self.root, [wu("u1")])
+        pid = task_manager.prepare_dispatch(
+            self.root, TID, "u1", quota_status="AVAILABLE")["permit"]["permit_id"]
+        before = state_bytes(self.root)
+        task_manager.abort_dispatch(self.root, TID, "u1")
+        # 活跃 permit 清空、审计轨迹保留（.invalidated.json）
+        self.assertEqual(dispatch_wave.list_permits(self.root, TID), [])
+        self.assertIsNone(
+            dispatch_wave.load_permit(self.root, TID, pid))
+        trail = permits_dir(self.root) / (pid + ".invalidated.json")
+        self.assertTrue(trail.is_file())
+        record = events(self.root, "dispatch_permit_invalidated")
+        self.assertEqual(len(record), 1)
+        self.assertEqual(record[0]["unit"], "u1")
+        self.assertEqual(record[0]["permit_id"], pid)
+        names = [e["event"] for e in journal.read_events(self.root, TID)]
+        self.assertEqual(names, ["dispatch_prepared",
+                                 "dispatch_permit_created",
+                                 "dispatch_aborted",
+                                 "dispatch_permit_invalidated"])
+        # state.json 仍零写入（abort 常态）
+        self.assertEqual(state_bytes(self.root), before)
+
+    def test_abort_without_permits_journals_no_invalidation(self):
+        # 无 prepare 直接 abort（无 permit）→ 零失效零事件（不留噪声行）
+        make_task(self.root, [wu("u1")])
+        task_manager.abort_dispatch(self.root, TID, "u1")
+        self.assertEqual(
+            events(self.root, "dispatch_permit_invalidated"), [])
+        self.assertEqual(len(events(self.root, "dispatch_aborted")), 1)
+
+    def test_repeated_prepare_then_abort_invalidates_all(self):
+        # 重复 prepare 每次签发新 permit；abort 一次作废该单元全部
+        make_task(self.root, [wu("u1")])
+        task_manager.prepare_dispatch(self.root, TID, "u1", quota_status="AVAILABLE")
+        task_manager.prepare_dispatch(self.root, TID, "u1", quota_status="AVAILABLE")
+        self.assertEqual(len(dispatch_wave.list_permits(self.root, TID)), 2)
+        task_manager.abort_dispatch(self.root, TID, "u1")
+        self.assertEqual(dispatch_wave.list_permits(self.root, TID), [])
+        self.assertEqual(
+            len(events(self.root, "dispatch_permit_invalidated")), 2)
+
+    def test_abort_scopes_invalidation_to_unit(self):
+        # 其他单元的 permit 不被代失效（按 unit_id 精确过滤）
+        make_task(self.root, [wu("u1"), wu("u2", ("src/b/**",))],
+                  max_workers=2)
+        p1 = task_manager.prepare_dispatch(self.root, TID, "u1", quota_status="AVAILABLE")["permit"]
+        p2 = task_manager.prepare_dispatch(self.root, TID, "u2", quota_status="AVAILABLE")["permit"]
+        task_manager.abort_dispatch(self.root, TID, "u1")
+        self.assertEqual(
+            [p["permit_id"] for p in
+             dispatch_wave.list_permits(self.root, TID)],
+            [p2["permit_id"]])
+        invalidated = events(self.root, "dispatch_permit_invalidated")
+        self.assertEqual([r["permit_id"] for r in invalidated],
+                         [p1["permit_id"]])
+
+    def test_reprepare_after_abort_issues_fresh_permit(self):
+        # 崩溃窗口恢复：abort 后重新 prepare → 全新可用 permit
+        make_task(self.root, [wu("u1")])
+        first = task_manager.prepare_dispatch(
+            self.root, TID, "u1", quota_status="AVAILABLE")["permit"]
+        task_manager.abort_dispatch(self.root, TID, "u1")
+        second = task_manager.prepare_dispatch(
+            self.root, TID, "u1", quota_status="AVAILABLE")["permit"]
+        self.assertNotEqual(first["permit_id"], second["permit_id"])
+        self.assertEqual(
+            dispatch_wave.validate_permit(self.root, TID,
+                                          second["permit_id"]),
+            (True, "ok"))
 
 
 class RecoverLeasesTest(TaskManagerTestBase):
@@ -744,7 +1100,7 @@ class OrphanLeaseRecoveryTest(TaskManagerTestBase):
 
     def test_orphan_lease_reconciled_after_interrupted_running_unit(self):
         make_task(self.root, [wu("u1")])
-        task_manager.prepare_dispatch(self.root, TID, "u1")
+        task_manager.prepare_dispatch(self.root, TID, "u1", quota_status="AVAILABLE")
         task_manager.commit_dispatch(self.root, TID, "u1")
         # —— 崩溃：单元 running + 租约在位；无验证证据、工作区干净 ——
         st = state.load_state(self.root, TID)
@@ -833,7 +1189,7 @@ class FinishGateRejectionTest(GitRepoFixture):
         """make_task + prepare + commit 到 running，返回构造的 unit dict。"""
         unit = wu("u1", **wu_kwargs)
         make_task(self.root, [unit])
-        task_manager.prepare_dispatch(self.root, TID, "u1")
+        task_manager.prepare_dispatch(self.root, TID, "u1", quota_status="AVAILABLE")
         task_manager.commit_dispatch(self.root, TID, "u1")
         return unit
 
@@ -948,7 +1304,7 @@ class FinishGateFailClosedTest(TaskManagerTestBase):
     def test_non_git_repo_with_required_commands_fails_closed(self):
         # A12b：零 git 夹具即可——tempdir 未 git init
         make_task(self.root, [wu("u1")])
-        task_manager.prepare_dispatch(self.root, TID, "u1")
+        task_manager.prepare_dispatch(self.root, TID, "u1", quota_status="AVAILABLE")
         task_manager.commit_dispatch(self.root, TID, "u1")
         with self.assertRaises(task_manager.TaskManagerError) as ctx:
             task_manager.finish_unit(self.root, TID, "u1")
@@ -1017,7 +1373,7 @@ class BoundRepositoryFinishGateTest(TaskManagerTestBase):
         st = state.load_state(str(self.ledger), TID)
         state.bind_repository_root(st, str(self.task_repo))
         state.save_state(str(self.ledger), st)
-        task_manager.prepare_dispatch(str(self.ledger), TID, "u1")
+        task_manager.prepare_dispatch(str(self.ledger), TID, "u1", quota_status="AVAILABLE")
         task_manager.commit_dispatch(str(self.ledger), TID, "u1")
         return unit
 
@@ -1044,6 +1400,7 @@ class BoundRepositoryFinishGateTest(TaskManagerTestBase):
         names = [e["event"] for e in
                  journal.read_events(str(self.ledger), TID)]
         self.assertEqual(names, ["dispatch_prepared",
+                                 "dispatch_permit_created",
                                  "implementation_started",
                                  "verification", "unit_finished"])
         # 绑定根归一落盘，账本仍在非 git 目录
@@ -1069,7 +1426,7 @@ class BoundRepositoryFinishGateTest(TaskManagerTestBase):
         # ⑳ 对照：同场景无绑定（legacy 回退账本根非 git）→ fail-closed
         # TaskManagerError（与 FinishGateFailClosedTest 的 A12b 同语义）
         make_task(str(self.ledger), [wu("u1", ("src/**",))])
-        task_manager.prepare_dispatch(str(self.ledger), TID, "u1")
+        task_manager.prepare_dispatch(str(self.ledger), TID, "u1", quota_status="AVAILABLE")
         task_manager.commit_dispatch(str(self.ledger), TID, "u1")
         with self.assertRaises(task_manager.TaskManagerError) as ctx:
             task_manager.finish_unit(str(self.ledger), TID, "u1")
@@ -1092,7 +1449,7 @@ class FinishGateCompletionTest(GitRepoFixture):
         """make_task + prepare + commit 到 running，返回 unit dict。"""
         unit = unit or wu("u1")
         make_task(self.root, [unit])
-        task_manager.prepare_dispatch(self.root, TID, "u1")
+        task_manager.prepare_dispatch(self.root, TID, "u1", quota_status="AVAILABLE")
         task_manager.commit_dispatch(self.root, TID, "u1")
         return unit
 
@@ -1122,6 +1479,7 @@ class FinishGateCompletionTest(GitRepoFixture):
         self.assertEqual(record["fingerprint"], fp)
         names = [e["event"] for e in journal.read_events(self.root, TID)]
         self.assertEqual(names, ["dispatch_prepared",
+                                 "dispatch_permit_created",
                                  "implementation_started",
                                  "verification", "unit_finished"])
 
@@ -1201,7 +1559,7 @@ class FinishGateDagIntegrationTest(GitRepoFixture):
         make_task(self.root, [upstream,
                               wu("u2", ("src/b/**",), deps=("u1",),
                                  status="pending")])
-        task_manager.prepare_dispatch(self.root, TID, "u1")
+        task_manager.prepare_dispatch(self.root, TID, "u1", quota_status="AVAILABLE")
         task_manager.commit_dispatch(self.root, TID, "u1")
         return upstream
 
@@ -1288,7 +1646,7 @@ class RefreshReadinessTest(TaskManagerTestBase):
                                  status="pending")])
         self.assertEqual(task_manager.refresh_readiness(self.root, TID),
                          ["u1"])
-        plan = task_manager.prepare_dispatch(self.root, TID, "u1")
+        plan = task_manager.prepare_dispatch(self.root, TID, "u1", quota_status="AVAILABLE")
         self.assertEqual(plan["dispatch"], ["u1"])
 
 
