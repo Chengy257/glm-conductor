@@ -85,21 +85,29 @@
     现有回退逻辑之后对该单元全部未消费 permit invalidate 并落
     dispatch_permit_invalidated（零失效不落事件）。
 
-派发 wave 批量事务（v2.1 M4，wu-21-08）：
-    prepare_dispatch_wave 把「决策 → 全量租约 → wave 记录 → 批量 permit
+派发 wave 批量事务（v2.1 M4，wu-21-08；RB-21-03 事务补偿）：
+    prepare_dispatch_wave 把「决策 → 全量租约 → 批量 permit → wave 记录
     → journal」固化为一次调用的事务入口，与 prepare_dispatch（单单元）
-    并存；事务性 all-or-safe-degrade：wave 记录落盘时其全部成员租约
-    已在位——绝不出现「wave 记录 2 单元但只有 1 张租约」。要点：
+    并存；事务性 all-or-safe-degrade：wave 记录落盘时其全部成员租约与
+    permit 已在位——绝不出现「wave 记录 2 单元但只有 1 张租约」。要点：
       - plan_dispatch 全量决策（带租约闸），批准集按 state.work_units
         原序（plan 内部是 topo 序，这里重排回账面原序）；
       - 批准集逐单元 acquire_lease；任一 LeaseConflictError → 释放本轮
         已获取的全部租约、冲突单元入 excluded 集合、剔除后重新 plan
         重试——excluded 单调增长保证有界终止；批准集空 →
         TaskManagerError（消息口径照抄 prepare_dispatch，零租约残留）；
-      - 全部租约到位 → wave 记录（dispatch.waves[]，status="active"）
-        随 save_state 一次落盘 → 逐成员 create_permit（携带 wave_id）→
-        journal 单条 dispatch_wave_prepared（不逐单元重复
-        dispatch_prepared）；单元 wave 合法（只批 1 个也成 wave）；
+      - 全部租约到位 → 逐成员 create_permit（携带 wave_id，临时持有，
+        尚不落 wave）→ wave 记录（dispatch.waves[]，status="active"）
+        随 save_state 一次落盘 → journal 单条 dispatch_wave_prepared
+        （不逐单元重复 dispatch_prepared）；单元 wave 合法（只批 1 个
+        也成 wave）；
+      - 事务补偿（_compensate_failed_prepare）：permit 创建或
+        save_state 失败 → 作废全部已建 permit + 释放本轮全部租约 +
+        防御性移除盘上可能的半完成 wave 记录，journal 落
+        transaction_aborted（补偿自身失败带 compensation_error，
+        fail-closed 不静默），原始异常上抛——失败时无 wave、无本轮
+        租约、无活跃 permit、无 prepared 事件；单单元 prepare_dispatch
+        的 permit 落盘失败同样自动释放该租约（无需人工 abort_dispatch）；
       - wave 关闭归 finish_unit：收尾使某 active wave 的 units 全部进入
         completed/failed/cancelled/verifying → status="closed" +
         closed_at + journal wave_closed；无 waves 键零行为；
@@ -514,6 +522,74 @@ def _validate_permit_mode(api, st, mode, reason) -> "tuple":
     return effective_mode, permit_reason
 
 
+# —— prepare 事务补偿（RB-21-03）：失败时零残留的回退面 ——
+
+def _compensate_failed_prepare(repo_root, task_id, *, api, stage, exc,
+                               permits=(), owners=(), wave_id=None) -> None:
+    """prepare 事务补偿：permit 创建 / state 保存失败后，把本轮已产生的
+    副作用全部回退（all-or-safe-degrade 契约的「失败时 safe」半边）——
+    失败的 prepare 绝不残留可放行的 permit、在位租约或半完成 wave。
+
+    补偿顺序固定：
+      1. 先作废全部已创建 permit（invalidate 按文件 rename、只认
+         permit_id，与 wave 是否落盘无关；返回 False = 未能作废，记账
+         为补偿失败）；
+      2. 再释放本轮全部租约（单点失败不中止——继续释放剩余并全部记账）；
+      3. 防御性 wave 记录回滚：save_state 是 tmp+os.replace 原子写，
+         失败即未落盘，正常无需处理；但若盘上已出现该 wave_id 的记录
+         （异常窗口的半完成残留）则移除后重存；
+      4. journal 落一条 transaction_aborted {api, reason, wave_id?,
+         compensation_error?}（开放词汇记账，仅在补偿路径落）——补偿
+         自身任何失败都记入 compensation_error 字段，fail-closed 绝不
+         静默吞掉；记账自身再失败只能放弃（调用方保证原始异常继续
+         上抛，补偿不掩盖根因）。
+    """
+    errors = []
+    for permit in permits:
+        permit_id = (permit.get("permit_id")
+                     if isinstance(permit, dict) else None)
+        if not isinstance(permit_id, str) or not permit_id:
+            continue
+        if not dispatch_wave.invalidate_permit(repo_root, task_id,
+                                               permit_id):
+            errors.append("invalidate_permit(%s) 未生效" % permit_id)
+    for owner in owners:
+        try:
+            lease.release_lease(repo_root, task_id, owner)
+        except Exception as release_exc:
+            errors.append("release_lease(%s): %s" % (owner, release_exc))
+    if wave_id is not None:
+        try:
+            disk = state.load_state(repo_root, task_id)
+        except Exception as load_exc:
+            errors.append("load_state: %s" % load_exc)
+        else:
+            block = disk.get("dispatch")
+            waves = block.get("waves") if isinstance(block, dict) else None
+            if isinstance(waves, list):
+                kept = [w for w in waves
+                        if not (isinstance(w, dict)
+                                and w.get("wave_id") == wave_id)]
+                if len(kept) != len(waves):
+                    block["waves"] = kept
+                    try:
+                        state.save_state(repo_root, disk)
+                    except Exception as save_exc:
+                        errors.append("save_state(wave 记录回滚): %s"
+                                      % save_exc)
+    event = {
+        "event": "transaction_aborted", "api": api,
+        "reason": "%s_failed: %s" % (stage, exc)}
+    if wave_id is not None:
+        event["wave_id"] = wave_id
+    if errors:
+        event["compensation_error"] = errors
+    try:
+        journal.append_event(repo_root, task_id, event)
+    except Exception:
+        pass  # 记账自身失败不掩盖原始异常（调用方 re-raise）
+
+
 # —— prepare：plan 决策 + 租约 + permit + 事件（无 state 副作用） ——
 
 def prepare_dispatch(repo_root, task_id, uid, *, quota_status=None,
@@ -572,8 +648,10 @@ def prepare_dispatch(repo_root, task_id, uid, *, quota_status=None,
     失败零副作用锚定：决策未批准（步骤 8）发生在获取租约（步骤 9）与
     journal（步骤 11）之前——落选的 prepare 不写租约、不写 permit、
     不写决策事件（quota_resolved 属解析事实，见 _resolve_quota）。
-    permit 落盘失败（OSError）在租约之后上抛：主会话可 abort_dispatch
-    回退半状态（崩溃窗口语义见模块 docstring permit 接线一节）。
+    permit 落盘失败（OSError）发生在租约之后：自动补偿释放该租约
+    （journal transaction_aborted 记账，见 _compensate_failed_prepare）
+    后原样上抛——失败零残留，无需人工 abort_dispatch 回退（RB-21-03；
+    硬崩溃窗口语义仍见模块 docstring permit 接线一节）。
     """
     api = "prepare_dispatch"
     st = _require_state(repo_root, task_id, api)
@@ -629,8 +707,17 @@ def prepare_dispatch(repo_root, task_id, uid, *, quota_status=None,
                         ttl_seconds=LEASE_DEFAULT_TTL_SECONDS)
     # 派发 permit（§6.3）：租约在位后签发——「无 permit 即 deny」门的
     # 数据基础；wave_id 缺省 None（M4 wave 事务接线）
-    permit = dispatch_wave.create_permit(
-        repo_root, task_id, uid, mode=effective_mode, reason=permit_reason)
+    try:
+        permit = dispatch_wave.create_permit(
+            repo_root, task_id, uid, mode=effective_mode,
+            reason=permit_reason)
+    except Exception as exc:
+        # RB-21-03：permit 落盘失败 → 释放该租约再上抛（消除「人工
+        # abort_dispatch 回退」缺口）——失败的 prepare 零残留
+        _compensate_failed_prepare(
+            repo_root, task_id, api=api, stage="create_permit", exc=exc,
+            owners=[uid])
+        raise
     # leased 记持有事实（归一路径、排序、同 owner 幂等重入不虚报）
     held = lease.held_by(repo_root, task_id, uid)
     journal.append_event(repo_root, task_id, {
@@ -649,9 +736,11 @@ def prepare_dispatch(repo_root, task_id, uid, *, quota_status=None,
 def prepare_dispatch_wave(repo_root, task_id, *, quota_status=None,
                           max_workers=None, mode=None, reason=None) -> dict:
     """批量派发准备（v2.1 M4 wu-21-08）：一次调用完成「决策 → 全量租约
-    → wave 记录 → 批量 permit → journal」，事务性 all-or-safe-degrade
-    ——wave 记录落盘时其全部成员租约已在位，绝不出现「wave 记录
-    2 单元但只有 1 张租约」。
+    → 批量 permit → wave 记录落盘 → journal」，事务性 all-or-safe-degrade
+    ——wave 记录落盘时其全部成员租约与 permit 已在位，绝不出现「wave
+    记录 2 单元但只有 1 张租约」；permit/state 任一写失败则整笔补偿
+    （RB-21-03）：作废已建 permit + 释放本轮租约，wave 不落盘、无
+    prepared 事件，异常原样上抛——失败时零残留。
 
     流程：
       1. load_state（任务缺失 TaskManagerError；损坏 ValueError 上抛）；
@@ -687,15 +776,26 @@ def prepare_dispatch_wave(repo_root, task_id, *, quota_status=None,
          quota 调节后的值），wave_id = dispatch_wave.new_wave_id()，
          wave 记录（冻结键：wave_id/units/worker_budget/quota_status/
          created_at/status/closed_at，status="active"；quota_status 记
-         解析后的实际值，wu-21-10）追加进 dispatch.waves，save_state
-         一次落盘（单元 wave 合法：只批 1 个也成 wave）；
-      7. 逐成员 create_permit（携带 wave_id 与 mode/reason）；
-      8. journal 单条 dispatch_wave_prepared {wave_id, units,
+         解析后的实际值，wu-21-10）追加进内存 dispatch.waves（单元
+         wave 合法：只批 1 个也成 wave）；
+      7. 逐成员 create_permit（携带 wave_id 与 mode/reason）——先建
+         全部 permit（临时列表持有），尚不落 wave（RB-21-03 事务顺序：
+         permit 任一失败时 wave 根本不落盘，无需回滚盘上记录）；
+      8. save_state 一次落盘（原子写 tmp+os.replace，失败即未落盘）；
+      9. journal 单条 dispatch_wave_prepared {wave_id, units,
          worker_budget, permits: [permit_id...]}——不逐单元重复
          dispatch_prepared（步 3 走了 resolver 时 quota_resolved 在最前）；
-      9. 返回 {"wave_id", "units", "permits", "worker_budget",
-         "deferred", "waiting_quota"}（permits 为 permit dict 列表；
-         deferred/waiting_quota 为最终决策的落选面透传）。
+      10. 返回 {"wave_id", "units", "permits", "worker_budget",
+          "deferred", "waiting_quota"}（permits 为 permit dict 列表；
+          deferred/waiting_quota 为最终决策的落选面透传）。
+
+    事务补偿（RB-21-03）：步 7 任一 create_permit 抛异常，或步 8
+    save_state 抛 OSError/ValueError → _compensate_failed_prepare
+    整笔回退（作废全部已建 permit → 释放本轮全部租约 → 防御性移除
+    盘上可能的半完成 wave 记录）并落一条 transaction_aborted 警告
+    事件（补偿自身再失败 → compensation_error 字段，fail-closed 不
+    静默），原始异常继续上抛；dispatch_wave_prepared 只在全部就绪后
+    落盘，失败路径绝无 prepared 事件。
 
     wave 关闭不归本 API：成员全部终态/verifying 时由 finish_unit 收口
     （见 _close_finished_waves）；hook 侧经
@@ -793,13 +893,29 @@ def prepare_dispatch_wave(repo_root, task_id, *, quota_status=None,
         waves = []
         st["dispatch"]["waves"] = waves
     waves.append(wave)
-    # 一次落盘：此处起 wave.units 与在位租约一一对应（all-or-safe 界）
-    state.save_state(repo_root, st)
-    permits = [
-        dispatch_wave.create_permit(
-            repo_root, task_id, uid, wave_id=wave_id,
-            mode=effective_mode, reason=permit_reason)
-        for uid in approved]
+    # RB-21-03 事务顺序（方案 A）：先建全部 permit（临时列表持有）→
+    # save_state 持久化 wave → journal。permit 任一失败时 wave 根本
+    # 不落盘（无需回滚盘上记录），整笔补偿后异常原样上抛
+    permits = []
+    try:
+        for uid in approved:
+            permits.append(dispatch_wave.create_permit(
+                repo_root, task_id, uid, wave_id=wave_id,
+                mode=effective_mode, reason=permit_reason))
+    except Exception as exc:
+        _compensate_failed_prepare(
+            repo_root, task_id, api=api, stage="create_permit", exc=exc,
+            permits=permits, owners=list(approved), wave_id=wave_id)
+        raise
+    try:
+        # 一次落盘：此处起 wave.units 与在位租约、permit 一一对应
+        # （all-or-safe 界）；原子写失败即未落盘，同样整笔补偿
+        state.save_state(repo_root, st)
+    except Exception as exc:
+        _compensate_failed_prepare(
+            repo_root, task_id, api=api, stage="save_state", exc=exc,
+            permits=permits, owners=list(approved), wave_id=wave_id)
+        raise
     journal.append_event(repo_root, task_id, {
         "event": "dispatch_wave_prepared", "wave_id": wave_id,
         "units": list(approved), "worker_budget": worker_budget,

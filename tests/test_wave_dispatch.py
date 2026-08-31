@@ -353,6 +353,208 @@ class WaveApprovedEmptyTest(unittest.TestCase):
         self.assertEqual(journal.read_events(self.root, TID), [])
 
 
+# —— RB-21-03：wave / 单单元 prepare 事务补偿 ——
+
+class WaveTransactionCompensationTest(unittest.TestCase):
+    """permit 创建 / state 保存失败 → 整笔补偿（all-or-safe-degrade）：
+    失败时无 wave、无本轮租约、无活跃 permit、无 prepared 事件；补偿
+    自身失败 fail-closed（transaction_aborted.compensation_error 记账 +
+    原始异常上抛）。注入点与生产同形：create_permit / save_state 抛
+    OSError；磁盘终态逐项断言（waves / leases.json / permits 目录 /
+    journal），不是只看返回值。"""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = self._tmp.name
+        make_task(self.root, [wu("u1", ("src/a/**",)),
+                              wu("u2", ("src/b/**",))])
+        self.created = []  # 补偿断言用：真实落盘成功的 permit
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _permit_patch(self, fail_unit=None):
+        """create_permit 注入：捕获全部成功创建的 permit；fail_unit
+        非 None 时该单元在真实落盘前抛 OSError（第 N 张失败场景）。"""
+        real_create = dispatch_wave.create_permit
+        created = self.created
+
+        def patched_create(repo, tid, unit_id, **kwargs):
+            if unit_id == fail_unit:
+                raise OSError("注入：unit %s 的 permit 落盘失败" % unit_id)
+            permit = real_create(repo, tid, unit_id, **kwargs)
+            created.append(permit)
+            return permit
+
+        return mock.patch.object(task_manager.dispatch_wave,
+                                 "create_permit", side_effect=patched_create)
+
+    def _retired_path(self, permit):
+        return (dispatch_wave.permits_dir(self.root, TID)
+                / (permit["permit_id"]
+                   + dispatch_wave.INVALIDATED_SUFFIX))
+
+    def test_second_permit_create_failure_rolls_back_wave(self):
+        # 第 2 张 permit（u2）落盘失败：wave 不落盘、租约全释放、
+        # u1 的 permit 作废，异常原样上抛
+        with self._permit_patch(fail_unit="u2"):
+            with self.assertRaises(OSError) as ctx:
+                task_manager.prepare_dispatch_wave(self.root, TID,
+                                                   quota_status="AVAILABLE")
+        self.assertIn("u2", str(ctx.exception))
+        # 磁盘终态：无 wave、无租约、无活跃 permit
+        self.assertEqual(waves_of(self.root), [])
+        self.assertEqual(lease.lease_state(self.root, TID), {})
+        self.assertEqual(dispatch_wave.list_permits(self.root, TID), [])
+        # u1 permit 的审计轨迹以 .invalidated.json 保留
+        self.assertTrue(self._retired_path(self.created[0]).is_file())
+        # 补偿记账：transaction_aborted（api + 失败阶段 + wave_id）
+        aborted = events(self.root, "transaction_aborted")
+        self.assertEqual(len(aborted), 1)
+        self.assertEqual(aborted[0]["api"], "prepare_dispatch_wave")
+        self.assertTrue(aborted[0]["reason"].startswith(
+            "create_permit_failed"), aborted[0]["reason"])
+        self.assertTrue(aborted[0]["wave_id"].startswith("wave-"))
+        self.assertNotIn("compensation_error", aborted[0])
+
+    def test_permit_failure_releases_all_wave_leases(self):
+        # 本轮批准集（u1、u2）租约全部 acquire 在先 → 补偿全部释放
+        released = []
+        real_release = task_manager.lease.release_lease
+
+        def recording_release(repo, tid, owner, *args, **kwargs):
+            released.append(owner)
+            return real_release(repo, tid, owner, *args, **kwargs)
+
+        with self._permit_patch(fail_unit="u2"), \
+                mock.patch.object(task_manager.lease, "release_lease",
+                                  side_effect=recording_release):
+            with self.assertRaises(OSError):
+                task_manager.prepare_dispatch_wave(self.root, TID,
+                                                   quota_status="AVAILABLE")
+        self.assertEqual(sorted(released), ["u1", "u2"])
+        self.assertEqual(lease.lease_state(self.root, TID), {})
+
+    def test_permit_failure_invalidates_partial_permits(self):
+        # 前 N-1 张已创建 permit 全部作废：活跃面 list 为空、load 视同
+        # 不存在（rename 防重放推论）、审计文件保留
+        with self._permit_patch(fail_unit="u2"):
+            with self.assertRaises(OSError):
+                task_manager.prepare_dispatch_wave(self.root, TID,
+                                                   quota_status="AVAILABLE")
+        self.assertEqual(len(self.created), 1)
+        first = self.created[0]
+        self.assertEqual(first["unit_id"], "u1")
+        self.assertIsNone(dispatch_wave.load_permit(self.root, TID,
+                                                    first["permit_id"]))
+        self.assertTrue(self._retired_path(first).is_file())
+        self.assertEqual(dispatch_wave.list_permits(self.root, TID), [])
+
+    def test_wave_state_save_failure_rolls_back_permits(self):
+        # save_state 原子写失败：两张 permit 已创建 → 全部作废、租约
+        # 全释放；wave 未落盘（tmp+os.replace 失败即未写）
+        real_save = task_manager.state.save_state
+
+        def broken_save(repo, st, **kwargs):
+            raise OSError("注入：state 落盘失败")
+
+        with self._permit_patch(), \
+                mock.patch.object(task_manager.state, "save_state",
+                                  side_effect=broken_save):
+            with self.assertRaises(OSError) as ctx:
+                task_manager.prepare_dispatch_wave(self.root, TID,
+                                                   quota_status="AVAILABLE")
+        self.assertIn("state 落盘失败", str(ctx.exception))
+        self.assertEqual(waves_of(self.root), [])
+        self.assertEqual(lease.lease_state(self.root, TID), {})
+        self.assertEqual(dispatch_wave.list_permits(self.root, TID), [])
+        self.assertEqual(len(self.created), 2)
+        for permit in self.created:
+            self.assertTrue(self._retired_path(permit).is_file(),
+                            permit["permit_id"])
+        aborted = events(self.root, "transaction_aborted")
+        self.assertEqual(len(aborted), 1)
+        self.assertEqual(aborted[0]["api"], "prepare_dispatch_wave")
+        self.assertTrue(aborted[0]["reason"].startswith(
+            "save_state_failed"), aborted[0]["reason"])
+
+    def test_wave_prepare_failure_has_no_prepared_event(self):
+        # 失败路径 journal 只有 transaction_aborted（AVAILABLE 直通，
+        # 无 quota_resolved）——dispatch_wave_prepared 绝不出现
+        with self._permit_patch(fail_unit="u2"):
+            with self.assertRaises(OSError):
+                task_manager.prepare_dispatch_wave(self.root, TID,
+                                                   quota_status="AVAILABLE")
+        all_events = journal.read_events(self.root, TID)
+        self.assertEqual([e["event"] for e in all_events],
+                         ["transaction_aborted"])
+        self.assertEqual(events(self.root, "dispatch_wave_prepared"), [])
+
+    def test_compensation_failure_fails_closed_with_journal_warning(self):
+        # 补偿中 release_lease 也炸 → fail-closed：警告事件仍落
+        # （compensation_error 记账）+ 原始异常上抛（非补偿异常掩盖）
+        real_create_patch = self._permit_patch(fail_unit="u2")
+
+        def exploding_release(repo, tid, owner, *args, **kwargs):
+            raise OSError("注入：补偿中 release_lease 也失败")
+
+        with real_create_patch, \
+                mock.patch.object(task_manager.lease, "release_lease",
+                                  side_effect=exploding_release):
+            with self.assertRaises(OSError) as ctx:
+                task_manager.prepare_dispatch_wave(self.root, TID,
+                                                   quota_status="AVAILABLE")
+        self.assertIn("u2", str(ctx.exception))
+        self.assertNotIn("release_lease 也失败", str(ctx.exception))
+        # permit 补偿先于租约释放完成：无活跃 permit 残留
+        self.assertEqual(dispatch_wave.list_permits(self.root, TID), [])
+        aborted = events(self.root, "transaction_aborted")
+        self.assertEqual(len(aborted), 1)
+        self.assertTrue(aborted[0]["reason"].startswith(
+            "create_permit_failed"), aborted[0]["reason"])
+        comp_errors = aborted[0]["compensation_error"]
+        self.assertEqual(len(comp_errors), 2)
+        self.assertTrue(all(e.startswith("release_lease(u")
+                            for e in comp_errors), comp_errors)
+        # 释放失败的租约残留盘上（绝不静默）——警告事件即其账面
+        self.assertEqual(set(lease.lease_state(self.root, TID)),
+                         {"src/a/**", "src/b/**"})
+
+
+class SingleUnitPermitFailureCompensationTest(unittest.TestCase):
+    """单单元 prepare_dispatch：create_permit 失败 → 自动释放该租约再
+    上抛（RB-21-03：消除「人工 abort_dispatch 回退」缺口）。"""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = self._tmp.name
+        make_task(self.root, [wu("u1", ("src/a/**",))])
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def test_single_permit_failure_releases_lease(self):
+        def exploding_create(repo, tid, unit_id, **kwargs):
+            raise OSError("注入：单单元 permit 落盘失败")
+
+        with mock.patch.object(task_manager.dispatch_wave, "create_permit",
+                               side_effect=exploding_create):
+            with self.assertRaises(OSError):
+                task_manager.prepare_dispatch(self.root, TID, "u1",
+                                              quota_status="AVAILABLE")
+        # 失败零残留：租约已释放、无活跃 permit、成功路径事件未落
+        self.assertEqual(lease.lease_state(self.root, TID), {})
+        self.assertEqual(dispatch_wave.list_permits(self.root, TID), [])
+        self.assertEqual(events(self.root, "dispatch_prepared"), [])
+        self.assertEqual(events(self.root, "dispatch_permit_created"), [])
+        aborted = events(self.root, "transaction_aborted")
+        self.assertEqual(len(aborted), 1)
+        self.assertEqual(aborted[0]["api"], "prepare_dispatch")
+        self.assertTrue(aborted[0]["reason"].startswith(
+            "create_permit_failed"), aborted[0]["reason"])
+        self.assertNotIn("wave_id", aborted[0])  # 单单元无 wave 语义
+
+
 # —— 4. ownership 冲突进 deferred ——
 
 class WaveDeferredPassthroughTest(unittest.TestCase):
