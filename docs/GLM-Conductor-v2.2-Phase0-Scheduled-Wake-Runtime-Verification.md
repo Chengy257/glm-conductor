@@ -20,7 +20,7 @@
 | 7 | ZCode 日志作为 hook 观察面 | **只记失败**（`hook.run.failed`，warn 级，含 hookEventName/matcher/source/durationMs/sessionId）；成功执行不记日志。M6 验证应以「无 failed 记录 + probe 自身落盘副作用」双证据 | 确证 | 今日日志 444 条 failed 全量分析 |
 | 8 | glm-conductor hook 健康度 | **正常**。今日全部 failed 记录属 `example-plugin@zcode-plugins-official`（其 SessionStart `startup\|clear\|compact` 与 PreToolUse `Bash\|Write\|Edit` 在失败，与本插件无关）。缓存 2.1.0 的 `session_start.py` 手动执行：exit 0 且正确产出 v22-loop-857f55a 的 RESUME CONTEXT（12 waiting 单元 + 授权面）；`pre_tool_use.py`（Bash payload）：exit 0 静默放行 | 确证 | 手动执行 + 日志 source 字段 |
 | 9 | SessionStart 恢复注入 | 下一个新会话将注入 v22-loop-857f55a resume context（任务账本已被恢复发现捕获）——v2.2 任务自身的 resumable 闭环可用 | 确证 | 手动执行 session_start.py 输出 |
-| 10 | wake 注入形态（同会话 user-turn） | **待观察**：探针 `automation-cf2017e9-70f7-496e-96e6-10928fc1c5a5`（15:48:55Z 触发）注入形态预计在本轮 turn 结束（会话空闲）后发生，由主会话在下一 turn 亲自观察补充 | 待观察 | v2.1 已有同会话注入结论（2026-08-31） |
+| 10 | wake 注入形态（同会话 user-turn） | **确证（2026-09-01 15:49Z 触发实测）**：探针在上一 turn 结束、会话空闲后以**用户 turn 形式注入本会话**，prompt 全文原样到达、marker 完整可读；完整对话历史可读（v2.1「同会话续行」再确证）；注入不触发任何可见 hook 通知（SessionStart 不重放）；turn 进行中不注入（触发时刻与注入时刻间隔 = 上一 turn 剩余时长）。附带确证 **one-shot 自完成**：触发后 `runCount=1` + `enabled=false` + `lifecycleStatus="completed"`，**无需 CronDelete 清理（glitch 红线天然规避）**；`lastRunAt` 较计划时刻晚 ~20 秒（调度精度可接受） | 确证 | 主会话第一手观察 + CronList 触发后状态 |
 | 11 | PreToolUse/PostToolUse 对 Cron 工具的拦截 | **待 M6 部署后新会话补测**：matcher 候选 `CronCreate\|CronDelete\|CronUpdate`（官方语义为正则匹配 tool name；Cron 系是原生工具，理论可拦） | 待测 | 官方文档 |
 | 12 | UserPromptSubmit 对 wake 注入 turn 的触发 | **待补测**（Stop/UserPromptSubmit 忽略 matcher——v2.1 已证；wake fire 机械记账挂点候选） | 待测 | v2.1 Phase 0 + 官方文档 |
 
