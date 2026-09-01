@@ -68,6 +68,7 @@ from pathlib import Path
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "plugins" / "glm-conductor"))
+from runtime import agent_run
 from runtime import fingerprint as fingerprint_mod
 from runtime import journal as journal_mod
 from runtime import provenance
@@ -210,12 +211,29 @@ class TempDirFixture(unittest.TestCase):
         return journal_mod.read_events(self.repo, task_id)
 
     def gate_journal_events(self, task_id=TID):
-        """读取任务 journal 的门生命周期事件（过滤 runtime 溯源层凭证
+        """读取任务 journal 的门生命周期事件（过滤 runtime 溯源/账本层
         事件）。wu-21-13 起 run_review 落证会先写 review_receipt 事件
-        （verify_* 写 verification_receipt）——用例 setup 阶段的这些
+        （verify_* 写 verification_receipt）；RB-21-02 起真实审查链路
+        setup 还会写 reviewer_invoked 账本事件——用例 setup 阶段的这些
         事件不是门行为，门事件序断言经本助手过滤后保持既有语义。"""
         return [event for event in self.journal_events(task_id)
-                if not str(event.get("event", "")).endswith("_receipt")]
+                if not str(event.get("event", "")).endswith("_receipt")
+                and event.get("event") not in ("reviewer_invoked",
+                                               "reviewer_invocation_skipped")]
+
+    def record_invocation(self, tool_use_id, reviewer="glm-reviewer",
+                          task_id=TID):
+        """RB-21-02 真实链路 setup：经 agent_run.record_reviewer_invocation
+        直落一条 reviewer_invoked 事件（run_review 回验链的前置账本）。"""
+        payload = {
+            "hook_event_name": "PostToolUse", "tool_name": "Agent",
+            "tool_input": {"subagent_type": reviewer,
+                           "prompt": "review %s"
+                                     % agent_run.review_marker_for(task_id)},
+            "tool_use_id": tool_use_id,
+            "tool_response": {"agentId": "agent-review-fixture"}}
+        return agent_run.record_reviewer_invocation(
+            str(self.repo), task_id, payload)
 
     def add_corrupt_task(self, task_id, state_text="{broken"):
         """写入一个 state.json 损坏的任务目录（H3 四分类发现用）。"""
@@ -241,14 +259,18 @@ class TempDirFixture(unittest.TestCase):
                            observed_at="2026-01-01T00:00:00.000Z",
                            reviewer="reviewer-a", fingerprint=None,
                            route=None, note=None,
-                           tool_use_id="toolu-fixture-001"):
+                           tool_use_id="toolu-fixture-001",
+                           runner=provenance.RUNNER_ID):
         """直落一份 review receipt 文件 fixture（wu-21-13 receipt 语义）。
 
         run_review 的正规入口会同步写 state / journal，部分场景（手写
         full 路由绕过 save_state 校验、构造指定 observed_at / 空指纹等
         形状）需要绕开它直接构造 durable receipt——冻结键契约与文件名
         形态（review-<observed_at紧凑串>-<hash8>.json）与
-        runtime.provenance._write_receipt 同构。
+        runtime.provenance._write_receipt 同构。runner 缺省
+        provenance.RUNNER_ID（RB-21-02 起门只认 runtime 来源）；显式传
+        其他值/None 可构造「手工伪造文件」场景（RB-21-02 gate runner
+        闸的反向构造）。
         """
         receipt = {
             "kind": "review",
@@ -258,7 +280,7 @@ class TempDirFixture(unittest.TestCase):
             "fingerprint": fingerprint,
             "tool_use_id": tool_use_id,
             "observed_at": observed_at,
-            "runner": "glm-conductor-runtime",
+            "runner": runner,
             "note": note,
         }
         receipts_dir = state.task_dir(self.repo, task_id) / "receipts"
@@ -743,28 +765,33 @@ class StopGateReviewCheckTest(GitRepoFixture):
     def test_review_rejected_blocks_with_verdict_and_reviewer(self):
         # 最新 receipt verdict != ship（fix-first）→ review_rejected；
         # detail 含 verdict 与 reviewer（均取自 receipt）
+        # RB-21-02：receipt 经真实链路产出（invocation 账本 + 白名单
+        # reviewer 名）——reviewer 从 "reviewer-a" 收紧为 "glm-reviewer"
         self.add_active_task(review_required=True, reviewer="reviewer-a")
+        self.record_invocation("toolu-rej-001")
         provenance.run_review(
-            str(self.repo), TID, reviewer="reviewer-a", verdict="fix-first",
+            str(self.repo), TID, reviewer="glm-reviewer", verdict="fix-first",
             tool_use_id="toolu-rej-001", note="needs fixes")
         result = run_gate("{}", self.repo)
         payload = json.loads(result.stdout)
         self.assertEqual(payload["decision"], "block")
         reason = payload["reason"]
         self.assertIn("review verdict is 'fix-first'", reason)
-        self.assertIn("reviewer-a", reason)
+        self.assertIn("glm-reviewer", reason)
         self.assertIn("runtime.provenance.run_review", reason)
         events = self.gate_journal_events()
         self.assertEqual(events[0]["check"], "review_rejected")
         self.assertEqual(events[0]["verdict"], "fix-first")
-        self.assertEqual(events[0]["reviewer"], "reviewer-a")
+        self.assertEqual(events[0]["reviewer"], "glm-reviewer")
 
     def test_review_stale_after_later_change_blocks(self):
         # ship receipt 落盘后改动文件 → receipt 指纹过期 → review_stale
+        # （RB-21-02：receipt 经真实链路产出）
         self.write("src/a.py", b"v1\n")
         self.add_active_task(review_required=True, reviewer="reviewer-a")
+        self.record_invocation("toolu-stale-001")
         provenance.run_review(
-            str(self.repo), TID, reviewer="reviewer-a", verdict="ship",
+            str(self.repo), TID, reviewer="glm-reviewer", verdict="ship",
             tool_use_id="toolu-stale-001")
         self.write("src/a.py", b"v2\n")
         result = run_gate("{}", self.repo)
@@ -779,18 +806,19 @@ class StopGateReviewCheckTest(GitRepoFixture):
         self.assertNotEqual(events[0]["recorded"], events[0]["current"])
 
     def test_review_stale_with_null_fingerprint_receipt_blocks(self):
-        # 手写 ship receipt 无指纹（fingerprint None）→ 同样 review_stale
-        #（receipt 缺失绑定按拦截处理，不静默放宽）
+        # RB-21-02 目的性收紧（宽松→严格）：手写 ship receipt 无指纹
+        # （fingerprint None）不再作为 receipt 候选——runner/形状闸
+        # （五字段齐全非空）拒绝该文件，全部不合法 → review_missing
+        #（原 wu-21-13 语义是按 review_stale 拦截；拦截方向不变且更严）
         self.add_active_task(review_required=True, reviewer="reviewer-a")
         self.add_review_receipt(verdict="ship", fingerprint=None)
         result = run_gate("{}", self.repo)
-        reason = json.loads(result.stdout)["reason"]
-        self.assertIn("review evidence is stale", reason)
-        self.assertIn("review fingerprint none", reason)
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["decision"], "block")
+        reason = payload["reason"]
+        self.assertIn("review required but not completed", reason)
         events = self.journal_events()
-        self.assertEqual(events[0]["check"], "review_stale")
-        self.assertIsNone(events[0]["recorded"])
-        self.assertTrue(events[0]["current"].startswith("sha256:"))
+        self.assertEqual(events[0]["check"], "review_missing")
 
     def test_handwritten_state_ship_without_receipt_blocks_review_missing(self):
         # 负向锚定（wu-21-13）：state.review 手写 ship 且绑定当前指纹，
@@ -843,11 +871,13 @@ class StopGateReviewCheckTest(GitRepoFixture):
 
     def test_ship_receipt_passes_review_gate(self):
         # ship receipt 且指纹一致 → 审查检查通过（receipt 唯一权威的
-        # 正向锚定；state.review 未手写也放行）
+        # 正向锚定；state.review 未手写也放行；RB-21-02：receipt 经
+        # 真实链路产出——invocation 账本 + 白名单 reviewer 名）
         self.write("src/a.py", b"v1\n")
         self.add_active_task(review_required=True, reviewer="reviewer-a")
+        self.record_invocation("toolu-ship-001")
         provenance.run_review(
-            str(self.repo), TID, reviewer="reviewer-a", verdict="ship",
+            str(self.repo), TID, reviewer="glm-reviewer", verdict="ship",
             tool_use_id="toolu-ship-001")
         result = run_gate("{}", self.repo)
         self.assertEqual(result.returncode, 0)
@@ -856,6 +886,31 @@ class StopGateReviewCheckTest(GitRepoFixture):
         self.assertEqual(
             [e["event"] for e in self.gate_journal_events()],
             ["gate_passed"])
+
+    def test_handwritten_receipt_file_rejected(self):
+        # RB-21-02 gate runner 闸（规格 §10.2 命名）：手工伪造的 receipt
+        # 文件——kind=review、verdict=ship、指纹与当前一致，但 runner
+        # 缺失 / 冒名——不计入候选，全部不合法 → review_missing（第二
+        # 个伪造入口被机械关闭；不回退采信 state.review）
+        self.write("src/a.py", b"v1\n")
+        self.add_active_task(review_required=True, reviewer="reviewer-a")
+        st = state.load_state(self.repo, TID)
+        current = self.task_fingerprint(st)
+        # 伪造 1：完全剥离 runner 字段
+        self.add_review_receipt(
+            verdict="ship", fingerprint=current, runner=None)
+        # 伪造 2：runner 冒名（非 runtime 产出标识）
+        self.add_review_receipt(
+            verdict="ship", fingerprint=current, runner="me-myself",
+            observed_at="2026-07-01T00:00:00.000Z")
+        result = run_gate("{}", self.repo)
+        self.assertEqual(result.returncode, 0)
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["decision"], "block")
+        reason = payload["reason"]
+        self.assertIn("review required but not completed", reason)
+        events = self.journal_events()
+        self.assertEqual(events[0]["check"], "review_missing")
 
 
 # —— B4.1 四重检查：visual evidence（stale） ——
@@ -957,8 +1012,11 @@ class StopGateAllFreshPassTest(GitRepoFixture):
         state.record_verification(st, "pytest tests/a.py", current)
         self.set_state(st)
         # 审查裁决经 run_review 落 durable ship receipt（绑定同一指纹）
+        # RB-21-02：receipt 经真实链路产出（invocation 账本 + 白名单
+        # reviewer 名——reviewer 从 "reviewer-a" 收紧为 "glm-reviewer"）
+        self.record_invocation("toolu-fresh-001")
         receipt = provenance.run_review(
-            str(self.repo), TID, reviewer="reviewer-a", verdict="ship",
+            str(self.repo), TID, reviewer="glm-reviewer", verdict="ship",
             tool_use_id="toolu-fresh-001")
         self.assertEqual(receipt["fingerprint"], current)
         result = run_gate("{}", self.repo)
@@ -1146,7 +1204,9 @@ class StopGateIntegrationSmokeTest(GitRepoFixture):
         self.assertEqual(events[0]["task_id"], TID)
         self.assertEqual(events[0]["reviewer"], "glm-reviewer")
         # 模拟主会话裁决：run_review 落 durable ship receipt（绑定终
-        # 指纹——与完成门同一入口，receipt 唯一权威）
+        # 指纹——与完成门同一入口，receipt 唯一权威；RB-21-02 起先落
+        # runtime 观察到的 invocation 账本）
+        self.record_invocation("toolu-s4-001")
         provenance.run_review(
             str(self.repo), TID, reviewer="glm-reviewer", verdict="ship",
             tool_use_id="toolu-s4-001")
@@ -1167,6 +1227,7 @@ class StopGateIntegrationSmokeTest(GitRepoFixture):
             reviewer="glm-reviewer")
         self._write_owned(b"v1\n")
         # 先落一个新鲜裁决（run_review ship receipt，绑定当前证据指纹）
+        self.record_invocation("toolu-s5-001")
         provenance.run_review(
             str(self.repo), TID, reviewer="glm-reviewer", verdict="ship",
             tool_use_id="toolu-s5-001")
@@ -1201,6 +1262,7 @@ class StopGateIntegrationSmokeTest(GitRepoFixture):
         fresh = self.task_fingerprint(st)
         state.record_verification(st, self.CMD, fresh)
         self.set_state(st)
+        self.record_invocation("toolu-s6-001")
         provenance.run_review(
             str(self.repo), TID, reviewer="glm-reviewer", verdict="ship",
             tool_use_id="toolu-s6-001")
@@ -1224,6 +1286,7 @@ class StopGateIntegrationSmokeTest(GitRepoFixture):
         current = self.task_fingerprint(st)
         state.record_verification(st, self.CMD, current)
         self.set_state(st)
+        self.record_invocation("toolu-s6-002")
         provenance.run_review(
             str(self.repo), TID, reviewer="glm-reviewer", verdict="ship",
             tool_use_id="toolu-s6-002")
@@ -1261,8 +1324,11 @@ class StopGateCompletionCommitTest(GitRepoFixture):
         state.record_verification(st, self.CMD, current)
         self.set_state(st)
         # 审查证据：run_review 落 durable ship receipt（绑定同一指纹）
+        # RB-21-02：receipt 经真实链路产出（白名单 reviewer 名 + invocation
+        # 账本——reviewer 从 "reviewer-a" 收紧为 "glm-reviewer"）
+        self.record_invocation("toolu-commit-001")
         provenance.run_review(
-            str(self.repo), TID, reviewer="reviewer-a", verdict="ship",
+            str(self.repo), TID, reviewer="glm-reviewer", verdict="ship",
             tool_use_id="toolu-commit-001")
         return current
 
@@ -1856,9 +1922,11 @@ class DogfoodCompletionTest(SplitLedgerFixture):
         state.record_verification(st, self.CMD, current)
         self.set_state(st)
         # 审查证据：run_review 以账本根为入口——终指纹按任务绑定根
-        # （inner）求值，与完成门同一指纹（wu-21-13 receipt 唯一权威）
+        # （inner）求值，与完成门同一指纹（wu-21-13 receipt 唯一权威；
+        # RB-21-02：invocation 账本同样落账本根 + 白名单 reviewer 名）
+        self.record_invocation("toolu-df-001", reviewer="glm-reviewer")
         receipt = provenance.run_review(
-            str(self.repo), TID, reviewer="reviewer-a", verdict="ship",
+            str(self.repo), TID, reviewer="glm-reviewer", verdict="ship",
             tool_use_id="toolu-df-001")
         self.assertEqual(receipt["fingerprint"], current)
         result = run_gate("{}", self.repo)

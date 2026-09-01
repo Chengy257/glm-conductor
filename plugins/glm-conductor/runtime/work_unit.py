@@ -57,7 +57,12 @@ WU_REQUIRED_KEYS = ("id", "objective", "status", "depends_on", "executor",
 # 收缩移交 execution_policy.effective_worker_budget（PRESSURE→1）。
 # 键不删除、校验不拒绝（未知键向前兼容），旧 state 中的 small 原样
 # 保留但无人读取。
-WU_OPTIONAL_KEYS = ("interfaces", "constraints", "attempt", "result")
+# "runtime" 由 RB-21-01（§62 演进）收录：额度中断来源等运行时元数据
+# （handle_quota_exhausted 写 runtime.quota_interrupted_from，恢复对账
+# 按它区分 ready / running 落点）——内部形状自由，校验只查「存在时
+# 必须是 JSON 对象」。
+WU_OPTIONAL_KEYS = ("interfaces", "constraints", "attempt", "result",
+                    "runtime")
 # executor 词汇（与 state.EXECUTORS 取值一致；见模块 docstring 依赖说明）
 WU_EXECUTORS = ("main", "flash-implementer", "visual-implementer")
 
@@ -65,6 +70,10 @@ WU_EXECUTORS = ("main", "flash-implementer", "visual-implementer")
 #   - pending → waiting_dependency → ready → running → verifying →
 #     completed 为推荐主链；
 #   - ready/running → waiting_quota 为配额抑制边；→ blocked 为阻断边；
+#   - waiting_quota → ready 为额度恢复边；→ verifying 是 RB-21-01
+#     新增的恢复对账边（§62 演进：额度中断的 running 单元恢复时经
+#     reconcile 对账为 reuse_result——agent 成果可复用时直达验证，
+#     不再盲目重派；推荐主链不经此边）；
 #   - blocked → failed 允许彻底判死；
 #   - running → verifying 是主验证边（worker 报告后进入验证）；
 #     running → ready / blocked 是 §69 恢复对账边；running → completed
@@ -76,7 +85,7 @@ WU_TRANSITIONS = {
     "pending": ("waiting_dependency", "ready", "cancelled"),
     "waiting_dependency": ("ready", "blocked", "cancelled"),
     "ready": ("running", "waiting_quota", "blocked", "cancelled"),
-    "waiting_quota": ("ready", "blocked", "cancelled"),
+    "waiting_quota": ("ready", "verifying", "blocked", "cancelled"),
     "blocked": ("ready", "failed", "cancelled"),
     "running": ("verifying", "ready", "blocked", "waiting_quota",
                 "failed", "completed", "cancelled"),
@@ -191,6 +200,9 @@ def validate_work_unit(wu) -> "list[str]":
         或无验证的单元不可派发（空数组报错）；
       - attempt：存在时必须是 >= 0 的 int（bool 是 int 子类，拒绝）；
       - result：任意 JSON 值或 None，不校验内部形状（自由 JSON）；
+      - runtime：存在时必须是 JSON 对象（dict），内部形状自由不校验
+        （运行时元数据——如额度中断来源 quota_interrupted_from——
+        由写入方负责；RB-21-01 起收录为可选键）；
       - interfaces / constraints：自由形状，不校验（向前兼容）；
       - 未知键忽略（向前兼容），不报错。
     多处非法时聚合全部错误，不短路。
@@ -226,6 +238,8 @@ def validate_work_unit(wu) -> "list[str]":
         if isinstance(attempt, bool) or not isinstance(attempt, int) \
                 or attempt < 0:
             errors.append("attempt 必须是 >= 0 的整数")
+    if "runtime" in wu and not isinstance(wu["runtime"], dict):
+        errors.append("runtime 必须是 JSON 对象")
     return errors
 
 

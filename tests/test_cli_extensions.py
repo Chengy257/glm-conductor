@@ -22,7 +22,9 @@ exit 2 + 失败路径 exit 1）——
      （零转态是合法结果）；status 缺省走 resolver（monkeypatch 零网
      络）；非法词汇 → 2；任务缺失 → 1；
   6. wake-record：consumed 递增 + journal quota_wake_recorded；空
-     automation_id → 2；任务缺失 → 1；参数个数 → 2；
+     automation_id → 2；任务缺失 → 1；参数个数 → 2（SH-21-01 起记账
+     入口带写入前授权三查与同 automation_id 幂等——happy 用例 fixture
+     相应授予 until_done / 2 窗用户授权，断言本身不变）；
   7. wake-prompt：**stdout 纯文本**（不裹 JSON——json.loads 必炸的
      反向锚）；任务缺失 → 错误 JSON + 1；参数个数 → 2；真实子进程
      UTF-8 冒烟（Windows 显式 utf-8 纪律）；
@@ -52,7 +54,8 @@ from pathlib import Path
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "plugins" / "glm-conductor"))
-from runtime import cli, dispatch_wave, journal, provenance, state
+from runtime import agent_run, cli, dispatch_wave, execution_policy, \
+    journal, provenance, state
 from runtime import task_manager, work_unit
 from runtime.quota import resolver as quota_resolver
 
@@ -178,6 +181,23 @@ class GitCliFixture(TempDirFixture):
         self.dirty_file("base.txt", b"v1\n")
         run_git(self.repo, "add", ".")
         run_git(self.repo, "commit", "-m", "init")
+
+    def record_invocation(self, tool_use_id, reviewer="glm-reviewer",
+                          task_id=TID):
+        """RB-21-02 真实链路 setup：经 agent_run.record_reviewer_invocation
+        直落一条 reviewer_invoked 事件（review-record 回验链的前置账本）。
+
+        本文件不在 RB-21-02 声明的自有文件集内——此处为全量测试保持
+        全绿的最小夹具增补（既有断言零改动/只朝更严方向）。"""
+        payload = {
+            "hook_event_name": "PostToolUse", "tool_name": "Agent",
+            "tool_input": {"subagent_type": reviewer,
+                           "prompt": "review %s"
+                                     % agent_run.review_marker_for(task_id)},
+            "tool_use_id": tool_use_id,
+            "tool_response": {"agentId": "agent-review-fixture"}}
+        return agent_run.record_reviewer_invocation(
+            str(self.repo), task_id, payload)
 
 
 # —— 1. quota-resolve ——
@@ -318,6 +338,8 @@ class ReviewRecordCliTest(GitCliFixture):
 
     def test_review_record_happy_defaults(self):
         self.make_task()
+        # RB-21-02：receipt 前置 runtime 观察到的 invocation 账本
+        self.record_invocation("call_review_1")
         code, payload = run_cli("review-record", str(self.repo), TID,
                                 "glm-reviewer", "ship", "call_review_1")
         self.assertEqual(code, 0)
@@ -336,6 +358,7 @@ class ReviewRecordCliTest(GitCliFixture):
 
     def test_review_record_route_and_note_passthrough(self):
         self.make_task()
+        self.record_invocation("call_r2")  # RB-21-02 前置 invocation 账本
         code, payload = run_cli("review-record", str(self.repo), TID,
                                 "glm-reviewer", "fix-first", "call_r2",
                                 "delegate", "权限矩阵缺一节")
@@ -448,14 +471,15 @@ class QuotaResumeCliTest(TempDirFixture):
 
     def test_quota_resume_default_goes_through_resolver(self):
         # status 缺省 → resolver 解析（monkeypatch 零网络）；source 记
-        # resolver 层级来源而非 explicit
+        # resolver 层级来源而非 explicit；RB-21-01 起强制刷新
+        # （force_refresh=True——wake 后不得信任新鲜缓存）
         self._waiting_task()
         with mock.patch.object(quota_resolver, "resolve_quota_status",
                                return_value=dict(FAKE_RESOLVED)) as fake:
             code, payload = run_cli("quota-resume", str(self.repo), TID)
         self.assertEqual(code, 0)
         self.assertTrue(payload["resumed"])
-        fake.assert_called_once_with(str(self.repo))
+        fake.assert_called_once_with(str(self.repo), force_refresh=True)
         resumed = self.events("quota_resumed")
         self.assertEqual(resumed[0]["source"], "provider")
 
@@ -490,12 +514,22 @@ class WakeRecordCliTest(TempDirFixture):
     """wake-record：窗口扣减记账 + 空串闸 2 / 缺失 1 / 用法 2。"""
 
     def test_wake_record_increments_consumed(self):
-        self.make_task()
+        # SH-21-01 起记账入口做写入前授权三查（manual / source 非 user /
+        # 预算耗尽拒绝）：fixture 相应授予 until_done / 2 窗用户授权——
+        # 本用例断言不变（不同 automation_id 两次调用纯递增 1→2）
+        st = self.make_task()
+        st["execution_policy"] = execution_policy.set_resume_authorization(
+            st["execution_policy"], auto_resume="until_done",
+            max_quota_windows=2, source="user",
+            confirmed_at="2026-08-31T00:00:00+00:00")
+        state.save_state(self.repo, st)
         code, payload = run_cli("wake-record", str(self.repo), TID,
                                 "aut-wake-0001", "2026-09-01T00:00:00Z")
         self.assertEqual(code, 0)
         self.assertEqual(payload["consumed_quota_windows"], 1)
-        self.assertEqual(payload["remaining_quota_windows"], 0)
+        # remaining=1：授权 fixture（until_done / 2 窗）消耗 1 窗后的
+        # 真实剩余——历史断言 0 是默认 manual 块 max=0 的装置伪影
+        self.assertEqual(payload["remaining_quota_windows"], 1)
         self.assertEqual(payload["automation_id"], "aut-wake-0001")
         self.assertEqual(payload["fires_at"], "2026-09-01T00:00:00Z")
         recorded = self.events("quota_wake_recorded")

@@ -19,6 +19,16 @@
   6. tool_use_id / reviewer 空串拒绝；
   补充：任务缺失 → ProvenanceError；durable 原子写无 .tmp 残留。
 
+RB-21-02 调用真实性回验（receipt 从申报制升级为 runtime-observed
+invocation + runtime-bound verdict；规格命名 §10.2）：
+  7. 白名单：reviewer ∉ agent_run.REVIEWER_PROFILES → 拒；
+  8. invocation 存在：无 reviewer_invoked 事件（伪造 tool_use_id）→ 拒；
+  9. reviewer/task 匹配：身份不匹配 / 跨任务申报 → 拒；
+  10. replay 闸：同 tool_use_id + 同 verdict → 幂等返回既有 receipt
+      （不新建第二份、不重复记事件）；verdict 矛盾 → 拒；
+  11. 真实链路：invocation + ship → receipt 可过完成门扫描；审查后
+      仓库再变动 → receipt 指纹过期（stale 语义）。
+
 git fixture 做法（git init + config + commit、Windows 下 .git 只读位
 清理）对齐 tests/test_provenance.py 的 ProvenanceFixture；环境无 git
 可执行时整类自动 skipTest。被检仓库目录由 tempfile.TemporaryDirectory
@@ -40,6 +50,7 @@ import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "plugins" / "glm-conductor"))
+from runtime import agent_run
 from runtime import fingerprint as fingerprint_mod
 from runtime import journal as journal_mod
 from runtime import provenance
@@ -127,6 +138,23 @@ class ReviewProvenanceFixture(TempDirFixture):
         state.save_state(self.repo, st)
         return st
 
+    def record_invocation(self, tool_use_id, reviewer="glm-reviewer",
+                          task_id=TID, run_in_background=None):
+        """RB-21-02 真实链路前置：经 agent_run.record_reviewer_invocation
+        真实入口直落一条 reviewer_invoked 事件（hook PostToolUse 分支的
+        等价调用——receipt 申报必须先有 runtime 观察到的调用账本）。"""
+        tool_input = {"subagent_type": reviewer,
+                      "prompt": "review it %s"
+                                % agent_run.review_marker_for(task_id)}
+        if run_in_background is not None:
+            tool_input["run_in_background"] = run_in_background
+        payload = {
+            "hook_event_name": "PostToolUse", "tool_name": "Agent",
+            "tool_input": tool_input, "tool_use_id": tool_use_id,
+            "tool_response": {"agentId": "agent-review-fixture"}}
+        return agent_run.record_reviewer_invocation(
+            str(self.repo), task_id, payload)
+
     def events(self, name, task_id=TID):
         """读取真实 journal 并过滤事件名。"""
         return [e for e in journal_mod.read_events(self.repo, task_id)
@@ -161,7 +189,9 @@ class RunReviewTest(ReviewProvenanceFixture):
     def test_run_review_ship_receipt_journal_and_state_sync(self):
         # 用例 1：ship → receipt 文件（冻结键）+ journal review_receipt
         # （同字段）+ state.review 同步（verdict / fingerprint 恒一致）
+        # RB-21-02：先落 runtime 观察到的 reviewer_invoked（真实链路）
         self.make_review_task()
+        self.record_invocation("toolu-run-001")
         receipt = provenance.run_review(
             str(self.repo), TID, reviewer="glm-reviewer", verdict="ship",
             tool_use_id="toolu-run-001", route="delegate", note="looks good")
@@ -226,13 +256,15 @@ class RunReviewTest(ReviewProvenanceFixture):
         self.assertIn("route", str(ctx.exception))
         self.assertEqual(self.state_bytes(), before_state)
         self.assertEqual(self.receipt_names(), [])
-        # route=None 恒法
+        # route=None 恒法（RB-21-02：两次申报各配一条 invocation 账本）
+        self.record_invocation("toolu-run-003")
         receipt = provenance.run_review(
             str(self.repo), TID, reviewer="glm-reviewer", verdict="ship",
             tool_use_id="toolu-run-003")
         self.assertIn("route", receipt)
         self.assertIsNone(receipt["route"])
         # 合法 mode 值透传
+        self.record_invocation("toolu-run-003b")
         routed = provenance.run_review(
             str(self.repo), TID, reviewer="glm-reviewer", verdict="ship",
             tool_use_id="toolu-run-003b", route="audit")
@@ -242,11 +274,13 @@ class RunReviewTest(ReviewProvenanceFixture):
         # 用例 4：note 透传（中文、durable 文件 ensure_ascii=False 明文
         # 可读）与 null 默认（note 恒入键，未传为 None）
         self.make_review_task()
+        self.record_invocation("toolu-run-004a")
         plain = provenance.run_review(
             str(self.repo), TID, reviewer="glm-reviewer", verdict="ship",
             tool_use_id="toolu-run-004a")
         self.assertIn("note", plain)
         self.assertIsNone(plain["note"])
+        self.record_invocation("toolu-run-004b")
         noted = provenance.run_review(
             str(self.repo), TID, reviewer="glm-reviewer", verdict="ship",
             tool_use_id="toolu-run-004b", note="中文审查备注：通过")
@@ -263,11 +297,13 @@ class RunReviewTest(ReviewProvenanceFixture):
         # 用例 5：多张 receipt——fix-first 后重审 ship → 最新一张为准
         # （observed_at 排序；扫描用完成门同一函数 latest_review_receipt）
         self.make_review_task()
+        self.record_invocation("toolu-run-005a")
         first = provenance.run_review(
             str(self.repo), TID, reviewer="glm-reviewer",
             verdict="fix-first", tool_use_id="toolu-run-005a",
             note="round 1")
         time.sleep(0.01)  # observed_at 毫秒精度：留出间隔保证严格递增
+        self.record_invocation("toolu-run-005b")
         second = provenance.run_review(
             str(self.repo), TID, reviewer="glm-reviewer", verdict="ship",
             tool_use_id="toolu-run-005b", note="round 2")
@@ -318,6 +354,7 @@ class RunReviewTest(ReviewProvenanceFixture):
         # 补充：durable 原子写 → 落盘后无 .tmp 残留
         self.make_review_task()
         for index in range(2):
+            self.record_invocation("toolu-run-008-%d" % index)
             provenance.run_review(
                 str(self.repo), TID, reviewer="glm-reviewer",
                 verdict="ship" if index else "fix-first",
@@ -328,6 +365,155 @@ class RunReviewTest(ReviewProvenanceFixture):
         for name in names:
             self.assertTrue(name.endswith(".json"))
             self.assertFalse(name.endswith(".tmp"))
+
+
+class ReviewerInvocationRecheckTest(ReviewProvenanceFixture):
+    """RB-21-02 调用真实性回验链（规格 §10.2 命名）：
+    reviewer 白名单 → reviewer_invoked 存在 → reviewer/task 匹配 →
+    replay 闸 → 终指纹绑定。任一不满足 ProvenanceError 且零副作用。"""
+
+    def test_non_reviewer_tool_use_id_rejected(self):
+        # 白名单闸：reviewer 不在 REVIEWER_PROFILES → 拒（即使 invocation
+        # 已落账也不行——receipt 只受理 runtime 已知审查者身份）
+        self.make_review_task()
+        self.record_invocation("toolu-nonprofile-001")
+        before_state = self.state_bytes()
+        before_events = journal_mod.read_events(self.repo, TID)
+        for bad in ("random-reviewer", "glm-advisor", "claude-reviewer"):
+            with self.subTest(reviewer=bad), \
+                    self.assertRaises(provenance.ProvenanceError) as ctx:
+                provenance.run_review(
+                    str(self.repo), TID, reviewer=bad, verdict="ship",
+                    tool_use_id="toolu-nonprofile-001")
+            self.assertIn("REVIEWER_PROFILES", str(ctx.exception))
+        self.assertEqual(self.state_bytes(), before_state)
+        self.assertEqual(journal_mod.read_events(self.repo, TID),
+                         before_events)
+        self.assertEqual(self.receipt_names(), [])
+
+    def test_fake_review_tool_use_id_rejected(self):
+        # invocation 闸：伪造任意 tool_use_id（无 reviewer_invoked 账本）
+        # → 拒，零副作用——receipt 不再受理口头申报（本 WU 目的性断言）
+        self.make_review_task()
+        before_state = self.state_bytes()
+        before_events = journal_mod.read_events(self.repo, TID)
+        with self.assertRaises(provenance.ProvenanceError) as ctx:
+            provenance.run_review(
+                str(self.repo), TID, reviewer="glm-reviewer", verdict="ship",
+                tool_use_id="toolu-fake-no-invocation")
+        self.assertIn("reviewer_invoked", str(ctx.exception))
+        self.assertIn("toolu-fake-no-invocation", str(ctx.exception))
+        self.assertEqual(self.state_bytes(), before_state)
+        self.assertEqual(journal_mod.read_events(self.repo, TID),
+                         before_events)
+        self.assertEqual(self.receipt_names(), [])
+
+    def test_reviewer_identity_mismatch_rejected(self):
+        # 身份匹配闸：invocation 记录 glm-reviewer，申报 visual-reviewer
+        # → 拒（receipt 只受理与真实调用一致的身份）
+        self.make_review_task()
+        self.record_invocation("toolu-identity-001", reviewer="glm-reviewer")
+        before_events = journal_mod.read_events(self.repo, TID)
+        with self.assertRaises(provenance.ProvenanceError) as ctx:
+            provenance.run_review(
+                str(self.repo), TID, reviewer="visual-reviewer",
+                verdict="ship", tool_use_id="toolu-identity-001")
+        self.assertIn("身份不匹配", str(ctx.exception))
+        self.assertEqual(journal_mod.read_events(self.repo, TID),
+                         before_events)
+        self.assertEqual(self.receipt_names(), [])
+
+    def test_review_tool_use_wrong_task_rejected(self):
+        # task 匹配闸：invocation 绑定任务 A，申报任务 B（同 tool_use_id）
+        # → 拒（一次审查调用不可跨任务申报；B 的 journal 无该 invocation）
+        self.make_review_task()
+        other_tid = "rev-prov-task-other9"
+        self.make_review_task(task_id=other_tid)
+        self.record_invocation("toolu-crosstask-001", task_id=TID)
+        before_state = self.state_bytes(other_tid)
+        with self.assertRaises(provenance.ProvenanceError) as ctx:
+            provenance.run_review(
+                str(self.repo), other_tid, reviewer="glm-reviewer",
+                verdict="ship", tool_use_id="toolu-crosstask-001")
+        self.assertIn("toolu-crosstask-001", str(ctx.exception))
+        self.assertEqual(self.state_bytes(other_tid), before_state)
+        self.assertEqual(self.receipt_names(other_tid), [])
+
+    def test_review_tool_use_replay_idempotent(self):
+        # replay 闸：同 tool_use_id + 同 task + 同 verdict 重复申报 →
+        # 幂等（返回既有 receipt，不新建第二份、不重复记事件、state
+        # 不重写）；同 tool_use_id 但 verdict 矛盾 → ProvenanceError
+        self.make_review_task()
+        self.record_invocation("toolu-replay-001")
+        first = provenance.run_review(
+            str(self.repo), TID, reviewer="glm-reviewer", verdict="ship",
+            tool_use_id="toolu-replay-001", note="round 1")
+        time.sleep(0.01)
+        replayed = provenance.run_review(
+            str(self.repo), TID, reviewer="glm-reviewer", verdict="ship",
+            tool_use_id="toolu-replay-001", note="第二轮申报（应幂等）")
+        # 返回与首次等价的结果（含首次 observed_at，note 不覆盖）
+        self.assertEqual(replayed, first)
+        self.assertEqual(replayed["observed_at"], first["observed_at"])
+        self.assertEqual(replayed["note"], "round 1")
+        # 不新建第二份 receipt、不重复记 review_receipt 事件
+        self.assertEqual(len(self.receipt_names()), 1)
+        self.assertEqual(len(self.events("review_receipt")), 1)
+        # 同 tool_use_id 但 verdict 矛盾 → 拒（且零新副作用）
+        with self.assertRaises(provenance.ProvenanceError) as ctx:
+            provenance.run_review(
+                str(self.repo), TID, reviewer="glm-reviewer",
+                verdict="fix-first", tool_use_id="toolu-replay-001")
+        self.assertIn("replay", str(ctx.exception))
+        self.assertEqual(len(self.receipt_names()), 1)
+        self.assertEqual(len(self.events("review_receipt")), 1)
+
+    def test_real_reviewer_ship_receipt_passes(self):
+        # 真实链路：invocation + ship 申报 → receipt（冻结键）可通过
+        # 完成门同一扫描函数（runner/形状闸全过）且指纹与完成门一致
+        self.make_review_task()
+        invocation = self.record_invocation("toolu-real-001")
+        # 事件字段冻结：六键 + event/ts
+        self.assertEqual(
+            set(invocation.keys()),
+            {"ts", "event", "tool_use_id", "reviewer", "task_id",
+             "agent_id", "execution_mode"})
+        self.assertEqual(invocation["event"], "reviewer_invoked")
+        self.assertEqual(invocation["tool_use_id"], "toolu-real-001")
+        self.assertEqual(invocation["reviewer"], "glm-reviewer")
+        self.assertEqual(invocation["task_id"], TID)
+        self.assertEqual(invocation["agent_id"], "agent-review-fixture")
+        self.assertEqual(invocation["execution_mode"], "foreground")
+        receipt = provenance.run_review(
+            str(self.repo), TID, reviewer="glm-reviewer", verdict="ship",
+            tool_use_id="toolu-real-001", route="audit")
+        st = state.load_state(self.repo, TID)
+        self.assertEqual(
+            receipt["fingerprint"],
+            fingerprint_mod.task_fingerprint(str(self.repo), st))
+        latest = latest_review_receipt(str(self.repo), TID)
+        self.assertIsNotNone(latest)
+        self.assertEqual(latest["verdict"], "ship")
+        self.assertEqual(latest["runner"], "glm-conductor-runtime")
+        self.assertEqual(latest, receipt)
+
+    def test_review_receipt_becomes_stale_after_repo_change(self):
+        # runtime-bound verdict：审查后仓库再变动 → receipt 指纹不再
+        # 等于当前任务指纹（完成门 review_stale 的判定输入成立）
+        self.make_review_task()
+        self.record_invocation("toolu-stalerev-001")
+        receipt = provenance.run_review(
+            str(self.repo), TID, reviewer="glm-reviewer", verdict="ship",
+            tool_use_id="toolu-stalerev-001")
+        st = state.load_state(self.repo, TID)
+        self.assertEqual(
+            receipt["fingerprint"],
+            fingerprint_mod.task_fingerprint(str(self.repo), st))
+        self.dirty_file("src/main.py", b"reviewed-v2\n")
+        st_after = state.load_state(self.repo, TID)
+        self.assertNotEqual(
+            receipt["fingerprint"],
+            fingerprint_mod.task_fingerprint(str(self.repo), st_after))
 
 
 if __name__ == "__main__":

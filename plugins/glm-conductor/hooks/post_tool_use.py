@@ -7,14 +7,25 @@
     PostToolUse 与 PostToolUseFailure 两条 matcher "Agent|Task" 条目
     均指向本脚本，按 stdin 载荷的 hook_event_name 分发：
 
-      - PostToolUse（派发成功，tool_response 为 launch 确认）：
-        从 tool_input 的 prompt/description 解析 marker
-        （GLM_CONDUCTOR_DISPATCH=<permit_id>，§6.4）→ 定位持有该
-        permit 的活动任务 → consume_permit（原子 rename，重放机械
-        拒绝）→ agent_run.record_agent_launch 记 agent_launched 事件
-        （runtime-observed 生命周期，与手写 implementation_started
-        互不替代）。permit 已消费/不存在 → record_launch_replay_
-        skipped 幂等容错（不报错）。
+      - PostToolUse（派发成功，tool_response 为 launch 确认）：两条
+        记账分支——
+        a) permit 分支：从 tool_input 的 prompt/description 解析 marker
+           （GLM_CONDUCTOR_DISPATCH=<permit_id>，§6.4）→ 定位持有该
+           permit 的活动任务 → consume_permit（原子 rename，重放机械
+           拒绝）→ agent_run.record_agent_launch 记 agent_launched 事件
+           （runtime-observed 生命周期，与手写 implementation_started
+           互不替代）。permit 已消费/不存在 → record_launch_replay_
+           skipped 幂等容错（不报错）。
+        b) reviewer 分支（RB-21-02）：tool_input.subagent_type ∈
+           agent_run.REVIEWER_PROFILES 且 prompt/description 解析出
+           GLM_CONDUCTOR_REVIEW=<task_id> marker → agent_run.record_
+           reviewer_invocation 记 reviewer_invoked 事件（reviewer 类型
+           按 D1 裁定免 permit，此前零记账；该事件是 provenance.
+           run_review 落 receipt 前回验调用真实性的唯一账本依据）。
+           marker 指向的任务不存在 → record_reviewer_invocation_skipped
+           警告事件（fail-loud 不阻断）。reviewer 类型无 review marker
+           → 落回 permit 分支原逻辑（无 dispatch marker → 静默），两条
+           分支互斥、permit 分支零改动。
       - PostToolUseFailure（派发失败）：invalidate_permit（作废，
         不得重复使用）+ record_agent_failure（agent_dispatch_failed，
         error 摘要自载荷提取）。
@@ -115,9 +126,13 @@ def _owning_task(repo, active_tasks, permit_id):
 
 
 def main():
-    """主流程：读 stdin → 按 hook_event_name 分发两条记账路径。
+    """主流程：读 stdin → 按 hook_event_name 分发记账路径。
 
     - 非 PostToolUse / PostToolUseFailure → 静默（exit 0）；
+    - PostToolUse：reviewer 分支先行（subagent_type ∈
+      REVIEWER_PROFILES + GLM_CONDUCTOR_REVIEW=<task_id> marker →
+      reviewer_invoked 记账后返回）；无 marker / 非 reviewer 类型落回
+      既有 permit 分支；
     - 无 marker / 无归属活动任务 → 静默（无 permit 的 Agent 调用
       是只读类或与 conductor 无关，不记账）；
     - PostToolUse → consume + agent_launched（permit 缺失时
@@ -134,12 +149,37 @@ def main():
     if event_name not in SERVED_EVENTS:
         return 0
 
+    repo = repo_root()
+    tool_input = payload.get("tool_input")
+
+    # RB-21-02 reviewer 分支（PostToolUse 专属；失败路径不记账——
+    # reviewer_invoked 只证明「调用真实发生过」）：reviewer 类型 +
+    # review marker → 落账后返回；无 marker 落回 permit 分支原逻辑
+    # （reviewer 免 permit → 无 dispatch marker → 静默，行为不回退）
+    if event_name == "PostToolUse":
+        subagent_type = (tool_input.get("subagent_type")
+                         if isinstance(tool_input, dict) else None)
+        if isinstance(subagent_type, str) \
+                and subagent_type in agent_run.REVIEWER_PROFILES:
+            review_task_id = agent_run.parse_review_marker(
+                _marker_text(tool_input))
+            if review_task_id is not None:
+                if state.load_state(repo, review_task_id) is None:
+                    # fail-loud 不阻断：marker 指向的任务不存在 →
+                    # 警告记账（该 task_id 下无 receipt 可申报）
+                    agent_run.record_reviewer_invocation_skipped(
+                        repo, review_task_id, payload,
+                        reason="task_missing")
+                else:
+                    agent_run.record_reviewer_invocation(
+                        repo, review_task_id, payload)
+                return 0
+
     permit_id = dispatch_wave.parse_marker(
-        _marker_text(payload.get("tool_input")))
+        _marker_text(tool_input))
     if permit_id is None:
         return 0
 
-    repo = repo_root()
     task_id, permit = _owning_task(repo, state.find_active_tasks(repo),
                                    permit_id)
     if task_id is None:

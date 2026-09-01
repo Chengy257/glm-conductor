@@ -184,6 +184,10 @@ GLM Conductor 基于 ZCode 原生的本地会话生命周期机制，不是云�
 
 完整限制清单与设计取舍见 [架构文档](./docs/architecture.md)。
 
+## 发布纪律
+
+GitHub Release 元数据与版本号语义绑定：`alpha` / `rc` 预发布版本必须勾选 **prerelease**（"Set as a pre-release"），仅 `stable` 正式版才以 latest 稳定版发布——市场源用户据此决定是否自动接收更新。
+
 ## 参考项目与致谢
 
 本项目站在以下项目/生态的肩膀上（按参考深度排列）：

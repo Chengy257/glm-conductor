@@ -26,6 +26,13 @@ run_lifecycle）与 CLI agent-runs：
     False；档案缺失 → 二者皆 False）；
   - CLI agent-runs 两形态（数组 / lifecycle dict）与用法错误退出码。
 
+RB-21-02 reviewer invocation 账本（ReviewerInvocationTest）：
+  - reviewer_invoked 事件字段冻结（tool_use_id/reviewer/task_id/
+    agent_id/execution_mode）与载荷形状容错、执行模式推导；
+  - reviewer_invocation_skipped 警告事件（reason 摘要口径）；
+  - review marker（GLM_CONDUCTOR_REVIEW=<task_id>）构造/解析与
+    REVIEWER_PROFILES 白名单词汇冻结。
+
 仅 Python 3 标准库；临时目录 fixture，不污染真实工作区。
 """
 
@@ -206,6 +213,123 @@ class RecordReplaySkippedTest(unittest.TestCase):
         self.assertEqual(event["event"], "agent_launch_replay_skipped")
         self.assertEqual(event["tool_use_id"], "c")
         self.assertEqual(event["permit_id"], "dp-abc123def456")
+
+
+class ReviewerInvocationTest(unittest.TestCase):
+    """RB-21-02：reviewer_invoked / reviewer_invocation_skipped 记账 +
+    review marker 构造/解析 + REVIEWER_PROFILES 白名单词汇。"""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.repo = self._tmp.name
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _last(self):
+        return journal.read_events(self.repo, TID)[-1]
+
+    def test_reviewer_profiles_vocabulary(self):
+        # 白名单词汇冻结：bare 与 "glm-conductor:" 前缀双形态
+        self.assertEqual(
+            agent_run.REVIEWER_PROFILES,
+            frozenset(("glm-reviewer", "visual-reviewer",
+                       "glm-conductor:glm-reviewer",
+                       "glm-conductor:visual-reviewer")))
+
+    def test_review_marker_round_trip(self):
+        marker = agent_run.review_marker_for("t-abc")
+        self.assertEqual(marker, "GLM_CONDUCTOR_REVIEW=t-abc")
+        # 多行文本按「prefix 后首个空白 token」定位（与 dispatch marker
+        # 的 parse 同构）
+        text = "请审查该 diff\n%s\n谢谢" % marker
+        self.assertEqual(agent_run.parse_review_marker(text), "t-abc")
+        # 行内尾随文本不吞并
+        self.assertEqual(
+            agent_run.parse_review_marker(
+                "GLM_CONDUCTOR_REVIEW=t-1 extra"),
+            "t-1")
+
+    def test_parse_review_marker_negative(self):
+        self.assertIsNone(agent_run.parse_review_marker("no marker here"))
+        self.assertIsNone(agent_run.parse_review_marker(None))
+        self.assertIsNone(agent_run.parse_review_marker(
+            "GLM_CONDUCTOR_REVIEW="))  # 空 token → None
+        self.assertIsNone(agent_run.parse_review_marker(
+            "GLM_CONDUCTOR_REVIEW=   "))  # 纯空白 token → None
+        # 不与 dispatch marker 混淆（独立前缀）
+        self.assertIsNone(agent_run.parse_review_marker(
+            "GLM_CONDUCTOR_DISPATCH=dp-1"))
+
+    def test_review_marker_for_rejects_bad_task_id(self):
+        for bad in ("", None, 123):
+            with self.assertRaises(ValueError):
+                agent_run.review_marker_for(bad)
+
+    def test_invocation_fields_frozen(self):
+        payload = {
+            "tool_use_id": "call_r1",
+            "tool_input": {"subagent_type": "glm-conductor:visual-reviewer",
+                           "prompt": "review GLM_CONDUCTOR_REVIEW=other"},
+            "tool_response": {"agentId": "agent_r1"},
+        }
+        event = agent_run.record_reviewer_invocation(self.repo, TID, payload)
+        # 字段冻结：{"event","tool_use_id","reviewer","task_id","agent_id",
+        # "execution_mode"}（+ journal 统一管理的 ts）
+        self.assertEqual(
+            set(event.keys()),
+            {"ts", "event", "tool_use_id", "reviewer", "task_id",
+             "agent_id", "execution_mode"})
+        self.assertEqual(event["event"], "reviewer_invoked")
+        self.assertEqual(event["tool_use_id"], "call_r1")
+        self.assertEqual(event["reviewer"], "glm-conductor:visual-reviewer")
+        self.assertEqual(event["task_id"], TID)
+        self.assertEqual(event["agent_id"], "agent_r1")
+        self.assertEqual(event["execution_mode"], "foreground")
+
+    def test_invocation_execution_mode_and_shape_tolerated(self):
+        # run_in_background=True → "background"；载荷形状异常容错为
+        # 缺省（reviewer None / agent_id None / foreground）
+        event = agent_run.record_reviewer_invocation(
+            self.repo, TID,
+            {"tool_input": {"subagent_type": "glm-reviewer",
+                            "run_in_background": True}})
+        self.assertEqual(event["execution_mode"], "background")
+        event = agent_run.record_reviewer_invocation(self.repo, TID, None)
+        self.assertIsNone(event["reviewer"])
+        self.assertIsNone(event["agent_id"])
+        self.assertIsNone(event["tool_use_id"])
+        self.assertEqual(event["execution_mode"], "foreground")
+        self.assertEqual(event["task_id"], TID)
+
+    def test_invocation_agent_id_snake_and_nested_result(self):
+        event = agent_run.record_reviewer_invocation(
+            self.repo, TID,
+            {"tool_response": {"agent_id": "snake_1"}})
+        self.assertEqual(event["agent_id"], "snake_1")
+        event = agent_run.record_reviewer_invocation(
+            self.repo, TID,
+            {"tool_response": {"result": {"agentId": "nested_1"}}})
+        self.assertEqual(event["agent_id"], "nested_1")
+
+    def test_invocation_skipped_fields(self):
+        event = agent_run.record_reviewer_invocation_skipped(
+            self.repo, TID,
+            {"tool_use_id": "call_r9",
+             "tool_input": {"subagent_type": "glm-reviewer"}},
+            reason="task_missing")
+        self.assertEqual(event["event"], "reviewer_invocation_skipped")
+        self.assertEqual(event["reason"], "task_missing")
+        self.assertEqual(event["task_id"], TID)
+        self.assertEqual(event["tool_use_id"], "call_r9")
+        self.assertEqual(event["reviewer"], "glm-reviewer")
+        # reason 非 str 压字符串并截断 200（同 error 摘要口径）
+        event = agent_run.record_reviewer_invocation_skipped(
+            self.repo, TID, {}, reason=None)
+        self.assertEqual(event["reason"], "unknown")
+        event = agent_run.record_reviewer_invocation_skipped(
+            self.repo, TID, {}, reason="x" * 500)
+        self.assertEqual(len(event["reason"]), 200)
 
 
 class ListAgentRunsTest(unittest.TestCase):

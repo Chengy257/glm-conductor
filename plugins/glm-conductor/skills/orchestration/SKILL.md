@@ -170,6 +170,7 @@ active task 的状态同步义务：五段式规格中 FILES AND OWNERSHIP 声�
 - rethink：修订架构，不得报告完成
 - 任何修复使先前裁决失效；审查者与实施者/主会话同模型家族，独立性来自全新上下文与只读隔离，不宣称跨模型独立
 - **审查溯源（v2.1 M6）**：审查完成后主会话经 CLI `review-record <repo> <task> <reviewer> <verdict> <tool_use_id> ['<route>'] ['<note>']` 申报裁决——runtime 绑定终指纹（与完成门同一入口）落 durable review receipt（journal `review_receipt` 事件 + state.review 同步镜像）。Stop 完成门的审查检查**只认 fresh ship review receipt**——receipt 是审查裁决的唯一权威，state.review 手写字段不再作为通过依据
+- **审查派发 marker 纪律（RB-21-02，强制）**：审查派发的 prompt 必须携带 `GLM_CONDUCTOR_REVIEW=<task_id>` marker（`agent_run.review_marker_for(task_id)` 构造）——PostToolUse 对 reviewer 类型（glm-reviewer / visual-reviewer）派发据此落 `reviewer_invoked` 账本事件（tool_use_id 绑定 task），`review-record` 落 receipt 前机械回验该事件（reviewer 白名单 + tool_use_id 存在 + reviewer/task 匹配 + 不可 replay）；**无 marker 的审查调用零记账，其裁决无法取得 receipt**——完成门将恒拦 review_missing。手工伪造 receipt 文件同样无效：Stop 门只认 runner == `glm-conductor-runtime` 且冻结字段齐全的 receipt
 
 ## 12. ROUTE REASSESSMENT
 
