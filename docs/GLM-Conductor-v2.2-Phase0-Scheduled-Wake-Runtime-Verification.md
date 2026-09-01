@@ -148,4 +148,13 @@ host error（原文，若有）
 
 | 编号 | session origin | parent automation | tested | result | host error |
 |---|---|---|---|---|---|
-| （待回填） | | | | | |
+| P0-SCHED-04 | fresh interactive（B2 交接会话 armed 2026-09-01T18:19Z，30min recurring 探针即 Persistent Bridge 本体） | 无 parent——interactive 会话直接 CronCreate；automation `automation-dc0cc8d8-5c86-43af-93b1-81b664382e0d`（探针即本体） | recurring 第 2/3 次触发稳定性：18:49:00.377Z / 19:19:00.993Z / 19:49:01.635Z 三连拍（标称 +4.4/+5.0/+5.2s），每拍以同会话 user-turn 注入并被执行（含 DRAINING no-op 决策轮） | **PASS（HARD GATE 通过）**：三拍全中、runCount 1→3 递增、lifecycleStatus=active、enabled/recurring 恒 true、nextRunAt 依 30min 节拍推进；journal `wake_bridge_fired` ×3（含 sched04_evidence 六字段）与 CronList 对齐 | 无 |
+| （待回填：SCHED-01/02/03/05/06/07/08/09/10） | | | | | |
+
+SCHED-04 结论（2026-09-01T19:49Z 回填）：**Persistent Recurring Bridge 策略成立**——
+第 2、3 次触发照常、automation 存活无停摆，D15 recurring 主路径的可靠性前提
+得到运行时证据。含义：**wu-22-05 行为实现解锁，可按 D15 规格实施（实施前
+仍需用户点头，checkpoint §3 约定）**。附注：本轮间隔 30min 为用户显式批准值
+（D15-d 保守默认 60 的覆盖），三拍偏差 ≤5.2s 说明 30min 节拍在宿主侧稳定，
+`bridge_interval_minutes=30` 的收紧前提（SCHED-10 的耗尽期空转无害性）待
+额度归零窗口补充观察后再记 SCHED-10 行。
