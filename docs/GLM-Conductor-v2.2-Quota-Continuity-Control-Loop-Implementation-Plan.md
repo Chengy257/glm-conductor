@@ -327,8 +327,10 @@ Scheduled Task / Automation
 因此：
 
 ```text
-PRESSURE → SHOULD pre-arm
-DRAINING → MUST be armed
+until_done 授权后 → MUST eager-arm Persistent Bridge（D15-c）
+auto_once 风险触发 → SHOULD eager-arm
+PRESSURE → SHOULD arm（manual/notify）
+DRAINING → MUST be armed（create 可用时）
 EXHAUSTED → MUST NOT depend on creating a new wake
 ```
 
@@ -481,7 +483,7 @@ execution_quota_phase:
 - 降低 worker budget；
 - 优先完成当前 work unit；
 - 更新 resume state；
-- SHOULD pre-arm Wake Bridge。
+- SHOULD arm Wake Bridge（未 arm 时，按 §7.2 分层）。
 
 ### DRAINING
 
@@ -751,42 +753,89 @@ if now >= next_check_at:
 
 Wake Bridge 是：
 
-> 在当前 quota window 仍可执行模型调用时，提前创建一个指向下一可用窗口的 scheduled wake，以保证当前模型即使随后耗尽，也有未来一次重新激活入口。
+> 在当前 quota window 仍可执行模型调用、且会话仍拥有 Scheduled Task create capability 时，提前建立的**一条持久 scheduled wake（Persistent Wake Bridge）**——后续所有 quota window 复用、retarget 或按间隔重复触发同一条 bridge，保证当前模型即使随后耗尽，每个未来窗口都有重新激活入口。
+
+Phase 0 #13 宿主硬约束（D15）：
+
+```text
+被 Scheduled Task 触发过的会话（即使该 automation 已 completed）
+→ 不得再创建任何新 Scheduled Task
+```
+
+因此冻结：
+
+```text
+one tracked task
+→ prefer one persistent automation identity
+```
+
+废除：
+
+```text
+one quota boundary = one new automation    （per-window chained wake）
+wake N → resume → create wake N+1          （链式创建）
+```
+
+主路径与可选优化（D15-b）：
+
+```text
+Primary:   Persistent Recurring Bridge（recurring，按间隔重复触发）
+Optional:  Self-Retiming Bridge（仅在 P0-SCHED-01 验证
+           scheduled-owned session 可 Update 后启用）
+```
+
+Self-Retiming 不得作为 correctness 前提（本机 CronUpdate 已知 glitch）。
 
 ---
 
-## 7.2 Bridge 触发条件
+## 7.2 Bridge 触发条件（D15-c：arm 时机分层）
 
-建议：
+### until_done
 
 ```text
-active tracked task
-AND
-continuity.mode != foreground? 不是必须
-AND
-known reset_at
-AND
-execution_quota_phase >= PRESSURE
+task active
+AND auto_resume = until_done
+AND authorization.source = user
+→ MUST eager-arm（授权完成即建，不等 PRESSURE）
 ```
 
-更准确地：
+### auto_once（risk-triggered eager-arm）
 
-### PRESSURE
+以下任一满足即 SHOULD arm：
 
 ```text
-SHOULD arm
+quota enters PRESSURE
+predicted task cost may cross current window
+task is long-horizon
+scheduler create capability may soon be lost
+another Scheduled Task is already associated with current session
+runtime predicts current window cannot safely finish task
 ```
 
-### DRAINING
+且：
 
 ```text
-MUST arm
+DRAINING AND scheduler.create = allowed
+→ MUST arm
+```
+
+### manual / notify
+
+```text
+PRESSURE  → SHOULD arm
+DRAINING  → MUST arm if mechanically possible
+```
+
+若 create 已不可用（scheduled-owned session）且无 reusable bridge：
+
+```text
+continuity = degraded（不得无限 Stop block，见 §12.3）
 ```
 
 ### BLOCKED / EXHAUSTED
 
 ```text
-MUST already be armed
+MUST already be armed（不得依赖现场再建）
 ```
 
 ---
@@ -827,16 +876,45 @@ v2.2 必须新增一个机械义务层。
   "continuation": {
     "obligation": "none",
     "reason": null,
+    "scheduler_context": {
+      "origin": "unknown",
+      "create": "unknown",
+      "update": "unknown",
+      "pause": "unknown",
+      "delete": "unknown",
+      "parent_automation_id": null
+    },
     "wake_bridge": {
       "status": "none",
+      "mode": "recurring",
       "automation_id": null,
-      "wake_at": null,
+      "generation": 0,
+      "current_boundary_id": null,
+      "boundary_id": null,
+      "next_wake_at": null,
       "reset_at": null,
-      "armed_at": null
-    }
+      "wake_at": null,
+      "armed_at": null,
+      "fired_at": null,
+      "bridge_interval_minutes": null
+    },
+    "tombstone": null
   }
 }
 ```
+
+字段语义（D15-e）：
+
+- `scheduler_context.origin`：interactive / scheduled_task / unknown；
+- capability（create/update/pause/delete）：allowed / forbidden / unknown，
+  按会话缓存（单探针纪律，见 §26）；
+- `wake_bridge.mode`：recurring（主路径）/ self_retiming（可选优化）；
+- `boundary_id`：最近观测/消费的 quota boundary（legacy 兼容保留）；
+- `current_boundary_id`：当前 bridge 指向的目标 boundary（persistent 语义
+  的权威字段）；
+- `generation`：self-retiming 模式下同一 automation 的 retarget 代数
+  （recurring 恒 0）；
+- `tombstone`：完成墓碑（见 §15）。
 
 ---
 
@@ -857,13 +935,16 @@ degraded
 
 ## 8.2 wake_bridge.status 枚举
 
-冻结：
+冻结（D15-e 扩展，10 值）：
 
 ```text
 none
 requested
 armed
 fired
+retarget_required
+degraded
+paused
 cancelled
 stale
 failed
@@ -911,7 +992,24 @@ wake_bridge.status == armed
 obligation = wake_required
 ```
 
-Stop Gate 必须 block。
+Stop Gate block 与否由 scheduler capability 联合决定（D15 / INV-22-PB-07）：
+
+```text
+DRAINING + 无 armed bridge
+↓
+scheduler.create?
+├─ allowed   → BLOCK until bridge armed
+├─ forbidden → 既有 bridge 可 Update？
+│             ├─ allowed → require retarget（status=retarget_required）
+│             └─ 不可用  → continuity.degraded（reason=scheduler_create_forbidden）
+│                         不无限 block，SessionStart fallback
+└─ unknown   → 单次受控 Create 探测 → 分类后按上两支处理
+```
+
+冻结不变量：
+
+> **Continuation enforcement MUST NOT require an action that the current
+> scheduler context cannot mechanically perform.**
 
 ### EXHAUSTED
 
@@ -937,31 +1035,43 @@ continuity_bridge_missing_at_exhaustion
 
 ---
 
-# 9. Wake Bridge 生命周期
+# 9. Wake Bridge 生命周期（Persistent 拓扑，D15-a）
 
 ```text
-PRESSURE
+clean interactive session（仍拥有 create capability）
     ↓
-wake bridge requested
+arm ONE persistent bridge（eager / PRESSURE / DRAINING 按 §7.2 分层）
     ↓
-Scheduled Task create
+Scheduled Task create（CronCreate）
     ↓
-PostToolUse observes success
+PostToolUse observes success → wake bridge armed（automation_id 落账）
     ↓
-wake bridge armed
+normal execution → PRESSURE → DRAINING → EXHAUSTED → waiting_quota
     ↓
-quota exhaustion OR task continues
+bridge fires（recurring 按间隔 / self-retiming 按 boundary）
     ↓
-reset_at + grace
-    ↓
-scheduled task fires
-    ↓
-wake bridge fired
+wake bridge fired（scheduled-owned session）
     ↓
 force quota refresh
     ↓
-dynamic resume decision
+dynamic resume decision（§10/§11）
+    ↓
+task incomplete → REUSE SAME BRIDGE
+    （recurring：无需任何动作，下次触发照常；
+     self-retiming：若 Update 可用则 retarget 同一 automation，
+     严禁创建新 Scheduled Task）
 ```
+
+记账语义（D15-g）：
+
+```text
+bridge lifecycle（armed/fired/retargeted/paused/cancelled/degraded）
+≠
+quota window consumption（task_id + boundary_id 幂等消费）
+```
+
+一个 automation 可跨多个 quota window；automation fire count != quota
+window count。
 
 ---
 
@@ -994,6 +1104,8 @@ Required first actions:
 Decision:
 
 - If the goal is complete:
+  write the completed tombstone;
+  attempt a single bridge pause/delete (never retry);
   perform no implementation;
   clean only this task's continuation state and exit.
 
@@ -1019,6 +1131,12 @@ reconcile
 quota-window budget
 
 Do not create a second wake for the same reset boundary unless the previous bridge is invalid.
+
+HARD RED LINE (Phase 0 #13 / D15):
+
+DO NOT CREATE A NEW SCHEDULED TASK FROM THIS WAKE SESSION.
+This session belongs to a scheduled task; the host rejects nested creation.
+Reuse or retarget the existing bridge only if host capability permits.
 ```
 
 ---
@@ -1078,6 +1196,22 @@ route reassessment if needed
 dispatch under permit/lease
 ```
 
+窗口预算消费（D15-g）：仅在
+
+```text
+new executable quota boundary confirmed
+AND authorized resume actually starts
+```
+
+时 `consumed_quota_windows += 1`。以下不消费：
+
+```text
+wake fires but quota still exhausted
+weekly quota still blocking
+provider unavailable
+resume not actually started
+```
+
 ---
 
 # 12. Wake Bridge 强制执行
@@ -1112,6 +1246,16 @@ Continuation gate 不只在 `finalizing` 时工作。
 
 ## 12.2 Blocking 条件
 
+Stop Gate 必须联合判断（D15 / WU-22-07）：
+
+```text
+execution_quota_phase
+wake_bridge.status
+scheduler_context（origin + create/update capability）
+```
+
+不得只判断"是否 armed"。
+
 当：
 
 ```text
@@ -1119,6 +1263,7 @@ task active
 AND execution_quota_phase == DRAINING
 AND reset_at known
 AND wake_bridge.status != armed
+AND scheduler_context.create == allowed
 ```
 
 Stop 输出：
@@ -1128,28 +1273,39 @@ GLM Conductor continuation obligation unresolved:
 quota boundary wake is not armed for task <task-id>.
 
 Required:
-create the scheduled wake for <wake-at>,
+create the persistent wake bridge for <wake-at>,
 then ensure runtime records the resulting automation id.
 ```
+
+capability 为 unknown 时：先走单次受控 Create 探测分类（§26 单探针纪律），
+再按 allowed/forbidden 分支处理。
 
 ---
 
 ## 12.3 Degraded 条件
 
-如果宿主当前不提供 Scheduled Task 能力：
+当：
 
 ```text
-wake.required = true
-automation unavailable
+scheduled-owned session
+AND scheduler.create == forbidden
+AND 无 reusable/editable bridge
 ```
 
-不得声称 continuity active。
+必须：
+
+```text
+continuity = degraded
+reason = scheduler_create_forbidden
+```
+
+不得无限要求 Create（INV-22-PB-07：不得要求当前 scheduler context 机械上
+无法完成的动作），不得声称 continuity active。
 
 记录：
 
 ```text
 continuity_degraded
-reason = automation_unavailable
 ```
 
 允许：
@@ -1159,6 +1315,12 @@ SessionStart fallback
 ```
 
 并显式告知用户。
+
+宿主完全无 Scheduled Task 能力时同理：
+
+```text
+reason = automation_unavailable
+```
 
 ---
 
@@ -1181,11 +1343,11 @@ Agent manually wake-record
 
 ## 13.2 推荐 Hook
 
-如果 ZCode 当前 hook payload 可以观察 scheduled-task / automation tool，则新增：
+Phase 0 已实测冻结工具名（Cron 系原生工具）：
 
 ```text
 PreToolUse:
-  CronCreate / AutomationCreate / ScheduledTaskCreate
+  CronCreate|CronUpdate|CronDelete
 
 PostToolUse:
   same matcher
@@ -1194,7 +1356,8 @@ PostToolUseFailure:
   same matcher
 ```
 
-具体 tool 名需 Phase 0 运行时实测后冻结。
+PostToolUseFailure 对 CronCreate 拒绝的捕获是 scheduler capability 分类的
+机械入口（§13.5）。
 
 ---
 
@@ -1208,8 +1371,13 @@ PostToolUseFailure:
 - 检查 authorization；
 - 检查 window budget；
 - 检查不存在同 boundary 活跃 bridge；
-- 校验 wake_at >= reset_at + grace；
-- 禁止重复/提前/越权 wake。
+- 校验 wake_at >= reset_at + grace（self-retiming 模式）；
+- 禁止重复/提前/越权 wake；
+- **嵌套创建 fail-fast（D15）**：会话 journal 已有 wake_bridge_fired 或
+  capability 缓存 create=forbidden 时，直接拒绝 CronCreate 并提示
+  "本会话为 scheduled-owned，须复用/retarget 既有 bridge"；
+- **单探针纪律**：capability=unknown 时放行一次受控探测，结果落账
+  （scheduler_capability_observed）后本会话缓存，不再重复探测。
 
 Prompt 内必须携带类似：
 
@@ -1221,25 +1389,28 @@ GLM_CONDUCTOR_WAKE=<task-id>:<boundary-id>
 
 ## 13.4 PostToolUse
 
-Automation create 成功后：
+CronCreate 成功后：
 
-从 tool result 解析：
+从 tool result 解析（Phase 0 #2 冻结锚点）：
 
 ```text
-automation_id
-scheduled_at
+tool_result.automation.automationId
+tool_result.automation.nextRunAt（epoch ms）
 ```
 
 然后 runtime 自动：
 
 ```text
-record_quota_wake(...)
+record_wake_bridge(...)
 ```
 
 并：
 
 ```text
 continuation.wake_bridge.status = armed
+continuation.wake_bridge.mode = recurring（默认主路径）
+continuation.wake_bridge.automation_id = <automationId>
+continuation.scheduler_context.create = allowed
 ```
 
 Agent 不再需要手动调用 `wake-record`。
@@ -1248,14 +1419,30 @@ Agent 不再需要手动调用 `wake-record`。
 
 ## 13.5 PostToolUseFailure
 
-记录：
+CronCreate 被宿主拒绝且错误匹配嵌套创建限制（Phase 0 #13 原文：
+
+```text
+Cannot create a scheduled task inside a session
+that already belongs to a scheduled task
+```
+
+）时：
+
+```text
+scheduler_context.origin = scheduled_task
+scheduler_context.create = forbidden
+journal: scheduled_nested_create_rejected
+wake_bridge.status = failed 或 degraded（按 §8.3 DRAINING 分支）
+```
+
+其余失败：
 
 ```text
 wake_bridge.status = failed
 continuation.obligation = wake_required
 ```
 
-DRAINING 下 Stop 继续 block。
+DRAINING + create=forbidden 下按 §12.3 走 degraded，不无限 block。
 
 ---
 
@@ -1294,36 +1481,69 @@ task_id + boundary_id
 
 只允许一个 active Wake Bridge。
 
+Persistent 语义增量（D15-g）：
+
+```text
+one tracked task
+→ prefer one persistent automation identity
+```
+
+automation 生命周期记账与窗口消费记账分离：
+
+```text
+automation fire count != quota window count
+quota window budget 按 task_id + boundary_id 幂等消费
+同一 boundary 只能消费一次
+```
+
 ---
 
 # 15. Completion Cleanup
 
 任务完成必须：
 
-1. 删除或取消当前 task 的未触发 Wake Bridge；
-2. 标记：
-   ```text
-   wake_bridge.status = cancelled
+1. 对当前 task 的持久 bridge 做一次 pause/delete 尝试（单次，绝不重试）；
+2. 写 completed tombstone：
+   ```json
+   {
+     "task_id": "...",
+     "status": "completed",
+     "completed_at": "...",
+     "bridge_should_noop": true
+   }
    ```
-3. 删除 task-local runtime state；
-4. 不触碰其他 task 的 automation；
-5. 防止 ghost wake。
+3. 标记：
+   ```text
+   wake_bridge.status = cancelled / paused
+   ```
+4. 删除 task-local runtime state；
+5. 不触碰其他 task 的 automation。
 
-如果无法删除 automation：
+ghost bridge 四层缓解（D15-d）：
+
+```text
+1. completion 时单次 pause/delete 尝试
+2. 明确 UI 手动清理路径（删除失败时向用户提示 automation id）
+3. future ghost wake 必须 cheap no-op
+4. completed tombstone（wake 端点零实施快速判定）
+```
+
+如果无法删除 automation（本机 CronDelete 已知 glitch，默认按失败预期）：
 
 ```text
 wake fires
     ↓
 load task
     ↓
-task completed / missing
+tombstone / task completed or missing
     ↓
 no implementation
     ↓
 exit
 ```
 
-Universal Wake 必须天然安全。
+Universal Wake 必须天然安全。recurring ghost 的空转成本由
+`bridge_interval_minutes`（保守默认 60）约束。
 
 ---
 
@@ -1616,13 +1836,17 @@ continuation-check <repo> <task>
 
 ## 22.2 wake-plan
 
-纯计算：
+纯计算（Persistent Bridge 参数，不创建 automation）：
 
 ```json
 {
   "required": true,
+  "mode": "recurring",
   "boundary_id": "...",
+  "current_boundary_id": "...",
   "wake_at": "...",
+  "bridge_interval_minutes": 60,
+  "eager": true,
   "prompt": "...",
   "reason": "..."
 }
@@ -1637,8 +1861,10 @@ continuation-check <repo> <task>
 显示：
 
 ```text
-none/requested/armed/fired/cancelled/stale/failed
+none/requested/armed/fired/retarget_required/degraded/paused/cancelled/stale/failed
 ```
+
+并附 scheduler_context（origin + capability 缓存）与 mode/generation。
 
 ---
 
@@ -1671,22 +1897,36 @@ quota_control
 
 ## 23.2 新默认块
 
-建议：
+建议（D15-e 扩展后）：
 
 ```json
 {
   "continuation": {
     "obligation": "none",
     "reason": null,
+    "scheduler_context": {
+      "origin": "unknown",
+      "create": "unknown",
+      "update": "unknown",
+      "pause": "unknown",
+      "delete": "unknown",
+      "parent_automation_id": null
+    },
     "wake_bridge": {
       "status": "none",
+      "mode": "recurring",
       "boundary_id": null,
+      "current_boundary_id": null,
       "automation_id": null,
+      "generation": 0,
       "reset_at": null,
       "wake_at": null,
+      "next_wake_at": null,
       "armed_at": null,
-      "fired_at": null
-    }
+      "fired_at": null,
+      "bridge_interval_minutes": null
+    },
+    "tombstone": null
   }
 }
 ```
@@ -1695,7 +1935,7 @@ quota_control
 
 # 24. Journal 新事件
 
-新增：
+新增（wu-22-01 已落地 13 个）：
 
 ```text
 quota_heartbeat
@@ -1711,6 +1951,18 @@ warm_only_completed
 resume_controller_started
 resume_controller_completed
 continuity_degraded
+```
+
+WU-22-01a 增量（D15-e，persistent bridge 生命周期与 capability）：
+
+```text
+scheduler_capability_observed
+wake_bridge_retargeted
+wake_bridge_pause_requested
+wake_bridge_paused
+wake_bridge_degraded
+quota_boundary_consumed
+scheduled_nested_create_rejected
 ```
 
 ---
@@ -1737,7 +1989,7 @@ wake requirement changed
 
 # 25. Hooks 调整
 
-建议最终：
+建议最终（工具名 Phase 0 实测冻结为 Cron 系）：
 
 ```text
 SessionStart
@@ -1751,24 +2003,24 @@ PreToolUse Agent|Task
 PreToolUse Bash
     policy
 
-PreToolUse ScheduledTaskCreate
+PreToolUse CronCreate|CronUpdate|CronDelete
     wake permit / boundary validation
+    嵌套创建 fail-fast（scheduled-owned 会话拒绝 CronCreate）
 
 PostToolUse Agent|Task
     agent run
 
-PostToolUse ScheduledTaskCreate
-    auto record wake bridge
+PostToolUse CronCreate
+    auto record wake bridge（automation id / nextRunAt 锚点）
 
-PostToolUseFailure ScheduledTaskCreate
-    wake failure state
+PostToolUseFailure CronCreate
+    嵌套创建拒绝 → capability 分类（create=forbidden）
+    其余失败 → wake failure state
 
 Stop
-    continuation obligation
+    continuation obligation（phase + bridge status + scheduler_context）
     completion integrity
 ```
-
-具体 Scheduled Task tool matcher 名必须运行时实测冻结。
 
 ---
 
@@ -1794,6 +2046,12 @@ v2.2 实施前必须先做 Phase 0，不允许凭文档猜 tool payload。
 ```text
 docs/GLM-Conductor-v2.2-Phase0-Scheduled-Wake-Runtime-Verification.md
 ```
+
+D15 增量：该报告 §5 的 **P0-SCHED-01..10 实验矩阵**（capability 探测，
+区分 fresh interactive / scheduled-owned 会话，单探针纪律）。其中
+**P0-SCHED-04（同一 recurring task 稳定重复触发）为 HARD GATE**——不通过则
+Persistent Recurring Bridge 主路径失效，停止 WU-22-05 行为实现并重估架构；
+P0-SCHED-01（scheduled-owned Update）通过前 Self-Retiming 不得启用。
 
 如果无法 Hook Scheduled Task：
 
@@ -1829,6 +2087,27 @@ Stop block
 - invalid enum；
 - missing fields；
 - task completion cleanup。
+
+---
+
+## WU-22-01a：Persistent Bridge Schema Increment（D15-e）
+
+只做 schema，不做行为：
+
+```text
+enum（origin/capability/mode/10 值 status）
+schema + validation
+legacy defaults
+serialization
+manifest fields（quota_control/bridge 快照块）
+journal vocabulary（+7 persistent 事件）
+migration tests
+```
+
+新增：`scheduler_context`（origin + create/update/pause/delete +
+parent_automation_id）、`wake_bridge.mode/generation/current_boundary_id/
+next_wake_at/bridge_interval_minutes`、`tombstone` 块、
+`quota_control.bridge_interval_minutes`（默认 60，D15-d）。
 
 ---
 
@@ -1889,51 +2168,76 @@ DRAINING：
 
 ---
 
-## WU-22-05：Wake Planner
+## WU-22-05：Persistent Wake Bridge（D15 重写，原 Wake Planner）
 
-新增：
+实现：
 
 ```text
-wake-plan
-boundary_id
-Universal Wake prompt
+eager-arm（§7.2 分层）
+persistent automation identity
+recurring bridge（主路径）
+boundary generation
+bridge interval（quota_control.bridge_interval_minutes）
+Universal Wake prompt（含硬红线）
+bridge idempotence
+ghost cleanup（单次尝试）
+completed tombstone 写入
+degraded handling
 ```
 
-确保：
+冻结：
 
 ```text
-same task + same boundary
-→ idempotent
+one tracked task → prefer one persistent automation identity
+```
+
+禁止：
+
+```text
+one quota boundary = one new Scheduled Task
+```
+
+P0-SCHED-04 hard gate 不通过则本单元停止实施并重估架构。
+
+---
+
+## WU-22-06：Scheduler Capability & Bridge Lifecycle Adapter（D15 重写，原 Scheduled Task Hook Closure）
+
+实现：
+
+```text
+session origin detection（interactive/scheduled_task/unknown）
+create/update/pause/delete capability（单探针 + 会话缓存）
+PreToolUse CronCreate（wake permit + 嵌套创建 fail-fast）
+PostToolUse CronCreate（automation id 提取 + auto record）
+PostToolUseFailure（嵌套拒绝 → capability 分类）
+parent automation binding
+bridge lifecycle 记账（armed/fired/retargeted/paused/cancelled/degraded）
 ```
 
 ---
 
-## WU-22-06：Scheduled Task Hook Closure
+## WU-22-07：Continuation Stop Gate（D15 修订）
 
-Phase 0 成功时实施：
-
-- PreToolUse validation；
-- PostToolUse auto wake-record；
-- PostToolUseFailure；
-- marker binding；
-- automation id capture。
-
----
-
-## WU-22-07：Continuation Stop Gate
-
-新增：
+联合判断：
 
 ```text
-DRAINING + active + known reset + no armed wake
-→ block
+execution_quota_phase
+wake_bridge.status
+scheduler_context（origin + capability）
 ```
 
-加入 bounded continuation loop。
+不得只判断"是否 armed"。冻结 INV-22-PB-07：
+
+```text
+scheduled-owned + create forbidden + 无 reusable/editable bridge
+→ continuity.degraded
+→ 不无限 block
+```
 
 ---
 
-## WU-22-08：Wake Fire / Resume Controller
+## WU-22-08：Wake Fire / Resume Controller（D15 修订）
 
 实现：
 
@@ -1943,17 +2247,23 @@ runtime/resume_controller.py
 
 或整合入 `task_manager.py`。
 
-流程：
+每次 bridge wake：
 
 ```text
-wake
-→ force refresh
-→ load state
-→ completed?
-→ warm-only or resume
-→ reconcile
-→ next safe work
+force-refresh quota
+→ load state / manifest / repository truth
+→ record quota boundary（task_id + boundary_id 幂等）
+→ goal complete?
+   → attempt bridge pause/delete once + tombstone + exit
+→ manual/notify → warm-only
+→ auto_once/until_done
+   → authorization valid AND executable boundary confirmed
+   → reconcile → resume next safe unit（仅此时消费窗口预算）
+→ task incomplete → REUSE SAME BRIDGE
 ```
+
+严禁从 wake 会话创建新 Scheduled Task；Update 可用则 retarget 同一
+automation，否则保持 recurring bridge 存活。
 
 ---
 
@@ -2061,8 +2371,8 @@ PRESSURE + active + reset known
 ### WB-02
 
 ```text
-DRAINING + no wake
-→ wake required
+DRAINING + no wake + create allowed
+→ wake required（Stop block）
 ```
 
 ### WB-03
@@ -2083,8 +2393,25 @@ same boundary repeated heartbeat
 
 ```text
 reset_at changed
-→ old bridge stale
-→ new bridge required
+→ 同一 bridge retarget（Update 可用）或依赖 recurring 触发节奏
+→ 不得新建 automation
+```
+
+### Persistent Bridge 矩阵（D15 新增，PB-01..10）
+
+```text
+PB-01 scheduled-owned session Create 被拒 → runtime 分类 create=forbidden
+PB-02 interactive + until_done + user 授权 → bridge 立即 eager-arm
+PB-03 多次 wake 周期 → 同一 automation_id
+PB-04 同一 automation 跨 boundary A/B 两次 resume → consumed windows = 2
+PB-05 wake 触发但额度仍耗尽 → 不消费窗口、不实施
+PB-06 auto_once：首次 wake 仍耗尽（预算保留）→ 后续 wake 恢复成功才消费 1 →
+      此后自动恢复拒绝
+PB-07 DRAINING + scheduled-owned + create forbidden + 无可编辑 bridge
+      → degraded，无无限 Stop 循环
+PB-08（Update 可用时）bridge fire → 新 reset_at → 同一 automation retarget
+PB-09（Update 不可用时）同一 recurring automation 多次 wake 周期
+PB-10 任务完成 + bridge 删不掉 → 未来 wake → tombstone 命中 → no-op
 ```
 
 ---
@@ -2218,7 +2545,7 @@ current unit safe finish
 ↓
 manifest refreshed
 ↓
-wake bridge pre-armed
+persistent wake bridge armed（until_done 授权即 eager-arm）
 ↓
 automation id recorded
 ↓
@@ -2273,13 +2600,14 @@ NO implementation
 期望：
 
 ```text
-completion cleanup removes wake
+completion cleanup removes / pauses wake
++ tombstone 写入
 ```
 
 或删除失败时：
 
 ```text
-future wake no-op
+future wake no-op（tombstone 命中）
 ```
 
 ---
@@ -2288,7 +2616,7 @@ future wake no-op
 
 ```text
 DRAINING
-ScheduledTaskCreate fails
+CronCreate fails
 ```
 
 期望：
@@ -2296,7 +2624,15 @@ ScheduledTaskCreate fails
 ```text
 wake_bridge=failed
 obligation=wake_required
-Stop blocked
+Stop blocked（create=allowed 时）
+```
+
+如果失败为嵌套创建限制（scheduled-owned）：
+
+```text
+scheduler_context.create = forbidden
+continuity degraded
+SessionStart fallback clearly reported
 ```
 
 如果宿主能力不可用：
@@ -2319,26 +2655,87 @@ SessionStart fallback clearly reported
 
 ---
 
+## RG-22-06：Multi-Window Until-Done（D15 新增，跨双窗硬验收）
+
+真实跨至少两个 quota boundaries：
+
+```text
+clean session
+→ until_done authorization
+→ eager-arm persistent bridge
+→ window 1 exhaustion
+→ recurring wake
+→ scheduled-owned resume
+→ NO nested create
+→ same bridge survives
+→ window 2 wake
+→ resume again
+```
+
+关键验收：
+
+> 第二个窗口恢复不得依赖 Scheduled Task create。
+
+---
+
+## RG-22-07：Scheduler Capability Matrix（D15 新增）
+
+真实记录宿主行为：
+
+```text
+Create / Update / Pause / Delete
+Recurring repeated-fire
+Overlap behavior
+Offline behavior
+```
+
+（按 P0-SCHED-01..10 结果填写，区分 fresh interactive / scheduled-owned。）
+
+---
+
+## RG-22-08：Recurring Offline Recovery（D15 新增）
+
+验证：
+
+```text
+one recurring trigger skipped/missed
+↓
+host available again
+↓
+future recurring trigger still works
+```
+
+若不成立，记录 hard limitation，并继续依赖：
+
+```text
+SessionStart correctness fallback
+```
+
+---
+
 # 30. Release Acceptance Criteria
 
 v2.2.0 不得发布为 stable，除非满足：
 
 1. 24% 长任务 dogfood 可进入 PRESSURE/DRAINING；
 2. DRAINING 下不会继续扩大 work surface；
-3. reset_at 已知时可预 arm Wake Bridge；
+3. reset_at 已知时可预 arm Wake Bridge（until_done 授权即 eager-arm）；
 4. Wake Bridge 创建成功能被 runtime 机械记录；
-5. DRAINING + missing bridge 会被 completion/continuation gate 阻止；
+5. DRAINING + missing bridge 会被 completion/continuation gate 阻止
+   （capability=forbidden 时转为显式 degraded，不无限 block）；
 6. EXHAUSTED 不依赖现场再建 continuation；
 7. wake 后强制 quota refresh；
 8. manual/notify 只 warm，不自动实施；
 9. auto_once/until_done 能 reconcile + resume；
 10. duplicate boundary 不创建重复 wake；
-11. completion cleanup 不产生 ghost implementation；
+11. completion cleanup 不产生 ghost implementation（tombstone 生效）；
 12. legacy v2.1 state 可读取；
 13. 无 provider credential 时仍可 fallback；
 14. full test suite green；
 15. validator green；
-16. 至少完成一轮真实跨 5h quota window dogfood。
+16. 至少完成一轮真实跨 5h quota window dogfood（模式：干净会话起 task +
+    persistent bridge + 完成时收尾，RG-22-06 双窗验收 + RG-22-07 能力矩阵
+    + RG-22-08 离线恢复）。
 
 ---
 
@@ -2396,7 +2793,7 @@ Authorization header
 
 ---
 
-## 32.4 Automation 预算
+## 32.4 Automation 预算与窗口消费（D15-g 重写）
 
 仍使用：
 
@@ -2405,23 +2802,41 @@ max_quota_windows
 consumed_quota_windows
 ```
 
-但要区分：
+但必须拆分：
 
 ```text
-bridge creation
+automation lifecycle（bridge 建立/触发/retarget）
 ```
 
 与：
 
 ```text
-actual execution window consumption
+actual quota-window consumption
 ```
 
-建议保持当前语义：
+冻结：
 
-> 成功创建真实 future wake 后即消费 window budget。
+```text
+automation fire count != quota window count
+quota window budget 按 task_id + boundary_id 幂等消费
+同一 boundary 只能消费一次
+```
 
-重放同 automation id 必须幂等。
+消费语义（取代旧"成功创建真实 future wake 后即消费"的建议）：
+
+> 仅在 **新可执行 quota boundary 确认 AND 授权 resume 实际开始** 时
+> `consumed_quota_windows += 1`。
+
+不消费的情形：
+
+```text
+wake fires but quota still exhausted
+weekly quota still blocking
+provider unavailable
+resume not actually started
+```
+
+重放同 automation id / 同 boundary 必须幂等。
 
 ---
 
@@ -2461,10 +2876,14 @@ plugins/glm-conductor/hooks/
 
 ```text
 Phase 0
-Scheduled Task runtime verification
+Scheduled Task runtime verification（含 P0-SCHED-01..10 矩阵，
+SCHED-04 为 hard gate，须在 WU-22-05 行为实现前通过）
 
 M1
 state continuation schema
+
+M1a
+persistent bridge schema increment（WU-22-01a，D15-e）
 
 M2
 execution quota phase
@@ -2476,16 +2895,16 @@ M4
 DRAINING dispatch gate
 
 M5
-wake planner + boundary id
+persistent wake bridge + boundary id（依赖 P0-SCHED-04 通过）
 
 M6
-scheduled task hook closure
+scheduler capability & bridge lifecycle adapter
 
 M7
-continuation Stop gate
+continuation Stop gate（capability 联合判断）
 
 M8
-resume controller
+resume controller（严禁新建 Scheduled Task）
 
 M9
 manifest/session start
@@ -2538,9 +2957,9 @@ flowchart TD
     D --> G[DRAINING]
     D --> H[BLOCKED]
 
-    F --> I[Pre-arm Wake Bridge]
-    G --> J[Wake Bridge MUST be armed]
-    J --> K[Scheduled Task]
+    F --> I[Eager-arm Persistent Wake Bridge]
+    G --> J[Bridge MUST be armed or degraded]
+    J --> K[Persistent Recurring Bridge]
 
     G --> L[Finish current atomic work]
     G --> M[Verification / Review]
@@ -2548,8 +2967,8 @@ flowchart TD
 
     H --> O[waiting_quota]
 
-    K --> P[reset_at + grace]
-    P --> Q[Universal Wake]
+    K --> P[Bridge fires: recurring interval / retarget boundary]
+    P --> Q[Universal Wake: NO nested create]
 
     Q --> R[Force-refresh quota]
     R --> S[Load task + repo + manifest]
@@ -2565,6 +2984,8 @@ flowchart TD
     Y --> Z[Resume next safe work unit]
 
     W --> AA[Exit recoverable]
+    X --> AB[REUSE SAME BRIDGE]
+    AB --> K
     Z --> B
 ```
 
@@ -2617,10 +3038,20 @@ Add:
 9. warm-only vs authorized resume decision at wake time.
 
 Critical invariants:
+- a session ever triggered by a Scheduled Task can never create another
+  Scheduled Task; per-window chained wake creation is forbidden;
+- one tracked task prefers one persistent automation identity;
+- until_done (user-authorized) MUST eager-arm while create capability exists;
+- auto_once uses risk-triggered eager-arm;
 - quota exhaustion is too late to establish continuity;
-- PRESSURE should pre-arm a bridge;
-- DRAINING must have an armed bridge when reset_at is known;
+- DRAINING must have an armed bridge when create is allowed; otherwise
+  continuity degrades explicitly — never demand a mechanically impossible
+  scheduler action;
 - EXHAUSTED must not depend on creating a new bridge;
+- never create a Scheduled Task from a wake session; reuse or retarget the
+  existing bridge only;
+- automation fire count != quota window count; budget consumption is keyed
+  by task_id + boundary_id and only on successful authorized resume;
 - manual/notify wake must never start implementation;
 - auto_once/until_done requires user authorization;
 - repository state remains authoritative;
@@ -2629,10 +3060,13 @@ Critical invariants:
 
 Before implementation:
 perform Phase 0 runtime verification of ZCode Scheduled Task tool names,
-PreToolUse/PostToolUse payloads, automation id output, and wake delivery semantics.
+PreToolUse/PostToolUse payloads, automation id output, wake delivery
+semantics, and the P0-SCHED-01..10 capability matrix. P0-SCHED-04
+(stable repeated recurring fires) is a hard gate for WU-22-05; P0-SCHED-01
+(scheduled-owned Update) gates the optional self-retiming strategy only.
 
-Release only after the real 24%-remaining long-task dogfood and one real
-cross-window resume scenario pass end to end.
+Release only after the real 24%-remaining long-task dogfood and the real
+multi-window until-done dogfood (RG-22-06/07/08) pass end to end.
 ```
 
 ---

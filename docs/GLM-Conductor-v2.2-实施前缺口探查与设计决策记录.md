@@ -247,3 +247,98 @@ wu-22-01 (M1 schema) ──┬─→ wu-22-02 (M2 phase) ─┬─→ wu-22-03 (
 
 M0 Phase 0 为派发 wu-22-06 前的主会话宿主实测（不占 work unit），产出
 `docs/GLM-Conductor-v2.2-Phase0-Scheduled-Wake-Runtime-Verification.md`。
+
+---
+
+## 九、D15：Persistent Wake Bridge 架构修正（用户 2026-09-01 批准，含修改项）
+
+**触发**：Phase 0 #13 宿主硬约束——被 Scheduled Task 触发过的会话（即使该
+automation 已 completed）永久不得再创建任何 Scheduled Task。该约束推翻
+"逐窗链式建 wake"（wake N → resume → create wake N+1）拓扑，也推翻
+v2.1 时代记忆处方"until_done 惰性逐窗创建"。证据：
+`docs/GLM-Conductor-v2.2-Phase0-Scheduled-Wake-Runtime-Verification.md` #13、
+`docs/GLM-Conductor-v2.2-Persistent-Wake-Bridge-Architecture-Correction.md`（架构
+决策证据文档，非第二 truth）。
+
+### D15-a — 批准：拓扑切换
+
+WU-22-05～08 全部切换 Persistent Wake Bridge：一个 tracked task 恒指向**一条**
+持久 automation 身份；废除"one quota boundary = one new automation"语义。
+
+### D15-b — 批准：策略优先级（含本机修正）
+
+主路径 = **Persistent Recurring Bridge**；Self-Retiming 仅为可选优化，且仅在
+宿主明确验证"scheduled-owned session 可 Update 既有 automation"（P0-SCHED-01
+通过）后启用。**不得把 Update capability 当 correctness 前提**。本机依据：
+CronUpdate/CronDelete 有已知 glitch（§七红线），主路径必须绕开 Update。
+
+### D15-c — 批准（含修改）：arm 时机分层
+
+- `until_done`（task active + authorization.source=user）：**MUST eager-arm**，
+  授权完成即建 bridge，不等 PRESSURE；
+- `auto_once`：risk-triggered eager-arm——PRESSURE / 预测成本可能跨窗 /
+  long-horizon / create capability 可能即将丢失 / 会话已关联其他 Scheduled
+  Task / 运行时预测当前窗口无法安全完成任务，任一满足即 SHOULD arm；
+  `DRAINING AND scheduler.create=allowed` 则 MUST arm；
+- `manual/notify`：PRESSURE → SHOULD arm；DRAINING → mechanically possible
+  则 MUST arm；create 不可用且无 reusable bridge → `continuity=degraded`，
+  不得无限 Stop block。
+
+### D15-d — 批准（含修改）：间隔与 ghost 缓解
+
+`quota_control` 新增 `bridge_interval_minutes`；**保守默认 60 分钟**（recurring
+overlap 行为经 P0-SCHED-10 验证前不冻结 30）。ghost bridge 四层缓解：
+① completion 时单次 pause/delete 尝试（绝不重试）；② 明确 UI 手动清理路径；
+③ future ghost wake 必须 cheap no-op；④ completed task tombstone
+（`{task_id, status:"completed", completed_at, bridge_should_noop:true}`）。
+
+### D15-e — 批准：WU-22-01a schema 前置增量
+
+在 WU-22-05～08 行为实现前新增 **WU-22-01a**（只做 schema/validation/defaults/
+serialization/manifest 字段/journal 词汇/迁移测试，不做行为）：
+`scheduler_context.origin`（interactive/scheduled_task/unknown）与 capability
+（allowed/forbidden/unknown × create/update/pause/delete +
+parent_automation_id）；`wake_bridge.mode`（recurring/self_retiming）；
+`wake_bridge.status` 扩为 10 值（+retarget_required/degraded/paused）；
+新增字段 automation_id（已有）/generation/current_boundary_id/next_wake_at/
+bridge_interval_minutes；tombstone 块。
+
+### D15-f — 批准：P0-SCHED 实验矩阵（P0-SCHED-01..10）
+
+见 Phase 0 报告 §5。所有 capability 实验区分 fresh interactive session 与
+scheduled-owned session；每项记录 session origin / parent automation id /
+previous trigger history / tested capability / result / host error；单探针纪律
+（unknown → 一次受控探测 → allowed/forbidden → 本会话缓存；已知
+create=forbidden 后不得重复真实 Create 探测）。**P0-SCHED-04（同一 recurring
+task 能否稳定第二次/第三次触发）为 HARD GATE**——不通过则 Persistent
+Recurring Bridge 策略失效，停止 WU-22-05 行为实现并重估架构。
+
+### D15-g — 批准：记账与 auto_once 语义（本节为用户指令 §4/§5 的落账）
+
+- automation lifecycle 与 quota-window consumption 拆分；冻结
+  `automation fire count != quota window count`；
+- 窗口预算按 `task_id + boundary_id`（`<window-kind>:<reset-at>`）幂等消费，
+  同一 boundary 只能消费一次；
+- `auto_once` = **一次成功的跨可执行新 quota boundary 的自动恢复**（不是一次
+  automation 触发）。wake 触发但额度仍耗尽 / weekly cap 阻塞 / provider 不可用 /
+  resume 未实际开始 → 不消费；仅在"新可执行 boundary 确认 AND 授权 resume 实际
+  开始"时 `consumed_quota_windows += 1`。
+- **本项取代主计划旧 §32.4"成功创建真实 future wake 后即消费 window budget"
+  的建议语义**。
+
+### D15 红线增量（并入 §七）
+
+- 不得继续实现 per-window chained wake；
+- 不得在 scheduled-owned session 中创建 next wake；
+- 不得把 Update capability 当 correctness 前提；
+- 不得把 automation trigger count 当 quota window count；
+- overlap 未验证前不得把 30min 固化成硬默认；
+- 已知 create=forbidden 后不得重复 probe；
+- Stop Gate 不得无限要求机械上不可能的 scheduler 动作（INV-22-PB-07）。
+
+### D15 账本映射变更
+
+wu-22-01a 插入为 wu-22-01 后继（M1a）；wu-22-05（Persistent Wake Bridge）、
+wu-22-06（Scheduler Capability & Bridge Lifecycle Adapter）、wu-22-07
+（Continuation Stop Gate，联合判断 phase + bridge status + scheduler_context）、
+wu-22-08（Resume Controller，严禁新建 Scheduled Task）按修正后规格重写。

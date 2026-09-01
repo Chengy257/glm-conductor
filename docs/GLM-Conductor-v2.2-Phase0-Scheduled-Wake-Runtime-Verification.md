@@ -86,3 +86,66 @@ ms → ISO 换算后即 wake_at 事实）。**注意**：PostToolUse payload 中
 | Cron 工具是否被 PreToolUse 管道覆盖 | M6 probe 实测；失败则走降级路径（主计划 §26 已预留） |
 | 槽位上限 20 的精确值 | 不强求；cleanup 设计已按「容忍删除失败」 |
 | 休眠 / ZCode 关闭后的 missed-wake 行为 | RG-22-05 真实 dogfood 覆盖 |
+
+---
+
+## 5. P0-SCHED 实验矩阵（D15-f，2026-09-01 冻结）
+
+Persistent Wake Bridge 的 capability 依赖必须在 WU-22-05/06 行为实现前实测。
+**所有实验必须在 fresh interactive session 执行**（本会话已 scheduled-owned，
+#13 后无法做任何创建类实验）。
+
+### 5.1 纪律
+
+- **单探针纪律**：capability=unknown → 一次受控探测 → allowed/forbidden →
+  本会话缓存（journal `scheduler_capability_observed`）；**已知
+  create=forbidden 后不得重复真实 Create 探测**；
+- CronUpdate / CronDelete 每实验**至多一次调用、绝不重试**（本机已知 glitch，
+  预期失败，失败本身即矩阵数据）；
+- recurring 探针自身无法删除时容忍 ghost（prompt 纯 no-op），观察后由用户
+  在 Automations UI 手动清理（顺带完成 SCHED-08 UI 侧取证）；
+- 每项实验记录六字段：
+
+```text
+session origin（fresh interactive / scheduled-owned）
+parent automation id
+previous trigger history
+tested capability（create/update/pause/delete/recurring 语义）
+result（allowed / forbidden / unknown + 行为描述）
+host error（原文，若有）
+```
+
+### 5.2 实验清单
+
+| 编号 | 实验 | 决定内容 | 优先级 |
+|---|---|---|---|
+| P0-SCHED-01 | scheduled-owned session 能否 Update parent task | Self-Retiming 是否可启用（不可则 recurring 唯一路径） | 高 |
+| P0-SCHED-02 | 能否 Pause parent task | 完成后能否自停（ghost 缓解第 1 层） | 高 |
+| P0-SCHED-03 | 能否 Delete parent task | ghost bridge 清理是否只能靠 UI | 高 |
+| P0-SCHED-04 | 同一 recurring task 能否第二次/第三次稳定触发 | **HARD GATE：不通过则 Persistent Recurring Bridge 策略失效，停止 WU-22-05 行为实现并重估架构** | **最高** |
+| P0-SCHED-05 | recurring run 能否修改自身 schedule | 是否可按真实 reset_at retarget | 中 |
+| P0-SCHED-06 | previous run 未结束时 next trigger 行为 | overlap 并发恢复防护（interval 下限依据） | 中 |
+| P0-SCHED-07 | host/app offline 或 sleep 后 recurring 后续 trigger 行为 | 离线恢复能力（RG-22-08 前置观察） | 中 |
+| P0-SCHED-08 | Chat 创建与 Automations UI/Form 创建是否同样受嵌套限制 | 是否存在 clean-controller 路径 + UI 手动清理可用性 | 中 |
+| P0-SCHED-09 | payload（PreToolUse/PostToolUse/事件输入）是否暴露 parent automation / session origin | scheduler_context 的机械识别入口 | 中 |
+| P0-SCHED-10 | recurring 耗尽期触发行为（prompt 送达但模型调用被 provider 拒） | automation 是否存活 / runCount 推进 / 下次触发照常（耗尽期空转是否无害；`bridge_interval_minutes` 是否可从 60 收紧到 30 的前提） | 高 |
+
+### 5.3 执行建议
+
+一次新会话批量执行（最小成本路径）：
+
+1. SCHED-09（零成本：读工具 schema / payload 形态）；
+2. SCHED-04/05/06/10 合并：创建一个 5-10 分钟间隔 recurring 探针，观察
+   2-3 次触发（含至少一次额度耗尽期触发），期间在 owned 状态下单次尝试
+   Update（SCHED-01）/ Pause（SCHED-02）；
+3. SCHED-03：任务完成后单次 Delete 尝试；
+4. SCHED-08：用户 UI 侧创建/删除各一次；
+5. SCHED-07：关闭 ZCode 跨过一次触发时刻再恢复。
+
+### 5.4 结果记录位
+
+本节预留结果表（实验完成后回填，RG-22-07 能力矩阵的数据源）：
+
+| 编号 | session origin | parent automation | tested | result | host error |
+|---|---|---|---|---|---|
+| （待回填） | | | | | |
