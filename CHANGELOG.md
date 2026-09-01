@@ -1,5 +1,13 @@
 # Changelog
 
+## 2.1.0
+
+Stable release, landed **2026-09-01**. The v2.1 arc is complete — from the M1-M3 control plane (dispatch permits, execution-policy authorization facts, runtime-observed agent lifecycle, crash reconciliation), through M4-M6 (dispatch waves with bounded parallelism, runtime quota resolution with authorized resume, verification/review provenance receipts), to the alpha3 runtime integrity closure (RB-21-01..05 + SH-21-01..03: recovery reconciliation, provenance binding, transaction compensation, fail-closed permit integrity, multi-repo dual-root).
+
+Stable gate evidence: dogfood R1-R5 and A-E all live-verified; mid-batch + final + README reviews all ship; 1328 tests green; validator 15/15; CI green on ubuntu + windows x Python 3.8/3.13 for alpha3, rc1 and this tag; release metadata consistent (plugin.json / CHANGELOG / README, prerelease flags correct).
+
+The core loop is now closed end to end: policy -> permit -> dispatch -> runtime-observed agent run -> crash/quota interruption -> evidence-based reconcile -> authorized resume -> verification -> runtime-bound review -> completion gate — none of it depending on “the model should remember to”.
+
 ## 2.1.0-rc1
 
 Release candidate, landed **2026-09-01** — **bugfix / docs / dogfood fallout only** (no features, per the rc gate):
