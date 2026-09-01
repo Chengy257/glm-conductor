@@ -25,7 +25,11 @@
     scheduler_create_capability / wake_bridge_mode / wake_bridge_status /
     automation_id / generation / boundary_id / next_wake_at /
     bridge_interval_minutes，legacy 缺块按 default_continuation 默认
-    解释，所有键恒存在）。
+    解释，所有键恒存在）/ continuity（v2.2 M9 wu-22-09 增量键：控制
+    回路 continuity 面投影——obligation / execution_phase /
+    auto_resume / consumed_quota_windows / max_quota_windows 五键恒
+    存在；wake_bridge 事实已由 quota_control 九键投影，本块只补齐其
+    缺口，legacy 缺块按默认解释，只增不改不删）。
 
 失败语义（§10.3 冻结——本模块的调用方契约）：
     写 manifest 失败不得覆盖 state truth、不得让正常事务半提交——
@@ -46,7 +50,8 @@ import os
 import pathlib
 
 from runtime import agent_run, journal
-from runtime.execution_policy import default_execution_policy
+from runtime.execution_policy import (consumed_quota_windows,
+                                      default_execution_policy)
 
 # manifest 文件名（任务目录内，与 state.json / events.jsonl 平级）
 MANIFEST_FILENAME = "manifest.json"
@@ -171,6 +176,63 @@ def _quota_control_snapshot(st):
     }
 
 
+def _continuity_snapshot(st):
+    """continuity 面增量投影（v2.2 M9，wu-22-09）——五键恒存在。
+
+    投影控制回路恢复所需、而既有 quota_control（D15-e 九键）/ 
+    resume_authorization 两块尚未覆盖的缺口：
+      - obligation：continuation.obligation（缺块 / 缺键按
+        DEFAULT_CONTINUATION 的 "none" 无义务态）；
+      - execution_phase：state.quota.execution_phase（M4 prepare 时点
+        回填的执行相，D13；缺块 / 缺键 / 回填未发生过 → None，不虚构）；
+      - auto_resume：execution_policy.continuity.auto_resume（授权
+        词汇，缺块按默认块 "manual"）；
+      - consumed_quota_windows / max_quota_windows：窗口预算记账与
+        上限（consumed 经 runtime.execution_policy.consumed_quota_windows
+        容错读，非法形状一律 0；max 缺键 / 形状异常（bool / 负数 /
+        非整数）按 0 保守解释）。
+
+    与 _quota_control_snapshot 同款容错风格：legacy v2.1 state（无
+    continuation / quota / execution_policy 块）优雅降级为默认值，
+    绝不抛；未知值透传（形状纠错归 validate_state）。纯函数：只读
+    入参、零 I/O。既有键零变化（只增不改不删——本函数是 build_manifest
+    的新增键，quota_control 九键冻结形状不受扰）。
+    """
+    from runtime import state as state_mod
+
+    default = state_mod.DEFAULT_CONTINUATION
+
+    continuation = st.get("continuation")
+    continuation = continuation if isinstance(continuation, dict) else {}
+    obligation = continuation.get("obligation", default["obligation"])
+
+    quota = st.get("quota")
+    execution_phase = (quota.get("execution_phase")
+                       if isinstance(quota, dict) else None)
+
+    policy = st.get("execution_policy")
+    policy = policy if isinstance(policy, dict) else default_execution_policy()
+    continuity_block = policy.get("continuity")
+    default_continuity = default_execution_policy()["continuity"]
+    continuity_block = continuity_block \
+        if isinstance(continuity_block, dict) else default_continuity
+    auto_resume = continuity_block.get(
+        "auto_resume", default_continuity["auto_resume"])
+    max_windows = continuity_block.get("max_quota_windows")
+    # bool 是 int 子类，True/False 不得充当窗口数（与 validate 口径一致）
+    if isinstance(max_windows, bool) or not isinstance(max_windows, int) \
+            or max_windows < 0:
+        max_windows = 0
+
+    return {
+        "obligation": obligation,
+        "execution_phase": execution_phase,
+        "auto_resume": auto_resume,
+        "consumed_quota_windows": consumed_quota_windows(policy),
+        "max_quota_windows": max_windows,
+    }
+
+
 def build_manifest(repo_root, st, events) -> dict:
     """从已加载的 state dict 与事件清单构建 manifest dict（纯读，不落盘）。
 
@@ -210,6 +272,7 @@ def build_manifest(repo_root, st, events) -> dict:
         "quota_snapshot": _quota_snapshot(st),
         "resume_authorization": _resume_authorization(st),
         "quota_control": _quota_control_snapshot(st),
+        "continuity": _continuity_snapshot(st),
     }
 
 
