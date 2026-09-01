@@ -1,5 +1,13 @@
 # Changelog
 
+## 2.1.0-rc1
+
+Release candidate, landed **2026-09-01** — **bugfix / docs / dogfood fallout only** (no features, per the rc gate):
+
+- **README version surface fix (final-review finding)**: version badge 2.0.1 → current and a v2.1-alpha3 milestone section added to both README / README.en (plugin.json / CHANGELOG / README version consistency restored); independently reviewed (fresh glm-reviewer: ship)
+- **CI matrix confirmed on the alpha3 tag**: ubuntu + windows × Python 3.8 / 3.13 all green on v2.1.0-alpha3 (run 33460399614) — the local suite had run under CPython 3.7, closing the reviewer's evidence-scope note
+- **Dogfood A–E non-regression**: the alpha3 session itself live-exercised the batch-two scenarios as a superset — six real dispatch waves with auto-close (A), a real background worker killed mid-run with reconcile classification and evidence package (B/R2), multi-window exhaustion + forced-refresh wake recovery incl. the real one-shot wake automation that resumed this very session (C/D/R1), and quota-folded worker budgets on every dispatch (E); no regression observed, recorded in `docs/GLM-Conductor-v2.1-Dogfood-Records.md`
+
 ## 2.1.0-alpha3
 
 Third batch of v2.1, landed **2026-08-31** — **secondary hardening (RB-21 series)**: review-findings gaps in the batch-two machinery closed one by one. The landed RB items, in brief:
