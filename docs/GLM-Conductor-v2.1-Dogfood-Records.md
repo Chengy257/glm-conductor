@@ -231,3 +231,9 @@ wave 事务层在真实三波九单元次派发中零人工干预闭合——批
 | R5 双根恢复 | ledger/git 双根分离 | 混合残留正确归属绑定仓库，账本读不跟随迁移 |
 
 五场景结论：alpha3 的五个 release blocker 修复不是纸面闭合——异常路径（多窗耗尽、worker 强杀、permit 写盘失败、伪造溯源、双根工作区）全部在真实 runtime 上确定性收敛，且收敛方向与 §18 的验收原则一致（failure path converges safely / recovery does not redo trustworthy work / completion cannot be forged）。
+
+---
+
+## rc1 复测注记（2026-09-01）：Dogfood A–E 不回退
+
+v2.1.0-rc1 门槛的 A–E 不回退复测以「第三批会话本身即 A–E 超集实跑」结题：六次真实派发 wave 全部自动收口（A）；真实后台 worker 运行中被强杀并走 reconcile 分类与证据包回收（B，即 R2）；多窗口耗尽 + 强刷唤醒恢复链实测（C，即 R1），且本会话的发布链续作由真实一次性 wake automation（reset+宽限准点触发、自足 prompt 恢复）完成（D 的跨窗口闭环）；每次派发均经 permit 门与额度折算预算（E）。未观察到任何 A–E 机制回退；详细时间线见上文 R1-R5 各节与任务 v21-alpha3-release-612d25 账本。
