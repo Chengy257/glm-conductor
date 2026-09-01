@@ -2,7 +2,7 @@
 
 [English](./README.en.md) | **简体中文**
 
-![Version](https://img.shields.io/badge/version-2.0.1-blue.svg)
+![Version](https://img.shields.io/badge/version-2.1.0-alpha3-blue.svg)
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
 ![ZCode Plugin](https://img.shields.io/badge/ZCode-plugin-green.svg)
 ![Models](https://img.shields.io/badge/models-GLM--5.3%20%2F%20GLM--5.3--Flash-orange.svg)
@@ -56,6 +56,8 @@ v2 起，插件把原本写在提示词里的关键契约升级为**运行时强
 **v2.1-alpha1 控制平面收口（M1-M3）**——把"存在但可被绕过"的机制变成不可绕过的机器事实：派发许可（dispatch permit + PreToolUse 拒绝门，实施者类型无有效许可即 deny，重放/过期/伪造机械拒绝）；执行策略授权事实源（并发预算硬上限 4、跨额度窗口自动续跑默认关闭、升档须用户确认并落盘审计）；runtime 观察到的 Agent 生命周期（PostToolUse 自动记账，与手写事件互不替代）；崩溃恢复三件套——SessionStart 自动注入恢复上下文（新会话无需提醒即知未完成任务）、四分 reconcile（捞结果/进度包续作/干净重派/人工裁决，不再一律重派）、事务点自动刷新的 resume manifest；runtime CLI 入口取代内联调用。详见 CHANGELOG 2.1.0-alpha1。
 
 **v2.1-alpha2 第二批收口（M4-M6）**——把有界并行、额度决策与证据溯源收进 runtime 确定性事实：dispatch wave 批量事务（`prepare_dispatch_wave` 一次签发整批许可与 marker，wave 成员同一回合并发派出——禁止"等第一个返回再派下一个"，默认并发 2 / 上限 4、额度预算折算，wave permit 成员资格环防旧许可重放）；运行时额度解析（`quota-resolve` 四级层级，绝不默认 AVAILABLE）与授权续跑链（`quota-exhausted` 四态授权 + 窗口预算 + 自足一次性 wake，预算耗尽转 `waiting_user`）；验证 / 审查溯源 receipts（`verify-unit` / `verify-task` runtime 亲测 + durable receipt，`review-record` 落 fresh ship receipt——完成门审查检查只认 receipt）。详见 CHANGELOG 2.1.0-alpha2。
+
+**v2.1-alpha3 Runtime Integrity Closure**——依据审查 findings 逐条加固第二批机制：quota resume 控制面闭合（`quota-resume` 恢复时强制 provider 刷新、绝不采信睡眠期的新鲜缓存，EXHAUSTED 唤醒统一交 `scheduler.plan_resume` 按最晚 reset 规划，逐单元保留中断来源 `quota_interrupted_from`，reconcile 前置于重派——running-interrupted 单元不再被盲目置回 ready）；review 溯源绑定真实 reviewer invocation（PostToolUse marker 记账 `reviewer_invoked` 账本事实，回验链锚定 reviewer 白名单与 replay 幂等，完成门 receipt 来源闸只认追溯到真实调用的 ship receipt）；wave 事务补偿（permits 先于 wave 记录落盘，permit 签发或落盘失败全额回滚，wave 记录永不携带残缺租约）；permit 完整性 fail-closed（`validate_permit` 强制校验 id/mode/reason/时间戳/consumed 全链，含 `expires_at <= now` 过期边界）；multi-repo reconcile 双根分离（`reconcile_agent_run` 账本事实读 ledger 根、git 证据按任务绑定根求值）；另含 SH 三项加固——`wake-record` 幂等 + 写前授权复验、发布元数据纪律成文、Python 版本一致性核验。dogfood R1-R5 五场景实测（多窗口额度耗尽、worker 中途额度崩溃恢复、wave 残缺 permit 故障注入、伪 review 拒绝 + 真实 reviewer 链、账本根≠git 根 reconcile），全量 1328 测试绿、`validate_plugin` 15/15。详见 CHANGELOG 2.1.0-alpha3。
 
 ## 路由矩阵
 
