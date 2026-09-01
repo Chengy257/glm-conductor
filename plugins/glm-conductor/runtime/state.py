@@ -39,6 +39,14 @@
         validate_state 规则 8.7 复用 runtime.execution_policy 校验
         （错误路径前缀 execution_policy.）；无该键即 legacy 形态，
         完全合法，由消费方按保守默认块解释。
+      - 续跑义务（v2.2 M1，控制回路数据载体）：可选顶层 "continuation"
+        块——new_task_state() 构造默认块（default_continuation，
+        obligation="none" + 未退役 tombstone + 全 unknown
+        scheduler_context + 无事实 wake_bridge），validate_state 规则
+        8.8 做形状校验（obligation 六枚举 / wake_bridge.status 十枚举 /
+        scheduler_context 词汇 / tombstone 形状 / reason 与各字段的
+        null 或合法值）；无该键即 legacy v2.1 形态，完全合法，由消费方
+        按默认块解释（无义务态）。
     本文件是 Stop 完成门钩子等强制状态源的确定性来源。
 
 路径布局：
@@ -46,7 +54,13 @@
     与 runtime.journal 管理的 events.jsonl 同处一个任务目录，各管各的文件。
 
 schema 来源：
-    docs/glm-conductor-v2-upgrade-guide-final.md §7（推荐 schema 的权威定义）。
+    docs/glm-conductor-v2-upgrade-guide-final.md §7（推荐 schema 的权威定义）；
+    continuation 块见
+    docs/GLM-Conductor-v2.2-Quota-Continuity-Control-Loop-Implementation-Plan.md
+    §8（obligation / wake_bridge 冻结 schema）/ §23（默认块与向后兼容）；
+    v2.2 M1a Persistent Bridge 扩展（scheduler_context / wake_bridge 五
+    扩展键 / tombstone / 10 值 status）见同计划 D15-e 决策（WU-22-01a，
+    只做 schema 不做行为）。
     repository 文件仍是代码状态真相源，本文件只是运行时任务状态。
 
 legacy 标识归一：
@@ -54,7 +68,7 @@ legacy 标识归一：
     （TASK_ID 全量替代 CONTINUITY_ID）。读取时按 TASK_ID_KEYS 顺序归一。
 
 依赖：
-    仅 Python 3 标准库（json / os / pathlib / re）+ runtime.quota.parser
+    仅 Python 3 标准库（datetime / json / os / pathlib / re）+ runtime.quota.parser
     （quota 状态词汇 QUOTA_STATUSES，§39；quota/* 不 import 本模块，
     无循环导入）+ runtime.work_unit（work unit 逐项校验，B8.1；
     本模块单向导入它，它不导入本模块，无循环导入）+
@@ -63,6 +77,7 @@ legacy 标识归一：
     零第三方依赖，`python3 -S` 可运行（无 site-packages）。
 """
 
+import datetime
 import json
 import os
 import pathlib
@@ -145,6 +160,27 @@ TASK_TRANSITIONS = {
 VERIFICATION_STATUSES = ("missing", "valid", "stale", "failed")
 # 审查裁决词汇
 REVIEW_VERDICTS = ("not-required", "missing", "ship", "fix-first", "rethink", "stale")
+# v2.2 M1：continuation obligation 词汇（主计划 §8.1 冻结枚举；
+# none 为默认 / 无义务态，其余为控制回路推进的义务态）
+CONTINUATION_OBLIGATIONS = (
+    "none", "checkpoint_required", "wake_required", "armed",
+    "waiting_user", "degraded")
+# v2.2 M1：wake_bridge.status 词汇（主计划 §8.2 冻结枚举；none 为默认。
+# v2.2 M1a D15-e 扩为 10 值——Persistent Wake Bridge 跨多个 quota window
+# 后新增 retarget_required / degraded / paused 三态，原 7 值顺序不变）
+WAKE_BRIDGE_STATUSES = (
+    "none", "requested", "armed", "fired", "retarget_required",
+    "degraded", "paused", "cancelled", "stale", "failed")
+# v2.2 M1a（D15-e）：scheduler_context.origin 词汇——本会话由什么启动
+# （scheduled_task = 被 Scheduled Task 触发，Phase 0 #13：此类会话被
+# 禁止再创建 automation）；unknown 为默认（尚无探针结论）
+SCHEDULER_ORIGINS = ("interactive", "scheduled_task", "unknown")
+# v2.2 M1a（D15-e）：scheduler_context 四能力（create/update/pause/delete）
+# 的观察词汇——allowed / forbidden / unknown（unknown 为默认）
+SCHEDULER_CAPABILITIES = ("allowed", "forbidden", "unknown")
+# v2.2 M1a（D15-e）：wake_bridge.mode 词汇——recurring（固定间隔持久
+# automation，默认）/ self_retiming（每次触发后自改期的持久 automation）
+WAKE_BRIDGE_MODES = ("recurring", "self_retiming")
 
 # legacy 标识归一：v1.x checkpoint/状态用 CONTINUITY_ID，v2 统一为 task_id
 TASK_ID_KEYS = ("task_id", "TASK_ID", "CONTINUITY_ID", "continuity_id")
@@ -155,6 +191,65 @@ _TASK_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9-]*$")
 
 # 必填顶层键（缺一即非法；未知顶层键忽略，向前兼容）
 _REQUIRED_TOP_KEYS = ("task_id", "goal", "route", "status")
+
+# v2.2 M1：顶层 continuation 默认块（主计划 §23.2 冻结 schema，逐字段
+# 不得增删改名；模块常量只读，default_continuation() 每次返回全新
+# 拷贝，防止调用方改动波及本常量。v2.2 M1a D15-e 扩展：新增顶层
+# scheduler_context（scheduler 能力事实）与 tombstone（bridge 退役
+# 记录），wake_bridge 新增 mode / generation / current_boundary_id /
+# next_wake_at / bridge_interval_minutes 五键——原 7 键不动）
+DEFAULT_CONTINUATION = {
+    "obligation": "none",
+    "reason": None,
+    # v2.2 M1a（D15-e）：本会话的 scheduler 启动来源与四能力观察
+    # （Phase 0 #13：被 Scheduled Task 触发过的会话禁止再创建
+    # automation——能力事实由探针单元写入，本层只定义形状）
+    "scheduler_context": {
+        "origin": "unknown",
+        "create": "unknown",
+        "update": "unknown",
+        "pause": "unknown",
+        "delete": "unknown",
+        "parent_automation_id": None,
+    },
+    "wake_bridge": {
+        "status": "none",
+        "boundary_id": None,
+        "automation_id": None,
+        "reset_at": None,
+        "wake_at": None,
+        "armed_at": None,
+        "fired_at": None,
+        # v2.2 M1a（D15-e）：Persistent Wake Bridge 扩展记账——拓扑
+        # 模式（recurring 固定间隔 / self_retiming 自改期）、跨窗口
+        # 世代计数、当前生效 boundary、下次唤醒时刻与固定间隔分钟数
+        "mode": "recurring",
+        "generation": 0,
+        "current_boundary_id": None,
+        "next_wake_at": None,
+        "bridge_interval_minutes": None,
+    },
+    # v2.2 M1a（D15-e）：bridge 退役墓碑（null = 未退役；退役时写
+    # task_id / status="completed" / completed_at / bridge_should_noop）
+    "tombstone": None,
+}
+
+
+def default_continuation() -> dict:
+    """返回 v2.2 continuation 默认块的全新拷贝。
+
+    每次调用构造新 dict（嵌套 wake_bridge / scheduler_context 二层
+    拷贝隔离），调用方改写返回值不影响模块常量 DEFAULT_CONTINUATION；
+    legacy 缺块 / 形状异常的消费方按本块解释（obligation="none" 即
+    无义务态，scheduler 能力全 unknown，bridge 未建置、未退役）。
+    """
+    return {
+        "obligation": DEFAULT_CONTINUATION["obligation"],
+        "reason": DEFAULT_CONTINUATION["reason"],
+        "scheduler_context": dict(DEFAULT_CONTINUATION["scheduler_context"]),
+        "wake_bridge": dict(DEFAULT_CONTINUATION["wake_bridge"]),
+        "tombstone": DEFAULT_CONTINUATION["tombstone"],
+    }
 
 
 # —— 路径定位 ——
@@ -546,6 +641,196 @@ def _validate_repository(repository):
     return []
 
 
+def _is_iso8601(value) -> bool:
+    """判断 value 是否为可解析的 ISO8601 时间字符串。
+
+    与 runtime.execution_policy._is_iso8601 同款判定（本地复制，不在
+    模块间引用私有函数）：兼容结尾 Z/z 后缀（先归一为 +00:00 再解析
+    ——Python 3.11 之前 fromisoformat 不认 Z）。非字符串 / 空串 /
+    解析失败 → False。
+    """
+    if not isinstance(value, str) or value == "":
+        return False
+    probe = value[:-1] + "+00:00" if value.endswith(("Z", "z")) else value
+    try:
+        datetime.datetime.fromisoformat(probe)
+    except ValueError:
+        return False
+    return True
+
+
+def _validate_continuation(continuation):
+    """校验可选顶层 continuation 块（v2.2 M1 控制回路事实块，主计划
+    §8 冻结 schema / §23.2 默认块）。
+
+    只做形状校验（错误消息中文、路径前缀 continuation.，聚合不短路）：
+      - continuation 非 dict → 错误；
+      - obligation / wake_bridge.status 存在时 → 冻结枚举
+        （CONTINUATION_OBLIGATIONS / WAKE_BRIDGE_STATUSES；None 亦拒
+        ——枚举字段与 reason 不同，无 null 空档，缺省即不写键）；
+      - reason 存在时 → null 或 str；
+      - wake_bridge 键存在且非 None 时 → dict；七字段逐键（存在才
+        校验，缺键合法按默认解释）：boundary_id / automation_id 为
+        null 或非空 str；reset_at / wake_at / armed_at / fired_at 为
+        null 或 ISO8601 字符串（_is_iso8601 同款判定）；wake_bridge
+        显式 null 视同缺省（与 quota 块 five_hour/weekly 的容错同风格）；
+      - v2.2 M1a（D15-e）wake_bridge 新键逐键（存在才校验，缺键合法
+        按默认解释）：mode ∈ WAKE_BRIDGE_MODES（None 亦拒，枚举无
+        null 空档）；generation 为 null 或 >= 0 的 int（bool 拒绝）；
+        current_boundary_id 为 null 或非空 str；next_wake_at 为 null
+        或 ISO8601；bridge_interval_minutes 为 null 或 5-1440 的 int
+        （bool 拒绝——bool 是 int 子类，True/False 不得充当分钟数）；
+      - scheduler_context 键存在且非 None 时 → dict（显式 null 视同
+        缺省，与 wake_bridge 同风格）：origin 存在时 ∈ SCHEDULER_
+        ORIGINS（None 亦拒）；create / update / pause / delete 存在时
+        ∈ SCHEDULER_CAPABILITIES（None 亦拒）；parent_automation_id
+        为 null 或非空 str；未知键忽略；
+      - tombstone：null 合法（未退役）；dict 时四键必填——task_id 非
+        空 str、status 必须等于 "completed"、completed_at 为非空
+        ISO8601 str、bridge_should_noop 必须为 True（bool）；其他类型
+        （非 dict 非 null）或 dict 缺键 → continuation.tombstone.*
+        错误；
+      - 未知键忽略（向前兼容）。
+    无 continuation 键 → 完全合法（legacy v2.1 形态，消费方按
+    default_continuation 解释——obligation="none" 无义务态）。
+    wu-22-01 已写形态（7 键 wake_bridge、无 scheduler_context /
+    tombstone）仍然合法——新键全部存在才校验，缺键按默认解释。
+    """
+    if not isinstance(continuation, dict):
+        return ["continuation 必须是 JSON 对象"]
+    errors = []
+    obligation = continuation.get("obligation")
+    if "obligation" in continuation \
+            and obligation not in CONTINUATION_OBLIGATIONS:
+        errors.append(_enum_error("continuation.obligation", obligation,
+                                  CONTINUATION_OBLIGATIONS))
+    if "reason" in continuation:
+        reason = continuation["reason"]
+        if reason is not None and not isinstance(reason, str):
+            errors.append("continuation.reason 必须是字符串或 null")
+    wake_bridge = continuation.get("wake_bridge")
+    if "wake_bridge" in continuation and wake_bridge is not None:
+        if not isinstance(wake_bridge, dict):
+            errors.append("continuation.wake_bridge 必须是 JSON 对象或 null")
+        else:
+            status = wake_bridge.get("status")
+            if "status" in wake_bridge and status not in \
+                    WAKE_BRIDGE_STATUSES:
+                errors.append(_enum_error("continuation.wake_bridge.status",
+                                          status, WAKE_BRIDGE_STATUSES))
+            for key in ("boundary_id", "automation_id"):
+                if key in wake_bridge:
+                    value = wake_bridge[key]
+                    if value is not None and (
+                            not isinstance(value, str) or value == ""):
+                        errors.append(
+                            "continuation.wake_bridge.%s 必须是非空字符串"
+                            "或 null" % key)
+            for key in ("reset_at", "wake_at", "armed_at", "fired_at"):
+                if key in wake_bridge:
+                    value = wake_bridge[key]
+                    if value is not None and not _is_iso8601(value):
+                        errors.append(
+                            "continuation.wake_bridge.%s 必须是 ISO8601 "
+                            "字符串或 null" % key)
+            # —— v2.2 M1a（D15-e）Persistent Bridge 扩展五键 ——
+            mode = wake_bridge.get("mode")
+            if "mode" in wake_bridge and mode not in WAKE_BRIDGE_MODES:
+                errors.append(_enum_error("continuation.wake_bridge.mode",
+                                          mode, WAKE_BRIDGE_MODES))
+            if "generation" in wake_bridge:
+                generation = wake_bridge["generation"]
+                # bool 是 int 的子类，但 True/False 不应充当世代计数
+                if generation is not None and (
+                        isinstance(generation, bool)
+                        or not isinstance(generation, int)
+                        or generation < 0):
+                    errors.append(
+                        "continuation.wake_bridge.generation 必须是 >= 0 "
+                        "的整数或 null")
+            if "current_boundary_id" in wake_bridge:
+                value = wake_bridge["current_boundary_id"]
+                if value is not None and (
+                        not isinstance(value, str) or value == ""):
+                    errors.append(
+                        "continuation.wake_bridge.current_boundary_id "
+                        "必须是非空字符串或 null")
+            if "next_wake_at" in wake_bridge:
+                value = wake_bridge["next_wake_at"]
+                if value is not None and not _is_iso8601(value):
+                    errors.append(
+                        "continuation.wake_bridge.next_wake_at 必须是 "
+                        "ISO8601 字符串或 null")
+            if "bridge_interval_minutes" in wake_bridge:
+                interval = wake_bridge["bridge_interval_minutes"]
+                if interval is not None and (
+                        isinstance(interval, bool)
+                        or not isinstance(interval, int)
+                        or not 5 <= interval <= 1440):
+                    errors.append(
+                        "continuation.wake_bridge.bridge_interval_minutes "
+                        "必须是 5-1440 的整数或 null")
+    # —— v2.2 M1a（D15-e）scheduler 能力事实块 ——
+    scheduler_context = continuation.get("scheduler_context")
+    if "scheduler_context" in continuation and scheduler_context is not None:
+        if not isinstance(scheduler_context, dict):
+            errors.append(
+                "continuation.scheduler_context 必须是 JSON 对象或 null")
+        else:
+            origin = scheduler_context.get("origin")
+            if "origin" in scheduler_context \
+                    and origin not in SCHEDULER_ORIGINS:
+                errors.append(_enum_error(
+                    "continuation.scheduler_context.origin", origin,
+                    SCHEDULER_ORIGINS))
+            for key in ("create", "update", "pause", "delete"):
+                capability = scheduler_context.get(key)
+                if key in scheduler_context \
+                        and capability not in SCHEDULER_CAPABILITIES:
+                    errors.append(_enum_error(
+                        "continuation.scheduler_context.%s" % key,
+                        capability, SCHEDULER_CAPABILITIES))
+            if "parent_automation_id" in scheduler_context:
+                parent_id = scheduler_context["parent_automation_id"]
+                if parent_id is not None and (
+                        not isinstance(parent_id, str) or parent_id == ""):
+                    errors.append(
+                        "continuation.scheduler_context."
+                        "parent_automation_id 必须是非空字符串或 null")
+    # —— v2.2 M1a（D15-e）bridge 退役墓碑 ——
+    if "tombstone" in continuation and continuation["tombstone"] is not None:
+        tombstone = continuation["tombstone"]
+        if not isinstance(tombstone, dict):
+            errors.append("continuation.tombstone 必须是 JSON 对象或 null")
+        else:
+            for key in ("task_id", "status", "completed_at",
+                        "bridge_should_noop"):
+                if key not in tombstone:
+                    errors.append(
+                        "continuation.tombstone 缺少必填键 %s" % key)
+            if "task_id" in tombstone:
+                value = tombstone["task_id"]
+                if not isinstance(value, str) or value == "":
+                    errors.append(
+                        "continuation.tombstone.task_id 必须是非空字符串")
+            if "status" in tombstone and tombstone["status"] != "completed":
+                errors.append(_enum_error(
+                    "continuation.tombstone.status", tombstone["status"],
+                    ("completed",)))
+            if "completed_at" in tombstone:
+                value = tombstone["completed_at"]
+                if not _is_iso8601(value):
+                    errors.append(
+                        "continuation.tombstone.completed_at 必须是 "
+                        "ISO8601 字符串")
+            if "bridge_should_noop" in tombstone \
+                    and tombstone["bridge_should_noop"] is not True:
+                errors.append(
+                    "continuation.tombstone.bridge_should_noop 必须为"
+                    "布尔 true")
+    return errors
+
+
 def validate_state(state) -> "list[str]":
     """校验状态 dict，返回错误消息列表（中文，含字段路径）；空列表 = 合法。
 
@@ -557,6 +842,12 @@ def validate_state(state) -> "list[str]":
     dict 且复用 validate_execution_policy（§3 冻结 schema + §5.4
     授权不变量，错误路径前缀 execution_policy.）；缺失时完全合法
     （legacy 保守默认形态，R7）。
+    可选顶层 continuation 块（v2.2 M1 控制回路事实块）：存在时按规则
+    8.8 做形状校验（obligation / wake_bridge.status 冻结枚举 + reason
+    与 wake_bridge 各字段的 null 或合法值 + v2.2 M1a D15-e 的
+    scheduler_context 词汇 / tombstone 形状，错误路径前缀
+    continuation.）；缺失时完全合法（legacy v2.1 形态，消费方按
+    default_continuation 解释——obligation="none" 无义务态）。
     """
     if not isinstance(state, dict):
         return ["state 必须是 JSON 对象"]
@@ -643,6 +934,14 @@ def validate_state(state) -> "list[str]":
                 "execution_policy.%s" % policy_error
                 for policy_error in validate_execution_policy(policy_block))
 
+    # 规则 8.8：continuation（v2.2 M1 可选顶层续跑义务 + wake bridge
+    # 事实块；无该键完全合法——legacy v2.1 形态，消费方按
+    # default_continuation 解释（obligation="none" 无义务态）；存在时
+    # 按主计划 §8 冻结 schema 做形状校验，错误路径前缀 continuation.，
+    # 聚合不短路——与规则 8.7 的 execution_policy 前缀同风格）
+    if "continuation" in state:
+        errors.extend(_validate_continuation(state["continuation"]))
+
     # 规则 9：status ∈ TASK_STATUSES
     if "status" in state:
         status = state["status"]
@@ -683,6 +982,13 @@ def new_task_state(task_id, goal, route, *, ownership_files=(),
     v2.1 M1：构造结果恒含顶层 "execution_policy" 默认块
     （runtime.execution_policy.default_execution_policy() 的保守
     默认——授权事实源的初始形状；升档经 set_*_authorization 变换）。
+
+    v2.2 M1：构造结果恒含顶层 "continuation" 默认块
+    （default_continuation()——obligation="none" + 未退役 tombstone +
+    全 unknown scheduler_context + 无事实 wake_bridge 的初始形状，含
+    v2.2 M1a D15-e 的 mode/generation/current_boundary_id/
+    next_wake_at/bridge_interval_minutes 五扩展键；义务推进 /
+    wake bridge 记账由控制回路单元经纯变换写入）。
 
     v2.1 §11.5（wu-21-09）：dispatch.max_workers 默认 1 → 2——与
     dispatcher.DEFAULT_MAX_WORKERS=2、execution_policy parallelism
@@ -726,6 +1032,9 @@ def new_task_state(task_id, goal, route, *, ownership_files=(),
         # v2.1 M1：执行策略授权事实源（§3 冻结 schema 的保守默认块；
         # 授权升档经 execution_policy.set_*_authorization 变换后写入）
         "execution_policy": default_execution_policy(),
+        # v2.2 M1：续跑义务 + wake bridge 事实块（§23.2 冻结默认形状；
+        # obligation 推进与 bridge 记账由控制回路单元经纯变换写入）
+        "continuation": default_continuation(),
     }
     if repository_root is not None:
         bind_repository_root(st, repository_root)

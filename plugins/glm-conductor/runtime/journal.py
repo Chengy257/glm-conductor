@@ -62,6 +62,33 @@ RECOMMENDED_EVENTS = (
     "completed",
     "cancelled",
     "failed",
+    # —— v2.2 M1 控制回路事件（quota 阈值 / continuation obligation /
+    # wake bridge / resume controller；词汇仍开放式，本常量只作文档性
+    # 推荐，append_event 不强制成员资格）——
+    "quota_heartbeat",        # quota 心跳（仅状态/阶段/阈值穿越时记，降噪）
+    "quota_phase_changed",    # execution phase 变化（NORMAL/PRESSURE/DRAINING/BLOCKED）
+    "continuation_obligation_changed",  # continuation obligation 推进
+    "wake_bridge_requested",  # wake bridge 请求创建（DRAINING 探得 boundary）
+    "wake_bridge_armed",      # wake bridge 武化（定时唤醒已建立）
+    "wake_bridge_failed",     # wake bridge 建置失败
+    "wake_bridge_fired",      # wake bridge 触发（唤醒已注入）
+    "wake_bridge_cancelled",  # wake bridge 取消
+    "wake_bridge_stale",      # wake bridge 过期失效
+    "warm_only_completed",    # warm-only 恢复完成（零转态不派发）
+    "resume_controller_started",  # resume controller 启动
+    "resume_controller_completed",  # resume controller 完成
+    "continuity_degraded",    # 连续性降级记账（如 gate_exhausted 放行仍无 bridge）
+    # —— v2.2 M1a Persistent Wake Bridge 事件（D15-e：scheduler 能力
+    # 观察 / bridge retarget / 暂停 / 降级 / quota 边界消费 / 嵌套创建
+    # 拒绝——Phase 0 #13 会话级 cron 创建禁令的记账；词汇仍开放式，
+    # 本常量只作文档性推荐，append_event 不强制成员资格）——
+    "scheduler_capability_observed",      # scheduler 四能力探针结论记账（create/update/pause/delete）
+    "wake_bridge_retargeted",             # wake bridge 重定目标（boundary 变更 / 自改期 / 间隔重排）
+    "wake_bridge_pause_requested",        # wake bridge 暂停请求（进入暂停意愿态）
+    "wake_bridge_paused",                 # wake bridge 已暂停（automation 置 disabled）
+    "wake_bridge_degraded",               # wake bridge 降级（自动化不可用，回退人工唤醒）
+    "quota_boundary_consumed",            # quota 边界已消费（bridge 触发后的窗口切换确认）
+    "scheduled_nested_create_rejected",   # 被 Scheduled Task 触发的会话嵌套创建 automation 被拒（SCHED-04 硬门）
 )
 
 

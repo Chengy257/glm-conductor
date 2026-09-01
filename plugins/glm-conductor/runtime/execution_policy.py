@@ -17,7 +17,11 @@
         不改入参、不触碰磁盘，调用方负责 save_state）；非法输入抛
         ValueError（中文消息含字段名），先全量校验后修改，失败零副作用；
       - 预算求值：effective_worker_budget() 按 quota 四态把策略
-        max_workers 折算为有效并发预算（计划 §12 表）。
+        max_workers 折算为有效并发预算（计划 §12 表）；
+      - 阈值配置（v2.2 M1，决策记录 D5）：可选子块 quota_control——
+        pressure_percent / draining_percent 两个百分比阈值（默认 35/20
+        冻结供测试），default_quota_control() 容错读供 v2.2 控制回路
+        （wu-22-02 control.py）消费。
     本模块不接线任何 hook / task_manager 消费方（那是 M2+ 的事）。
 
 冻结 schema（计划 §3，逐字段；新增字段走版本演进，不在本层放宽）：
@@ -32,6 +36,18 @@
     }
     hard_limit == 4 且不可变（>4 v2.1 直接拒绝）；legacy state 缺
     execution_policy 顶层键完全合法（R7，按本默认块解释）。
+
+quota_control 可选子块（v2.2 M1，决策记录 D5；不在 POLICY_SUB_BLOCKS
+四必填内；v2.2 M1a D15-d 增补 bridge_interval_minutes）：
+    {"pressure_percent": 35.0, "draining_percent": 20.0,
+     "bridge_interval_minutes": 60}——execution phase 阈值配置
+    （pressure / draining 触发线，百分比）+ Persistent Wake Bridge 的
+    固定间隔分钟数（D15-d 保守默认 60，overlap 未验证前不收紧到 30）。
+    缺块完全合法（legacy / 新任务按默认 35/20/60 解释），块内缺键按
+    同键默认解释；约束 0 <= draining_percent < pressure_percent <= 100
+    （对合并默认后的生效配置判定）；百分比逐键有限数值（bool 拒绝）；
+    bridge_interval_minutes 非 bool int 且 5 <= 值 <= 1440；未知键忽略
+    （向前兼容）。
 
 授权不变量（计划 §5.4 全表，全部强制，validate_execution_policy 逐条落）：
     hard_limit == 4；1 <= max_workers <= 4；
@@ -73,10 +89,15 @@ window 预算记账（v2.1 §14，wu-21-11）：
     docs/GLM-Conductor-v2.1-Architecture-Agent-Implementation-Plan.md
     §3（schema 冻结）/ §5（M1 API 与不变量）/ §12（有效预算表）；
     docs/GLM-Conductor-v2.1-实施前缺口探查与设计决策记录.md §四 R7
-    （legacy 兼容：缺键合法）。
+    （legacy 兼容：缺键合法）；
+    docs/GLM-Conductor-v2.2-Quota-Continuity-Control-Loop-Implementation-Plan.md
+    §5.1（quota_control 阈值配置）/ §23（state schema 迁移：缺块合法）；
+    docs/GLM-Conductor-v2.2-实施前缺口探查与设计决策记录.md §四 D5
+    （阈值配置落点：execution_policy.quota_control 子块）。
 """
 
 import datetime
+import math
 
 from runtime.quota.parser import QUOTA_STATUSES
 
@@ -105,12 +126,25 @@ HARD_WORKER_LIMIT = 4
 SERIAL_MAX_WORKERS = 1
 
 # execution_policy 必填子块（§3 冻结 schema 四块；缺一即非法——
-# 授权事实源不允许半定义形状，完整性由 validate_state 在保存闸拒绝）
+# 授权事实源不允许半定义形状，完整性由 validate_state 在保存闸拒绝。
+# v2.2 M1 的 quota_control 是可选子块，不加入本元组）
 POLICY_SUB_BLOCKS = ("worker_execution", "parallelism", "continuity",
                      "authorization")
 
+# v2.2 M1 quota_control 可选子块的冻结默认（决策记录 D5：阈值可配置，
+# 默认值冻结供测试；模块常量只读——DEFAULT_EXECUTION_POLICY 与
+# default_quota_control() 各持全新拷贝，调用方改写互不波及。
+# v2.2 M1a D15-d：bridge_interval_minutes 为 Persistent Wake Bridge 的
+# 固定间隔保守默认——overlap 行为未验证前不收紧到 30）
+DEFAULT_QUOTA_CONTROL = {
+    "pressure_percent": 35.0,
+    "draining_percent": 20.0,
+    "bridge_interval_minutes": 60,
+}
+
 # §3 冻结 schema 的保守默认块（模块常量只读；default_execution_policy()
-# 每次返回全新拷贝，防止调用方改动波及本常量）
+# 每次返回全新拷贝，防止调用方改动波及本常量。v2.2 M1 起含可选子块
+# quota_control——不改变四必填子块契约，legacy 消费方按需取用）
 DEFAULT_EXECUTION_POLICY = {
     "worker_execution": {"default_mode": "background"},
     "parallelism": {"mode": "standard", "default_workers": 2,
@@ -119,6 +153,9 @@ DEFAULT_EXECUTION_POLICY = {
                    "max_quota_windows": 0},
     "authorization": {"source": "default", "confirmed_at": None,
                       "scope": AUTH_SCOPE},
+    # v2.2 M1（D5）：可选阈值子块（缺块合法按 DEFAULT_QUOTA_CONTROL
+    # 解释）；dict(...) 拷贝与同名模块常量解耦
+    "quota_control": dict(DEFAULT_QUOTA_CONTROL),
 }
 
 # —— 构造 ——
@@ -127,10 +164,16 @@ DEFAULT_EXECUTION_POLICY = {
 def default_execution_policy() -> dict:
     """返回 §3 冻结 schema 保守默认块的全新拷贝。
 
-    每次调用构造新 dict（子块同样新造），调用方改写返回值不影响
-    模块常量 DEFAULT_EXECUTION_POLICY，也不影响其他调用方。
+    每次调用构造新 dict：子块同样新造，块内嵌套 dict 值（v2.2 M1 起
+    预留，如 quota_control 之后的复合子块）再做二层拷贝——调用方改写
+    返回值不影响模块常量 DEFAULT_EXECUTION_POLICY，也不影响其他调用方。
     """
-    return {name: dict(block) for name, block in DEFAULT_EXECUTION_POLICY.items()}
+    policy = {}
+    for name, block in DEFAULT_EXECUTION_POLICY.items():
+        policy[name] = {
+            key: dict(value) if isinstance(value, dict) else value
+            for key, value in block.items()}
+    return policy
 
 
 # —— 校验 ——
@@ -163,6 +206,16 @@ def _is_count(value) -> bool:
     return not isinstance(value, bool) and isinstance(value, int)
 
 
+def _is_finite_number(value) -> bool:
+    """判断 value 是否为有限数值（int/float；bool 排除——bool 是 int
+    子类，True/False 不得充当百分比阈值；NaN / inf 非有限，同样拒绝）。
+    quota_control 百分比阈值与 consumed_quota_windows 不同：允许小数
+    （阈值可配置到半个百分点），故类型闸是「有限数值」而非整数。"""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    return math.isfinite(value)
+
+
 def validate_execution_policy(policy) -> "list[str]":
     """校验 execution_policy 块，返回错误消息列表（中文，含字段路径）。
 
@@ -177,6 +230,12 @@ def validate_execution_policy(policy) -> "list[str]":
         报「必须是 JSON 对象」；子块形状损坏时其叶子校验跳过）；
       - 叶子字段齐全（缺失报「缺少必填键 <路径>」）+ 枚举 / 类型 /
         范围校验（§5.4 全表，见模块 docstring）；
+      - 可选子块 quota_control（v2.2 M1，D5 + v2.2 M1a D15-d）：缺块
+        合法；存在时必须为 dict，百分比逐键有限数值（bool 拒绝，缺键
+        按默认解释——与 default_quota_control 的消费口径一致），
+        bridge_interval_minutes 非 bool int 且 5-1440（缺省按默认 60
+        合法），合并默认后强制
+        0 <= draining_percent < pressure_percent <= 100；未知键忽略；
       - 跨字段耦合（mode↔max_workers、auto_resume↔max_quota_windows、
         auto_resume↔source、max_workers↔source、user↔confirmed_at）
         仅在涉及字段均合法时判定——非法值已有基线错误，不重复报；
@@ -317,6 +376,48 @@ def validate_execution_policy(policy) -> "list[str]":
                 "authorization.confirmed_at 非 null（用户授权必须记录"
                 "确认时间）")
 
+    # —— quota_control（v2.2 M1 可选子块，D5 阈值配置 + v2.2 M1a D15-d
+    # bridge_interval_minutes；不在 POLICY_SUB_BLOCKS 四必填内——缺块
+    # 完全合法，legacy 按默认 35/20/60 解释；错误路径 quota_control.，
+    # 由 state 规则 8.7 聚合时再加 execution_policy. 前缀）——
+    qc_block = policy.get("quota_control")
+    if qc_block is not None:
+        if not isinstance(qc_block, dict):
+            errors.append("quota_control 必须是 JSON 对象")
+        else:
+            # 逐键类型闸：存在才校验（缺键按默认解释，与
+            # default_quota_control 的消费口径一致）；百分比有限数值、
+            # bool 拒绝
+            for key in ("pressure_percent", "draining_percent"):
+                if key in qc_block and not _is_finite_number(qc_block[key]):
+                    errors.append(
+                        "quota_control.%s 必须是有限数值（bool 拒绝），"
+                        "得到 %r" % (key, qc_block[key]))
+            # bridge_interval_minutes（v2.2 M1a D15-d）：非 bool int 且
+            # 5-1440（bool 是 int 子类，True/False 不得充当分钟数；
+            # 缺省按默认 60 合法）
+            if "bridge_interval_minutes" in qc_block:
+                interval = qc_block["bridge_interval_minutes"]
+                if isinstance(interval, bool) or not isinstance(interval, int) \
+                        or not 5 <= interval <= 1440:
+                    errors.append(
+                        "quota_control.bridge_interval_minutes 必须是 "
+                        "5-1440 的整数（bool 拒绝），得到 %r" % (interval,))
+            # 阈值不变量（D5 冻结约束）：对合并默认后的生效配置判定——
+            # 半定义形状（单键越界）同样落网，缺省键按默认参与比较
+            effective = default_quota_control(policy)
+            effective_draining = effective["draining_percent"]
+            effective_pressure = effective["pressure_percent"]
+            if not 0 <= effective_draining < effective_pressure <= 100:
+                errors.append(
+                    "quota_control 阈值约束被违反：要求 "
+                    "0 <= draining_percent < pressure_percent <= 100"
+                    "（缺省键按默认 %s / %s 解释），得到 draining_percent="
+                    "%s / pressure_percent=%s"
+                    % (DEFAULT_QUOTA_CONTROL["draining_percent"],
+                       DEFAULT_QUOTA_CONTROL["pressure_percent"],
+                       effective_draining, effective_pressure))
+
     # —— 跨字段耦合（涉及字段均合法时才判，不重复报基线错误）——
 
     # §5.4：parallelism.mode ↔ max_workers
@@ -382,13 +483,17 @@ def _copy_policy(policy) -> dict:
     入参缺子块 / 子块形状异常时按默认块补齐（setter 的职责是产出
     可校验的完整块，legacy 半块不被放大）；子块浅拷贝即可——冻结
     schema 的叶子均为标量（str / int / None），未知键原样保留
-    （向前兼容）。
+    （向前兼容）。v2.2 M1：可选子块 quota_control 同口径原样保留
+    （叶子均为标量，浅拷贝足够）——授权写入不得重置用户的阈值配置。
     """
     updated = default_execution_policy()
     for name in POLICY_SUB_BLOCKS:
         block = policy.get(name)
         if isinstance(block, dict):
             updated[name] = dict(block)
+    qc_block = policy.get("quota_control")
+    if isinstance(qc_block, dict):
+        updated["quota_control"] = dict(qc_block)
     return updated
 
 
@@ -521,6 +626,39 @@ def consumed_quota_windows(policy) -> int:
     if _is_count(consumed) and consumed >= 0:
         return consumed
     return 0
+
+
+# —— 阈值配置容错读（v2.2 M1，决策记录 D5） ——
+
+
+def default_quota_control(policy) -> dict:
+    """容错读 quota_control 子块（execution phase 阈值配置 + v2.2 M1a
+    D15-d bridge 固定间隔），返回全新 dict。
+
+    消费口径（供 wu-22-02 control.py 求 execution phase，与
+    validate_execution_policy 的缺省解释一致）：
+      - policy 非 dict / quota_control 缺块或非 dict → 全默认
+        35 / 20 / 60；
+      - 键级容错：pressure_percent / draining_percent 单键缺失或值
+        形状非法（bool / 非数值 / NaN / inf）→ 该键按默认解释，合法值
+        原样透传（int / float 均可）；
+      - bridge_interval_minutes（v2.2 M1a D15-d）：缺失或非法（bool /
+        非整数 / 越出 5-1440）→ 按默认 60 解释，合法值原样透传；
+      - 未知键忽略；返回值恒含三键且为全新拷贝（改写不波及入参与
+        模块常量 DEFAULT_QUOTA_CONTROL）。
+    纯函数：只读入参、零 I/O；形状纠错归 validate_execution_policy。
+    """
+    block = (policy.get("quota_control")
+             if isinstance(policy, dict) else None)
+    merged = dict(DEFAULT_QUOTA_CONTROL)
+    if isinstance(block, dict):
+        for key in ("pressure_percent", "draining_percent"):
+            if key in block and _is_finite_number(block[key]):
+                merged[key] = block[key]
+        interval = block.get("bridge_interval_minutes")
+        if _is_count(interval) and 5 <= interval <= 1440:
+            merged["bridge_interval_minutes"] = interval
+    return merged
 
 
 # —— 有效并发预算（计划 §12 表） ——

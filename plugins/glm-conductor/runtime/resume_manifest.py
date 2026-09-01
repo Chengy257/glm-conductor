@@ -20,7 +20,12 @@
     active_units / verification_due / agent_runs（≤20 条 + truncated）/
     next_ready_candidates / quota_snapshot（state.quota 精简，缺块
     UNKNOWN）/ resume_authorization（execution_policy.continuity 精简，
-    legacy 缺块按默认块）。
+    legacy 缺块按默认块）/ quota_control（v2.2 M1a D15-e：continuation
+    的 Persistent Bridge 只读快照——scheduler_origin /
+    scheduler_create_capability / wake_bridge_mode / wake_bridge_status /
+    automation_id / generation / boundary_id / next_wake_at /
+    bridge_interval_minutes，legacy 缺块按 default_continuation 默认
+    解释，所有键恒存在）。
 
 失败语义（§10.3 冻结——本模块的调用方契约）：
     写 manifest 失败不得覆盖 state truth、不得让正常事务半提交——
@@ -111,6 +116,61 @@ def _resume_authorization(st):
             "remaining_windows": continuity.get("max_quota_windows")}
 
 
+def _quota_control_snapshot(st):
+    """continuation 块的 Persistent Bridge 只读快照（v2.2 M1a，D15-e）。
+
+    与 _quota_snapshot / _resume_authorization 同款容错风格：st 无
+    continuation 块（legacy v2.1）、半块或形状异常一律按
+    runtime.state.DEFAULT_CONTINUATION 的默认口径解释（origin/create
+    = "unknown"、status="none"、mode="recurring"、generation=0、
+    其余 None），未知值透传（形状纠错归 validate_state，绝不抛）。
+    boundary_id 取 wake_bridge 的 current_boundary_id（D15-e 新键）
+    优先；缺省或 null 回退 legacy 键 boundary_id；再缺省 None。
+    纯函数：只读入参、零 I/O，所有键恒存在、形状确定，供恢复入口
+    零猜测消费。
+
+    state 经函数内延迟 import（与 write_resume_manifest 同风格，本
+    模块对 state 只读消费不持顶层依赖）。
+    """
+    from runtime import state as state_mod
+
+    default = state_mod.DEFAULT_CONTINUATION
+    default_scheduler = default.get("scheduler_context")
+    default_scheduler = default_scheduler \
+        if isinstance(default_scheduler, dict) else {}
+    default_bridge = default.get("wake_bridge")
+    default_bridge = default_bridge if isinstance(default_bridge, dict) else {}
+
+    continuation = st.get("continuation")
+    continuation = continuation if isinstance(continuation, dict) else {}
+    scheduler_context = continuation.get("scheduler_context")
+    scheduler_context = scheduler_context \
+        if isinstance(scheduler_context, dict) else {}
+    wake_bridge = continuation.get("wake_bridge")
+    wake_bridge = wake_bridge if isinstance(wake_bridge, dict) else {}
+
+    boundary_id = wake_bridge.get("current_boundary_id")
+    if boundary_id is None:
+        boundary_id = wake_bridge.get("boundary_id")
+
+    return {
+        "scheduler_origin": scheduler_context.get(
+            "origin", default_scheduler.get("origin")),
+        "scheduler_create_capability": scheduler_context.get(
+            "create", default_scheduler.get("create")),
+        "wake_bridge_mode": wake_bridge.get(
+            "mode", default_bridge.get("mode")),
+        "wake_bridge_status": wake_bridge.get(
+            "status", default_bridge.get("status")),
+        "automation_id": wake_bridge.get("automation_id"),
+        "generation": wake_bridge.get(
+            "generation", default_bridge.get("generation")),
+        "boundary_id": boundary_id,
+        "next_wake_at": wake_bridge.get("next_wake_at"),
+        "bridge_interval_minutes": wake_bridge.get("bridge_interval_minutes"),
+    }
+
+
 def build_manifest(repo_root, st, events) -> dict:
     """从已加载的 state dict 与事件清单构建 manifest dict（纯读，不落盘）。
 
@@ -149,6 +209,7 @@ def build_manifest(repo_root, st, events) -> dict:
         "next_ready_candidates": _ready_candidates(units),
         "quota_snapshot": _quota_snapshot(st),
         "resume_authorization": _resume_authorization(st),
+        "quota_control": _quota_control_snapshot(st),
     }
 
 

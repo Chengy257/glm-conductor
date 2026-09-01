@@ -5,6 +5,9 @@
 覆盖：
   - build/write/read 形状逐键（含 legacy 无 execution_policy / 无
     quota 块的兜底）；
+  - quota_control 快照（v2.2 M1a D15-e）：legacy 缺 continuation 块
+    按默认解释 / continuation 事实容错派生 / current_boundary_id 优先
+    于 boundary_id / 半块逐键回退；
   - 三挂点触发（commit_dispatch / abort_dispatch / finish_unit 后
     manifest 刷新——active_units / next_ready_candidates 随事务变化）；
   - §10.3 失败语义：manifest 写失败绝不影响主事务（mock 抛异常 →
@@ -64,7 +67,8 @@ class ManifestShapeTest(unittest.TestCase):
         for key in ("task_id", "written_at", "task_status",
                     "last_event_seq", "active_units", "verification_due",
                     "agent_runs", "next_ready_candidates",
-                    "quota_snapshot", "resume_authorization"):
+                    "quota_snapshot", "resume_authorization",
+                    "quota_control"):
             self.assertIn(key, manifest)
         self.assertEqual(manifest["task_id"], TID)
         self.assertEqual(manifest["task_status"], "executing")
@@ -76,6 +80,19 @@ class ManifestShapeTest(unittest.TestCase):
                          {"status": "UNKNOWN", "observed_at": None})
         self.assertEqual(manifest["resume_authorization"],
                          {"mode": "resumable", "remaining_windows": 0})
+        # v2.2 M1a：新任务含 continuation 默认块 → quota_control 快照
+        # 逐键等于默认口径（unknown/unknown/recurring/none/0）
+        self.assertEqual(
+            manifest["quota_control"],
+            {"scheduler_origin": "unknown",
+             "scheduler_create_capability": "unknown",
+             "wake_bridge_mode": "recurring",
+             "wake_bridge_status": "none",
+             "automation_id": None,
+             "generation": 0,
+             "boundary_id": None,
+             "next_wake_at": None,
+             "bridge_interval_minutes": None})
         # 回读一致
         reread = resume_manifest.read_resume_manifest(self.repo, TID)
         self.assertEqual(reread["task_id"], TID)
@@ -108,6 +125,96 @@ class ManifestShapeTest(unittest.TestCase):
         manifest = resume_manifest.write_resume_manifest(self.repo, TID)
         self.assertEqual(len(manifest["agent_runs"]), 20)
         self.assertTrue(manifest["agent_runs_truncated"])
+
+
+class QuotaControlSnapshotTest(unittest.TestCase):
+    """quota_control 快照（v2.2 M1a D15-e）：legacy 缺块按默认解释，
+    continuation 事实按容错读派生，绝不抛。"""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.repo = self._tmp.name
+        save_task(self.repo, [make_unit("wu-1")])
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _manifest_quota_control(self):
+        return resume_manifest.write_resume_manifest(
+            self.repo, TID)["quota_control"]
+
+    def test_legacy_state_without_continuation_gets_defaults(self):
+        # legacy v2.1 形态（无 continuation 键）：快照恒九键、按默认块解释
+        st = state.load_state(self.repo, TID)
+        del st["continuation"]
+        state.save_state(self.repo, st)
+        self.assertEqual(
+            self._manifest_quota_control(),
+            {"scheduler_origin": "unknown",
+             "scheduler_create_capability": "unknown",
+             "wake_bridge_mode": "recurring",
+             "wake_bridge_status": "none",
+             "automation_id": None,
+             "generation": 0,
+             "boundary_id": None,
+             "next_wake_at": None,
+             "bridge_interval_minutes": None})
+
+    def test_continuation_facts_reflected_and_current_boundary_wins(self):
+        # 有 continuation 时正确反映 mode / status / automation_id；
+        # boundary_id 取 current_boundary_id 优先，缺省回退 boundary_id
+        st = state.load_state(self.repo, TID)
+        st["continuation"]["scheduler_context"] = {
+            "origin": "scheduled_task", "create": "forbidden",
+            "update": "unknown", "pause": "allowed", "delete": "allowed",
+            "parent_automation_id": "cron-parent-1"}
+        st["continuation"]["wake_bridge"] = {
+            "status": "armed",
+            "boundary_id": "five_hour:2026-09-01T12:00:00+00:00",
+            "automation_id": "cron-bridge-1",
+            "reset_at": "2026-09-01T12:00:00+00:00",
+            "wake_at": "2026-09-01T11:55:00+00:00",
+            "armed_at": "2026-09-01T11:00:00+00:00",
+            "fired_at": None,
+            "mode": "self_retiming",
+            "generation": 2,
+            "current_boundary_id": "weekly:2026-09-07T00:00:00+00:00",
+            "next_wake_at": "2026-09-01T11:55:00+00:00",
+            "bridge_interval_minutes": 60}
+        state.save_state(self.repo, st)
+        self.assertEqual(
+            self._manifest_quota_control(),
+            {"scheduler_origin": "scheduled_task",
+             "scheduler_create_capability": "forbidden",
+             "wake_bridge_mode": "self_retiming",
+             "wake_bridge_status": "armed",
+             "automation_id": "cron-bridge-1",
+             "generation": 2,
+             "boundary_id": "weekly:2026-09-07T00:00:00+00:00",
+             "next_wake_at": "2026-09-01T11:55:00+00:00",
+             "bridge_interval_minutes": 60})
+        # wu-22-01 旧形态（无 current_boundary_id）：回退 legacy
+        # boundary_id 键
+        st = state.load_state(self.repo, TID)
+        del st["continuation"]["wake_bridge"]["current_boundary_id"]
+        state.save_state(self.repo, st)
+        self.assertEqual(
+            self._manifest_quota_control()["boundary_id"],
+            "five_hour:2026-09-01T12:00:00+00:00")
+
+    def test_half_block_falls_back_per_key(self):
+        # 半块 / 缺键逐键按默认解释（形状确定性，恢复入口零猜测）
+        st = state.load_state(self.repo, TID)
+        st["continuation"]["wake_bridge"] = {
+            "status": "paused", "automation_id": "cron-bridge-2"}
+        state.save_state(self.repo, st)
+        snapshot = self._manifest_quota_control()
+        self.assertEqual(snapshot["wake_bridge_status"], "paused")
+        self.assertEqual(snapshot["automation_id"], "cron-bridge-2")
+        self.assertEqual(snapshot["wake_bridge_mode"], "recurring")
+        self.assertEqual(snapshot["generation"], 0)
+        self.assertIsNone(snapshot["boundary_id"])
+        self.assertIsNone(snapshot["bridge_interval_minutes"])
 
 
 class HookPointsTest(unittest.TestCase):
