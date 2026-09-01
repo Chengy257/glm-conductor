@@ -147,6 +147,33 @@
     语义折算为 1（不挂起），因此缺省调用在有凭证环境下更准、无凭证
     环境下更保守，都不改变「可派发」这一基本事实。
 
+DRAINING 派发闸（v2.2 M4，wu-22-04；决策记录 D6/D7/D13）：
+    v2.1 派发闸只认 provider 四态——provider 报 AVAILABLE 但剩余
+    24% 时仍继续扩大任务（dogfood 实录）。本单元把 M2 纯决策器
+    runtime.quota.control.evaluate_task_quota_phase 的 execution
+    phase 决策接进 prepare_dispatch / prepare_dispatch_wave，成为
+    既有额度四态闸之后的新一层（prepare 层硬拒绝，D6）：
+      - 零网络：只读 <repo_root>/.glm-conductor/quota-cache.json
+        （resolver._load_cache / _cache_path 容错原语——缺失 /
+        坏 JSON / status 词汇陈旧 / fetched_at 不可解析一律视为
+        无缓存），绝不触发 provider 抓取；
+      - fail-open 先于闸门：无有效缓存 → 闸不激活，预算折算与
+        state 落盘零改动（缓存缺失/陈旧绝不阻塞或降级既有派发）；
+      - 闸激活（有效缓存）：DRAINING / BLOCKED → 在任何租约 /
+        permit / wave 副作用之前硬拒（TaskManagerError 消息以
+        "execution phase" 开头：注明 execution_phase、驱动窗口
+        剩余、§18.1 收尾白名单与 reset/wake 建议；拒绝路径先按
+        D13 落回填再 raise）；PRESSURE → dispatch_budget=1 并入
+        _effective_worker_cap 的单一 min 折算（与既有 provider
+        维度 PRESSURE→1 合流，不产生第二预算源）；NORMAL → 照旧；
+      - D13 回填：state.quota.execution_phase 在 prepare 时点写入
+        （放行与拒绝两路径都落盘；validator 对 quota 未知键宽松；
+        单次 save 纪律——单单元入口此为调用唯一 save_state，wave
+        入口随 wave 记录的既有落盘点，不新增写）；
+      - 白名单不加闸（D6）：plan_dispatch 底层零改动（仍只认
+        provider 四态）；running 单元不强杀；finish/verify/review/
+        checkpoint/wake 路径零接触。
+
 用户授权续跑（v2.1 §14/§22.7，wu-21-11 Authorized Quota Resume）：
     把「EXHAUSTED 之后怎么办」从模型即兴变成四态授权矩阵 + window
     预算记账。prepare 两个 API 解析出 EXHAUSTED 时只抛 waiting_quota
@@ -271,6 +298,7 @@ from runtime import state
 from runtime import work_unit
 from runtime.execution_policy import consumed_quota_windows
 from runtime.execution_policy import default_execution_policy
+from runtime.execution_policy import default_quota_control
 from runtime.execution_policy import effective_worker_budget
 from runtime.execution_policy import HARD_WORKER_LIMIT
 from runtime.lease import LEASE_DEFAULT_TTL_SECONDS
@@ -409,10 +437,9 @@ def _is_worker_cap(value) -> bool:
             and 1 <= value <= HARD_WORKER_LIMIT)
 
 
-def _effective_worker_cap(st, quota_status, max_workers) -> int:
-    """wu-21-09 预算接线（计划 §11.5/§12）：并发上限 × quota 四态折算。
-
-    cap_base 优先级（前者缺席 / 形状坏才落后者）：
+def _worker_cap_base(st, max_workers) -> int:
+    """wu-21-09 cap_base 优先级解析（原 _effective_worker_cap 前半，
+    v2.2 M4 起 execution phase 决策器共用同一预算口径）：
       1. 显式 max_workers 参数（非 None 即采纳）；
       2. state execution_policy.parallelism.max_workers（合法
          1..hard_limit 的 int 时）；
@@ -420,18 +447,6 @@ def _effective_worker_cap(st, quota_status, max_workers) -> int:
          1..hard_limit 校验）；
       4. dispatcher.DEFAULT_MAX_WORKERS（=2，v2.1 起与
          new_task_state 默认、execution_policy 默认块三处口径一致）。
-    有效预算 eff = min(cap_base,
-    execution_policy.effective_worker_budget(policy, quota_status))：
-    §12 表——AVAILABLE→策略 max_workers（policy 缺块 / 坏形状按
-    default_execution_policy 的 2 兜底，effective_worker_budget 既有
-    行为）/ PRESSURE→1 / UNKNOWN→1 / EXHAUSTED→0（quota_status 非法
-    同样保守折 0，词汇校验仍由 plan_dispatch 的 ValueError 兜底）。
-
-    返回 int：eff ≥ 1 时即调用方应传给 plan_dispatch 的
-    max_workers；eff == 0（EXHAUSTED / 非法词汇折 0）不能直接传入
-    plan_dispatch（其校验 1..hard_limit）——调用方传 max(eff, 1)，
-    plan 的 quota 闸自然把候选全转 waiting_quota（预算 0 的可观察面
-    就是「零派发 + waiting_quota」，错误口径与旧实现逐字一致）。
     纯函数：只读入参、零 I/O。
     """
     policy = st.get("execution_policy")
@@ -447,7 +462,39 @@ def _effective_worker_cap(st, quota_status, max_workers) -> int:
                         if isinstance(dispatch_block, dict) else None)
             if not _is_worker_cap(cap_base):
                 cap_base = dispatcher.DEFAULT_MAX_WORKERS
+    return cap_base
+
+
+def _effective_worker_cap(st, quota_status, max_workers,
+                          phase_budget=None) -> int:
+    """wu-21-09 预算接线（计划 §11.5/§12）：并发上限 × quota 四态折算。
+
+    有效预算 eff = min(cap_base（见 _worker_cap_base）,
+    execution_policy.effective_worker_budget(policy, quota_status))：
+    §12 表——AVAILABLE→策略 max_workers（policy 缺块 / 坏形状按
+    default_execution_policy 的 2 兜底，effective_worker_budget 既有
+    行为）/ PRESSURE→1 / UNKNOWN→1 / EXHAUSTED→0（quota_status 非法
+    同样保守折 0，词汇校验仍由 plan_dispatch 的 ValueError 兜底）。
+
+    v2.2 M4（wu-22-04，D7/§18）：phase_budget 为 execution phase 决策
+    （control.evaluate_task_quota_phase）的 dispatch_budget，参与同一
+    min 折算——NORMAL 相 budget=cap_base 折算无变化、PRESSURE 相折 1，
+    与既有 provider 维度 PRESSURE→1 折算路径合流为单一预算源，不双写；
+    None（闸未激活 / fail-open）零影响。DRAINING/BLOCKED 的 budget=0
+    不会走到本折算（调用方在预算折算前已硬拒）。
+
+    返回 int：eff ≥ 1 时即调用方应传给 plan_dispatch 的
+    max_workers；eff == 0（EXHAUSTED / 非法词汇折 0）不能直接传入
+    plan_dispatch（其校验 1..hard_limit）——调用方传 max(eff, 1)，
+    plan 的 quota 闸自然把候选全转 waiting_quota（预算 0 的可观察面
+    就是「零派发 + waiting_quota」，错误口径与旧实现逐字一致）。
+    纯函数：只读入参、零 I/O。
+    """
+    policy = st.get("execution_policy")
+    cap_base = _worker_cap_base(st, max_workers)
     eff = min(cap_base, effective_worker_budget(policy, quota_status))
+    if phase_budget is not None:
+        eff = min(eff, phase_budget)
     return eff if eff >= 1 else 0
 
 
@@ -481,6 +528,97 @@ def _resolve_quota(api, repo_root, task_id, quota_status) -> str:
         "source": resolved["source"],
         "evaluated_at": resolved["evaluated_at"]})
     return status
+
+
+def _execution_phase_decision(repo_root, st, max_workers):
+    """v2.2 M4（wu-22-04）execution phase 决策（D6/D7/D13）——零网络。
+
+    只读本地额度缓存 <repo_root>/.glm-conductor/quota-cache.json
+    （runtime.quota.resolver.CACHE_FILE_NAME；复用 resolver._load_cache
+    / _cache_path 容错原语——文件缺失 / OSError / JSON 损坏 / 非 dict /
+    status 词汇陈旧（不在 QUOTA_STATUSES）/ fetched_at 不可解析一律
+    视为无缓存），绝不触发 provider 抓取、绝不重试网络：
+
+      - 无有效缓存 → 返回 None（fail-open：闸不激活，调用方预算折算
+        与 state 落盘零改动——缓存缺失绝不阻塞或降级既有派发行为，
+        D7 第 4 条 fail-open 语义先于闸门）；
+      - 有效缓存 → 以缓存 status 为 provider_status、snapshot.windows
+        为窗口清单，组装 runtime.quota.control.evaluate_task_quota_phase
+        输入：quota_control 取 execution_policy.default_quota_control
+        （D5 阈值单一真相源，legacy 缺块按 35/20 默认）、max_workers
+        取 _worker_cap_base（与预算折算同一 cap_base 口径）、
+        wake_bridge_status 容错读 continuation.wake_bridge.status
+        （非法词汇按 "none"）、task_active=True（prepare 时点任务恒在
+        执行态）；返回其冻结 8 键决策 dict（§17.1）；
+      - 决策器任何异常（防御分支：上游输入已全量容错，理论不可达）
+        → None 同 fail-open——闸自身故障绝不阻塞派发。
+
+    纯读：不改入参 st、零写副作用；D13 回填与 D6 硬拒归调用方按各自
+    事务时点执行。
+    """
+    try:
+        from runtime.quota import control, resolver  # 函数内 import：monkeypatch 友好
+        cache = resolver._load_cache(resolver._cache_path(repo_root))
+        if not isinstance(cache, dict):
+            return None
+        snapshot = cache.get("snapshot")
+        windows = (snapshot.get("windows")
+                   if isinstance(snapshot, dict) else None)
+        policy = st.get("execution_policy")
+        continuation = st.get("continuation")
+        bridge = (continuation.get("wake_bridge")
+                  if isinstance(continuation, dict) else None)
+        wake_bridge_status = (bridge.get("status")
+                              if isinstance(bridge, dict) else None)
+        if wake_bridge_status not in state.WAKE_BRIDGE_STATUSES:
+            wake_bridge_status = "none"
+        return control.evaluate_task_quota_phase(
+            provider_status=cache.get("status"), windows=windows,
+            quota_control=default_quota_control(policy),
+            max_workers=_worker_cap_base(st, max_workers),
+            task_active=True, wake_bridge_status=wake_bridge_status)
+    except Exception:
+        return None  # 闸自身故障一律 fail-open，绝不阻塞派发
+
+
+def _backfill_execution_phase(st, phase) -> None:
+    """D13 回填：state.quota.execution_phase = phase（prepare 时点写入，
+    供 manifest 与 SessionStart 展示）。
+
+    quota 块缺失时新建、已存在时只增写 execution_phase 键（既有键——
+    如 observer 落的 status / snapshot——原样保留）；validator 对 quota
+    未知键宽松，execution_phase 直接写入合法。只改内存 dict，落盘归
+    调用方的单次 save（拒绝路径为 _reject_by_execution_phase 的
+    save-then-raise，放行路径为调用方既有落盘点）。
+    """
+    quota_block = st.get("quota")
+    if not isinstance(quota_block, dict):
+        quota_block = {}
+        st["quota"] = quota_block
+    quota_block["execution_phase"] = phase
+
+
+def _reject_by_execution_phase(api, repo_root, st, decision) -> None:
+    """D6 硬拒新实施派发 + D13 回填落盘（拒绝路径先落回填再 raise——
+    prepare 时点写入是 D13 冻结语义，被拒的 prepare 也留下观测事实）。
+
+    单次 save 纪律：本次 save_state 是该次被拒 prepare 调用的唯一落盘
+    （单单元入口原本零落盘；wave 入口尚未走到 wave 记录落盘点）；调用
+    方保证此刻无任何租约 / permit / wave / journal 副作用，被拒的
+    prepare 零残留、可安全重试。
+
+    错误口径（v2.2 M4 冻结）：消息以 "execution phase" 开头（供测试与
+    M5 区分），随后注明决策器 reason——含 execution_phase、驱动窗口
+    剩余与最早重置时刻——以及 §18.1 收尾白名单与 reset/wake 建议。
+    """
+    phase = decision["execution_phase"]
+    _backfill_execution_phase(st, phase)
+    state.save_state(repo_root, st)
+    raise TaskManagerError(
+        "execution phase %s：%s 拒绝新实施单元/波次（%s）。收尾白名单"
+        "动作 join/verify/review/checkpoint/wake 不受本闸限制（running "
+        "单元不强杀）；建议等待额度窗口重置或创建 wake bridge 后恢复"
+        "派发" % (phase, api, decision["reason"]))
 
 
 def _validate_permit_mode(api, st, mode, reason) -> "tuple":
@@ -652,6 +790,18 @@ def prepare_dispatch(repo_root, task_id, uid, *, quota_status=None,
     （journal transaction_aborted 记账，见 _compensate_failed_prepare）
     后原样上抛——失败零残留，无需人工 abort_dispatch 回退（RB-21-03；
     硬崩溃窗口语义仍见模块 docstring permit 接线一节）。
+
+    execution phase 闸（v2.2 M4 wu-22-04，D6/D7/D13）：额度解析（步 4）
+    之后、预算折算（步 5）之前，零网络读取本地额度缓存做 execution
+    phase 决策——无有效缓存 fail-open 跳过（预算折算与 state 落盘零
+    改动，fail-open 语义先于闸门）；有效缓存时先按 D13 回填
+    state.quota.execution_phase（本调用唯一一笔 save_state），再裁决：
+    DRAINING/BLOCKED 在任何租约 / permit 副作用之前硬拒（TaskManagerError
+    消息以 "execution phase" 开头，拒绝路径先落回填再 raise）；放行相
+    （NORMAL/PRESSURE）的 dispatch_budget 并入步 5 的单一 min 折算
+    （PRESSURE→1 合流既有折算路径，NORMAL 照旧）。plan_dispatch 底层
+    零改动；running 单元不强杀；finish/verify/review/checkpoint/wake
+    路径零接触（D6 白名单）。
     """
     api = "prepare_dispatch"
     st = _require_state(repo_root, task_id, api)
@@ -668,13 +818,29 @@ def prepare_dispatch(repo_root, task_id, uid, *, quota_status=None,
     # wu-21-10 运行时额度解析：显式字符串直通；None → resolver 层级
     # 决策 + quota_resolved 事件（此后 quota_status 恒为四态实际值）
     quota_status = _resolve_quota(api, repo_root, task_id, quota_status)
+    # —— v2.2 M4（wu-22-04）execution phase 闸（D6/D7/D13）：零网络读
+    # 本地额度缓存 → control 决策；无有效缓存 fail-open 跳过（零改动）。
+    # 闸激活时先 D13 回填（本调用唯一一笔 save_state），DRAINING/BLOCKED
+    # 在任何租约 / permit 副作用之前硬拒；放行相的 dispatch_budget 并入
+    # 下方 _effective_worker_cap 的单一 min 折算
+    phase_decision = _execution_phase_decision(repo_root, st, max_workers)
+    if phase_decision is not None:
+        _backfill_execution_phase(st, phase_decision["execution_phase"])
+        if not phase_decision["allow_new_wave"]:
+            _reject_by_execution_phase(api, repo_root, st, phase_decision)
+        state.save_state(repo_root, st)  # D13 回填落盘（放行路径）
     dispatch_block = st.get("dispatch")
     if not isinstance(dispatch_block, dict):
         dispatch_block = {}
     # wu-21-09 预算接线：cap_base（显式 > policy > legacy dispatch > 2）
     # × quota 四态折算（§12）→ eff；eff=0（EXHAUSTED）时传 1 进 plan，
-    # 由 quota 闸自然全转 waiting_quota（plan 校验 1..4 不能收 0）
-    eff = _effective_worker_cap(st, quota_status, max_workers)
+    # 由 quota 闸自然全转 waiting_quota（plan 校验 1..4 不能收 0）；
+    # v2.2 M4 起 execution phase 的 dispatch_budget 参与同一 min 折算
+    # （PRESSURE→1，NORMAL 相 budget=cap_base 无变化）
+    eff = _effective_worker_cap(
+        st, quota_status, max_workers,
+        phase_budget=(phase_decision["dispatch_budget"]
+                      if phase_decision is not None else None))
     active = dispatch_block.get("active")
     if not isinstance(active, list):
         active = []
@@ -800,6 +966,19 @@ def prepare_dispatch_wave(repo_root, task_id, *, quota_status=None,
     wave 关闭不归本 API：成员全部终态/verifying 时由 finish_unit 收口
     （见 _close_finished_waves）；hook 侧经
     dispatch_wave.validate_wave_membership 校验成员资格。
+
+    execution phase 闸（v2.2 M4 wu-22-04，D6/D7/D13）：额度解析（步 3）
+    之后、预算折算（步 4）之前，零网络读取本地额度缓存做 execution
+    phase 决策——无有效缓存 fail-open 跳过（预算折算与 state 落盘零
+    改动，fail-open 语义先于闸门）；有效缓存时按 D13 回填
+    state.quota.execution_phase（随步 8 wave 记录的既有单次 save_state
+    落盘，不新增写盘点），DRAINING/BLOCKED 在决策-租约循环（步 5）之前
+    硬拒（TaskManagerError 消息以 "execution phase" 开头，拒绝路径先
+    落回填再 raise——零租约残留）；放行相（NORMAL/PRESSURE）的
+    dispatch_budget 并入步 4 的单一 min 折算（PRESSURE→worker_budget
+    收缩为 1，合流既有折算路径，NORMAL 照旧）。plan_dispatch 底层零
+    改动；running 单元不强杀；finish/verify/review/checkpoint/wake
+    路径零接触（D6 白名单）。
     """
     api = "prepare_dispatch_wave"
     st = _require_state(repo_root, task_id, api)
@@ -810,13 +989,28 @@ def prepare_dispatch_wave(repo_root, task_id, *, quota_status=None,
     # 决策 + quota_resolved 事件（此后 quota_status 恒为四态实际值，
     # wave 记录的 quota_status 字段记的正是它）
     quota_status = _resolve_quota(api, repo_root, task_id, quota_status)
+    # —— v2.2 M4（wu-22-04）execution phase 闸（D6/D7/D13）：零网络读
+    # 本地额度缓存 → control 决策；无有效缓存 fail-open 跳过（零改动）。
+    # 闸激活时 D13 回填随下方 wave 记录的既有单次 save_state 落盘（不
+    # 新增写盘点）；DRAINING/BLOCKED 在决策-租约循环之前硬拒（零租约
+    # 残留）；放行相的 dispatch_budget 并入下方单一 min 折算
+    phase_decision = _execution_phase_decision(repo_root, st, max_workers)
+    if phase_decision is not None:
+        _backfill_execution_phase(st, phase_decision["execution_phase"])
+        if not phase_decision["allow_new_wave"]:
+            _reject_by_execution_phase(api, repo_root, st, phase_decision)
     dispatch_block = st.get("dispatch")
     if not isinstance(dispatch_block, dict):
         dispatch_block = {}
     # wu-21-09 预算接线（与 prepare_dispatch 同口径，见
     # _effective_worker_cap）：eff=0（EXHAUSTED）时传 1 进 plan，
-    # 由 quota 闸自然全转 waiting_quota
-    eff = _effective_worker_cap(st, quota_status, max_workers)
+    # 由 quota 闸自然全转 waiting_quota；v2.2 M4 起 execution phase 的
+    # dispatch_budget 参与同一 min 折算——PRESSURE 相 worker_budget
+    # 自然收缩为 1（合流既有折算路径，不双写），NORMAL 相照旧
+    eff = _effective_worker_cap(
+        st, quota_status, max_workers,
+        phase_budget=(phase_decision["dispatch_budget"]
+                      if phase_decision is not None else None))
     active = dispatch_block.get("active")
     if not isinstance(active, list):
         active = []
