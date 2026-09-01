@@ -23,6 +23,7 @@
 | 10 | wake 注入形态（同会话 user-turn） | **确证（2026-09-01 15:49Z 触发实测）**：探针在上一 turn 结束、会话空闲后以**用户 turn 形式注入本会话**，prompt 全文原样到达、marker 完整可读；完整对话历史可读（v2.1「同会话续行」再确证）；注入不触发任何可见 hook 通知（SessionStart 不重放）；turn 进行中不注入（触发时刻与注入时刻间隔 = 上一 turn 剩余时长）。附带确证 **one-shot 自完成**：触发后 `runCount=1` + `enabled=false` + `lifecycleStatus="completed"`，**无需 CronDelete 清理（glitch 红线天然规避）**；`lastRunAt` 较计划时刻晚 ~20 秒（调度精度可接受） | 确证 | 主会话第一手观察 + CronList 触发后状态 |
 | 11 | PreToolUse/PostToolUse 对 Cron 工具的拦截 | **待 M6 部署后新会话补测**：matcher 候选 `CronCreate\|CronDelete\|CronUpdate`（官方语义为正则匹配 tool name；Cron 系是原生工具，理论可拦） | 待测 | 官方文档 |
 | 12 | UserPromptSubmit 对 wake 注入 turn 的触发 | **待补测**（Stop/UserPromptSubmit 忽略 matcher——v2.1 已证；wake fire 机械记账挂点候选） | 待测 | v2.1 Phase 0 + 官方文档 |
+| 13 | **会话级 automation 创建限制（2026-09-01T16:16Z 发现，实验性 wake 建立受阻）** | `Cannot create a scheduled task inside a session that already belongs to a scheduled task`——**被 scheduled wake 触发过的会话被宿主标记"belongs to scheduled task"，即使该 automation 已 completed，本会话内也不能再创建任何新 cron**。含义：① until_done 多窗逐窗建 wake 在同一会话内**不可行**（第一窗 wake 触发后的会话建不了第二窗）；② bridge 必须在"干净会话"（从未被 wake 过）中创建；③ 账本在仓库不在会话——跨会话恢复不受此限（新会话建 wake / SessionStart 恢复均有效）。**wu-22-05/06 设计修正项：wake planner 的建立时机与"宿主关闭后 wake 去向"（RG-22-05）因此升为必测** | 确证（错误信息原文） | CronCreate 被宿主拒绝（本会话探针 15:48Z 触发后） |
 
 ## 2. 关键证据摘录
 
