@@ -610,6 +610,31 @@ class WakePromptTest(unittest.TestCase):
         self.assertIn("maxRuns=1", prompt)                # 一次性语义
         self.assertIn("wu-a", prompt)                     # 等待单元清单
 
+    def test_quota_wake_prompt_no_wake_record_discipline(self):
+        """C1a（wu-22-C1a，D15-g）：prompt 不再携带「arm 后串联
+        wake-record 记账」旧纪律——预算状态行保留前缀，消费语义改为
+        「本唤醒不消耗窗口预算（消费点 = resume commit point）」。"""
+        policy = authorize(save_task(
+            self.repo,
+            units=[make_unit("wu-a", "waiting_quota")],
+            policy=None), "until_done", 2)
+        st = state.load_state(self.repo, TID)
+        st["execution_policy"] = policy
+        st["status"] = "waiting_quota"
+        state.save_state(self.repo, st)
+        task_manager.record_quota_wake(self.repo, TID,
+                                       automation_id="cron-1",
+                                       fires_at="2026-08-31T12:05:00Z")
+
+        prompt = task_manager.quota_wake_prompt(self.repo, TID)
+
+        self.assertIn("已消耗 1 / 共 2 窗", prompt)        # 前缀行保留
+        self.assertIn("剩余 1 窗", prompt)
+        self.assertIn("不消耗窗口预算", prompt)            # D15-g 新语义
+        self.assertNotIn("record_quota_wake", prompt)      # 旧纪律清除
+        self.assertNotIn("wake-record", prompt)
+        self.assertNotIn("本唤醒消耗 1 个窗口预算", prompt)
+
     def test_prompt_missing_task_rejected(self):
         with self.assertRaises(task_manager.TaskManagerError):
             task_manager.quota_wake_prompt(self.repo, TID)

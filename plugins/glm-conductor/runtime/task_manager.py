@@ -185,10 +185,13 @@ DRAINING 派发闸（v2.2 M4，wu-22-04；决策记录 D6/D7/D13）：
       - quota_wake_prompt：自足唤醒 prompt（宿主实测：automation wake
         是同会话续行、SessionStart 不重放，prompt 必须自带 task_id /
         恢复步骤 / 红线）；
-      - record_quota_wake：window 扣减记账（主会话 CronCreate 成功后
-        调用，写 continuity.consumed_quota_windows，与 automation 存活
-        解耦、绝不回滚——正确性底线永远是未来 SessionStart 恢复注入，
-        automation 只是 best-effort bridge）；
+      - record_quota_wake：v2.1 legacy arm-time 窗口扣减记账（C1a 起
+        标记 legacy——v2.2 persistent path 禁止调用：automation
+        arm/fire/create 一律不消费窗口预算（D15-g），消费点唯一合法
+        位置 = Resume Controller 成功接受 epoch 的 resume commit
+        point（修正计划 §15.1，C1b 落新 API）；行为仍为写
+        continuity.consumed_quota_windows、与 automation 存活解耦、
+        绝不回滚——仅限 v2.1 one-shot 兼容入口）；
       - resume_from_quota：唤醒会话 / SessionStart 的恢复首步（RB-21-01
         恢复对账语义：status 缺省强制刷新额度；AVAILABLE/PRESSURE 恢复
         时逐 waiting_quota 单元按中断来源 quota_interrupted_from 分类
@@ -1902,10 +1905,11 @@ def quota_wake_prompt(repo_root, task_id) -> str:
         "   - EXHAUSTED / UNKNOWN → 零转态保守等待：不得派发、不得再建"
         "唤醒，按 recovery 摘要重排或降级 SessionStart 恢复。",
         "",
-        "预算状态：已消耗 %d / 共 %d 窗（剩余 %d 窗）。本唤醒消耗 1 个"
-        "窗口预算——主会话在 CronCreate 成功后调用 record_quota_wake "
-        "记账（与 automation 存活解耦，wake 未触发也不回滚）；预算耗尽"
-        "后不得再创建任何自动化唤醒，一律降级 SessionStart 恢复。"
+        "预算状态：已消耗 %d / 共 %d 窗（剩余 %d 窗）。本唤醒本身不消耗"
+        "窗口预算（automation arm/fire/create 一律不消费，D15-g："
+        "automation lifecycle ≠ quota epoch consumption）；窗口预算仅在"
+        "任务成功恢复执行（resume commit point）时消耗；预算耗尽后不得"
+        "再创建任何自动化唤醒，一律降级 SessionStart 恢复。"
         % (view["consumed_quota_windows"], view["max_quota_windows"],
            view["remaining"]),
         "",
@@ -1922,7 +1926,14 @@ def quota_wake_prompt(repo_root, task_id) -> str:
 
 
 def record_quota_wake(repo_root, task_id, *, automation_id, fires_at) -> dict:
-    """window 扣减记账（v2.1 §14.4：主会话 CronCreate 成功后调用）。
+    """window 扣减记账（v2.1 legacy arm-time 记账；v2.1 §14.4：主会话
+    CronCreate 成功后调用）。
+
+    LEGACY / DEPRECATED（v2.2 C1a）：本入口仅为 v2.1 one-shot 兼容
+    保留；v2.2 persistent path 禁止调用（automation arm/fire/create
+    一律不消费窗口预算，D15-g：automation lifecycle ≠ quota epoch
+    consumption）——消费点唯一合法位置 = resume commit point（修正
+    计划 §15.1），C1b 落地新记账 API 后本入口退役。
 
     - 幂等（SH-21-01）：journal 已有同 automation_id 的
       quota_wake_recorded 事件 → 直接返回既有消耗结果（不递增、
@@ -2460,8 +2471,9 @@ def plan_wake_bridge(repo_root, task_id, *, provider_status=None,
     "bridge_interval_minutes", "eager", "prompt", "reason"}。
 
     时序（与宿主动作的分工）：本函数裁决 → 主会话宿主 CronCreate
-    （runtime 绝不调用）→ arm_wake_bridge 记账 → 调用方串联 CLI
-    wake-record / record_quota_wake 扣减窗口预算（M5 不自动串联）。
+    （runtime 绝不调用）→ arm_wake_bridge 记账即止——arm/fire/create
+    一律不消费窗口预算（C1a，D15-g：automation lifecycle ≠ quota
+    epoch consumption；消费点 = resume commit point §15.1，C1b 落地）。
     """
     api = "plan_wake_bridge"
     st = _require_state(repo_root, task_id, api)
@@ -2671,9 +2683,10 @@ def arm_wake_bridge(repo_root, task_id, *, automation_id, boundary_id,
     后**调用，v2.2 M5 / D15-a / §9 生命周期）。
 
     时序（冻结）：plan_wake_bridge 裁决（required=True）→ 主会话宿主
-    CronCreate（宿主动作，runtime 绝不调用）→ 本函数记账 → 调用方串联
-    CLI wake-record / record_quota_wake 扣减窗口预算（M5 不自动串联；
-    auto 家族三查与幂等语义见 record_quota_wake）。
+    CronCreate（宿主动作，runtime 绝不调用）→ 本函数记账即止——
+    arm/fire/create 一律不消费窗口预算（C1a，D15-g：automation
+    lifecycle ≠ quota epoch consumption；消费点 = resume commit
+    point §15.1，C1b 落地）。
 
     写入（continuation.wake_bridge 十字段 + obligation）：
       status="armed"、boundary_id / current_boundary_id=boundary_id、

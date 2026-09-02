@@ -138,7 +138,9 @@
         是合法结果——退出码仍 0。
     wake-record <repo_root> <task_id> <automation_id> <fires_at>
         唤醒窗口扣减记账（v2.1 M5 §14.4，task_manager.
-        record_quota_wake 薄壳；主会话 CronCreate 成功后调用）：
+        record_quota_wake 薄壳；v2.1 legacy 兼容入口——v2.2 persistent
+        path 禁止调用，C1a：arm/fire/create 不消费窗口预算，消费点 =
+        resume commit point，C1b 落地）：
         consumed_quota_windows += 1 + journal quota_wake_recorded。输出
         {consumed_quota_windows, remaining_quota_windows,
         max_quota_windows, automation_id, fires_at}。automation_id /
@@ -740,9 +742,10 @@ def _quota_resume(repo_root, task_id, raw_status=None) -> int:
 
 def _wake_record(repo_root, task_id, automation_id, fires_at) -> int:
     """wake-record：唤醒窗口扣减记账（task_manager.record_quota_wake
-    薄壳）。automation_id / fires_at 空串由 API 的 ValueError 闸拒绝
-    （退出码 2）；任务缺失（TaskManagerError）→ _QuotaFlowRejected
-    （退出码 1）。"""
+    薄壳；v2.1 legacy 兼容入口——v2.2 persistent path 禁止调用，C1a：
+    arm/fire/create 不消费窗口预算）。automation_id / fires_at 空串由
+    API 的 ValueError 闸拒绝（退出码 2）；任务缺失（TaskManagerError）
+    → _QuotaFlowRejected（退出码 1）。"""
     from runtime import task_manager
     try:
         result = task_manager.record_quota_wake(

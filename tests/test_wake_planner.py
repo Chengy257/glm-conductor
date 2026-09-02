@@ -935,5 +935,61 @@ class WakeStatusCliTest(WakePlannerTestBase):
         self.assertIn("error", payload)
 
 
+# —— C1a（wu-22-C1a）：persistent path 零窗口消费 ——
+
+class C1aZeroConsumptionTests(WakePlannerTestBase):
+    """C1a（wu-22-C1a，D15-g）：bridge 生命周期 arm/fire/retarget 全链
+    不消费窗口预算——机械钉死 consumed_quota_windows 只能被 v2.1
+    legacy 入口 record_quota_wake 改写，persistent path 上的任何
+    bridge 记账都不碰它（消费点唯一合法位置 = resume commit point
+    §15.1，C1b 落地新 API）。"""
+
+    def test_bridge_lifecycle_never_consumes_windows(self):
+        make_task(self.root, auto_resume="until_done", source="user",
+                  max_windows=2, consumed=1)
+
+        def consumed_value():
+            st = state.load_state(self.root, TID)
+            return (st["execution_policy"]["continuity"]
+                    ["consumed_quota_windows"])
+
+        self.assertEqual(consumed_value(), 1)  # 消费起点
+        task_manager.arm_wake_bridge(
+            self.root, TID, automation_id=AUTOMATION_ID,
+            boundary_id=BOUNDARY, reset_at=RESET_AT,
+            wake_at="2026-09-02T12:05:00Z")
+        self.assertEqual(consumed_value(), 1)  # arm 不消费
+        for hour in range(1, 11):  # fire 连续 10 次（每次不同 fired_at）
+            task_manager.record_bridge_fired(
+                self.root, TID, fired_at="2026-09-03T%02d:00:00Z" % hour)
+            self.assertEqual(consumed_value(), 1)  # fire 不消费
+        new_boundary = "five_hour:2026-09-02T21:59:00Z"
+        task_manager.retarget_wake_bridge(
+            self.root, TID, boundary_id=new_boundary,
+            reset_at="2026-09-02T21:59:00Z",
+            wake_at="2026-09-02T22:04:00Z")
+        self.assertEqual(consumed_value(), 1)  # retarget 不消费
+        rearm = task_manager.arm_wake_bridge(
+            self.root, TID, automation_id=AUTOMATION_ID,
+            boundary_id=new_boundary, reset_at="2026-09-02T21:59:00Z",
+            wake_at="2026-09-02T22:04:00Z")
+        self.assertTrue(rearm["idempotent"])  # 幂等 no-op 路径
+        self.assertEqual(consumed_value(), 1)
+        self.assertEqual(
+            events(self.root, "quota_wake_recorded"), [])  # 零扣减事件
+        self.assertEqual(len(events(self.root, "wake_bridge_fired")),
+                         10)  # fire 真实记账（测试非空洞）
+
+    def test_bridge_docstrings_no_legacy_discipline(self):
+        """C1a：arm/plan docstring 不再串联「arm 后 wake-record 记账」
+        旧纪律（legacy 入口标注只归 record_quota_wake 自身）。"""
+        self.assertNotIn("wake-record", task_manager.arm_wake_bridge.__doc__)
+        self.assertNotIn("record_quota_wake",
+                         task_manager.arm_wake_bridge.__doc__)
+        self.assertNotIn("wake-record", task_manager.plan_wake_bridge.__doc__)
+        self.assertNotIn("record_quota_wake",
+                         task_manager.plan_wake_bridge.__doc__)
+
+
 if __name__ == "__main__":
     unittest.main()

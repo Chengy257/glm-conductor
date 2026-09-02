@@ -69,9 +69,11 @@ quota_control 可选子块（v2.2 M1，决策记录 D5；不在 POLICY_SUB_BLOCK
 window 预算记账（v2.1 §14，wu-21-11）：
     continuity.consumed_quota_windows 是可选键（已消耗的自动续跑窗口
     预算计数，task_manager.record_quota_wake 在主会话 CronCreate 成功
-    后递增）：缺键完全合法（按 0 解释——validate 容错缺省，默认块不
-    含该键，legacy / 新任务形状不变）；存在时必须是 >= 0 的 int
-    （bool 拒绝）。消费方经 consumed_quota_windows() 容错读，与
+    后递增——C1a 起该入口为 v2.1 legacy：v2.2 persistent path 禁止
+    调用，arm/fire/create 不消费窗口预算，消费点 = resume commit
+    point，C1b 落地）：缺键完全合法（按 0 解释——validate 容错缺省，
+    默认块不含该键，legacy / 新任务形状不变）；存在时必须是 >= 0 的
+    int（bool 拒绝）。消费方经 consumed_quota_windows() 容错读，与
     max_quota_windows 的差即剩余窗口预算。
 
 有效并发预算（计划 §12 表）：
