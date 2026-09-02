@@ -466,6 +466,54 @@ subprocess 一律使用 sys.executable
 第一版不引入 Windows service
 ```
 
+### 6.2.1 P0-WATCH-00 验证记录（2026-09-02/03，实施时回填）
+
+实施工作单元 wu-22-C3 将五项硬门落地为持续门（`tests/test_watcher_store.py`，
+`python3 -m unittest` 驱动；OS 原语零 mock 掉——门 5 的死 pid 用真实
+subprocess 派生并 wait 后的已退出进程，门 4 仅按规格口径对 os.replace
+注入 PermissionError 验证 bounded 重试）。
+
+| # | 门 | 结果 | 测试锚（本机真实执行） |
+|---|----|------|------------------------|
+| 1 | single-instance lock（活 pid + 新鲜 heartbeat 拒绝第二 acquire） | PASS | `tests.test_watcher_store.SingleInstanceLockTest`（5 用例） |
+| 2 | tmp + replace 原子写（写后内容完整、零 .tmp 残留） | PASS | `tests.test_watcher_store.AtomicWriteTest`（3 用例） |
+| 3 | watcher reader / writer 并发（一写多读永不见 partial JSON；读方 decode 错误 bounded reread） | PASS | `tests.test_watcher_store.ReaderWriterConcurrencyTest`（2 用例） |
+| 4 | PermissionError 的 bounded handling（有界重试后成功；超限抛 WatcherStoreError） | PASS | `tests.test_watcher_store.PermissionErrorBoundedTest`（3 用例） |
+| 5 | stale lock recovery（死 pid / 过期 heartbeat → 接管 generation+1） | PASS | `tests.test_watcher_store.StaleLockRecoveryTest`（4 用例） |
+
+运行证据（2026-09-03 真实执行，退出码均 0）：
+
+```text
+python3 -m unittest tests.test_watcher_store tests.test_watcher
+→ Ran 48 tests in 0.608s  OK（watcher_store 17 + watcher 31）
+python3 -m unittest discover -s tests
+→ Ran 1779 tests in 88.905s  OK
+python3 scripts/validate_plugin.py
+→ 15/15 项通过, 0 项失败
+```
+
+本机环境一行：Windows 10 x64（OS build 19042；platform.platform() 报
+Windows-10-10.0.19041-SP0）+ Python 3.7.9（sys.executable =
+`C:\Program Files\WindowsApps\PythonSoftwareFoundation.Python.3.7_2544.0_x64__qbz5n2kfra8p0\python.exe`，
+商店版），os.name=nt；pid 存活判定走 ctypes kernel32
+OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION) + GetExitCodeProcess
+判 STILL_ACTIVE（零外部依赖，未引入 psutil）。
+
+实施实录补充（本机验证发现的两笔真实 Windows 现象与处置）：
+
+```text
+1. 并发读压力下 os.replace 以 WinError 5（目标被读者句柄占用）拒绝：
+   默认 3 次 × 0.2s 的有界预算在 torture 级连续读压力下可能耗尽并按
+   设计抛 WatcherStoreError（绝不静默吞）。写方预算按「常量可配」
+   以参数放宽（attempts / interval）即可在高频读下收敛；门 3 测试
+   即以该口径落地（20 次 × 1ms），默认常量口径由门 4 单独锚定。
+2. watcher 循环写回丢旗标竞争：CLI stop 在 tick 抓取期间置位
+   stop_requested 会被 tick 末尾的整记录覆盖写抹掉（测试实录：循环
+   永不退出）。处置：watcher 循环写前重读文件并 OR 合并旗标，窗口
+   收窄到合并读之后的微秒级（文件即锁、无 CAS 的固有窗口，已记入
+   watcher.py docstring）。
+```
+
 ---
 
 # 7. Watcher ACTIVE / PASSIVE 模式

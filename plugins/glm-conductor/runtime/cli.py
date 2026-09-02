@@ -166,6 +166,21 @@
         wake_bridge.status 十值词汇 + scheduler_context（origin +
         capability 缓存）+ mode/generation 及墓碑。零写副作用；任务
         缺失 → 退出码 1。
+    quota-watcher <repo_root> start|status|stop|once
+        Real-Time Quota Watcher 操作面（v2.2 修正计划 C3 wu-22-C3，
+        §6/§6.1，runtime.quota.watcher / watcher_store 薄壳）：
+        start 以 **sys.executable** 分离派生子进程运行本 CLI 的内部
+        serve 形态 `quota-watcher <repo_root> --serve`（隐藏形态，仅
+        由 start 派生使用；stdout/stderr 落
+        .glm-conductor/quota/watcher.log），派生成功即返回 pid（子
+        进程内的单实例锁冲突只落日志，不在 start 同步上报）；status
+        读 watcher.json 输出摘要（mode/pid/generation/heartbeat/
+        staleness/last_observation）；stop 置 stop_requested 旗标
+        （原子写回，单次操作绝不轮询等待退出）；once 前台单次抓取
+        （测试/诊断用；锁被活进程新鲜持有时报冲突退出码 1）。watcher
+        只写自身状态文件 .glm-conductor/quota/watcher.json，绝不写
+        任务 state/journal；第一阶段零模型调用、不 prime、不发
+        activation（§6.1 skeleton-first）。
 
 输出与退出码契约：
     stdout 恒为单行 JSON（json.dumps(..., ensure_ascii=True)，中文以
@@ -233,7 +248,8 @@ USAGE = (
     "wake-record <repo_root> <task_id> <automation_id> <fires_at> | "
     "wake-prompt <repo_root> <task_id> | "
     "wake-plan <repo_root> <task_id> | "
-    "wake-status <repo_root> <task_id>")
+    "wake-status <repo_root> <task_id> | "
+    "quota-watcher <repo_root> start|status|stop|once")
 
 # policy-set-resume 的 max_quota_windows 缺省推导表（§5.4 耦合的
 # 最小合法值：until_done 取下界 1，保守不放大）
@@ -274,6 +290,11 @@ class _VerifyRejected(Exception):
     """溯源执行 / 审查申报被 provenance 拒绝（任务或单元缺失、白名单
     闸 / policy 闸、ProvenanceError；verify-unit / verify-task /
     review-record 共用）——运行期拒绝，退出码 1。"""
+
+
+class _QuotaWatcherConflict(Exception):
+    """quota-watcher 单实例锁冲突（§6 冻结：现存记录 pid 活着且
+    heartbeat 新鲜时，once / serve 拒绝执行）——运行期拒绝，退出码 1。"""
 
 
 def _emit(payload):
@@ -840,6 +861,132 @@ def _wake_status(repo_root, task_id) -> int:
     return 0
 
 
+# —— v2.2 修正计划 C3（wu-22-C3）：Real-Time Quota Watcher ——
+
+def _quota_watcher_start(repo_root) -> int:
+    """quota-watcher start：以 sys.executable 分离派生 serve 子进程
+    （§6.2 工程约束：subprocess 一律 sys.executable；用户文档仍写
+    python3）。子进程运行本 CLI 的内部隐藏形态
+    `quota-watcher <repo_root> --serve`，stdout/stderr 落
+    .glm-conductor/quota/watcher.log；派生成功即返回 pid（子进程内的
+    单实例锁冲突只落日志——start 是 fire-and-forget，状态由 status
+    观测）。Windows 用 DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP，
+    POSIX 用 start_new_session；不引入 Windows service / autostart
+    （§6.1 冻结不做项）。"""
+    import os
+    import subprocess
+    from runtime.quota import watcher_store
+    cli_path = str(pathlib.Path(__file__).resolve())
+    log_path = watcher_store.watcher_log_path(repo_root)
+    state_path = watcher_store.watcher_state_path(repo_root)
+    os.makedirs(os.path.dirname(log_path), exist_ok=True)
+    argv = [sys.executable, cli_path, "quota-watcher", str(repo_root),
+            "--serve"]
+    with open(log_path, "ab") as log_handle:
+        kwargs = {}
+        if os.name == "nt":
+            kwargs["creationflags"] = (subprocess.DETACHED_PROCESS
+                                       | subprocess.CREATE_NEW_PROCESS_GROUP)
+        else:
+            kwargs["start_new_session"] = True
+        process = subprocess.Popen(
+            argv, stdin=subprocess.DEVNULL, stdout=log_handle,
+            stderr=log_handle, close_fds=True, **kwargs)
+    _emit({"started": True, "pid": process.pid, "log": log_path,
+           "state": state_path,
+           "serve": "quota-watcher <repo_root> --serve（内部隐藏形态，"
+                    "由 start 派生；单实例锁冲突详情落 watcher.log）"})
+    return 0
+
+
+def _quota_watcher_status(repo_root) -> int:
+    """quota-watcher status：读 watcher.json 输出摘要（零写副作用；
+    无记录不是错误——active=false，退出码 0）。staleness =
+    heartbeat_age_seconds 相对 watcher_store 默认新鲜阈值（180 秒）
+    的新鲜性二标注。"""
+    from runtime.quota import watcher_store
+    record = watcher_store.read_watcher_state(repo_root)
+    state_path = watcher_store.watcher_state_path(repo_root)
+    if record is None:
+        _emit_utf8({"active": False, "record": None, "state": state_path})
+        return 0
+    stale_seconds = watcher_store.DEFAULT_HEARTBEAT_STALE_SECONDS
+    age = watcher_store.heartbeat_age_seconds(record)
+    _emit_utf8({
+        "active": record.get("pid") is not None,
+        "mode": record.get("mode"),
+        "pid": record.get("pid"),
+        "generation": record.get("generation"),
+        "provider_identity_hash": record.get("provider_identity_hash"),
+        "started_at": record.get("started_at"),
+        "heartbeat_at": record.get("heartbeat_at"),
+        "heartbeat_age_seconds": age,
+        "heartbeat_stale": (None if age is None
+                            else age > stale_seconds),
+        "stop_requested": record.get("stop_requested"),
+        "next_poll_at": record.get("next_poll_at"),
+        "last_observation": record.get("last_observation"),
+        "state": state_path,
+    })
+    return 0
+
+
+def _quota_watcher_stop(repo_root) -> int:
+    """quota-watcher stop：置 stop_requested 旗标（原子写回）；单次
+    操作，绝不轮询等待退出（消费由 watcher 循环在下一 wake 完成）。
+    无记录 → stop_requested=false 幂等成功（退出码 0，非错误）。"""
+    from runtime.quota import watcher_store
+    record = watcher_store.request_stop(repo_root)
+    if record is None:
+        _emit_utf8({"stop_requested": False,
+                    "reason": "无 watcher 状态记录（watcher.json 不存在），"
+                              "无可停止对象",
+                    "state": watcher_store.watcher_state_path(repo_root)})
+        return 0
+    _emit_utf8({"stop_requested": True, "pid": record.get("pid"),
+                "generation": record.get("generation"),
+                "note": "旗标已原子置位；watcher 将在下一 wake 优雅退出"
+                        "（本命令不等待）",
+                "state": watcher_store.watcher_state_path(repo_root)})
+    return 0
+
+
+def _quota_watcher_once(repo_root) -> int:
+    """quota-watcher once：前台单次抓取（watcher.run_once 薄壳，测试/
+    诊断用）。锁被活进程新鲜持有（§6）→ _QuotaWatcherConflict（退出
+    码 1）；否则输出一次观察摘要（epoch_id / probe_boundary_at 来自
+    epoch.evaluate_epoch 对 §27 windows 的折算）。"""
+    from runtime.quota import watcher, watcher_store  # 函数内 import：monkeypatch 友好
+    result = watcher.run_once(repo_root)
+    if not result["ran"]:
+        raise _QuotaWatcherConflict(
+            "quota-watcher once：单实例锁被活进程持有（pid=%r，"
+            "heartbeat_at=%r 仍新鲜），未执行抓取" % (
+                (result["conflict"] or {}).get("pid"),
+                (result["conflict"] or {}).get("heartbeat_at")))
+    record = result["record"] or {}
+    observation = record.get("last_observation") or {}
+    _emit_utf8({"ran": True, "mode": record.get("mode"),
+                "generation": record.get("generation"),
+                "status": observation.get("status"),
+                "source": observation.get("source"),
+                "epoch_id": observation.get("epoch_id"),
+                "probe_boundary_at": observation.get("probe_boundary_at"),
+                "executable": observation.get("executable"),
+                "observed_at": observation.get("observed_at"),
+                "error": observation.get("error"),
+                "state": watcher_store.watcher_state_path(repo_root)})
+    return 0
+
+
+def _quota_watcher_serve(repo_root) -> int:
+    """quota-watcher <repo_root> --serve：内部隐藏形态，仅由 start 派生
+    使用（文档注明；不由操作者直接调用）。acquire 冲突 → 退出码 1
+    （详情落 stderr → watcher.log）；graceful stop → 退出码 0。"""
+    from runtime.quota import watcher
+    return watcher.serve(repo_root)
+
+
 def _manifest_show(repo_root, task_id) -> int:
     """manifest-show：Resume Manifest 只读查询（薄壳）。
 
@@ -1004,6 +1151,26 @@ def _dispatch(args) -> int:
             raise _UsageError(
                 "wake-status 需要 <repo_root> <task_id> 两个参数。" + USAGE)
         return _wake_status(rest[0], rest[1])
+    if cmd == "quota-watcher":
+        if len(rest) != 2:
+            raise _UsageError(
+                "quota-watcher 需要 <repo_root> start|status|stop|once"
+                " 两个参数（--serve 为 start 派生的内部隐藏形态）。"
+                + USAGE)
+        action = rest[1]
+        if action == "start":
+            return _quota_watcher_start(rest[0])
+        if action == "status":
+            return _quota_watcher_status(rest[0])
+        if action == "stop":
+            return _quota_watcher_stop(rest[0])
+        if action == "once":
+            return _quota_watcher_once(rest[0])
+        if action == "--serve":  # 内部隐藏形态：仅由 start 派生使用
+            return _quota_watcher_serve(rest[0])
+        raise _UsageError(
+            "quota-watcher 的动作只接受 start / status / stop / once"
+            "（--serve 为内部隐藏形态），得到 %r。" % action + USAGE)
     raise _UsageError("未知子命令 %r。" % cmd + USAGE)
 
 
@@ -1015,7 +1182,8 @@ def main(argv=None) -> int:
     _TaskMissing（任务不存在）/ _PermitMissing（permit 不存在或已
     消费 / 已失效）/ _WaveMissing（wave 记录不存在）/ _WaveRejected
     （wave 准备被派发事务层拒绝）/ _QuotaFlowRejected（quota 连续性
-    事务被拒）/ _VerifyRejected（溯源执行或审查申报被拒）→ 1；其余
+    事务被拒）/ _VerifyRejected（溯源执行或审查申报被拒）/
+    _QuotaWatcherConflict（quota-watcher 单实例锁冲突）→ 1；其余
     意外异常 → 1（错误 JSON 含异常类型名，stdout 契约不破）。
     """
     args = list(sys.argv[1:]) if argv is None else list(argv)
@@ -1025,7 +1193,8 @@ def main(argv=None) -> int:
         _emit({"error": str(exc)})
         return 2
     except (_TaskMissing, _PermitMissing, _WaveMissing, _WaveRejected,
-            _QuotaFlowRejected, _VerifyRejected) as exc:
+            _QuotaFlowRejected, _VerifyRejected,
+            _QuotaWatcherConflict) as exc:
         _emit({"error": str(exc)})
         return 1
     except Exception as exc:  # 意外异常兜底：stdout 契约不破
