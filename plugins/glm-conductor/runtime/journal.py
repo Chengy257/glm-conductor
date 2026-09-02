@@ -87,8 +87,13 @@ RECOMMENDED_EVENTS = (
     "wake_bridge_pause_requested",        # wake bridge 暂停请求（进入暂停意愿态）
     "wake_bridge_paused",                 # wake bridge 已暂停（automation 置 disabled）
     "wake_bridge_degraded",               # wake bridge 降级（自动化不可用，回退人工唤醒）
-    "quota_boundary_consumed",            # quota 边界已消费（bridge 触发后的窗口切换确认）
+    "quota_boundary_consumed",            # quota 边界已消费（§15.1 resume commit point：新 executable epoch 确认且授权恢复实际开始才 +1；v2.2 C1b 起消费语义冻结，arm/fire/create 一律不消费）
     "scheduled_nested_create_rejected",   # 被 Scheduled Task 触发的会话嵌套创建 automation 被拒（SCHED-04 硬门）
+    # —— v2.2 C1b resume-time consumption 事件（修正计划 §C1b / §22.5 /
+    # §22.6；词汇仍开放式，本常量只作文档性推荐，append_event 不强制
+    # 成员资格）——
+    "quota_accounting_migrated",  # §22.6 存量窗口记账保守迁移一次性事件（max 语义，不退款）
+    "wake_bridge_reconciled",     # §22.5 手动/历史桥对账（纯账本；host_status 由调用方显式提供，绝不制造 armed）
 )
 
 

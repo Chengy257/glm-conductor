@@ -36,6 +36,12 @@ boundary 分工，2026-09-02 冻结）/ §30（max(reset)+grace）/ §31
        （空集指纹锚定）；grace 0 / 600 生效；grace -1/True/nan →
        ValueError；provider_status="BOGUS" → ValueError
     i  归一化："+00:00 后缀形式" 与 "Z 形式" 同一时刻 → 归一后同指纹
+    j  部分可解析 reset_at（C2 reviewer P3，wu-22-C1b 增补）：混合
+       可解析 + 不可解析窗——unknown 窗完整参与 epoch 身份（多重集
+       占位）但被 probe / executable 双边界排除（不虚构，§31）；边界
+       数学只落在可解析子集上（probe 取 min、executable 取阻塞窗
+       可解析者的 max）；阻塞窗 reset 全不可解析 → executable None
+       而 probe 仍可由非阻塞可解析窗给出
 """
 
 import hashlib
@@ -55,6 +61,8 @@ RESET_WEEKLY = "2026-09-07T21:59:00Z"
 WEEKLY_PLUS_GRACE = "2026-09-07T22:04:00Z"   # RESET_WEEKLY + 默认 300s
 RESET_WEEKLY_ROLLED = "2026-09-14T21:59:00Z"  # 场景 e：weekly 滚动后的新 reset
 RESET_DRIFT = "2026-09-03T03:19:22Z"          # 场景 c：真实漂移样本
+RESET_EARLY = "2026-09-02T10:00:00Z"          # 场景 j：更早的可解析 reset
+EARLY_PLUS_GRACE = "2026-09-02T10:05:00Z"     # RESET_EARLY + 默认 300s
 
 # evaluate_epoch 冻结 6 键（键名逐字）
 FROZEN_KEYS = {
@@ -399,6 +407,77 @@ class CanonicalWindowsShapeTest(unittest.TestCase):
                    win("five_hour", "EXHAUSTED", RESET_FIVE)]
         once = epoch.canonical_windows(windows)
         self.assertEqual(epoch.canonical_windows(once), once)
+
+
+# —— j：部分可解析 reset_at（混合可解析 + 不可解析；C2 reviewer P3） ——
+
+class PartiallyParseableResetTest(unittest.TestCase):
+    """j：混合清单中可解析 / 不可解析窗并存——unknown 参与身份、被
+    双 boundary 排除（epoch.py 模块 docstring「输入契约」注记的机械
+    锚定；C1b 增补）。"""
+
+    def test_probe_uses_parseable_subset_only(self):
+        """j：unknown 窗被 probe 排除——min 只在可解析子集上取。"""
+        windows = [
+            win("five_hour", "EXHAUSTED", None),       # unknown：不参与
+            win("weekly", "AVAILABLE", RESET_WEEKLY),  # 可解析
+        ]
+        self.assertEqual(epoch.probe_boundary_at(windows), WEEKLY_PLUS_GRACE)
+
+    def test_executable_excludes_unparseable_blocking_windows(self):
+        """j：阻塞窗 reset 不可解析 → 被排除；executable = 可解析阻塞
+        子集的 max，probe = 全部可解析窗的 min（两者分离）。"""
+        windows = [
+            win("five_hour", "AVAILABLE", RESET_EARLY),
+            win("weekly", "EXHAUSTED", None),           # unknown 阻塞窗
+            win("five_hour", "EXHAUSTED", RESET_FIVE),  # 可解析阻塞窗
+        ]
+        self.assertEqual(
+            epoch.executable_boundary_at(windows), FIVE_PLUS_GRACE)
+        self.assertEqual(epoch.probe_boundary_at(windows), EARLY_PLUS_GRACE)
+        self.assertNotEqual(
+            epoch.executable_boundary_at(windows),
+            epoch.probe_boundary_at(windows))
+
+    def test_all_blocking_unparseable_executable_none_probe_still_ok(self):
+        """j：阻塞窗 reset 全不可解析 → executable None（§31 不虚构），
+        probe 仍可由非阻塞可解析窗给出；身份照常可计算。"""
+        windows = [
+            win("five_hour", "EXHAUSTED", "garbage"),
+            win("weekly", "AVAILABLE", RESET_WEEKLY),
+        ]
+        self.assertIsNone(epoch.executable_boundary_at(windows))
+        self.assertEqual(epoch.probe_boundary_at(windows), WEEKLY_PLUS_GRACE)
+        self.assertTrue(epoch.epoch_id(windows).startswith("glm:"))
+
+    def test_unknown_window_still_counts_in_identity(self):
+        """j：unknown 窗完整参与 epoch 身份——存在即改变多重集；不可
+        解析拼写（None vs 乱串）同一身份；但不改变可解析子集的边界
+        数学。"""
+        base = [win("five_hour", "EXHAUSTED", RESET_FIVE)]
+        with_unknown = base + [win("weekly", "AVAILABLE", None)]
+        self.assertNotEqual(
+            epoch.epoch_id(base), epoch.epoch_id(with_unknown))
+        self.assertEqual(
+            epoch.epoch_id(base + [win("weekly", "AVAILABLE", None)]),
+            epoch.epoch_id(base + [win("weekly", "AVAILABLE", "garbage")]))
+        self.assertEqual(
+            epoch.executable_boundary_at(with_unknown), FIVE_PLUS_GRACE)
+        self.assertEqual(epoch.probe_boundary_at(with_unknown),
+                         FIVE_PLUS_GRACE)
+
+    def test_mixed_parseability_canonical_shape(self):
+        """j：混合清单 canonical 归一——可解析窗归一 Z 形式串、不可
+        解析窗 None，排序确定性保持。"""
+        windows = [
+            win("weekly", "AVAILABLE", None),
+            win("five_hour", "EXHAUSTED", "2026-09-02T21:59:00+00:00"),
+        ]
+        canonical = epoch.canonical_windows(windows)
+        self.assertEqual([w["kind"] for w in canonical],
+                         ["five_hour", "weekly"])
+        self.assertEqual([w["reset_at"] for w in canonical],
+                         [RESET_FIVE, None])
 
 
 if __name__ == "__main__":

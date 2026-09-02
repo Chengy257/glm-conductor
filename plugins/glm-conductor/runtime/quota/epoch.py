@@ -27,6 +27,23 @@ epoch 身份（冻结口径）：
     reset 不可知的窗口以字面 "unknown" 参与身份（同 kind 双 unknown
     快照仍是同一 epoch）。
 
+输入契约（v2.2 C1b 注记，C2 reviewer P2；仅注记不改行为）：
+    输入 windows 为 §27 snapshot 的 windows 列表：逐窗 dict，语义字段
+    kind / status / reset_at（used_percent / remaining_percent 等其余
+    字段允许存在，但不参与任何输出——身份与边界只读上述三字段）；
+    非 list 按空列表处理（fail-open），逐窗非 dict 条目跳过。
+    部分可解析 reset_at 的语义：解析以「窗」为单位——可解析窗归一为
+    Z 形式串参与一切计算；缺失 / 不可解析窗归一为 None（身份序列中
+    记字面 "unknown"）：
+      - epoch 身份：unknown 窗完整参与（unknown 是身份占位符，同
+        kind 双 unknown 仍是同一 epoch；混合清单中 unknown 窗的存在
+        本身改变多重集、即改变 epoch_id）；
+      - probe / executable boundary：unknown 窗被排除（不虚构时刻，
+        §31）——probe = 其余可解析窗的 min(reset)+grace；executable =
+        阻塞 EXHAUSTED 窗中可解析者的 max(reset)+grace。混合清单里
+        只有可解析子集参与边界数学；阻塞窗 reset 全不可解析 →
+        executable None（此时 probe 仍可由非阻塞可解析窗给出）。
+
 双 boundary 分工（§10.2，2026-09-02 冻结；禁止再混成一个 wake_at）：
     - probe boundary = min(全部可解析 reset_at) + grace——只服务观察
       收紧 / surveillance；Resume Controller 不得把它当 executable
