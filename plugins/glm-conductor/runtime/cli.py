@@ -149,13 +149,30 @@
         主会话直接复制进 automation 的 prompt 字段——本 CLI 唯一不裹
         JSON 的子命令；显式 UTF-8 落 stdout）。纯读零写副作用；任务
         缺失（TaskManagerError）→ 错误 JSON + 退出码 1。
+    wake-plan <repo_root> <task_id>
+        Persistent Wake Bridge 的 arm 裁决（v2.2 M5 wu-22-05，§22.2，
+        task_manager.plan_wake_bridge 薄壳）：纯计算不创建 automation。
+        额度输入与 M4 闸同源——只读本地 quota-cache.json（缺失 / 损坏
+        → provider_status=None / windows=None，plan 内按 UNKNOWN 保守
+        fail-open，绝不触发 provider 抓取）。输出 §22.2 冻结九键
+        {required, mode, boundary_id, current_boundary_id, wake_at,
+        bridge_interval_minutes, eager, prompt, reason}（ensure_ascii=
+        False——中文 reason/prompt 面向主会话直接阅读）。任务缺失 →
+        退出码 1。
+    wake-status <repo_root> <task_id>
+        wake bridge 状态只读查询（v2.2 M5 wu-22-05，§22.3）：展示
+        wake_bridge.status 十值词汇 + scheduler_context（origin +
+        capability 缓存）+ mode/generation 及墓碑。零写副作用；任务
+        缺失 → 退出码 1。
 
 输出与退出码契约：
     stdout 恒为单行 JSON（json.dumps(..., ensure_ascii=True)，中文以
     \\uXXXX 转义——管道 / Windows 控制台零编码依赖；例外：wake-prompt
     的成功路径为纯文本 prompt；v2.2 M3 起 quota-observe / quota-phase
     为 ensure_ascii=False（wu-22-03 规格冻结：中文 reason 面向主会话
-    直接阅读，显式 UTF-8 落 stdout））；stderr 不承载结构化输出。
+    直接阅读，显式 UTF-8 落 stdout）；v2.2 M5 起 wake-plan / wake-
+    status 同走 ensure_ascii=False（§22.2/§22.3 中文 reason / prompt
+    面向主会话直接阅读，同一观测面口径））；stderr 不承载结构化输出。
     退出码：
       0 = 成功；
       2 = 校验拒绝（用法错误 / 参数值非法 / setter 抛 ValueError /
@@ -212,7 +229,9 @@ USAGE = (
     "quota-exhausted <repo_root> <task_id> | "
     "quota-resume <repo_root> <task_id> [status] | "
     "wake-record <repo_root> <task_id> <automation_id> <fires_at> | "
-    "wake-prompt <repo_root> <task_id>")
+    "wake-prompt <repo_root> <task_id> | "
+    "wake-plan <repo_root> <task_id> | "
+    "wake-status <repo_root> <task_id>")
 
 # policy-set-resume 的 max_quota_windows 缺省推导表（§5.4 耦合的
 # 最小合法值：until_done 取下界 1，保守不放大）
@@ -749,6 +768,75 @@ def _wake_prompt(repo_root, task_id) -> int:
     return 0
 
 
+def _wake_plan(repo_root, task_id) -> int:
+    """wake-plan：Persistent Wake Bridge 的 arm 裁决（§22.2，v2.2 M5
+    wu-22-05，task_manager.plan_wake_bridge 薄壳）。纯计算不创建
+    automation；额度输入与 M4 闸同源——只读本地 quota-cache.json
+    （resolver._load_cache / _cache_path 容错原语：缺失 / 坏 JSON /
+    status 词汇陈旧 / fetched_at 不可解析一律视为无缓存 → 传 None，
+    plan 内按 UNKNOWN 保守 fail-open），绝不触发 provider 抓取、绝不
+    重试网络。任务缺失（TaskManagerError）→ _QuotaFlowRejected（退出
+    码 1）。输出 §22.2 冻结九键（ensure_ascii=False，同 M3 观测面）。"""
+    from runtime import task_manager
+    from runtime.quota import resolver  # 函数内 import：monkeypatch 友好
+    provider_status = None
+    windows = None
+    cache = resolver._load_cache(resolver._cache_path(repo_root))
+    if isinstance(cache, dict):
+        provider_status = cache.get("status")
+        snapshot = cache.get("snapshot")
+        if isinstance(snapshot, dict) \
+                and isinstance(snapshot.get("windows"), list):
+            windows = snapshot["windows"]
+    try:
+        plan = task_manager.plan_wake_bridge(
+            repo_root, task_id, provider_status=provider_status,
+            windows=windows)
+    except task_manager.TaskManagerError as exc:
+        raise _QuotaFlowRejected(str(exc)) from exc
+    _emit_utf8(plan)
+    return 0
+
+
+def _wake_status(repo_root, task_id) -> int:
+    """wake-status：wake bridge 状态只读查询（§22.3，v2.2 M5
+    wu-22-05）。展示 wake_bridge.status 十值词汇 + scheduler_context
+    （origin + capability 缓存）+ mode/generation 与墓碑。continuation
+    缺块按 default_continuation 兜底（§23.1 legacy 兼容，不写盘）；
+    零写副作用。任务缺失 → _TaskMissing（退出码 1）。"""
+    st = state.load_state(repo_root, task_id)
+    if st is None:
+        raise _TaskMissing(
+            "任务 %s 不存在（%s 下无 state.json），无法查询 wake bridge "
+            "状态" % (task_id, repo_root))
+    continuation = st.get("continuation")
+    block = (continuation if isinstance(continuation, dict)
+             else state.default_continuation())
+    bridge = block.get("wake_bridge")
+    bridge = (bridge if isinstance(bridge, dict)
+              else state.default_continuation()["wake_bridge"])
+    scheduler_context = block.get("scheduler_context")
+    scheduler_context = (scheduler_context
+                         if isinstance(scheduler_context, dict) else
+                         state.default_continuation()["scheduler_context"])
+    _emit_utf8({
+        "task_id": st.get("task_id", task_id),
+        "status": bridge.get("status", "none"),
+        "obligation": block.get("obligation", "none"),
+        "mode": bridge.get("mode", "recurring"),
+        "generation": bridge.get("generation", 0),
+        "automation_id": bridge.get("automation_id"),
+        "boundary_id": bridge.get("boundary_id"),
+        "current_boundary_id": bridge.get("current_boundary_id"),
+        "next_wake_at": bridge.get("next_wake_at"),
+        "bridge_interval_minutes": bridge.get("bridge_interval_minutes"),
+        "scheduler_context": scheduler_context,
+        "wake_bridge": bridge,
+        "tombstone": block.get("tombstone"),
+    })
+    return 0
+
+
 def _manifest_show(repo_root, task_id) -> int:
     """manifest-show：Resume Manifest 只读查询（薄壳）。
 
@@ -903,6 +991,16 @@ def _dispatch(args) -> int:
             raise _UsageError(
                 "wake-prompt 需要 <repo_root> <task_id> 两个参数。" + USAGE)
         return _wake_prompt(rest[0], rest[1])
+    if cmd == "wake-plan":
+        if len(rest) != 2:
+            raise _UsageError(
+                "wake-plan 需要 <repo_root> <task_id> 两个参数。" + USAGE)
+        return _wake_plan(rest[0], rest[1])
+    if cmd == "wake-status":
+        if len(rest) != 2:
+            raise _UsageError(
+                "wake-status 需要 <repo_root> <task_id> 两个参数。" + USAGE)
+        return _wake_status(rest[0], rest[1])
     raise _UsageError("未知子命令 %r。" % cmd + USAGE)
 
 
