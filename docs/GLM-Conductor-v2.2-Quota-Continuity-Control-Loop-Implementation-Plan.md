@@ -7,7 +7,8 @@
 > **适用仓库**：`https://github.com/Chengy257/glm-conductor`  
 > **状态**：Implementation Ready  
 > **语言**：中文  
-> **核心主题**：Quota Observer、Adaptive Heartbeat、DRAINING、Wake Bridge、Reset-boundary Activation、Authorized Resume、Continuation Obligation
+> **核心主题**：Quota Observer、Adaptive Heartbeat、DRAINING、Wake Bridge、Reset-boundary Activation、Authorized Resume、Continuation Obligation  
+> **冲突优先级（C0 冻结，2026-09-02）**：本文件与《GLM-Conductor-v2.2-Quota-Control-Plane-Architecture-Correction-and-Agent-Implementation-Plan.md》冲突时，**以该修正文件为准**。旧 M6/M7/M8/M10+ 规格按其 §26 C 序列重写执行（C0→C1a→C2→C1b→C3 骨架→P0-QP→C4→C5+）；wu-22-06/07/08/10/11/12 保留历史状态，不再按原规格实施。本文件保留为历史设计证据与 Phase0/SCHED/测试矩阵引用源，不再单独维护演进。
 
 ---
 

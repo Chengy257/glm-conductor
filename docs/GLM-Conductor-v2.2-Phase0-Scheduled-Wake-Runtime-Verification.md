@@ -149,7 +149,8 @@ host error（原文，若有）
 | 编号 | session origin | parent automation | tested | result | host error |
 |---|---|---|---|---|---|
 | P0-SCHED-04 | fresh interactive（B2 交接会话 armed 2026-09-01T18:19Z，30min recurring 探针即 Persistent Bridge 本体） | 无 parent——interactive 会话直接 CronCreate；automation `automation-dc0cc8d8-5c86-43af-93b1-81b664382e0d`（探针即本体） | recurring 第 2/3 次触发稳定性：18:49:00.377Z / 19:19:00.993Z / 19:49:01.635Z 三连拍（标称 +4.4/+5.0/+5.2s），每拍以同会话 user-turn 注入并被执行（含 DRAINING no-op 决策轮） | **PASS（HARD GATE 通过）**：三拍全中、runCount 1→3 递增、lifecycleStatus=active、enabled/recurring 恒 true、nextRunAt 依 30min 节拍推进；journal `wake_bridge_fired` ×3（含 sched04_evidence 六字段）与 CronList 对齐 | 无 |
-| （待回填：SCHED-01/02/03/05/06/07/08/09/10） | | | | | |
+| P0-SCHED-03 | scheduled-owned（B2 桥会话本体；用户取消会话后执行清理，2026-09-02T08:31:20Z） | `automation-dc0cc8d8-5c86-43af-93b1-81b664382e0d`（删除的就是自身 parent） | delete parent task（28 次 fire 历史后） | **allowed（单次成功）——但仅记作 intermittent**：首次成功观察（此前 Phase 0 尝试全部失败，glitch 为间歇性）；红线 single attempt / never retry 不变；`scheduler_context.delete` 仍是 session-local observation，不表达全局可靠性（不新增第四枚举值）；capability matrix 结论冻结为 "observed successful at least once, but reliability is intermittent"。Completion cleanup 措辞：MAY one best-effort pause/delete attempt，correctness MUST NOT depend on success（tombstone + future no-op 恒为 correctness path）。journal `bridge_deleted` 事件为证 | 无（单次尝试即成功） |
+| （待回填：SCHED-01/02/05/06/07/08/09/10） | | | | | |
 
 SCHED-04 结论（2026-09-01T19:49Z 回填）：**Persistent Recurring Bridge 策略成立**——
 第 2、3 次触发照常、automation 存活无停摆，D15 recurring 主路径的可靠性前提
