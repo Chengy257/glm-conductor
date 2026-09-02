@@ -21,7 +21,8 @@ sys.executable）/ §C3（复用 observer / resolver / epoch，不复制额度
        per-window reset_at 摘要落 watcher.json）/ fetch 网络失败容错
        不崩（error 只记类型名）/ heartbeat 逐 wake 推进 + should_refresh
        到期再抓 / ACTIVE 间隔复用自适应表 / stop_requested 优雅退出
-       （写 stopped 终态 pid=None）/ acquire 冲突零抓取
+       （写 stopped 终态 pid=None）/ acquire 冲突零抓取 / 非到期 wake
+       写回前 OR 合并并发 stop 旗标（读→写窗口竞争回归）
     4  run_once：无记录 → ran=True generation=1 / 活锁新鲜 → 冲突
        ran=False 零写盘 / stale（过期 heartbeat）→ 放行且 generation
        不 +1（不走锁接管）
@@ -29,6 +30,10 @@ sys.executable）/ §C3（复用 observer / resolver / epoch，不复制额度
        （只落哈希不落凭证 §37）
     6  CLI quota-watcher：status / stop / once / 用法错 / start 派生
        argv 用 sys.executable（mock Popen，不真实派生子进程）
+    7  EXECUTING_FAMILY_STATUSES 镜像锚定：与
+       task_manager.QUOTA_WAIT_TASK_STATUSES 逐值一致（quota 包禁
+       import task_manager 的词汇镜像，对齐由本测试锚定；测试侧跨包
+       import 读常量断言）
 """
 
 import io
@@ -329,6 +334,41 @@ class RunLoopTest(RepoFixture):
         self.assertIsNone(record["pid"])  # stopped 表达：无存活持有者
         self.assertEqual(record["generation"], 1)
 
+    def test_nondue_wake_writeback_preserves_concurrent_stop_flag(self):
+        """非到期 wake 的「读记录→写回」窗口内落下的并发 stop 不被覆盖
+        写抹掉（P2 竞争回归；与 fetch 分支的写前 OR 合并同构）。
+
+        确定性复现（非到期分支无 fetch 可注入）：run 每 tick 恰好
+        在读记录之后、写回之前调用 mode_reader 注入钩子——钩子在
+        非到期 wake（盘上已有 next_poll_at，即首抓取完成后的下一
+        wake）对同一 repo 真实调用 watcher_store.request_stop（真
+        文件读改写，零 mock），即把 CLI stop 确定性地放进该 wake 的
+        「读→写」竞争窗口。修复前该分支用唤醒时的旧内存副本整体覆
+        盖写，旗标被抹（单次 stop 静默失效，watcher 永不退出）；
+        修复后写前重读 OR 合并——断言旗标存活且下一 wake 优雅退出。
+        """
+        stop_injected = {"done": False}
+
+        def stop_in_nondue_window(repo_root):
+            if not stop_injected["done"]:
+                fresh = watcher_store.read_watcher_state(repo_root)
+                # 无 next_poll_at = 首 tick 尚未抓取（其写回在受保护
+                # 的 fetch 分支）——只在非到期分支的窗口注入一次
+                if fresh is not None and fresh.get("next_poll_at"):
+                    watcher_store.request_stop(repo_root)
+                    stop_injected["done"] = True
+            return watcher.determine_mode(repo_root)
+
+        result = self.run_watcher(
+            lambda repo: fake_detail("AVAILABLE", []), max_ticks=3,
+            mode_reader=stop_in_nondue_window)
+        self.assertEqual(result["fetches"], 1)  # 仅首 wake 抓取
+        self.assertTrue(result["stopped"])  # 修复前：旗标被抹 → False
+        self.assertEqual(result["wakes"], 3)  # stop 由下一 wake 消费退出
+        record = watcher_store.read_watcher_state(self.repo)
+        self.assertTrue(record["stop_requested"])
+        self.assertIsNone(record["pid"])  # stopped 终态表达
+
     def test_acquire_conflict_returns_without_fetching(self):
         """锁被活进程新鲜持有（§6）→ run 不抓取、不改写状态文件。"""
         self.write_raw_state(self.live_record(generation=3))
@@ -558,6 +598,22 @@ class QuotaWatcherCliTest(RepoFixture):
         self.assertEqual(code, 0)
         record = watcher_store.read_watcher_state(self.repo)
         self.assertEqual(record["generation"], 2)  # 接管 +1
+
+
+# —— 7：词汇镜像锚定（quota 包禁 import task_manager，对齐由测试背书） ——
+
+class ExecutingFamilyMirrorAnchorTest(unittest.TestCase):
+    """watcher.EXECUTING_FAMILY_STATUSES 是
+    task_manager.QUOTA_WAIT_TASK_STATUSES 的本地冻结镜像（quota/*
+    包纪律禁 import runtime.task_manager，watcher.py 模块 docstring
+    「镜像对齐由测试锚定」的声称）——本测试即锚：两常量必须逐值
+    （含顺序与长度）一致，任一侧词汇漂移即刻红。测试侧跨包 import
+    读权威常量断言，运行时侧镜像常量不动。"""
+
+    def test_executing_family_matches_task_manager_quota_wait_statuses(self):
+        from runtime import task_manager
+        self.assertEqual(watcher.EXECUTING_FAMILY_STATUSES,
+                         task_manager.QUOTA_WAIT_TASK_STATUSES)
 
 
 if __name__ == "__main__":

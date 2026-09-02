@@ -62,7 +62,8 @@ journal（task 面接线归 C5+）。
     - fetch 异常容错不崩：异常只取类型名进 last_observation.error
       （绝不透传异常文本，resolver 同纪律），循环继续；
     - provider identity hash = sha256("来源:凭证")[:16]——只落哈希
-      不落凭证材料（§37；不可逆指纹，用于 §6 单实例锁身份）；
+      不落凭证材料（runtime/quota/_http.py §37 安全条款 / 升级指南
+      §36-§38；不可逆指纹，用于 §6 单实例锁身份）；
     - quota/* 包纪律：不 import runtime.state / runtime.task_manager；
       executing 族词汇以本地冻结常量镜像（tests 与
       task_manager.QUOTA_WAIT_TASK_STATUSES 对齐锚定）。
@@ -142,7 +143,8 @@ def compute_provider_identity_hash(environ=None):
     """provider identity 指纹（§6 单实例锁身份字段）：sha256("来源:凭证")
     十六进制前 16 位。
 
-    只落哈希绝不落凭证材料（§37——哈希不可逆，不含 key 本体）；无凭证
+    只落哈希绝不落凭证材料（runtime/quota/_http.py §37 安全条款 /
+    升级指南 §36-§38——哈希不可逆，不含 key 本体）；无凭证
     → ("none" 来源的确定性占位哈希)——watcher 仍可 PASSIVE 运行，
     acquire 语义不受影响。
     """
@@ -413,6 +415,7 @@ def run(repo_root, *, fetch=None, clock=None, sleep=None,
         else:
             # 未到期：仅续 heartbeat，绝不空转打 provider
             record["heartbeat_at"] = _format_iso_z(now)
+            _merge_stop_flag(repo_root, record)  # 并发 stop 不被覆盖写抹掉
             watcher_store.write_watcher_state(repo_root, record)
         if max_ticks is not None and wakes >= max_ticks:
             break
