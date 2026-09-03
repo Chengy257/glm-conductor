@@ -2,7 +2,7 @@
 
 > 对应修正计划 `docs/GLM-Conductor-v2.2-Quota-Control-Plane-Architecture-Correction-and-Agent-Implementation-Plan.md` §8.3（Feature-Gate + 三重授权）与 §9（P0-QP-00/00A → P0-QP-01..08）。工作单元 `wu-22-P0QP`（主会话主导，C4 Window Primer 的硬前置）。
 >
-> **纪律**：任何一条硬前置不成立 → C4 停在实验阶段，绝不伪造 epoch / 伪造实验结果。全部通过前 `primer.enabled` 恒 false（当前状态：**primer 特性代码缺席 = 结构性关闭**，运行时 grep 零 primer 实现面，唯一一处提及是 task_manager docstring 的不消费清单）。
+> **纪律**：任何一条硬前置不成立 → C4 停在实验阶段，绝不伪造 epoch / 伪造实验结果。全部通过前 `primer.enabled` 恒 false。（**时点注记**：Phase0 实验期间 primer 特性代码缺席 = 结构性关闭；C4 落地后特性已存在但 `primer_enabled` 缺省恒 false——授权闸 fail-closed，启用须显式配置 + 用户决策。）
 
 ## 门总览
 
@@ -90,8 +90,9 @@ reset_at/boundary 变化（这也正是 §10 epoch 模型的方向）。
 ## 2. P0-QP-00A：Primer 授权三条件（PASS）
 
 ```text
-primer.enabled == true        → Phase0 期间为 false（特性代码缺席=结构性
-                                关闭；C0 已把文档示例钉为 false）
+primer.enabled == true        → Phase0 期间为 false（时点口径：实验期
+                                特性代码缺席=结构性关闭；C4 后特性已
+                                落地而 primer_enabled 缺省恒 false）
 auto_resume ∈ {auto_once, until_done}
                               → 任务账本 execution_policy.continuity.
                                 auto_resume = "until_done" ✓
@@ -143,7 +144,7 @@ primer.enabled 恒 false 缺省直至用户显式启用。
 |---|---|---|---|---|
 | 2026-09-01T21:59:00Z | 22:19:21Z（09-01，回算） | 03:19:22Z | 5h00m01s | 5h20m22s |
 | 2026-09-02T03:19:22Z | 03:35:47Z（回算） | 08:35:48Z | 5h00m01s | 5h16m26s |
-| 2026-09-02T18:36:24Z | 18:40:18Z（回算） | 23:40:18Z | 5h00m01s | 5h3m54s |
+| 2026-09-02T18:36:24Z | 18:40:17Z（回算） | 23:40:18Z | 5h00m01s | 5h3m54s |
 | 2026-09-02T23:40:18Z | **02:14:26.869Z（空闲 2h34m 后首触）** | **07:14:27Z** | **5h00m01s** | **7h34m09s** |
 | 2026-09-03T07:14:27Z | 07:28:08Z（空闲 13m41s 后首触，回算） | 12:28:09Z | 5h00m01s | 5h13m42s |
 | 2026-09-03T12:28:09Z | 12:28:11Z（活跃会话，边界后 ≤23s） | 17:28:12Z | 5h00m01s | 5h00m03s |
@@ -172,7 +173,8 @@ primer.enabled 恒 false 缺省直至用户显式启用。
 
 **第一轮 07:14:27Z（会话空闲）**：
 
-- 03:17→07:13 **纯轮询 4 小时**（33 采样，零模型调用）：reset_at 恒
+- 03:17→07:13 **纯轮询 4 小时**（32 采样 + 1 穿越后瞬态行，零模型
+  调用）：reset_at 恒
   07:14:27Z 纹丝不动——查询永不推进窗口（P0-QP-01 负向第三证）；
 - 期间 06:01 起 provider 状态翻转（executable=False）而 **epoch_id
   不变**——C2「状态翻转不推进 epoch」设计实战命中；
@@ -216,9 +218,12 @@ C4 `runtime/quota/primer.py`（commit 9147e01）机械落地：幂等单飞键 =
 - C3 watcher（`runtime/quota/watcher.py`）全文件无任何模型调用面：
   fetch 只走 `resolver.resolve_quota_detail`（quota 监控端点，非模型
   端点）；PASSIVE 分支无 prime / 无 activation。
-- 运行时全仓 grep：模型调用端点（`/api/anthropic/v1/messages` 等）零
-  出现于 `plugins/glm-conductor/`（探针脚本在 `.glm-conductor/tmp/`，
-  非运行时代码）。
+- 运行时全仓 grep（**审计时点 2026-09-02，pre-C4**）：模型调用端点
+  （`/api/anthropic/v1/messages` 等字面拼接串）零出现于
+  `plugins/glm-conductor/`（探针脚本在 `.glm-conductor/tmp/`，
+  非运行时代码）。C4 后运行时以拆分常量形态（`_DEFAULT_BASE_URL` +
+  `_MESSAGES_PATH`）携带端点——受 §8.3 三重门与 P0-QP-00 实测形态
+  约束，非任意端点。
 - Phase0 之后 primer 调用点唯一 = C4 primer.py，且受 §8.3 三重门。
 
 ---
@@ -247,7 +252,11 @@ C4 `runtime/quota/primer.py`（commit 9147e01）机械落地：幂等单飞键 =
   回填 CLOSED（C4 9147e01 落地证据）；§5 证据表勘正（行 1 日期
   09-01、行 1-3 首触列回算值、粒度统一 5h00m01s）+ 增补行 5/6 与
   §5.1 双轮穿越全程佐证（CSV 50 行，两轮互补形态：空闲延迟物化
-  vs 活跃即时物化）。C 系列 C0..C8a 全部闭环（本地提交
-  c6196d0..c596bd2，15 个，待统一 push）；reviewer 留账项全吸收
+  vs 活跃即时物化）。C 系列 C0..C8a 全部闭环（未推送本地提交 16 个
+  含 C0——origin/v2-dev=75be3ec 为 c6196d0 之父；统一 push 待交互
+  回合）；reviewer 留账项全吸收
   （C6 四项入 C6 提交、C7 P3-3 guidance 措辞澄清留待未来措辞更新
   ——重跑 quota-resume 不补记账，仅 journal 核对）。
+  **13:3xZ 复审修正（fix-first 落地）**：行 3 首触回算勘正
+  18:40:17Z；§5.1 采样数勘正 32；头部/§2 primer 缺席措辞改时点
+  口径；§8 端点 grep 声明改审计时点（pre-C4）时态。
