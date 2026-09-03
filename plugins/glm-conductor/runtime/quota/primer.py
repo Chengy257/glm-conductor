@@ -16,18 +16,31 @@
          三条全过才 authorized；任一不过 → 结构化拒绝（零副作用：无
          网络、无事件、无状态写）。manual / notify 永不 prime。
 
-      2. prime_once(...)——单飞幂等执行（幂等闸 → 一次最小模型调用
+      2. prime_authorized(repo_root, task_id, ...)——唯一 public 执行
+         API（RH-02，v2.2 Release Hardening，方案 A：机械闸内嵌）：
+         json 容错读任务 state 文件（<repo_root>/.glm-conductor/tasks/
+         <task_id>/state.json）的 execution_policy 块 → authorize_prime
+         三重闸 → 未授权（含任务 / policy 缺失坏块）返回冻结九键结构化
+         拒绝（PRIMER_RESULT_KEYS 八键 + reason；零 transport、零 quota
+         网络、零 primer.json 写、零 window_primed journal、零窗口消费
+         ——拒绝路径不制造任何 durable 痕迹）→ 授权通过才透传
+         _prime_once_unchecked 执行（八键返回原样）。
+
+      3. _prime_once_unchecked(...)（原 prime_once，RH-02 起私有名）
+         ——单飞幂等执行（幂等闸 → 一次最小模型调用
          （single-attempt：绝不自动重发——重发即是 P0-QP-07 要防的
          「同旧 boundary 连发多个 prime」；歧义超时以 post-refresh
          确认代替重发）→ 强制 quota refresh 物化确认 → durable 落账
-         + journal 事件 → 冻结键返回）。
+         + journal 事件 → 冻结键返回）。仅供单元测试与内部已授权
+         wrapper（public 面只有 prime_authorized——绕过授权闸必须
+         显式使用私有名，调用面即审计面）。
          v2.2 C5a 起 window_primed 事件落在控制面 journal
          .glm-conductor/quota/events.jsonl（journal.append_control_
          plane_event，与 watcher.json / primer.json 同层）——不再借用
          tasks/<伪任务>/events.jsonl 目录（C4 reviewer P2 正解：伪任务
          目录会被 discover_tasks 判为 orphaned 噪声）。
 
-      3. primer.json durable 存取——独立文件独立常量（不复用任务
+      4. primer.json durable 存取——独立文件独立常量（不复用任务
          state / journal / watcher.json），原子写纪律照抄
          watcher_store（tmp 同目录写 + os.replace + PermissionError
          有界重试——Windows AV / 目录锁是本机已知现象）。
@@ -71,12 +84,19 @@ fail-closed 不对称的理由（本模块与 quota 观察面的方向差异，�
       不产生新 epoch），而拒绝执行的代价是恢复链永久卡死——又一次代价
       不对称；原子写纪律使撕裂文件实际不可见。
 
-接线边界（约束 1，C1b unwired 先例）：本单元不把 primer 接到任何自动
-调用路径——watcher 循环 / resume 链 / CLI 均不动，调用编排归 C5/C6。
-调用方契约：必须先过 authorize_prime 闸再调 prime_once（后者不再重复
-授权——返回值中的 authorized 恒 True，仅作记录字段，见冻结键表）。
-primer_enabled 配置默认恒 False（§8.3：Phase0 未完成前结构性关闭），
-词汇落点 = runtime/execution_policy.py 的 quota_control.primer_enabled
+接线边界（约束 1，C1b unwired 先例；RH-02 收口）：本单元不把 primer
+接到任何自动调用路径——watcher 循环 / resume 链 / CLI 均不动，调用
+编排归 C5/C6。授权闸机械收口（RH-02，方案 A）：三重授权不再依赖
+「调用方先过 authorize_prime 再调执行」的纪律，而是内嵌在唯一 public
+执行 API prime_authorized 内（读任务 execution_policy → authorize_
+prime → 通过才执行）；_prime_once_unchecked（原 prime_once）是私有
+名，仅供单元测试与内部已授权 wrapper——绕过授权必须显式使用私有名
+（调用面可见、可审计）。执行层自身不重复授权（返回值中的 authorized
+恒 True，仅作记录字段，见冻结键表）。prime_authorized 拒绝路径返回
+冻结九键 = PRIMER_RESULT_KEYS 八键 + reason（新增 public API 的返回
+形状，不触碰 PRIMER_RESULT_KEYS 冻结键表）。primer_enabled 配置默认
+恒 False（§8.3：Phase0 未完成前结构性关闭），词汇落点 =
+runtime/execution_policy.py 的 quota_control.primer_enabled
 （validator bool + 容错读，缺省 False）。
 
 凭证与安全纪律（§37 沿用；P0-QP-00 实测形态）：
@@ -154,6 +174,20 @@ PRIMER_RESULT_KEYS = (
     "authorized", "primed", "materialized", "executable",
     "tokens", "latency_ms", "idempotent", "error")
 
+# prime_authorized 拒绝路径返回的冻结九键（PRIMER_RESULT_KEYS 八键
+# + reason；授权通过路径透传 _prime_once_unchecked 的八键返回——九键
+# 仅在拒绝路径出现。这是新增 public API 的返回形状，不触碰
+# PRIMER_RESULT_KEYS 冻结键表）
+PRIME_AUTHORIZED_RESULT_KEYS = PRIMER_RESULT_KEYS + ("reason",)
+
+# 任务 state 文件相对布局（prime_authorized 的 policy 读取面；与
+# runtime.state / task_manager 的 <repo_root>/.glm-conductor/tasks/
+# <task_id>/state.json 布局同源命名。quota 包纪律禁止 import
+# runtime.state / runtime.task_manager（模块 docstring「依赖」节），
+# 故按 watcher.determine_mode 同款惯例本地声明常量 + json 直读）
+TASK_STATE_DIR_PARTS = (".glm-conductor", "tasks")
+TASK_STATE_FILE_NAME = "state.json"
+
 # authorize_prime 返回冻结三键
 _AUTHORIZATION_KEYS = ("authorized", "checks", "reason")
 
@@ -202,8 +236,8 @@ _DEFAULT_MAX_BYTES = 65536
 
 # 模型调用不设重试常量：single-attempt（RH-01，v2.2 Release Hardening）
 # ——一个幂等键下模型调用至多发一次（P0-QP-07：同旧 boundary 绝不连发），
-# 歧义超时（请求可能已到达 provider、结果未知）由 prime_once 以
-# post-refresh 确认代替重发，绝不回环重试。
+# 歧义超时（请求可能已到达 provider、结果未知）由 _prime_once_unchecked
+# 以 post-refresh 确认代替重发，绝不回环重试。
 
 # —— journal 词汇 ——
 
@@ -424,7 +458,7 @@ def make_default_transport(max_bytes=_DEFAULT_MAX_BYTES):
     返回 transport(url, body, headers, timeout) -> (status_code:int,
     body:bytes)：
       - POST 请求（body 原样透传，headers 含 x-api-key——本函数不接触
-        key 值，凭证纪律由 prime_once 侧承担）；
+        key 值，凭证纪律由 _prime_once_unchecked 侧承担）；
       - opener 复用 _http.build_default_opener（重定向禁用：任何 3xx
         都不跟随、不发起第二次请求）；
       - 响应体最多读 max_bytes+1 字节（§37 条款 4）；
@@ -522,7 +556,8 @@ def _attempt_once(transport, url, headers, body, timeout):
     "response_not_object" / "invalid_status"，绝不透传异常文本 / URL /
     响应体。ambiguous_timeout=True 仅限网络超时类（socket.timeout 及
     URLError 包裹的超时 reason）——语义是「请求可能已到达 provider、
-    结果未知」，调用方（prime_once）据此以 post-refresh 确认代替重发；
+    结果未知」，调用方（_prime_once_unchecked）据此以 post-refresh 确
+    认代替重发；
     其余失败（非超时 URLError / OSError、HTTP 状态码、解析错误）均为
     明确未到达 provider 或结果明确无效，绝不是歧义超时。
     """
@@ -532,7 +567,8 @@ def _attempt_once(transport, url, headers, body, timeout):
         status, raw = transport(url, body, headers, timeout)
     except socket.timeout:
         # 超时：provider 侧可能已执行（响应丢失）——结果未知（歧义），
-        # 绝不自动重发（P0-QP-07），由 prime_once 做 post-refresh 确认
+        # 绝不自动重发（P0-QP-07），由 _prime_once_unchecked 做
+        # post-refresh 确认
         outcome["kind"], outcome["detail"] = "network", "socket.timeout"
         outcome["ambiguous_timeout"] = True
         return outcome
@@ -641,9 +677,10 @@ def _result(*, primed, materialized, executable, tokens_in, tokens_out,
             latency_ms, idempotent, error):
     """按 PRIMER_RESULT_KEYS 冻结顺序装配返回 dict。
 
-    authorized 恒 True：prime_once 的调用契约是「先过 authorize_prime
-    闸再调用」（闸独立零副作用，接线归 C5）——凡进入本函数的路径都已
-    隐含授权通过，字段仅作记录（规格「authorized 隐含」）。
+    authorized 恒 True：_prime_once_unchecked 的调用契约是「已过
+    prime_authorized 的机械授权闸」（RH-02 起闸内嵌在 public API；
+    私有名仅供单元测试与内部已授权 wrapper）——凡进入本函数的路径都
+    已隐含授权通过，字段仅作记录（规格「authorized 隐含」）。
     """
     return {
         "authorized": True,
@@ -709,11 +746,124 @@ def _journal_prime(repo_root, *, boundary_id, provider_identity_hash,
         pass
 
 
-# —— 主入口：单飞幂等执行 ——
+# —— public 执行 API：机械授权闸内嵌（RH-02，方案 A） ——
 
-def prime_once(repo_root, *, boundary_id, provider_identity_hash,
-               transport=None, clock=None, fetch_refresh=None) -> dict:
-    """Window Primer 单飞幂等执行（§8.1 职责的机械化；冻结签名）。
+def _load_task_policy(repo_root, task_id):
+    """json 容错读任务 state 的 execution_policy 块 → (policy, None)。
+
+    任何结构性缺失（任务目录 / state.json 不存在、坏 JSON、顶层非
+    dict、缺 execution_policy 块 / 块非 dict）→ (None, 中文 reason)
+    ——授权方向 fail-closed（理由同模块 docstring「fail-closed 不对称」
+    节）：policy 缺块 / 坏块一律按保守拒绝解释，绝不 fail-open 放行。
+
+    纪律：quota 包不 import runtime.state / runtime.task_manager——
+    布局常量本地声明（TASK_STATE_DIR_PARTS / TASK_STATE_FILE_NAME，
+    与任务侧布局同源命名），json 直读（watcher.determine_mode 同款
+    惯例）。只读、零写入。
+    """
+    path = os.path.join(str(repo_root), *TASK_STATE_DIR_PARTS,
+                        task_id, TASK_STATE_FILE_NAME)
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            data = json.load(handle)
+    except OSError:
+        return None, ("任务 %s 不存在（无 state.json），保守拒绝 prime"
+                      % (task_id,))
+    except ValueError:
+        return None, ("任务 %s 的 state.json 损坏（非合法 JSON），保守"
+                      "拒绝 prime" % (task_id,))
+    if not isinstance(data, dict):
+        return None, ("任务 %s 的 state.json 顶层不是 JSON 对象，保守"
+                      "拒绝 prime" % (task_id,))
+    policy = data.get("execution_policy")
+    if not isinstance(policy, dict):
+        return None, ("任务 %s 的 state 缺少合法 execution_policy 块，"
+                      "保守拒绝 prime" % (task_id,))
+    return policy, None
+
+
+def _denied_prime(reason):
+    """prime_authorized 拒绝路径的冻结九键返回（零副作用形状）。
+
+    冻结键 = PRIME_AUTHORIZED_RESULT_KEYS（PRIMER_RESULT_KEYS 八键 +
+    reason）：authorized / primed / materialized / executable 全
+    False、tokens 双 None、latency_ms None、idempotent False、
+    error None。拒绝路径零 transport、零 quota 网络、零 primer.json
+    写、零 window_primed journal、零窗口消费——不制造任何 durable
+    痕迹。不抛裸 ValueError 表达未授权（结构化拒绝，§4.4）。"""
+    result = _result(primed=False, materialized=False, executable=False,
+                     tokens_in=None, tokens_out=None, latency_ms=None,
+                     idempotent=False, error=None)
+    result["authorized"] = False
+    result["reason"] = reason
+    return result
+
+
+def prime_authorized(repo_root, task_id, *, boundary_id,
+                     provider_identity_hash, transport=None, clock=None,
+                     fetch_refresh=None) -> dict:
+    """Window Primer 唯一 public 执行 API：机械授权闸内嵌（RH-02）。
+
+    流程（顺序冻结）：
+      0. task_id 校验（非空 str，否则 ValueError——定位 state 文件的
+         结构参数，先于一切 I/O）；
+      1. 授权闸（未授权零副作用优先——先于其余参数校验）：json 容错
+         读任务 state 的 execution_policy 块 → authorize_prime 三重闸；
+         任务 / policy 缺失坏块或三闸任一不过 → 冻结九键结构化拒绝
+         （零 transport、零 quota 网络、零 primer.json 写、零
+         window_primed journal、零窗口消费）；
+      2. 授权通过 → 透传 _prime_once_unchecked（boundary_id /
+         provider_identity_hash / transport / clock / fetch_refresh
+         的校验与执行语义全部沿用——参数非法仍 ValueError，八键返回
+         原样，authorized 恒 True）。
+
+    参数：repo_root / boundary_id / provider_identity_hash /
+    transport / clock / fetch_refresh 语义与 _prime_once_unchecked
+    逐字一致；task_id 为任务标识（定位 <repo_root>/.glm-conductor/
+    tasks/<task_id>/state.json）。
+
+    返回（键随路径二态，docstring 冻结）：
+      - 拒绝路径：PRIME_AUTHORIZED_RESULT_KEYS 冻结九键 =
+        {"authorized": False, "primed": False, "materialized": False,
+         "executable": False, "tokens": {"input": None, "output": None},
+         "latency_ms": None, "idempotent": False, "error": None,
+         "reason": <authorize_prime 的 reason，或任务 / policy 缺失
+         坏块的中文 reason>}；
+      - 授权路径：PRIMER_RESULT_KEYS 冻结八键（_prime_once_unchecked
+         返回原样透传，无 reason 键）。
+
+    异常：task_id 非法 ValueError；授权通过后的参数非法沿用
+    _prime_once_unchecked 的 ValueError；PrimerStoreError 同其契约。
+    """
+    # —— 0. 结构参数校验（先于一切 I/O，中文 ValueError） ——
+    if not isinstance(task_id, str) or task_id == "":
+        raise ValueError(
+            "prime_authorized：task_id 必须是非空 str，得到 %r"
+            % (task_id,))
+    # —— 1. 授权闸（未授权零副作用优先：即使其余参数非法，未授权也
+    #         必须落结构化拒绝而非参数异常——拒绝路径绝不进入 transport） ——
+    policy, load_reason = _load_task_policy(repo_root, task_id)
+    if policy is None:
+        return _denied_prime(load_reason)
+    verdict = authorize_prime(policy)
+    if not verdict["authorized"]:
+        return _denied_prime(verdict["reason"])
+    # —— 2. 已授权执行（参数校验与执行语义沿用私有执行面） ——
+    return _prime_once_unchecked(
+        repo_root, boundary_id=boundary_id,
+        provider_identity_hash=provider_identity_hash,
+        transport=transport, clock=clock, fetch_refresh=fetch_refresh)
+
+
+# —— 私有执行面：单飞幂等执行（原 prime_once，RH-02 起仅供单元测试
+#    与内部已授权 wrapper；public 面是 prime_authorized） ——
+
+def _prime_once_unchecked(repo_root, *, boundary_id,
+                          provider_identity_hash,
+                          transport=None, clock=None,
+                          fetch_refresh=None) -> dict:
+    """Window Primer 单飞幂等执行（§8.1 职责的机械化；RH-02 起私有名
+    ——仅供单元测试与内部已授权 wrapper，行为与 RH-01 后形态零变化）。
 
     参数：
       - repo_root：仓库 / 账本根（primer.json 与 quota 缓存的根）；
@@ -763,7 +913,8 @@ def prime_once(repo_root, *, boundary_id, provider_identity_hash,
          P0-QP-07：同旧 boundary 绝不连发）。
 
     返回（PRIMER_RESULT_KEYS 冻结 8 键；authorized 恒 True——调用契约
-    是先过 authorize_prime 闸，本函数不重复授权）：
+    是仅由 prime_authorized 授权后调用（或单元测试直调），本函数不
+    重复授权）：
       {"authorized": True,
        "primed": bool（模型调用完成，即 error 为 None——primed 语义与
                   materialized 正交，timeout + materialized=True 是合法
@@ -785,20 +936,20 @@ def prime_once(repo_root, *, boundary_id, provider_identity_hash,
     # —— 参数校验（先于一切 I/O，中文 ValueError） ——
     if not isinstance(boundary_id, str) or boundary_id == "":
         raise ValueError(
-            "prime_once：boundary_id 必须是非空 str，得到 %r"
+            "_prime_once_unchecked：boundary_id 必须是非空 str，得到 %r"
             % (boundary_id,))
     if not isinstance(provider_identity_hash, str) \
             or provider_identity_hash == "":
         raise ValueError(
-            "prime_once：provider_identity_hash 必须是非空 str，得到 %r"
-            % (provider_identity_hash,))
+            "_prime_once_unchecked：provider_identity_hash 必须是非空 "
+            "str，得到 %r" % (provider_identity_hash,))
     for name, callable_param in (("transport", transport),
                                  ("clock", clock),
                                  ("fetch_refresh", fetch_refresh)):
         if callable_param is not None and not callable(callable_param):
             raise ValueError(
-                "prime_once：%s 必须是可调用对象或 None，得到 %r"
-                % (name, type(callable_param).__name__))
+                "_prime_once_unchecked：%s 必须是可调用对象或 None，"
+                "得到 %r" % (name, type(callable_param).__name__))
     fetch = fetch_refresh if fetch_refresh is not None \
         else _default_fetch_refresh
     send = transport if transport is not None else make_default_transport()

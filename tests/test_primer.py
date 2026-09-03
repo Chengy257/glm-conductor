@@ -36,9 +36,20 @@ P0-QP-03（粒度告警）/ P0-QP-07（幂等设计门——随本文件取证�
         （epoch 推进 → materialized=True / 同 epoch → False）、失败
         记录同键重放幂等（零 transport 零刷新）、非歧义失败（5xx /
         401 / malformed）零重发零确认刷新
+    机械授权闸（PrimeAuthorizedTest，RH-02 方案 A）：唯一 public 执行
+        API prime_authorized 内嵌三重闸——primer_enabled=false /
+        manual / notify / auto_once+source=default → 冻结九键结构化
+        拒绝且零 transport 零 primer.json 零 journal 零窗口消费
+        （PRIMER-AUTH-01..04）；until_done+user+enabled → 恰一次授权
+        尝试（PRIMER-AUTH-05）；任务目录不存在 / state 坏 JSON / 缺
+        execution_policy 块 → 保守拒绝零 transport，且私有名
+        _prime_once_unchecked 直调仍可执行（绕过必须显式用私有名，
+        PRIMER-AUTH-06）；task_id 校验与「未授权零副作用优先」的
+        校验顺序
     fail-closed（授权闸各 refuse 例 + 48/49 的 malformed 保守归类 +
         38 的词汇外状态）：授权方向绝不 fail-open
-    冻结面（SignatureFreezeTest + 冻结键断言）：prime_once 冻结签名、
+    冻结面（SignatureFreezeTest + 冻结键断言）：_prime_once_unchecked
+        冻结签名（RH-02 起私有名）+ prime_authorized 冻结签名、
         返回 8 键、durable 记录 7 键、authorize_prime 3 键
 
 全部离线：scratch 仓库用 tempfile.TemporaryDirectory（绝不触碰仓库内
@@ -79,9 +90,11 @@ RESET_WEEKLY_ROLLED = "2026-09-14T21:59:00Z"
 DEFAULT_BASE = "https://open.bigmodel.cn/api/anthropic"
 MESSAGES_URL = DEFAULT_BASE + "/v1/messages"
 
-# prime_once 冻结签名（wu-22-C4 规格 INTERFACES 原文）
-PRIME_ONCE_PARAMS = ["repo_root", "boundary_id", "provider_identity_hash",
-                     "transport", "clock", "fetch_refresh"]
+# _prime_once_unchecked 冻结签名（wu-22-C4 规格 INTERFACES 原文；
+# RH-02 起为私有名，参数表与行为零变化）
+PRIME_UNCHECKED_PARAMS = ["repo_root", "boundary_id",
+                          "provider_identity_hash",
+                          "transport", "clock", "fetch_refresh"]
 RESULT_KEYS = ["authorized", "primed", "materialized", "executable",
                "tokens", "latency_ms", "idempotent", "error"]
 RECORD_KEYS = ["primed_at", "materialized", "executable",
@@ -411,7 +424,7 @@ class IdempotencyTest(PrimerCase):
                                     RESET_FIVE_NEW)])
 
     def prime(self, transport=None, fetch=None):
-        return primer.prime_once(
+        return primer._prime_once_unchecked(
             self.repo, boundary_id=BOUNDARY,
             provider_identity_hash=IDENTITY,
             transport=transport if transport is not None
@@ -458,7 +471,7 @@ class IdempotencyTest(PrimerCase):
         transport = recording_transport([("ok", ok_payload())])
         fetch = scripted_fetch([dict(self.PRE), dict(self.POST)])
         self.prime(transport=transport, fetch=fetch)
-        primer.prime_once(self.repo, boundary_id="glm:aaaaaaaaaaaaaaaa",
+        primer._prime_once_unchecked(self.repo, boundary_id="glm:aaaaaaaaaaaaaaaa",
                           provider_identity_hash=IDENTITY,
                           transport=transport, clock=fixed_clock,
                           fetch_refresh=fetch)
@@ -468,7 +481,7 @@ class IdempotencyTest(PrimerCase):
         transport = recording_transport([("ok", ok_payload())])
         fetch = scripted_fetch([dict(self.PRE), dict(self.POST)])
         self.prime(transport=transport, fetch=fetch)
-        primer.prime_once(self.repo, boundary_id=BOUNDARY,
+        primer._prime_once_unchecked(self.repo, boundary_id=BOUNDARY,
                           provider_identity_hash="ffffffffffffffff",
                           transport=transport, clock=fixed_clock,
                           fetch_refresh=fetch)
@@ -521,7 +534,7 @@ class MaterializationTest(PrimerCase):
     epoch.evaluate_epoch（weekly 优先语义，QC-05）。"""
 
     def prime(self, fetch_script, transport_script=None):
-        return primer.prime_once(
+        return primer._prime_once_unchecked(
             self.repo, boundary_id=BOUNDARY,
             provider_identity_hash=IDENTITY,
             transport=recording_transport(
@@ -657,7 +670,7 @@ class SingleAttemptHardeningTest(PrimerCase):
         """超时脚本 + 指定 fetch 脚本的一次 prime_once 全注入执行。"""
         transport = recording_transport([("timeout",)])
         fetch = scripted_fetch(fetch_script)
-        result = primer.prime_once(
+        result = primer._prime_once_unchecked(
             self.repo, boundary_id=BOUNDARY,
             provider_identity_hash=IDENTITY, transport=transport,
             clock=fixed_clock, fetch_refresh=fetch)
@@ -718,7 +731,7 @@ class SingleAttemptHardeningTest(PrimerCase):
         self.assertTrue(first["materialized"])
         calls_after_first = len(transport.calls)
         fetches_after_first = len(fetch.calls)
-        second = primer.prime_once(
+        second = primer._prime_once_unchecked(
             self.repo, boundary_id=BOUNDARY,
             provider_identity_hash=IDENTITY, transport=transport,
             clock=fixed_clock, fetch_refresh=fetch)
@@ -743,7 +756,7 @@ class SingleAttemptHardeningTest(PrimerCase):
             with self.subTest(case=name):
                 transport = recording_transport(script)
                 fetch = scripted_fetch([dict(self.PRE)])
-                result = primer.prime_once(
+                result = primer._prime_once_unchecked(
                     self.repo, boundary_id="glm:rh05%08x" % (index,),
                     provider_identity_hash=IDENTITY, transport=transport,
                     clock=fixed_clock, fetch_refresh=fetch)
@@ -753,6 +766,221 @@ class SingleAttemptHardeningTest(PrimerCase):
                 self.assertFalse(result["materialized"])
                 self.assertFalse(result["executable"])
                 self.assertIsNotNone(result["error"])
+
+
+# —— RH-02：机械授权闸收口至唯一 public 执行 API（方案 A） ——
+
+def _authorized_policy(auto_resume="until_done", source="user",
+                       primer_enabled=True):
+    """真实 execution_policy 形状的 policy（default_execution_policy()
+    为底，仅改三闸词汇——形状参照 runtime/execution_policy.py，它在
+    quota 包依赖白名单内可安全 import）。"""
+    policy = execution_policy.default_execution_policy()
+    policy["quota_control"]["primer_enabled"] = primer_enabled
+    policy["continuity"]["auto_resume"] = auto_resume
+    policy["authorization"]["source"] = source
+    return policy
+
+
+def _write_task_state(repo, task_id, policy):
+    """真实任务布局写入：<repo>/.glm-conductor/tasks/<task_id>/state.json
+    （与 task_manager / journal.journal_path 的布局同源）。"""
+    task_dir = os.path.join(repo, ".glm-conductor", "tasks", task_id)
+    os.makedirs(task_dir, exist_ok=True)
+    path = os.path.join(task_dir, "state.json")
+    with open(path, "w", encoding="utf-8") as handle:
+        json.dump({"task_id": task_id, "status": "waiting_quota",
+                   "execution_policy": policy}, handle)
+    return path
+
+
+class PrimeAuthorizedTest(PrimerCase):
+    """RH-02（v2.2 Release Hardening §4，方案 A）：三重授权闸机械收口
+    在唯一 public 执行 API prime_authorized 内——未授权（三闸任一不过、
+    任务 / policy 缺失坏块）→ 冻结九键结构化拒绝，零 transport、零
+    quota 网络、零 primer.json 写、零 window_primed journal、零窗口
+    消费（不制造任何 durable 痕迹）；授权通过才透传 _prime_once_
+    unchecked（八键返回）。PRIMER-AUTH-01..06 逐条对应实施规格 §4.5。
+    任务 state 一律按真实布局写入测试 tmp repo。
+    """
+
+    PRE = detail("AVAILABLE", [win("five_hour", "EXHAUSTED", 0.0,
+                                   RESET_FIVE_OLD)])
+    POST = detail("AVAILABLE", [win("five_hour", "AVAILABLE", 100.0,
+                                    RESET_FIVE_NEW)])
+
+    def prime_authorized(self, task_id, transport=None, fetch=None,
+                         boundary=BOUNDARY, policy=None):
+        """写任务 state + 全注入调用 prime_authorized 的公共装置。"""
+        _write_task_state(self.repo, task_id,
+                          policy if policy is not None
+                          else _authorized_policy())
+        return primer.prime_authorized(
+            self.repo, task_id, boundary_id=boundary,
+            provider_identity_hash=IDENTITY,
+            transport=transport if transport is not None
+            else recording_transport([("ok", ok_payload())]),
+            clock=fixed_clock,
+            fetch_refresh=fetch if fetch is not None
+            else scripted_fetch([dict(self.PRE), dict(self.POST)]))
+
+    def assert_denied(self, result, transport, fetch, where=""):
+        """冻结九键拒绝形状 + 全零副作用（零 transport 零刷新零落账）。"""
+        self.assertEqual(
+            sorted(result.keys()),
+            sorted(primer.PRIME_AUTHORIZED_RESULT_KEYS),
+            "拒绝键漂移 %s" % (where,))
+        self.assertFalse(result["authorized"], where)
+        self.assertFalse(result["primed"], where)
+        self.assertFalse(result["materialized"], where)
+        self.assertFalse(result["executable"], where)
+        self.assertEqual(result["tokens"],
+                         {"input": None, "output": None}, where)
+        self.assertIsNone(result["latency_ms"], where)
+        self.assertFalse(result["idempotent"], where)
+        self.assertIsNone(result["error"], where)
+        self.assertIsInstance(result["reason"], str, where)
+        self.assertNotEqual(result["reason"], "", where)
+        # 零副作用四重：零 transport、零 quota 网络、零 primer.json、
+        # 零 window_primed journal（= 零 durable 痕迹、零窗口消费）
+        self.assertEqual(len(transport.calls), 0, where)
+        self.assertEqual(len(fetch.calls), 0, where)
+        self.assertIsNone(primer.read_primer_state(self.repo), where)
+        self.assertEqual(self.journal_events(), [], where)
+
+    def test_auth01_primer_disabled_refuses(self):
+        # PRIMER-AUTH-01：primer_enabled=false（policy 完整、其余合格）
+        # → transport calls == 0、无 primer.json、无 journal
+        transport = recording_transport([("ok", ok_payload())])
+        fetch = scripted_fetch([dict(self.PRE), dict(self.POST)])
+        result = self.prime_authorized(
+            "task-auth01", transport=transport, fetch=fetch,
+            policy=_authorized_policy(primer_enabled=False))
+        self.assert_denied(result, transport, fetch, "AUTH-01")
+        self.assertIn("primer_enabled", result["reason"])
+
+    def test_auth02_manual_refuses(self):
+        # PRIMER-AUTH-02：auto_resume="manual" → 同上零副作用
+        transport = recording_transport([("ok", ok_payload())])
+        fetch = scripted_fetch([dict(self.PRE), dict(self.POST)])
+        result = self.prime_authorized(
+            "task-auth02", transport=transport, fetch=fetch,
+            policy=_authorized_policy(auto_resume="manual"))
+        self.assert_denied(result, transport, fetch, "AUTH-02")
+        self.assertIn("manual", result["reason"])
+
+    def test_auth03_notify_refuses(self):
+        # PRIMER-AUTH-03：auto_resume="notify" → 同上零副作用
+        transport = recording_transport([("ok", ok_payload())])
+        fetch = scripted_fetch([dict(self.PRE), dict(self.POST)])
+        result = self.prime_authorized(
+            "task-auth03", transport=transport, fetch=fetch,
+            policy=_authorized_policy(auto_resume="notify"))
+        self.assert_denied(result, transport, fetch, "AUTH-03")
+        self.assertIn("notify", result["reason"])
+
+    def test_auth04_auto_once_default_source_refuses(self):
+        # PRIMER-AUTH-04：auto_once + source="default" → 同上零副作用
+        transport = recording_transport([("ok", ok_payload())])
+        fetch = scripted_fetch([dict(self.PRE), dict(self.POST)])
+        result = self.prime_authorized(
+            "task-auth04", transport=transport, fetch=fetch,
+            policy=_authorized_policy(auto_resume="auto_once",
+                                      source="default"))
+        self.assert_denied(result, transport, fetch, "AUTH-04")
+        self.assertIn("default", result["reason"])
+
+    def test_auth05_until_done_user_executes_once(self):
+        # PRIMER-AUTH-05：until_done + source="user" + primer_enabled=
+        # true → 恰一次授权尝试（transport 恰 1、正常八键返回、
+        # durable 落账 + journal 照常）
+        transport = recording_transport([("ok", ok_payload())])
+        fetch = scripted_fetch([dict(self.PRE), dict(self.POST)])
+        result = self.prime_authorized("task-auth05",
+                                       transport=transport, fetch=fetch)
+        self.assertEqual(sorted(result.keys()), sorted(RESULT_KEYS))
+        self.assertTrue(result["authorized"])
+        self.assertTrue(result["primed"])
+        self.assertTrue(result["materialized"])
+        self.assertTrue(result["executable"])
+        self.assertEqual(result["tokens"], {"input": 19, "output": 38})
+        self.assertEqual(len(transport.calls), 1)
+        self.assertEqual(len(fetch.calls), 2)  # 基线 + 确认
+        self.assertIsNone(self.read_record()["error_kind"])
+        events = self.journal_events()
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]["event"], "window_primed")
+
+    def test_auth06_missing_or_corrupt_task_state_refuses(self):
+        # PRIMER-AUTH-06：任务目录不存在 / state.json 坏 JSON / 缺
+        # execution_policy 块 → 保守拒绝零 transport；且私有名
+        # _prime_once_unchecked 直调仍可执行——绕过必须显式用私有名
+        cases = [
+            ("missingtask", None),            # 任务目录 / state 不存在
+            ("corruptstate", "{corrupted"),   # 坏 JSON
+            ("nopolicy", {"task_id": "t",       # 缺 execution_policy 块
+                          "status": "waiting_quota"}),
+        ]
+        transport = recording_transport([("ok", ok_payload())])
+        fetch = scripted_fetch([dict(self.PRE), dict(self.POST)])
+        for name, payload in cases:
+            with self.subTest(case=name):
+                if payload is not None:
+                    task_dir = os.path.join(self.repo, ".glm-conductor",
+                                            "tasks", "task-%s" % name)
+                    os.makedirs(task_dir, exist_ok=True)
+                    with open(os.path.join(task_dir, "state.json"), "w",
+                              encoding="utf-8") as handle:
+                        if isinstance(payload, str):
+                            handle.write(payload)
+                        else:
+                            json.dump(payload, handle)
+                result = primer.prime_authorized(
+                    self.repo, "task-%s" % name, boundary_id=BOUNDARY,
+                    provider_identity_hash=IDENTITY, transport=transport,
+                    clock=fixed_clock, fetch_refresh=fetch)
+                self.assert_denied(result, transport, fetch, name)
+        # 测试通道保留：私有名直调不读任务 policy、照常执行——证明
+        # prime_authorized 的闸是机械的，「绕过」在调用面显式可见
+        result = primer._prime_once_unchecked(
+            self.repo, boundary_id=BOUNDARY,
+            provider_identity_hash=IDENTITY, transport=transport,
+            clock=fixed_clock, fetch_refresh=fetch)
+        self.assertTrue(result["primed"])
+        self.assertEqual(len(transport.calls), 1)
+
+    def test_task_id_validation_valueerror(self):
+        # task_id 非空 str 校验（中文 ValueError，先于一切 I/O）
+        transport = recording_transport([("ok", ok_payload())])
+        for bad in ("", None, 42, b"task"):
+            with self.subTest(bad=bad):
+                with self.assertRaises(ValueError):
+                    primer.prime_authorized(
+                        self.repo, bad, boundary_id=BOUNDARY,
+                        provider_identity_hash=IDENTITY,
+                        transport=transport)
+        self.assertEqual(len(transport.calls), 0)
+        self.assertIsNone(primer.read_primer_state(self.repo))
+
+    def test_denial_precedes_param_validation(self):
+        # 校验顺序判断（未授权零副作用优先）：policy 拒绝 + 非法
+        # boundary_id → 结构化拒绝而非 ValueError（拒绝路径绝不因参数
+        # 问题抛错而落不了拒绝返回）
+        transport = recording_transport([("ok", ok_payload())])
+        fetch = scripted_fetch([dict(self.PRE)])
+        result = self.prime_authorized(
+            "task-order", transport=transport, fetch=fetch, boundary="",
+            policy=_authorized_policy(primer_enabled=False))
+        self.assertFalse(result["authorized"])
+        self.assertEqual(len(transport.calls), 0)
+
+    def test_authorized_path_keeps_param_valueerror(self):
+        # 授权通过后参数校验沿用 _prime_once_unchecked 语义（透传抛错）
+        transport = recording_transport([("ok", ok_payload())])
+        with self.assertRaises(ValueError):
+            self.prime_authorized("task-badparam", transport=transport,
+                                  boundary="")
+        self.assertEqual(len(transport.calls), 0)  # 校验先于传输
 
 
 # —— 传输注入（零真实网络零真实模型调用；§37 异常类型名化） ——
@@ -765,7 +993,7 @@ class TransportInjectionTest(PrimerCase):
                                            RESET_FIVE_NEW)])]
 
     def prime(self, transport, fetch=None):
-        return primer.prime_once(
+        return primer._prime_once_unchecked(
             self.repo, boundary_id=BOUNDARY,
             provider_identity_hash=IDENTITY, transport=transport,
             clock=fixed_clock,
@@ -885,23 +1113,23 @@ class TransportInjectionTest(PrimerCase):
     def test_invalid_params_valueerror(self):
         transport = recording_transport([("ok", ok_payload())])
         with self.assertRaises(ValueError):
-            primer.prime_once(self.repo, boundary_id="",
+            primer._prime_once_unchecked(self.repo, boundary_id="",
                               provider_identity_hash=IDENTITY,
                               transport=transport)
         with self.assertRaises(ValueError):
-            primer.prime_once(self.repo, boundary_id=BOUNDARY,
+            primer._prime_once_unchecked(self.repo, boundary_id=BOUNDARY,
                               provider_identity_hash="", transport=transport)
         for bad in ("transport", 42):
             with self.assertRaises(ValueError):
-                primer.prime_once(self.repo, boundary_id=BOUNDARY,
+                primer._prime_once_unchecked(self.repo, boundary_id=BOUNDARY,
                                   provider_identity_hash=IDENTITY,
                                   transport=bad)
             with self.assertRaises(ValueError):
-                primer.prime_once(self.repo, boundary_id=BOUNDARY,
+                primer._prime_once_unchecked(self.repo, boundary_id=BOUNDARY,
                                   provider_identity_hash=IDENTITY,
                                   transport=transport, clock=bad)
             with self.assertRaises(ValueError):
-                primer.prime_once(self.repo, boundary_id=BOUNDARY,
+                primer._prime_once_unchecked(self.repo, boundary_id=BOUNDARY,
                                   provider_identity_hash=IDENTITY,
                                   transport=transport, fetch_refresh=bad)
 
@@ -945,7 +1173,7 @@ class BaseUrlTest(PrimerCase):
                 "options": {"baseURL": DEFAULT_BASE}}}}, handle)
         transport = recording_transport([("ok", ok_payload())])
         with mock.patch.object(primer, "_ZCODE_CONFIG_PATH", path):
-            primer.prime_once(self.repo, boundary_id=BOUNDARY,
+            primer._prime_once_unchecked(self.repo, boundary_id=BOUNDARY,
                               provider_identity_hash=IDENTITY,
                               transport=transport, clock=fixed_clock,
                               fetch_refresh=scripted_fetch(
@@ -974,7 +1202,7 @@ class StoreTest(PrimerCase):
         self.assertIsNone(primer.read_primer_state(self.repo))
 
     def test_no_tmp_left_after_write(self):
-        primer.prime_once(self.repo, boundary_id=BOUNDARY,
+        primer._prime_once_unchecked(self.repo, boundary_id=BOUNDARY,
                           provider_identity_hash=IDENTITY,
                           transport=recording_transport(
                               [("ok", ok_payload())]),
@@ -1004,18 +1232,18 @@ class StoreTest(PrimerCase):
                                    detail("AVAILABLE", [])])
         paths = [
             # 成功路径
-            primer.prime_once(self.repo, boundary_id=BOUNDARY,
+            primer._prime_once_unchecked(self.repo, boundary_id=BOUNDARY,
                               provider_identity_hash=IDENTITY,
                               transport=recording_transport(
                                   [("ok", ok_payload())]),
                               clock=fixed_clock, fetch_refresh=fetch_ok),
             # 幂等命中路径
-            primer.prime_once(self.repo, boundary_id=BOUNDARY,
+            primer._prime_once_unchecked(self.repo, boundary_id=BOUNDARY,
                               provider_identity_hash=IDENTITY,
                               transport=recording_transport([]),
                               clock=fixed_clock, fetch_refresh=fetch_ok),
             # 失败路径（传输错误）
-            primer.prime_once(self.repo, boundary_id="glm:bbbbbbbbbbbbbbbb",
+            primer._prime_once_unchecked(self.repo, boundary_id="glm:bbbbbbbbbbbbbbbb",
                               provider_identity_hash=IDENTITY,
                               transport=recording_transport([("status",
                                                               500)]),
@@ -1023,7 +1251,7 @@ class StoreTest(PrimerCase):
                               fetch_refresh=scripted_fetch(
                                   [detail("AVAILABLE", [])])),
             # 失败路径（无凭证）
-            primer.prime_once(self.repo, boundary_id="glm:cccccccccccccccc",
+            primer._prime_once_unchecked(self.repo, boundary_id="glm:cccccccccccccccc",
                               provider_identity_hash=IDENTITY,
                               transport=recording_transport([]),
                               clock=fixed_clock,
@@ -1031,7 +1259,7 @@ class StoreTest(PrimerCase):
         ]
         with mock.patch.object(primer, "resolve_credential",
                                return_value=(None, None)):
-            paths.append(primer.prime_once(
+            paths.append(primer._prime_once_unchecked(
                 self.repo, boundary_id="glm:dddddddddddddddd",
                 provider_identity_hash=IDENTITY,
                 transport=recording_transport([]), clock=fixed_clock,
@@ -1041,11 +1269,15 @@ class StoreTest(PrimerCase):
 
 
 class SignatureFreezeTest(PrimerCase):
-    """冻结签名（wu-22-C4 规格 INTERFACES 原文；本单元不越界改签名）。"""
+    """冻结签名（wu-22-C4 规格 INTERFACES 原文；RH-02 起执行面二分：
+    _prime_once_unchecked 私有名参数表与行为零变化，prime_authorized
+    是唯一 public 执行面——repo_root/task_id 位置参 + 其余
+    keyword-only；拒绝路径冻结九键 = 八键 + reason）。"""
 
-    def test_prime_once_signature_frozen(self):
-        signature = inspect.signature(primer.prime_once)
-        self.assertEqual(list(signature.parameters), PRIME_ONCE_PARAMS)
+    def test_prime_unchecked_signature_frozen(self):
+        signature = inspect.signature(primer._prime_once_unchecked)
+        self.assertEqual(list(signature.parameters),
+                         PRIME_UNCHECKED_PARAMS)
         for name in ("transport", "clock", "fetch_refresh"):
             self.assertEqual(signature.parameters[name].default, None)
             self.assertTrue(
@@ -1054,6 +1286,29 @@ class SignatureFreezeTest(PrimerCase):
         for name in ("boundary_id", "provider_identity_hash"):
             self.assertEqual(signature.parameters[name].default,
                              inspect.Parameter.empty)
+
+    def test_prime_authorized_signature_frozen(self):
+        signature = inspect.signature(primer.prime_authorized)
+        self.assertEqual(
+            list(signature.parameters),
+            ["repo_root", "task_id", "boundary_id",
+             "provider_identity_hash", "transport", "clock",
+             "fetch_refresh"])
+        for name in ("transport", "clock", "fetch_refresh"):
+            self.assertEqual(signature.parameters[name].default, None)
+            self.assertEqual(signature.parameters[name].kind,
+                             inspect.Parameter.KEYWORD_ONLY)
+        for name in ("task_id", "boundary_id", "provider_identity_hash"):
+            self.assertEqual(signature.parameters[name].default,
+                             inspect.Parameter.empty)
+
+    def test_prime_authorized_denial_keys_frozen(self):
+        # 拒绝路径冻结九键 = PRIMER_RESULT_KEYS 八键 + reason（新
+        # public API 的返回形状；PRIMER_RESULT_KEYS 本身零变化）
+        self.assertEqual(primer.PRIMER_RESULT_KEYS, tuple(RESULT_KEYS))
+        self.assertEqual(
+            primer.PRIME_AUTHORIZED_RESULT_KEYS,
+            tuple(RESULT_KEYS) + ("reason",))
 
     def test_authorize_prime_signature(self):
         signature = inspect.signature(primer.authorize_prime)
@@ -1065,7 +1320,7 @@ class SignatureFreezeTest(PrimerCase):
 class JournalTest(PrimerCase):
 
     def prime(self, transport_script=None, boundary=BOUNDARY):
-        return primer.prime_once(
+        return primer._prime_once_unchecked(
             self.repo, boundary_id=boundary,
             provider_identity_hash=IDENTITY,
             transport=recording_transport(

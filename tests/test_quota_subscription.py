@@ -763,7 +763,7 @@ class PrimerMigrationEndToEndTest(SubscriptionCase):
     IDENTITY = "a1b2c3d4e5f60718"
 
     def prime(self, transport, fetch=None):
-        return primer.prime_once(
+        return primer._prime_once_unchecked(
             self.repo, boundary_id=EPOCH_A,
             provider_identity_hash=self.IDENTITY,
             transport=transport,
