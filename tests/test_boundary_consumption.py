@@ -7,13 +7,16 @@
     task_id + epoch_id（同 key 重放 no-op 并标注 idempotent）、授权
     三查镜像 record_quota_wake（auto_resume ∈ {auto_once, until_done}
     / authorization.source == "user" / remaining > 0，拒绝零副作用）、
-    事件携带 epoch_id + executable_boundary_id + resume_started_at +
-    consumed/remaining；
+    事件携带 epoch_id + boundary 证据 + resume_started_at +
+    consumed/remaining（RH-04 起辅助证据字段记作
+    representative_boundary_id，旧事件为 legacy 键
+    executable_boundary_id，读侧双键兼容）；
   - §22.6：migrate_quota_window_accounting——保守迁移 max 语义不退款
     （new_consumed >= legacy_consumed 恒成立）、数字相同仍写一次性
     quota_accounting_migrated 五字段事件、重复触发幂等 no-op；v2.2 C7
-    双键联合去重（epoch_id / boundary_id / executable_boundary_id 全
-    身份键登记 seen，同窗 legacy + 新形态证据不双计）；
+    双键联合去重（RH-04 扩为 epoch_id / boundary_id /
+    representative_boundary_id / legacy executable_boundary_id 全身份
+    键登记 seen，同窗 legacy + 新形态证据、新旧键名混用不双计）；
   - §22.5：reconcile_wake_bridge_from_host——纯账本对账（host_status
     由调用方显式传入，零宿主调用 / 零 CronList 概念）、对账只能降级
     / 确认、journal 历史单独绝不制造 armed 桥；
@@ -117,11 +120,13 @@ class ConsumptionTestBase(unittest.TestCase):
             wake_at="2026-09-01T22:04:00Z")
 
     def append_consumed_event(self, *, epoch_id=None, boundary_id=None,
-                              executable_boundary_id=None):
+                              executable_boundary_id=None,
+                              representative_boundary_id=None):
         """直接向 journal 注入一条 quota_boundary_consumed 证据（迁移
         verified 口径的输入；模拟 §22.6 所引 2026-09-01 人工证据时用
-        boundary_id alias 形态；v2.2 C7 双键去重用例另以
-        executable_boundary_id 注入新形态 §C1b 事件）。"""
+        boundary_id alias 形态；RH-04 前新形态 §C1b 事件以 legacy 键
+        executable_boundary_id 注入，RH-04 后以 representative_boundary_id
+        注入）。"""
         event = {"event": "quota_boundary_consumed"}
         if epoch_id is not None:
             event["epoch_id"] = epoch_id
@@ -129,6 +134,8 @@ class ConsumptionTestBase(unittest.TestCase):
             event["boundary_id"] = boundary_id
         if executable_boundary_id is not None:
             event["executable_boundary_id"] = executable_boundary_id
+        if representative_boundary_id is not None:
+            event["representative_boundary_id"] = representative_boundary_id
         event["resume_started_at"] = RESUME_AT
         return journal.append_event(self.repo, TID, event)
 
@@ -153,9 +160,12 @@ class RecordQuotaBoundaryConsumedTest(ConsumptionTestBase):
         self.assertEqual(self.consumed(), 1)
         records = self.events("quota_boundary_consumed")
         self.assertEqual(len(records), 1)
-        # §C1b：事件同时携带 epoch_id 与 executable_boundary_id
+        # §C1b：事件同时携带 epoch_id 与代表窗口身份（RH-04 起字段面
+        # 记作 representative_boundary_id；返回键名 executable_boundary_id
+        # 冻结不变，承载同值）
         self.assertEqual(records[0]["epoch_id"], EPOCH_A)
-        self.assertEqual(records[0]["executable_boundary_id"], BOUNDARY_A)
+        self.assertEqual(records[0]["representative_boundary_id"], BOUNDARY_A)
+        self.assertNotIn("executable_boundary_id", records[0])
         self.assertEqual(records[0]["resume_started_at"], RESUME_AT)
         self.assertEqual(records[0]["consumed"], 1)
         self.assertEqual(records[0]["remaining"], 1)
@@ -495,27 +505,34 @@ class ConsumptionCrashConsistencyTest(ConsumptionTestBase):
             self.repo, TID, epoch_id=epoch_id,
             executable_boundary_id=BOUNDARY_A, resume_started_at=RESUME_AT)
 
-    def _append_pending(self, epoch_id=EPOCH_A, target_consumed=1):
+    def _append_pending(self, epoch_id=EPOCH_A, target_consumed=1,
+                        boundary_field="executable_boundary_id"):
+        """注入 pending 事件（默认 legacy 键形态，模拟 RH-04 前旧
+        pending；boundary_field="representative_boundary_id" 模拟新
+        形态——恢复闭合读侧对两者双键兼容）。"""
         return journal.append_event(self.repo, TID, {
             "event": "quota_consumption_pending", "epoch_id": epoch_id,
-            "executable_boundary_id": BOUNDARY_A,
+            boundary_field: BOUNDARY_A,
             "target_consumed": target_consumed,
             "resume_started_at": RESUME_AT})
 
     def test_pending_event_frozen_fields_and_write_ahead_order(self):
-        """pending 五字段逐字 {event, epoch_id, executable_boundary_id,
-        target_consumed, resume_started_at}；write-ahead 排序：pending
-        先于 save_state、committed 最后闭合。"""
+        """pending 五字段逐字 {event, epoch_id, representative_boundary_id,
+        target_consumed, resume_started_at}（RH-04 起辅助证据字段面改记
+        新键）；write-ahead 排序：pending 先于 save_state、committed
+        最后闭合。"""
         self.save_task(max_quota_windows=2)
         self._consume()
         pendings = self.events("quota_consumption_pending")
         self.assertEqual(len(pendings), 1)
         self.assertEqual(
             set(pendings[0]) - {"ts"},
-            {"event", "epoch_id", "executable_boundary_id",
+            {"event", "epoch_id", "representative_boundary_id",
              "target_consumed", "resume_started_at"})
         self.assertEqual(pendings[0]["epoch_id"], EPOCH_A)
-        self.assertEqual(pendings[0]["executable_boundary_id"], BOUNDARY_A)
+        self.assertEqual(pendings[0]["representative_boundary_id"],
+                         BOUNDARY_A)
+        self.assertNotIn("executable_boundary_id", pendings[0])
         self.assertEqual(pendings[0]["target_consumed"], 1)
         self.assertEqual(pendings[0]["resume_started_at"], RESUME_AT)
         names = [e.get("event") for e in journal.read_events(self.repo, TID)]
@@ -630,9 +647,11 @@ class ConsumptionCrashConsistencyTest(ConsumptionTestBase):
         self.assertEqual(len(self.events("quota_boundary_consumed")), 1)
 
     def test_pending_projection_missing_closes_with_single_projection(self):
-        """恢复闭合·投影未落分支：state == target - 1 → 补一次投影到
+        """恢复闭合·投影未落分支（本例 pending 为 RH-04 前 legacy 键
+        形态——锚定读侧双键兼容）：state == target - 1 → 补一次投影到
         pending 冻结 target 再补 committed（boundary / started_at 取
-        pending 冻结值，不取重放调用的新值）。"""
+        pending 冻结值，不取重放调用的新值；闭合 committed 以新键
+        representative_boundary_id 落盘）。"""
         self.save_task(max_quota_windows=2)
         self._append_pending(epoch_id=EPOCH_A, target_consumed=1)
         result = task_manager.record_quota_boundary_consumed(
@@ -645,7 +664,8 @@ class ConsumptionCrashConsistencyTest(ConsumptionTestBase):
         self.assertEqual(self.consumed(), 1)
         committed = self.events("quota_boundary_consumed")
         self.assertEqual(len(committed), 1)
-        self.assertEqual(committed[0]["executable_boundary_id"], BOUNDARY_A)
+        self.assertEqual(committed[0]["representative_boundary_id"],
+                         BOUNDARY_A)
         self.assertEqual(len(self.events("quota_consumption_pending")), 1)
 
     def test_pending_state_contradiction_raises_zero_writes(self):
@@ -817,6 +837,134 @@ class MigrationCrashConsistencyTest(ConsumptionTestBase):
             task_manager.migrate_quota_window_accounting(self.repo, TID)
         self.assertEqual(self.state_bytes(), before)
         self.assertEqual(self.events("quota_accounting_migrated"), [])
+
+
+# —— RH-04 representative_boundary_id 双键兼容（wu-rh04；修正计划 §6 方案 A） ——
+
+class RepresentativeBoundaryCompatTest(ConsumptionTestBase):
+    """RH-04：辅助证据字段改名（新事件记 representative_boundary_id，
+    语义 = epoch 中用于人类审计的代表窗口身份）+ 读侧双键兼容——
+    幂等命中 / pending 恢复闭合 / migrate 身份去重全部先 new 后 legacy
+    键 executable_boundary_id；旧 journal 不重写。kwargs 参数名、
+    record 返回键名零变化（minimal-disturbance 决策）。"""
+
+    def test_a_legacy_committed_event_dual_key_read_idempotent_hit(self):
+        """(a) 旧 committed 事件仅含 legacy 键 executable_boundary_id →
+        同 epoch 重放幂等命中、零二次消费，返回值取 legacy 冻结值、
+        返回键名不变、幂等零写。"""
+        self.save_task(max_quota_windows=2)
+        self.append_consumed_event(epoch_id=EPOCH_A,
+                                   executable_boundary_id=BOUNDARY_A)
+        before = self.state_bytes()
+        result = task_manager.record_quota_boundary_consumed(
+            self.repo, TID, epoch_id=EPOCH_A,
+            executable_boundary_id=BOUNDARY_B,  # 新值不覆盖旧证据
+            resume_started_at="2026-09-04T08:00:00Z")
+        self.assertTrue(result["idempotent"])
+        self.assertEqual(result["executable_boundary_id"], BOUNDARY_A)
+        self.assertEqual(result["consumed_quota_windows"], 0)
+        self.assertEqual(self.consumed(), 0)  # 零二次消费
+        self.assertEqual(len(self.events("quota_boundary_consumed")), 1)
+        self.assertEqual(self.state_bytes(), before)  # 幂等零写
+
+    def test_b_new_events_carry_representative_key_not_legacy(self):
+        """(b) 新 pending / committed 事件字段 = representative_boundary_id
+        （legacy 键绝不再出现在新事件中）；返回键名 executable_boundary_id
+        承载同值（返回键零变化）；新形态 committed 证据的幂等命中走
+        双键读 new 键先见。"""
+        self.save_task(max_quota_windows=2)
+        result = task_manager.record_quota_boundary_consumed(
+            self.repo, TID, epoch_id=EPOCH_A,
+            executable_boundary_id=BOUNDARY_A, resume_started_at=RESUME_AT)
+        self.assertEqual(result["executable_boundary_id"], BOUNDARY_A)
+        self.assertNotIn("representative_boundary_id", result)  # 返回键零变化
+        for name in ("quota_consumption_pending",
+                     "quota_boundary_consumed"):
+            events = self.events(name)
+            self.assertEqual(len(events), 1)
+            self.assertEqual(events[0]["representative_boundary_id"],
+                             BOUNDARY_A)
+            self.assertNotIn("executable_boundary_id", events[0])
+        replay = task_manager.record_quota_boundary_consumed(
+            self.repo, TID, epoch_id=EPOCH_A,
+            executable_boundary_id=BOUNDARY_B,
+            resume_started_at="2026-09-04T08:00:00Z")
+        self.assertTrue(replay["idempotent"])
+        self.assertEqual(replay["executable_boundary_id"], BOUNDARY_A)
+        self.assertEqual(len(self.events("quota_boundary_consumed")), 1)
+
+    def test_c_mixed_key_epochs_each_count_once_no_migrate_double_count(self):
+        """(c) 混合键名：旧 epoch 证据用 legacy 键 + 新 epoch 证据用
+        representative 键 → migrate 各计一次、不双计（双 boundary 键
+        与 epoch_id / boundary_id 同等身份键待遇）。"""
+        self.save_task(max_quota_windows=4)
+        self.set_consumed(1)
+        self.append_consumed_event(epoch_id=EPOCH_A,
+                                   executable_boundary_id=BOUNDARY_A)
+        self.append_consumed_event(epoch_id=EPOCH_B,
+                                   representative_boundary_id=BOUNDARY_B)
+        result = task_manager.migrate_quota_window_accounting(self.repo, TID)
+        self.assertEqual(result["verified_boundary_ids"],
+                         [EPOCH_A, EPOCH_B])
+        self.assertEqual(result["new_consumed"], 2)
+        self.assertEqual(self.consumed(), 2)
+
+    def test_c_mixed_key_same_window_dedup_across_names(self):
+        """(c) 同窗证据分别以 legacy 键与 representative 键在案（不同
+        epoch）→ 双 boundary 键联合去重只计第一条（同窗不双计语义跨
+        键名成立）。"""
+        self.save_task(max_quota_windows=4)
+        self.set_consumed(1)
+        self.append_consumed_event(epoch_id=EPOCH_A,
+                                   executable_boundary_id=BOUNDARY_A)
+        self.append_consumed_event(epoch_id=EPOCH_B,
+                                   representative_boundary_id=BOUNDARY_A)
+        result = task_manager.migrate_quota_window_accounting(self.repo, TID)
+        self.assertEqual(result["verified_boundary_ids"], [EPOCH_A])
+        self.assertEqual(result["new_consumed"], 1)
+        self.assertEqual(self.consumed(), 1)
+
+    def test_d_legacy_pending_recovery_closure_dual_key(self):
+        """(d-legacy) 旧 pending 仅含 legacy 键 executable_boundary_id →
+        恢复闭合照常（先于授权三查的排序不变），返回值取 pending 冻结
+        值、返回键名不变；闭合补的 committed 以新键
+        representative_boundary_id 落盘。"""
+        self.save_task(max_quota_windows=2)
+        journal.append_event(self.repo, TID, {
+            "event": "quota_consumption_pending", "epoch_id": EPOCH_A,
+            "executable_boundary_id": BOUNDARY_A,
+            "target_consumed": 1, "resume_started_at": RESUME_AT})
+        result = task_manager.record_quota_boundary_consumed(
+            self.repo, TID, epoch_id=EPOCH_A,
+            executable_boundary_id=BOUNDARY_B,
+            resume_started_at="2026-09-04T08:00:00Z")
+        self.assertEqual(result["consumed_quota_windows"], 1)
+        self.assertEqual(result["executable_boundary_id"], BOUNDARY_A)
+        committed = self.events("quota_boundary_consumed")
+        self.assertEqual(len(committed), 1)
+        self.assertEqual(committed[0]["representative_boundary_id"],
+                         BOUNDARY_A)
+        self.assertNotIn("executable_boundary_id", committed[0])
+        self.assertEqual(len(self.events("quota_consumption_pending")), 1)
+
+    def test_d_representative_pending_recovery_closure_new_key(self):
+        """(d-new) 新 pending 含 representative_boundary_id → 恢复闭合
+        双键读 new 键冻结值，闭合 committed 同值落新键。"""
+        self.save_task(max_quota_windows=2)
+        journal.append_event(self.repo, TID, {
+            "event": "quota_consumption_pending", "epoch_id": EPOCH_A,
+            "representative_boundary_id": BOUNDARY_A,
+            "target_consumed": 1, "resume_started_at": RESUME_AT})
+        result = task_manager.record_quota_boundary_consumed(
+            self.repo, TID, epoch_id=EPOCH_A,
+            executable_boundary_id=BOUNDARY_B,
+            resume_started_at="2026-09-04T08:00:00Z")
+        self.assertEqual(result["consumed_quota_windows"], 1)
+        self.assertEqual(result["executable_boundary_id"], BOUNDARY_A)
+        committed = self.events("quota_boundary_consumed")
+        self.assertEqual(committed[0]["representative_boundary_id"],
+                         BOUNDARY_A)
+        self.assertEqual(len(self.events("quota_consumption_pending")), 1)
 
 
 # —— reconcile_wake_bridge_from_host（§22.5） ——

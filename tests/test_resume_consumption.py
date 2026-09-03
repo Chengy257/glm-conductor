@@ -10,9 +10,13 @@
   - §22.1：manual / notify 永不消费；授权预闸（auto_resume ∈
     {auto_once, until_done} AND source=="user" AND remaining>0）不过 →
     零调用零副作用；
-  - §C7 / 修正计划 C7：executable_boundary_id 只从当前 epoch 快照真实
-    窗口派生（D10 形态 "kind:reset_at"，最早可解析窗口，无宽限；无可
-    解析窗口跳过消费不虚构 §31）；epoch_id 恒为幂等 / 归属权威键；
+  - §C7 / 修正计划 C7：消费事件辅助证据只从当前 epoch 快照真实窗口
+    派生（D10 形态 "kind:reset_at"，最早可解析窗口，无宽限；无可解析
+    窗口跳过消费不虚构 §31）；RH-04 起事件字段记作
+    representative_boundary_id（代表窗口身份；RH-04 前旧事件为 legacy
+    键 executable_boundary_id，读侧双键兼容；consumption face 返回键
+    名 executable_boundary_id 冻结不变）；epoch_id 恒为幂等 / 归属
+    权威键；
   - §22.6：迁移先于新形态事件（先 migrate one-shot 再 record）；
   - QC-07 / 退出码契约（v2.2 C7 ②）：消费记账 OSError 自然上抛（证据
     丢失必须可见）→ CLI quota-resume 退出码 3 + {error, guidance}；
@@ -231,7 +235,10 @@ class HappyPathConsumptionTest(ConsumptionWiringCase):
         self.assertEqual(len(events), 1)  # 恰一次
         event = events[0]
         self.assertEqual(event["epoch_id"], EPOCH_OF_B)
-        self.assertEqual(event["executable_boundary_id"], BOUNDARY_OF_B)
+        # RH-04：事件字段面改记 representative_boundary_id（face 返回
+        # 键名 executable_boundary_id 冻结不变，见上方 face 断言）
+        self.assertEqual(event["representative_boundary_id"], BOUNDARY_OF_B)
+        self.assertNotIn("executable_boundary_id", event)
         self.assertIsInstance(event["resume_started_at"], str)
         self.assertTrue(event["resume_started_at"])
         self.assertEqual(event["consumed"], 1)
@@ -270,7 +277,9 @@ class HappyPathConsumptionTest(ConsumptionWiringCase):
     def test_journal_evidence_preexisting_is_idempotent_hit(self):
         """§15.1 幂等证据语义（resume 层锚定）：journal 已有同 epoch
         消费证据（mark 后 state 被回滚的崩溃窗口）→ record 幂等命中，
-        face idempotent=True，不新建第二条消费事件。"""
+        face idempotent=True，不新建第二条消费事件。注入证据刻意用
+        RH-04 前旧形态（legacy 键 executable_boundary_id）——锚定
+        record 幂等命中路径的双键兼容读（legacy 值回填 face 返回键）。"""
         self.put_task(self.authorized_state())
         self.subscribe()
         self.mark()
@@ -429,18 +438,28 @@ class WriteAheadJournalOrderTest(ConsumptionWiringCase):
         # 消费：pending 先于 committed
         self.assertLess(names.index("quota_consumption_pending"),
                         names.index("quota_boundary_consumed"))
+        # RH-04：pending 事件字段面 = representative_boundary_id（新键，
+        # legacy 键 executable_boundary_id 不再出现在新事件中）
+        pending = [e for e in self.task_events()
+                   if e.get("event") == "quota_consumption_pending"][0]
+        self.assertEqual(pending["representative_boundary_id"],
+                         BOUNDARY_OF_B)
+        self.assertNotIn("executable_boundary_id", pending)
         self.assertEqual(self.continuity_consumed(), 1)
 
     def test_resume_reconciles_surviving_pending_without_double_consumption(self):
         """崩溃现场（上一进程已 append pending、投影未落）穿越进程边界
         → resume 链按 pending 冻结 target 恢复闭合：consumed 恰 +1、
-        journal 恰一条 pending + 一条 committed、无第二条 pending。"""
+        journal 恰一条 pending + 一条 committed、无第二条 pending。注入
+        pending 用 RH-04 后新形态（representative_boundary_id）——模拟
+        当前写方产物的恢复闭合；legacy 键形态的闭合兼容在
+        tests/test_boundary_consumption 的 RH-04 组锚定。"""
         self.put_task(self.authorized_state(max_quota_windows=2))
         self.subscribe()
         self.mark()
         journal.append_event(self.repo, TID, {
             "event": "quota_consumption_pending", "epoch_id": EPOCH_OF_B,
-            "executable_boundary_id": BOUNDARY_OF_B,
+            "representative_boundary_id": BOUNDARY_OF_B,
             "target_consumed": 1,
             "resume_started_at": "2026-09-03T08:00:00.000Z"})
         result = self.resume()
