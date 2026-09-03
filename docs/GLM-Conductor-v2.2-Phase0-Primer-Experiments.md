@@ -16,7 +16,7 @@
 | P0-QP-04 | Prime 成本记录 | **首笔已录**（19+38 tokens / 6.15s / 0 个可观测百分点） | §1.3 |
 | P0-QP-05 | Rolling-window anchor 行为 | **PASS（实证确认）**——reset_at 锚定过期后首触物化时刻，恒不得从旧边界外推 | §5 |
 | P0-QP-06 | Weekly / multi-window blocking | **机制确认（2026-09-03 用户裁决：weekly 优先判定、不得归 0）**——control.py 阻塞窗语义已机械对齐（QC-05）；真实 weekly 耗尽样本转 C11 机会性佐证 | §6 |
-| P0-QP-07 | Prime 幂等（同旧 boundary 不连发） | **PENDING（设计门）**（C4 primer.py 实现时落地+测试） | §7 |
+| P0-QP-07 | Prime 幂等（同旧 boundary 不连发） | **CLOSED（设计门随 C4 落地）**——primer.py 幂等键 (provider_identity_hash, boundary_id)，FAILED 尝试也落账防重发，超时单次有界重试，71 测试锚定（commit 9147e01） | §7 |
 | P0-QP-08 | 无 demand 时禁止 Prime（PASSIVE 零 control-plane model call） | **PASS（结构审计）** | §8 |
 
 ---
@@ -141,10 +141,16 @@ primer.enabled 恒 false 缺省直至用户显式启用。
 
 | 旧 reset_at | 过期后首触 | 新 reset_at | 新−首触 | 新−旧边界 |
 |---|---|---|---|---|
-| 2026-09-02T21:59:00Z | ~03:19Z（活跃会话，延迟≈2m） | 03:19:22Z | ≈5h+秒级 | 5h20m22s |
-| 2026-09-02T03:19:22Z | ~08:35Z（活跃） | 08:35:48Z | ≈5h+秒级 | 5h16m26s |
-| 2026-09-02T18:36:24Z | ~21:2xZ→23:40Z 间（活跃） | 23:40:18Z | ≈5h+秒级 | 5h3m54s |
+| 2026-09-01T21:59:00Z | 22:19:21Z（09-01，回算） | 03:19:22Z | 5h00m01s | 5h20m22s |
+| 2026-09-02T03:19:22Z | 03:35:47Z（回算） | 08:35:48Z | 5h00m01s | 5h16m26s |
+| 2026-09-02T18:36:24Z | 18:40:18Z（回算） | 23:40:18Z | 5h00m01s | 5h3m54s |
 | 2026-09-02T23:40:18Z | **02:14:26.869Z（空闲 2h34m 后首触）** | **07:14:27Z** | **5h00m01s** | **7h34m09s** |
+| 2026-09-03T07:14:27Z | 07:28:08Z（空闲 13m41s 后首触，回算） | 12:28:09Z | 5h00m01s | 5h13m42s |
+| 2026-09-03T12:28:09Z | 12:28:11Z（活跃会话，边界后 ≤23s） | 17:28:12Z | 5h00m01s | 5h00m03s |
+
+注：行 1-3 与行 5 的首触列为回算值（新 reset_at − 5h00m01s）；行 1
+日期勘正为 09-01（03:19:22Z 新窗的旧边界在前一日晚间）。行 6 活跃期
+物化延迟秒级，与行 1-3 模式一致。
 
 空闲 2.5 小时的首触样本把规则从"活跃期 >5h 间隙的模糊拟合"变成显式
 判别：新边界 = 首触时刻 + 5h（误差 ≤1s），与旧边界毫无外推关系。
@@ -158,6 +164,35 @@ primer.enabled 恒 false 缺省直至用户显式启用。
 - 该行为同时意味着：**长时间空闲会"推迟"下一窗口起点**——额度时钟
   只在触碰后走表，对 dogfood 排窗与成本规划是实打实的语义。
 
+### 5.1 边界穿越双轮全程佐证（2026-09-03，watcher+recorder CSV）
+
+仪器：常驻 watcher（pid 181160，ACTIVE）+ recorder CSV
+（`.glm-conductor/tmp/boundary_recorder.csv`，50 行，含边界临近
+1 分钟级采样）。两轮穿越形态互补，共同钉死机制裁决：
+
+**第一轮 07:14:27Z（会话空闲）**：
+
+- 03:17→07:13 **纯轮询 4 小时**（33 采样，零模型调用）：reset_at 恒
+  07:14:27Z 纹丝不动——查询永不推进窗口（P0-QP-01 负向第三证）；
+- 期间 06:01 起 provider 状态翻转（executable=False）而 **epoch_id
+  不变**——C2「状态翻转不推进 epoch」设计实战命中；
+- 07:15:52（边界后 85s）：**reset_at 消失、epoch 切 unknown 身份**
+  （`glm:305ed80142314f52`）——「窗口过期未物化」瞬态真实存在，
+  C2 unknown-branch 非纸上设计；
+- 07:28:08Z 首次模型调用物化新窗 reset_at=12:28:09Z（=首触
+  +5h00m01s；自然顺延应为 12:14:27Z，证伪）。
+
+**第二轮 12:28:09Z（会话活跃）**：
+
+- 12:28:32Z 观察已见新窗 reset_at=17:28:12Z——首触 12:28:11Z 在
+  边界后 ≤23s 内（活跃期物化延迟秒级），无 unknown 瞬态（首触先于
+  下次观察）；新−旧边界 5h00m03s，秒级容差内符合首触锚定规则；
+- 边界前 12:25-12:27 同样出现状态翻转（executable=False）而
+  epoch 不变——两轮一致。
+
+**结论**：reset_at 恒锚定物化时刻、查询永不推进、空闲推迟窗口起点
+（物化延迟=空闲时长）——机制裁决的三条支柱均获多轮独立佐证。
+
 ## 6. P0-QP-06：Weekly / multi-window blocking（PENDING）
 
 **Run condition**：需要 `5h available + weekly exhausted` 真实样本。
@@ -166,12 +201,15 @@ primer.enabled 恒 false 缺省直至用户显式启用。
 ActivationReady（control.evaluate_task_quota_phase 已有 BLOCKED 语义，
 primer 侧归 C4 对齐）。
 
-## 7. P0-QP-07：Prime 幂等（PENDING，设计门）
+## 7. P0-QP-07：Prime 幂等（CLOSED——设计门随 C4 落地）
 
 网络超时 / watcher restart 时不得对同旧 boundary 连发多个 prime。
-C4 `primer.py` 实现要求：同 boundary 幂等键（类比
-record_quota_boundary_consumed 的 task_id+epoch_id 模式）+ 超时单次
-重试上限 + 测试锚定。本门在 C4 实现时随代码取证关闭。
+C4 `runtime/quota/primer.py`（commit 9147e01）机械落地：幂等单飞键 =
+(provider_identity_hash, boundary_id)，持久记录于
+`.glm-conductor/quota/primer.json`（**FAILED 尝试也落账**——超时可能
+已在服务端物化，重发本身就是要防的双 prime）；网络超时单次有界重试
+（仅 socket.timeout，至多 2 次）；tests/test_primer.py 71 用例锚定
+（幂等命中零网络零事件 / 失败记录命中 / 授权矩阵 / 物化红线）。
 
 ## 8. P0-QP-08：无 demand 时禁止 Prime（PASS，结构审计）
 
@@ -205,3 +243,11 @@ record_quota_boundary_consumed 的 task_id+epoch_id 模式）+ 超时单次
   会话无法建桥自唤醒）归 C6 activation transport 解决。
 - 记录人：主会话（wu-22-P0QP，executor=main）；journal 事件随各门
   取证追加。
+- **2026-09-03T12:5xZ 尾款回填（C 系列实施收官）**：§7 门表行与正文
+  回填 CLOSED（C4 9147e01 落地证据）；§5 证据表勘正（行 1 日期
+  09-01、行 1-3 首触列回算值、粒度统一 5h00m01s）+ 增补行 5/6 与
+  §5.1 双轮穿越全程佐证（CSV 50 行，两轮互补形态：空闲延迟物化
+  vs 活跃即时物化）。C 系列 C0..C8a 全部闭环（本地提交
+  c6196d0..c596bd2，15 个，待统一 push）；reviewer 留账项全吸收
+  （C6 四项入 C6 提交、C7 P3-3 guidance 措辞澄清留待未来措辞更新
+  ——重跑 quota-resume 不补记账，仅 journal 核对）。
