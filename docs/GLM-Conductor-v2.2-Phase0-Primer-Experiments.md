@@ -10,12 +10,12 @@
 |---|----|------|------|
 | P0-QP-00 | 凭证与执行路径可达 | **PASS**（2026-09-03 探针实测；含粒度告警） | §1 |
 | P0-QP-00A | Primer 授权三条件 | **PASS**（Phase0 期间按「特性缺席=关闭」口径） | §2 |
-| P0-QP-01 | 纯 polling 是否自然产生新 reset_at | **PENDING（仪器已升级）**——C3 watcher 已作为 poll-only 观察者常驻，跨 07:14:27Z 边界自动取证 | §3 |
-| P0-QP-02 | 最小模型 call 是否物化新 boundary | **PENDING（首触物化已实证，query vs call 的分辨移交 01 的 watcher 协议）** | §4 |
+| P0-QP-01 | 纯 polling 是否自然产生新 reset_at | **CLOSED（负向）**——2026-09-03 用户机制裁决 + 02:14Z 首触锚定佐证 | §3 |
+| P0-QP-02 | 最小模型 call 是否物化新 boundary | **CLOSED（确认）**——同上；C4 走全量分支 B | §4 |
 | P0-QP-03 | Prime 与任务同一 Coding Plan 池 | **PASS（弱证据）**（同凭证同端点；百分比粒度限制见 §1.4） | §1 |
 | P0-QP-04 | Prime 成本记录 | **首笔已录**（19+38 tokens / 6.15s / 0 个可观测百分点） | §1.3 |
 | P0-QP-05 | Rolling-window anchor 行为 | **PASS（实证确认）**——reset_at 锚定过期后首触物化时刻，恒不得从旧边界外推 | §5 |
-| P0-QP-06 | Weekly / multi-window blocking | **PENDING**（需 weekly 耗尽态样本） | §6 |
+| P0-QP-06 | Weekly / multi-window blocking | **机制确认（2026-09-03 用户裁决：weekly 优先判定、不得归 0）**——control.py 阻塞窗语义已机械对齐（QC-05）；真实 weekly 耗尽样本转 C11 机会性佐证 | §6 |
 | P0-QP-07 | Prime 幂等（同旧 boundary 不连发） | **PENDING（设计门）**（C4 primer.py 实现时落地+测试） | §7 |
 | P0-QP-08 | 无 demand 时禁止 Prime（PASSIVE 零 control-plane model call） | **PASS（结构审计）** | §8 |
 
@@ -106,47 +106,29 @@ Phase0 实验本身（§1 探针）是操作者显式执行的被批准实验（
 
 ---
 
-## 3. P0-QP-01：纯 polling 是否自然产生新 reset_at（PENDING——仪器升级为常驻 watcher）
+## 3. P0-QP-01：纯 polling 是否自然产生新 reset_at（CLOSED——负向）
 
-**问题**：旧 window 到期后，只做 quota 查询（零模型调用），reset_at
-是否会自然改变。
+**2026-09-03 用户机制裁决（最高权威）**：provider 窗口机制确认——到达
+reset_at 后窗口恢复 100%（weekly 优先判定、weekly 不得归 0）；**下一轮
+reset_at 必须在新窗口中产生模型调用才会物化刷新，纯 quota 查询永远
+不推进**。此即修正计划 §8.1 的"若"字假设，由设计者本人实证确认，
+与本文件 02:14Z 首触锚定数据（新 reset_at=物化时刻+5h00m01s）完全
+吻合。**01 负向关闭**。
 
-**2026-09-03T02:14Z 首触观测（会话内弱证据 + 关键锚定数据）**：上轮
-会话 21:45Z 收轮后整机空闲；旧边界 five_hour:2026-09-02T23:40:18Z
-过期后 **2h34m09s 无任何触碰**（无查询无调用）；02:14:26Z 新会话
-首回合（模型调用与 quota 查询同秒发生，二者不可分辨）触碰后，监控
-立即呈现新窗口 reset_at=2026-09-03T07:14:27Z——**锚定 = 首触时刻 +
-5h00m00s**（若自然滚动应为旧边界+5h=04:40:18Z）。结论：(a) 过期后
-窗口不会"自己"滚动，物化需要触碰；(b) 物化锚定首触时刻（§5 详证）。
+**佐证采集（非阻塞）**：C3 watcher（pid 181160）+ boundary recorder
+（pid 183340，被动读 watcher.json 每 60s 落 CSV）持续常驻——夜间
+reset_at 冻结、晨间首次会话调用后翻转的完整时间线将作为 C11 dogfood
+佐证回填本节；不再构成任何门的阻塞项。
 
-**实验协议升级（2026-09-03T02:15Z 起）**：C3 watcher 已 `quota-watcher
-start` 常驻（pid 181160，ACTIVE 自适应节拍 ≤30min，独立进程不依赖
-会话存活）——它是 poll-only 纯净仪器：**只发 quota 监控查询、零模型
-调用**。下一边界 07:14:27Z：
-- 若用户夜间不使用任何 GLM 会话，跨边界后仅 watcher 查询在跑：
-  - reset_at 在 ~07:14-07:45Z 间推进 → **01 正向**（bare query 即物化，
-    Primer 降级为备用路径）；
-  - reset_at 冻结至下次会话模型调用才动 → **02 确认**（物化需要模型
-    调用，Primer 必要性成立）。
-- 观察数据自动累积于 `.glm-conductor/quota/watcher.json`
-  last_observation 序列（epoch_id / probe_boundary_at 逐次快照）与
-  `watcher.log`；下次会话直接读序列回填本节，无需人工值守。
-- 弱化因素如实记录：若边界期间存在任何会话模型调用，该轮只作弱证据，
-  等待下一个边界重试（watcher 常驻，机会成本为零）。
+## 4. P0-QP-02：最小模型 call 是否物化新 boundary（CLOSED——确认）
 
-原"普通终端手工协议"保留为备用交叉验证手段（不经 watcher 直连查询，
-排除 watcher 自身干扰——理论上 watcher 只读监控端点无副作用，但
-交叉验证更硬）。
-
-## 4. P0-QP-02：最小模型 call 是否物化新 boundary（PENDING，依赖 01）
-
-**问题**：`old boundary Bn → minimal call → quota refresh → boundary
-Bn+1` 是否成立，需可重复证据。
-
-**Run condition**：仅当 01 强隔离版显示「polling 不产生新 reset_at」后，
-在同一普通终端（保持零其他调用）执行一次最小 prime（§1.5 形态）→
-立即 quota-resolve --force-refresh → 记录 reset_at。重复 ≥2 个边界周期
-取证。注意 P0-QP-07：同旧 boundary 绝不连发第二次 prime。
+**同上裁决：确认**。§1 的探针已给出首笔可重复证据形态（最小 Messages
+调用 → 刷新 → 观察边界变化；HTTP 200 本身不构成证据，§C4 红线）。
+**C4 走全量分支 B**：primer.py 按已冻结设计实施（§8.3 三重授权闸
+机械强制、幂等键=(provider_identity, 旧 boundary/epoch_id) 单飞 +
+超时单次有界重试、物化确认只看二次 refresh 后 reset_at/boundary
+变化、绝不用百分比下降自证、weekly 阻塞 → 无 ActivationReady）；
+primer.enabled 恒 false 缺省直至用户显式启用。
 
 ## 5. P0-QP-05：Rolling-window anchor 行为（PASS——实证确认）
 
