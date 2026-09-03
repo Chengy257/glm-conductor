@@ -84,6 +84,7 @@ active task（continuity 为 resumable / idle 的任务，或需要 Stop 完成�
 | quota_waiting / quota_resumed / quota_wake_recorded / auto_resume_authorization_exhausted | 额度耗尽转态 / `quota-resume` 恢复 / wake automation 窗口扣减记账（**legacy/deprecated（v2.2）**：仅 v2.1 one-shot 兼容保留） / 授权预算耗尽转 waiting_user（v2.1 M5） |
 | wake_bridge_requested / wake_bridge_armed / wake_bridge_fired / wake_bridge_cancelled / wake_bridge_stale / wake_bridge_retargeted / wake_bridge_paused / wake_bridge_degraded / wake_bridge_reconciled | Persistent Wake Bridge 生命周期（v2.2 M5/C1a：plan 裁决 → 主会话宿主 CronCreate → `arm` 记账；对账经 `wake-reconcile`，绝不制造 armed） |
 | quota_boundary_consumed / quota_accounting_migrated | §15.1 resume commit point 消费记账（v2.2 C1b/C7：授权恢复实际开始才 +1，同 epoch 幂等；arm/fire/create 一律不消费）/ 存量窗口记账保守迁移一次性事件 |
+| quota_consumption_pending / quota_accounting_migration_pending | RH-03 write-ahead pending marker（v2.2 release hardening：消费/迁移在 state 动写前冻结证据；重入先扫 committed 幂等、再按 pending 恢复闭合——先于授权三查，矛盾形态零写待人工裁决） |
 | quota_subscription_registered | `register_quota_subscription` 幂等注册（v2.2 C5a——订阅事实记任务 journal；激活记账走控制面） |
 | scheduler_capability_observed / scheduled_nested_create_rejected | Cron* 工具观察到的宿主调度能力证据 / 嵌套创建被拒记账（v2.2 C6，PostToolUse 钩子经 `observe_scheduler_context`——journal 唯一写点在该 API 内） |
 | verification_receipt / review_receipt | runtime 亲测验证 / 审查裁决申报的 durable receipt 落盘（v2.1 M6——receipt 是完成门证据唯一权威） |

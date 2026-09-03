@@ -33,6 +33,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "plugins" / "glm-conductor"))
 from runtime import execution_policy, journal, state, task_manager
@@ -470,6 +471,352 @@ class MigrateQuotaWindowAccountingTest(ConsumptionTestBase):
     def test_missing_task_raises(self):
         with self.assertRaises(task_manager.TaskManagerError):
             task_manager.migrate_quota_window_accounting(self.repo, TID)
+
+
+# —— RH-03 崩溃一致性（wu-rh03；修正计划 §5 write-ahead pending marker） ——
+
+def _flaky_append(real_append, target_event):
+    """构造「指定事件名追加即抛 OSError、其余事件透传」的 append_event
+    替身（故障注入全走 monkeypatch，绝不真实 kill 进程）。"""
+    def flaky(repo_root, task_id, event, **kwargs):
+        if event.get("event") == target_event:
+            raise OSError("journal locked (%s)" % target_event)
+        return real_append(repo_root, task_id, event, **kwargs)
+    return flaky
+
+
+class ConsumptionCrashConsistencyTest(ConsumptionTestBase):
+    """RH-03：record_quota_boundary_consumed 的 write-ahead pending
+    marker——崩溃窗口（pending 落/save 抛、save 落/committed 抛）重跑
+    不得多消费；恢复闭合先于授权三查；异常形态零写待人工裁决。"""
+
+    def _consume(self, epoch_id=EPOCH_A):
+        return task_manager.record_quota_boundary_consumed(
+            self.repo, TID, epoch_id=epoch_id,
+            executable_boundary_id=BOUNDARY_A, resume_started_at=RESUME_AT)
+
+    def _append_pending(self, epoch_id=EPOCH_A, target_consumed=1):
+        return journal.append_event(self.repo, TID, {
+            "event": "quota_consumption_pending", "epoch_id": epoch_id,
+            "executable_boundary_id": BOUNDARY_A,
+            "target_consumed": target_consumed,
+            "resume_started_at": RESUME_AT})
+
+    def test_pending_event_frozen_fields_and_write_ahead_order(self):
+        """pending 五字段逐字 {event, epoch_id, executable_boundary_id,
+        target_consumed, resume_started_at}；write-ahead 排序：pending
+        先于 save_state、committed 最后闭合。"""
+        self.save_task(max_quota_windows=2)
+        self._consume()
+        pendings = self.events("quota_consumption_pending")
+        self.assertEqual(len(pendings), 1)
+        self.assertEqual(
+            set(pendings[0]) - {"ts"},
+            {"event", "epoch_id", "executable_boundary_id",
+             "target_consumed", "resume_started_at"})
+        self.assertEqual(pendings[0]["epoch_id"], EPOCH_A)
+        self.assertEqual(pendings[0]["executable_boundary_id"], BOUNDARY_A)
+        self.assertEqual(pendings[0]["target_consumed"], 1)
+        self.assertEqual(pendings[0]["resume_started_at"], RESUME_AT)
+        names = [e.get("event") for e in journal.read_events(self.repo, TID)]
+        self.assertLess(names.index("quota_consumption_pending"),
+                        names.index("quota_boundary_consumed"))
+
+    def test_consume_txn_01_pending_saved_state_save_failure_rerun_consumes_once(self):
+        """CONSUME-TXN-01：pending 落 → save_state 抛 → 重跑（同 epoch）
+        不得多消费——consumed 恰 +1 总量、journal 恰一条 pending +
+        一条 committed。"""
+        self.save_task(max_quota_windows=2)
+        with mock.patch.object(state, "save_state",
+                               side_effect=OSError("disk full")):
+            with self.assertRaises(OSError):
+                self._consume()
+        # pending 已落、投影未落
+        self.assertEqual(len(self.events("quota_consumption_pending")), 1)
+        self.assertEqual(self.events("quota_boundary_consumed"), [])
+        self.assertEqual(self.consumed(), 0)
+        # 重跑：恢复闭合（投影未落 → 补投影 + 补 committed）
+        result = self._consume()
+        self.assertNotIn("idempotent", result)
+        self.assertEqual(result["consumed_quota_windows"], 1)
+        self.assertEqual(self.consumed(), 1)  # 恰 +1 总量
+        self.assertEqual(len(self.events("quota_consumption_pending")), 1)
+        committed = self.events("quota_boundary_consumed")
+        self.assertEqual(len(committed), 1)   # 恰一条 committed
+        self.assertEqual(committed[0]["consumed"], 1)
+        self.assertEqual(committed[0]["remaining"], 1)
+
+    def test_consume_txn_02_state_saved_committed_failure_rerun_closes_only_committed(self):
+        """CONSUME-TXN-02：save_state 成功 → committed 追加抛 → 重跑
+        不得多消费——恢复闭合只补 committed 事件。"""
+        self.save_task(max_quota_windows=2)
+        with mock.patch.object(
+                journal, "append_event",
+                side_effect=_flaky_append(journal.append_event,
+                                          "quota_boundary_consumed")):
+            with self.assertRaises(OSError):
+                self._consume()
+        # 投影已落、committed 缺席
+        self.assertEqual(self.consumed(), 1)
+        self.assertEqual(len(self.events("quota_consumption_pending")), 1)
+        self.assertEqual(self.events("quota_boundary_consumed"), [])
+        # 重跑：state 已达 target → 只补 committed（不再 +1）
+        result = self._consume()
+        self.assertEqual(result["consumed_quota_windows"], 1)
+        self.assertEqual(self.consumed(), 1)
+        self.assertEqual(len(self.events("quota_consumption_pending")), 1)
+        committed = self.events("quota_boundary_consumed")
+        self.assertEqual(len(committed), 1)
+        self.assertEqual(committed[0]["consumed"], 1)
+        self.assertEqual(committed[0]["remaining"], 1)
+
+    def test_consume_txn_03_same_epoch_normal_replay_idempotent(self):
+        """CONSUME-TXN-03：同 epoch 正常重放 → consumed 不变 +
+        idempotent:True（既有语义回归），pending / committed 各恰一条。"""
+        self.save_task(max_quota_windows=2)
+        first = self._consume()
+        before = self.state_bytes()
+        replay = self._consume()
+        self.assertTrue(replay["idempotent"])
+        self.assertEqual(replay["consumed_quota_windows"],
+                         first["consumed_quota_windows"])
+        self.assertEqual(self.consumed(), 1)
+        self.assertEqual(len(self.events("quota_consumption_pending")), 1)
+        self.assertEqual(len(self.events("quota_boundary_consumed")), 1)
+        self.assertEqual(self.state_bytes(), before)  # 重放零写
+
+    def test_consume_txn_04_different_epoch_consumes_again(self):
+        """CONSUME-TXN-04：不同 epoch → consumed +1（pending / committed
+        各 +1，各 epoch 一套）。"""
+        self.save_task(max_quota_windows=3)
+        self._consume(EPOCH_A)
+        second = task_manager.record_quota_boundary_consumed(
+            self.repo, TID, epoch_id=EPOCH_B,
+            executable_boundary_id=BOUNDARY_B,
+            resume_started_at="2026-09-03T14:00:00Z")
+        self.assertEqual(second["consumed_quota_windows"], 2)
+        self.assertEqual(self.consumed(), 2)
+        self.assertEqual(len(self.events("quota_consumption_pending")), 2)
+        self.assertEqual(len(self.events("quota_boundary_consumed")), 2)
+
+    def test_consume_txn_05_pending_projected_exhausted_budget_still_closes(self):
+        """CONSUME-TXN-05：pending 在案 + state 已投影 + 剩余预算恰为 0
+        （target == max）→ 重跑仍闭合成功——恢复闭合先于授权三查的排序
+        锚（pending 是上一进程已过授权的持久证据，闭合不重查预算；
+        若闭合放在三查之后，该事务永远无法完成）。"""
+        self.save_task(max_quota_windows=1)
+        self._append_pending(target_consumed=1)
+        self.set_consumed(1)  # 投影已落 + remaining 恰为 0
+        before = self.state_bytes()
+        result = self._consume()
+        # 标准六键（返回键零变化，不加 idempotent 等新键）
+        self.assertEqual(sorted(result), [
+            "consumed_quota_windows", "epoch_id",
+            "executable_boundary_id", "max_quota_windows",
+            "remaining_quota_windows", "resume_started_at"])
+        self.assertEqual(result["consumed_quota_windows"], 1)
+        self.assertEqual(result["remaining_quota_windows"], 0)
+        self.assertEqual(result["resume_started_at"], RESUME_AT)  # 冻结值
+        # 只补 committed：零 state 写、pending 不新增
+        self.assertEqual(self.state_bytes(), before)
+        self.assertEqual(len(self.events("quota_consumption_pending")), 1)
+        committed = self.events("quota_boundary_consumed")
+        self.assertEqual(len(committed), 1)
+        self.assertEqual(committed[0]["consumed"], 1)
+        self.assertEqual(committed[0]["remaining"], 0)
+        # 闭合后该 epoch 再重放 → 自然落入 committed 幂等分支
+        again = self._consume()
+        self.assertTrue(again["idempotent"])
+        self.assertEqual(len(self.events("quota_boundary_consumed")), 1)
+
+    def test_pending_projection_missing_closes_with_single_projection(self):
+        """恢复闭合·投影未落分支：state == target - 1 → 补一次投影到
+        pending 冻结 target 再补 committed（boundary / started_at 取
+        pending 冻结值，不取重放调用的新值）。"""
+        self.save_task(max_quota_windows=2)
+        self._append_pending(epoch_id=EPOCH_A, target_consumed=1)
+        result = task_manager.record_quota_boundary_consumed(
+            self.repo, TID, epoch_id=EPOCH_A,
+            executable_boundary_id=BOUNDARY_B,  # 与 pending 冻结值不同
+            resume_started_at="2026-09-03T09:00:00Z")
+        self.assertEqual(result["consumed_quota_windows"], 1)
+        self.assertEqual(result["executable_boundary_id"], BOUNDARY_A)
+        self.assertEqual(result["resume_started_at"], RESUME_AT)
+        self.assertEqual(self.consumed(), 1)
+        committed = self.events("quota_boundary_consumed")
+        self.assertEqual(len(committed), 1)
+        self.assertEqual(committed[0]["executable_boundary_id"], BOUNDARY_A)
+        self.assertEqual(len(self.events("quota_consumption_pending")), 1)
+
+    def test_pending_state_contradiction_raises_zero_writes(self):
+        """异常分支·state 领先：pending 冻结 target=1 而 state 已消费 2
+        → TaskManagerError（中文，指明 pending/state 不一致），零写，
+        pending 保留待人工裁决。"""
+        self.save_task(max_quota_windows=3)
+        self._append_pending(target_consumed=1)
+        self.set_consumed(2)
+        before = self.state_bytes()
+        with self.assertRaises(task_manager.TaskManagerError) as ctx:
+            self._consume()
+        self.assertIn("pending", str(ctx.exception))
+        self.assertEqual(self.state_bytes(), before)   # 零写
+        self.assertEqual(self.events("quota_boundary_consumed"), [])
+        self.assertEqual(len(self.events("quota_consumption_pending")), 1)
+
+    def test_pending_state_gap_over_one_raises_zero_writes(self):
+        """异常分支·差距 > 1：pending 冻结 target=4 而 state=0（落后超一
+        窗）→ 同一异常分支，零写。"""
+        self.save_task(max_quota_windows=4)
+        self._append_pending(epoch_id=EPOCH_B, target_consumed=4)
+        before = self.state_bytes()
+        with self.assertRaises(task_manager.TaskManagerError) as ctx:
+            task_manager.record_quota_boundary_consumed(
+                self.repo, TID, epoch_id=EPOCH_B,
+                executable_boundary_id=BOUNDARY_B,
+                resume_started_at=RESUME_AT)
+        self.assertIn("不一致", str(ctx.exception))
+        self.assertEqual(self.state_bytes(), before)
+        self.assertEqual(self.events("quota_boundary_consumed"), [])
+
+    def test_conflicting_pending_targets_raise_zero_writes(self):
+        """异常分支·pending 证据自相矛盾：同 epoch 第二条 pending 不同
+        target（不应发生的形态）→ TaskManagerError 零写。"""
+        self.save_task(max_quota_windows=3)
+        self._append_pending(target_consumed=1)
+        self._append_pending(target_consumed=2)
+        before = self.state_bytes()
+        with self.assertRaises(task_manager.TaskManagerError):
+            self._consume()
+        self.assertEqual(self.state_bytes(), before)
+        self.assertEqual(self.events("quota_boundary_consumed"), [])
+
+
+class MigrationCrashConsistencyTest(ConsumptionTestBase):
+    """RH-03：migrate_quota_window_accounting 同款 write-ahead pending
+    marker——marker 缺失后重跑只按 pending 冻结值补 marker，绝不从已
+    更新 state 重算 legacy（迁移记录不失真）；异常形态零写。"""
+
+    def _prepare(self):
+        self.save_task(max_quota_windows=3)
+        self.set_consumed(1)
+        self.append_consumed_event(epoch_id=EPOCH_A)
+        self.append_consumed_event(epoch_id=EPOCH_B)
+
+    def test_migrate_txn_01_marker_failure_rerun_completes_from_pending(self):
+        """MIGRATE-TXN-01（§5.4 修正后期望）：state save 成功 + marker
+        追加失败 → 重跑只按 pending 补 marker、不二次上调、
+        legacy_consumed / attributed 拆分与首次计算一致（legacy=1 而
+        非已更新 state 的 2——记录不失真）。"""
+        self._prepare()
+        with mock.patch.object(
+                journal, "append_event",
+                side_effect=_flaky_append(journal.append_event,
+                                          "quota_accounting_migrated")):
+            with self.assertRaises(OSError):
+                task_manager.migrate_quota_window_accounting(self.repo, TID)
+        # pending 已冻结、marker 缺席、投影已落（save 成功）
+        self.assertEqual(
+            len(self.events("quota_accounting_migration_pending")), 1)
+        self.assertEqual(self.events("quota_accounting_migrated"), [])
+        self.assertEqual(self.consumed(), 2)
+        # 重跑：按 pending 冻结值补 marker
+        result = task_manager.migrate_quota_window_accounting(self.repo, TID)
+        self.assertNotIn("idempotent", result)
+        self.assertEqual(result["legacy_consumed"], 1)
+        self.assertEqual(result["verified_boundary_ids"], [EPOCH_A, EPOCH_B])
+        self.assertEqual(result["attributed_consumed"], 1)
+        self.assertEqual(result["legacy_unattributed_consumed"], 0)
+        self.assertEqual(result["new_consumed"], 2)
+        marker = self.events("quota_accounting_migrated")
+        self.assertEqual(len(marker), 1)
+        self.assertEqual(marker[0]["legacy_consumed"], 1)      # 冻结值
+        self.assertEqual(marker[0]["verified_boundary_ids"],
+                         [EPOCH_A, EPOCH_B])
+        self.assertEqual(marker[0]["attributed_consumed"], 1)  # 拆分不失真
+        self.assertEqual(marker[0]["legacy_unattributed_consumed"], 0)
+        # 不二次上调：consumed 仍 2、pending 不新增
+        self.assertEqual(self.consumed(), 2)
+        self.assertEqual(
+            len(self.events("quota_accounting_migration_pending")), 1)
+
+    def test_pending_saved_projection_failure_rerun_applies_projection(self):
+        """pending 落 → save_state 抛（投影未落）→ 重跑补一次投影到
+        new_consumed 再补 marker（new > legacy 且 state 仍为 legacy）。"""
+        self._prepare()
+        with mock.patch.object(state, "save_state",
+                               side_effect=OSError("disk full")):
+            with self.assertRaises(OSError):
+                task_manager.migrate_quota_window_accounting(self.repo, TID)
+        self.assertEqual(self.consumed(), 1)  # 投影未落
+        self.assertEqual(
+            len(self.events("quota_accounting_migration_pending")), 1)
+        result = task_manager.migrate_quota_window_accounting(self.repo, TID)
+        self.assertEqual(result["new_consumed"], 2)
+        self.assertEqual(result["legacy_consumed"], 1)  # 冻结值不重算
+        self.assertEqual(self.consumed(), 2)            # 投影恰补一次
+        self.assertEqual(len(self.events("quota_accounting_migrated")), 1)
+        self.assertEqual(
+            len(self.events("quota_accounting_migration_pending")), 1)
+
+    def test_pending_event_frozen_fields_and_write_ahead_order(self):
+        """pending 六字段逐字（五数在 state 动写之前冻结）；new ==
+        legacy 也落 pending；write-ahead 排序：pending 先于 marker。"""
+        self.save_task(max_quota_windows=3)
+        self.set_consumed(1)
+        self.append_consumed_event(epoch_id=EPOCH_A)
+        before = self.state_bytes()
+        task_manager.migrate_quota_window_accounting(self.repo, TID)
+        pendings = self.events("quota_accounting_migration_pending")
+        self.assertEqual(len(pendings), 1)
+        self.assertEqual(
+            set(pendings[0]) - {"ts"},
+            {"event", "legacy_consumed", "verified_boundary_ids",
+             "attributed_consumed", "legacy_unattributed_consumed",
+             "new_consumed"})
+        self.assertEqual(pendings[0]["legacy_consumed"], 1)
+        self.assertEqual(pendings[0]["verified_boundary_ids"], [EPOCH_A])
+        self.assertEqual(pendings[0]["attributed_consumed"], 1)
+        self.assertEqual(pendings[0]["legacy_unattributed_consumed"], 0)
+        self.assertEqual(pendings[0]["new_consumed"], 1)
+        names = [e.get("event") for e in journal.read_events(self.repo, TID)]
+        self.assertLess(names.index("quota_accounting_migration_pending"),
+                        names.index("quota_accounting_migrated"))
+        # new == legacy：零 state 写（数字不变语义回归）
+        self.assertEqual(self.state_bytes(), before)
+
+    def test_pending_state_contradiction_raises_zero_writes(self):
+        """异常分支：state 与 pending 冻结值矛盾（state 既非 legacy 也
+        非 new）→ TaskManagerError 零写，pending 保留待人工裁决。"""
+        self.save_task(max_quota_windows=3)
+        journal.append_event(self.repo, TID, {
+            "event": "quota_accounting_migration_pending",
+            "legacy_consumed": 2, "verified_boundary_ids": [],
+            "attributed_consumed": 0,
+            "legacy_unattributed_consumed": 2, "new_consumed": 2})
+        self.set_consumed(0)  # state(0) ∉ {legacy=2, new=2}
+        before = self.state_bytes()
+        with self.assertRaises(task_manager.TaskManagerError) as ctx:
+            task_manager.migrate_quota_window_accounting(self.repo, TID)
+        self.assertIn("pending", str(ctx.exception))
+        self.assertEqual(self.state_bytes(), before)
+        self.assertEqual(self.events("quota_accounting_migrated"), [])
+        self.assertEqual(
+            len(self.events("quota_accounting_migration_pending")), 1)
+
+    def test_malformed_pending_raises_zero_writes(self):
+        """异常分支·pending 形状损坏（new < legacy 违反 max 不变量）→
+        TaskManagerError 零写。"""
+        self.save_task(max_quota_windows=3)
+        journal.append_event(self.repo, TID, {
+            "event": "quota_accounting_migration_pending",
+            "legacy_consumed": 2, "verified_boundary_ids": [],
+            "attributed_consumed": 0,
+            "legacy_unattributed_consumed": 2, "new_consumed": 1})
+        before = self.state_bytes()
+        with self.assertRaises(task_manager.TaskManagerError):
+            task_manager.migrate_quota_window_accounting(self.repo, TID)
+        self.assertEqual(self.state_bytes(), before)
+        self.assertEqual(self.events("quota_accounting_migrated"), [])
 
 
 # —— reconcile_wake_bridge_from_host（§22.5） ——

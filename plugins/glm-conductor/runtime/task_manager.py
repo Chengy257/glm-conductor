@@ -2128,6 +2128,23 @@ def record_quota_boundary_consumed(repo_root, task_id, *, epoch_id,
       dict 既有键保留并增标 "idempotent": True——resume 重放 / 部分
       写入恢复（§15.1 幂等证据语义）不再重复消耗；不同 epoch_id 照常
       各消费一窗（epoch 推进 = 窗口身份推进）；
+    - RH-03 write-ahead pending marker（v2.2 release hardening 方案 A；
+      修正计划 §5）：正常写路径冻结为 append pending（新事件
+      quota_consumption_pending {epoch_id, executable_boundary_id,
+      target_consumed, resume_started_at}，字段逐字，target_consumed =
+      本次目标值）→ save_state 投影 → append committed
+      （quota_boundary_consumed）——epoch 身份先于一切可变投影存在。
+      committed 缺席而同 epoch pending 在案（= 上一进程已过授权、事务
+      中断在 pending 之后）→ 恢复闭合（reconcile），且此分支必须先于
+      授权三查：pending 是授权已通过的持久证据，恢复闭合不重查预算
+      （否则 state 已投影 + 预算恰好耗尽时该事务永远无法闭合）——
+      state.consumed == target_consumed → 投影已落，只补 committed 事件
+      （boundary / resume_started_at 取 pending 冻结值，remaining 按
+      max 折算）；== target_consumed - 1 → 投影未落，补一次投影到
+      target 再补 committed；其余形态（state 领先 / 差距 > 1 / 多条
+      pending target 不一致 / pending 形状损坏）→ TaskManagerError
+      （中文，零写——pending 保留待人工裁决）。恢复闭合返回标准六键
+      （返回键零变化，不加新键）；
     - 写入前授权三查（口径与 _continuity_view / _quota_wake_decision
       一致——execution_policy 块缺/坏按默认块解释为 manual）：
       auto_resume ∈ {auto_once, until_done} / authorization.source ==
@@ -2160,13 +2177,20 @@ def record_quota_boundary_consumed(repo_root, task_id, *, epoch_id,
     view = _continuity_view(st)
     # 幂等（§22.1 / §15.1）：同 epoch_id 已消费 → 原样返回既有消耗
     # 结果（取首条匹配——正确流程下至多一条；历史脏数据重复时首条是
-    # 原始账）
+    # 原始账）。同一趟扫描顺带收集同 epoch 的 RH-03 pending 证据
+    # （quota_consumption_pending）——committed 命中即幂等返回（优先
+    # 级最高）；pending 仅在 committed 缺席时进入恢复闭合分支。
     prior = None
+    pendings = []
     for event in journal.read_events(repo_root, task_id):
-        if event.get("event") == "quota_boundary_consumed" \
+        name = event.get("event")
+        if name == "quota_boundary_consumed" \
                 and event.get("epoch_id") == epoch_id:
             prior = event
             break
+        if name == "quota_consumption_pending" \
+                and event.get("epoch_id") == epoch_id:
+            pendings.append(event)
     if prior is not None:
         consumed = prior.get("consumed")
         if isinstance(consumed, bool) or not isinstance(consumed, int) \
@@ -2191,6 +2215,67 @@ def record_quota_boundary_consumed(repo_root, task_id, *, epoch_id,
             "executable_boundary_id": recorded_boundary,
             "resume_started_at": recorded_started_at,
             "idempotent": True,
+        }
+    # RH-03 恢复闭合（reconcile，先于授权三查）：committed 缺席而同
+    # epoch pending 在案 → 上一进程已过授权、事务中断在 pending 之后
+    # （write-ahead 的持久证据）——按 pending 冻结的 target_consumed 与
+    # state 投影对账，不重查预算、绝不二次 +1。pending 证据自身矛盾
+    # （多条且 target 不一致 / 形状损坏）按异常分支零写；同 epoch 不
+    # 同 target 的第二条 pending 不应发生，落入同一异常分支。
+    if pendings:
+        targets = [p.get("target_consumed") for p in pendings]
+        if len(set(targets)) > 1 \
+                or any(isinstance(t, bool) or not isinstance(t, int)
+                       or t < 1 for t in targets):
+            raise TaskManagerError(
+                "%s：同 epoch 的 quota_consumption_pending 证据不一致或"
+                "形状损坏（target_consumed=%r）——pending 与 state 矛盾，"
+                "恢复闭合中止，零写，pending 保留待人工裁决"
+                % (api, targets))
+        target = targets[0]
+        pending = pendings[0]
+        pending_boundary = pending.get("executable_boundary_id")
+        if not isinstance(pending_boundary, str) or pending_boundary == "":
+            pending_boundary = executable_boundary_id
+        pending_started_at = pending.get("resume_started_at")
+        if not isinstance(pending_started_at, str) \
+                or pending_started_at == "":
+            pending_started_at = resume_started_at
+        state_consumed = view["consumed_quota_windows"]
+        if state_consumed != target and state_consumed != target - 1:
+            raise TaskManagerError(
+                "%s：pending 与 state 不一致（quota_consumption_pending "
+                "冻结 target_consumed=%d，state.consumed_quota_windows="
+                "%d）——恢复闭合中止，零写，pending 保留待人工裁决"
+                % (api, target, state_consumed))
+        remaining = max(0, view["max_quota_windows"] - target)
+        if state_consumed != target:
+            # 投影未落：补一次投影到 pending 冻结的 target（不重算、
+            # 不再 +1；legacy 缺块按默认块补齐，与正常路径同款）
+            policy = st.get("execution_policy")
+            if not isinstance(policy, dict):
+                policy = default_execution_policy()
+                st["execution_policy"] = policy
+            continuity = policy.get("continuity")
+            if not isinstance(continuity, dict):
+                continuity = default_execution_policy()["continuity"]
+                policy["continuity"] = continuity
+            continuity["consumed_quota_windows"] = target
+            state.save_state(repo_root, st)
+        # 投影已落或刚补齐 → 只补 committed 事件（消费记账按 pending
+        # 冻结值闭合，boundary / resume_started_at 取冻结值）
+        journal.append_event(repo_root, task_id, {
+            "event": "quota_boundary_consumed", "epoch_id": epoch_id,
+            "executable_boundary_id": pending_boundary,
+            "resume_started_at": pending_started_at,
+            "consumed": target, "remaining": remaining})
+        return {
+            "consumed_quota_windows": target,
+            "remaining_quota_windows": remaining,
+            "max_quota_windows": view["max_quota_windows"],
+            "epoch_id": epoch_id,
+            "executable_boundary_id": pending_boundary,
+            "resume_started_at": pending_started_at,
         }
     # 写入前授权三查（逐条指明 violated 条件；在任何 mutation / 落盘
     # 之前——拒绝路径零副作用；口径逐条镜像 record_quota_wake）
@@ -2223,6 +2308,14 @@ def record_quota_boundary_consumed(repo_root, task_id, *, epoch_id,
         policy["continuity"] = continuity
     consumed = consumed_quota_windows(policy) + 1
     continuity["consumed_quota_windows"] = consumed
+    # RH-03 write-ahead：epoch 身份先于一切可变投影——pending 先于
+    # save_state 落盘（崩溃后重入按 pending 恢复闭合，最多只消费一次），
+    # committed 最后闭合
+    journal.append_event(repo_root, task_id, {
+        "event": "quota_consumption_pending", "epoch_id": epoch_id,
+        "executable_boundary_id": executable_boundary_id,
+        "target_consumed": consumed,
+        "resume_started_at": resume_started_at})
     state.save_state(repo_root, st)
     view = _continuity_view(st)
     journal.append_event(repo_root, task_id, {
@@ -2276,14 +2369,25 @@ def migrate_quota_window_accounting(repo_root, task_id) -> dict:
         = legacy_consumed − attributed_consumed
     （未归属部分仍然算已消费，不自动返还。）
 
-    写路径：new_consumed != legacy_consumed 时更新
-    continuity.consumed_quota_windows 并 save_state（legacy 缺
+    写路径（RH-03 同款 write-ahead pending marker，修正计划 §5.4）：
+    重算五数后先落 journal quota_accounting_migration_pending
+    {legacy_consumed, verified_boundary_ids, attributed_consumed,
+    legacy_unattributed_consumed, new_consumed}（六字段字段名逐字——
+    五数在 state 动写之前冻结）→ new_consumed != legacy_consumed 时
+    更新 continuity.consumed_quota_windows 并 save_state（legacy 缺
     execution_policy / continuity 块按默认块补齐）；数字不变则零
     state 写。随后无论数字是否变化都落 journal
     quota_accounting_migrated {legacy_consumed, verified_boundary_ids,
     attributed_consumed, legacy_unattributed_consumed, migrated_at}
-    （§22.6 五字段，字段名逐字）。单次调用至多一次 save_state +
-    一条事件。
+    （§22.6 五字段，字段名逐字；四数取 pending 冻结值）。marker 缺失
+    而 pending 在案（崩溃重跑）→ 恢复闭合（先于重算）：按 pending
+    冻结五数直接补 marker，绝不从可能已更新的 state 重算 legacy（否则
+    legacy_consumed / 归属拆分失真）——state 已达 new_consumed 或本就
+    无 state 变化 → 零 state 写只补 marker；new > legacy 且 state 仍为
+    legacy → 补一次投影到 new_consumed 再补 marker；state 与 pending
+    冻结值矛盾（或 pending 形状损坏 / 多条冻结值不一致）→
+    TaskManagerError 零写（pending 保留待人工裁决）。单次调用至多
+    一次 save_state + 两条事件（pending + marker）。
 
     返回 {"legacy_consumed", "verified_boundary_ids",
     "attributed_consumed", "legacy_unattributed_consumed",
@@ -2311,6 +2415,95 @@ def migrate_quota_window_accounting(repo_root, task_id) -> dict:
                 "migrated_at": event.get("migrated_at"),
                 "idempotent": True,
             }
+    # RH-03 pending 恢复闭合（先于重算，修正计划 §5.4）：marker 缺失而
+    # pending 在案 → 上一进程已冻结五数、事务中断——绝不从可能已更新
+    # 的 state 重算 legacy（否则迁移事件的 legacy_consumed / 归属拆分
+    # 失真），按 pending 冻结值直接补 marker：
+    #   state 已达 new_consumed，或本就无 state 变化（new == legacy 且
+    #     state 未动）→ 零 state 写，只补 marker；
+    #   new > legacy 且 state 仍为 legacy → 投影未落：补一次投影到
+    #     new_consumed 再补 marker；
+    #   其余（state 与 pending 冻结值矛盾 / pending 形状损坏 / 多条
+    #     pending 冻结值不一致）→ TaskManagerError 零写，pending 保留
+    #     待人工裁决。
+    pendings = [event for event in events
+                if event.get("event")
+                == "quota_accounting_migration_pending"]
+    if pendings:
+        frozen = pendings[0]
+        legacy_frozen = frozen.get("legacy_consumed")
+        new_frozen = frozen.get("new_consumed")
+        attributed_frozen = frozen.get("attributed_consumed")
+        unattributed_frozen = frozen.get("legacy_unattributed_consumed")
+        verified_frozen = frozen.get("verified_boundary_ids")
+        well_shaped = (
+            not isinstance(legacy_frozen, bool)
+            and isinstance(legacy_frozen, int) and legacy_frozen >= 0
+            and not isinstance(new_frozen, bool)
+            and isinstance(new_frozen, int) and new_frozen >= 0
+            and new_frozen >= legacy_frozen
+            and not isinstance(attributed_frozen, bool)
+            and isinstance(attributed_frozen, int)
+            and attributed_frozen >= 0
+            and not isinstance(unattributed_frozen, bool)
+            and isinstance(unattributed_frozen, int)
+            and unattributed_frozen >= 0
+            and isinstance(verified_frozen, list)
+            and all(
+                (p.get("legacy_consumed"), p.get("new_consumed"),
+                 p.get("attributed_consumed"),
+                 p.get("legacy_unattributed_consumed"),
+                 p.get("verified_boundary_ids"))
+                == (legacy_frozen, new_frozen, attributed_frozen,
+                    unattributed_frozen, verified_frozen)
+                for p in pendings[1:]))
+        if not well_shaped:
+            raise TaskManagerError(
+                "%s：quota_accounting_migration_pending 形状损坏或多条"
+                " pending 冻结值互相矛盾（legacy=%r new=%r attributed=%r"
+                " unattributed=%r）——恢复闭合中止，零写，pending 保留"
+                "待人工裁决" % (api, legacy_frozen, new_frozen,
+                                attributed_frozen, unattributed_frozen))
+        state_consumed = view["consumed_quota_windows"]
+        if state_consumed == new_frozen:
+            projection_needed = False  # 投影已落（或本就无 state 变化）
+        elif (state_consumed == legacy_frozen
+                and new_frozen > legacy_frozen):
+            projection_needed = True   # 投影未落：补一次投影到 new
+        else:
+            raise TaskManagerError(
+                "%s：state 与 pending 冻结值矛盾（pending 冻结 "
+                "legacy_consumed=%d / new_consumed=%d，state."
+                "consumed_quota_windows=%d）——恢复闭合中止，零写，"
+                "pending 保留待人工裁决"
+                % (api, legacy_frozen, new_frozen, state_consumed))
+        if projection_needed:
+            policy = st.get("execution_policy")
+            if not isinstance(policy, dict):
+                policy = default_execution_policy()
+                st["execution_policy"] = policy
+            continuity = policy.get("continuity")
+            if not isinstance(continuity, dict):
+                continuity = default_execution_policy()["continuity"]
+                policy["continuity"] = continuity
+            continuity["consumed_quota_windows"] = new_frozen
+            state.save_state(repo_root, st)
+        migrated_at = _utc_now_iso()
+        journal.append_event(repo_root, task_id, {
+            "event": "quota_accounting_migrated",
+            "legacy_consumed": legacy_frozen,
+            "verified_boundary_ids": verified_frozen,
+            "attributed_consumed": attributed_frozen,
+            "legacy_unattributed_consumed": unattributed_frozen,
+            "migrated_at": migrated_at})
+        return {
+            "legacy_consumed": legacy_frozen,
+            "verified_boundary_ids": verified_frozen,
+            "attributed_consumed": attributed_frozen,
+            "legacy_unattributed_consumed": unattributed_frozen,
+            "new_consumed": new_frozen,
+            "migrated_at": migrated_at,
+        }
     legacy_consumed = view["consumed_quota_windows"]
     verified_ids = []
     seen = set()
@@ -2339,6 +2532,16 @@ def migrate_quota_window_accounting(repo_root, task_id) -> dict:
     attributed = min(legacy_consumed, verified_consumed)
     unattributed = legacy_consumed - attributed
     migrated_at = _utc_now_iso()
+    # RH-03 write-ahead：五数先冻结在 state 动写之前（new != legacy 与
+    # new == legacy 都落 pending）——崩溃重跑按 pending 补 marker，绝不
+    # 从已更新 state 重算 legacy
+    journal.append_event(repo_root, task_id, {
+        "event": "quota_accounting_migration_pending",
+        "legacy_consumed": legacy_consumed,
+        "verified_boundary_ids": verified_ids,
+        "attributed_consumed": attributed,
+        "legacy_unattributed_consumed": unattributed,
+        "new_consumed": new_consumed})
     if new_consumed != legacy_consumed:
         policy = st.get("execution_policy")
         if not isinstance(policy, dict):

@@ -33,6 +33,8 @@
     ⑧ legacy 未注册任务无 consumption 键（LegacyUnchangedTest）
     ⑨ CLI：退出码 3 分类 + guidance 面 / TaskManagerError 仍 1 /
        consumption 面透传（CliExitContractTest）
+    ⑩ RH-03 write-ahead pending journal 序 + 幸存 pending 经 resume 链
+       恢复闭合不双消费（WriteAheadJournalOrderTest，wu-rh03）
 
 fixture：tempfile 仓库 + runtime.state 构造（scratch 任务目录，不碰
 真实账本）；resolver / epoch / 记账全注入——零网络零宿主调用。仅
@@ -401,6 +403,58 @@ class SameEpochReplayTest(ConsumptionWiringCase):
         self.assertEqual(len(self.migrated_events()), 1)  # 迁移 one-shot
         self.assertEqual(self.continuity_consumed(), 1)
         self.assertEqual(len(self.advanced_events()), 2)  # 每 epoch 恰一次
+
+
+# —— ⑩ RH-03 write-ahead pending marker（wu-rh03）：journal 序 + 恢复闭合 ——
+
+class WriteAheadJournalOrderTest(ConsumptionWiringCase):
+    """RH-03（修正计划 §5）：迁移与消费各自 write-ahead pending 先于
+    可变投影 / committed；崩溃幸存的 pending 经 resume 链恢复闭合，恰
+    +1 不多消费。故障语义的定点注入用例（CONSUME-TXN-01..05 /
+    MIGRATE-TXN-01）在 tests/test_boundary_consumption——本类锚定接线
+    层的组合序。"""
+
+    def test_full_resume_journal_order_pending_precedes_projection_and_committed(self):
+        self.put_task(self.authorized_state())
+        self.subscribe()
+        self.mark()
+        self.resume()
+        names = [e.get("event") for e in self.task_events()]
+        # 迁移：pending 先于 marker
+        self.assertLess(names.index("quota_accounting_migration_pending"),
+                        names.index("quota_accounting_migrated"))
+        # 迁移整体（pending + marker）先于消费段
+        self.assertLess(names.index("quota_accounting_migrated"),
+                        names.index("quota_consumption_pending"))
+        # 消费：pending 先于 committed
+        self.assertLess(names.index("quota_consumption_pending"),
+                        names.index("quota_boundary_consumed"))
+        self.assertEqual(self.continuity_consumed(), 1)
+
+    def test_resume_reconciles_surviving_pending_without_double_consumption(self):
+        """崩溃现场（上一进程已 append pending、投影未落）穿越进程边界
+        → resume 链按 pending 冻结 target 恢复闭合：consumed 恰 +1、
+        journal 恰一条 pending + 一条 committed、无第二条 pending。"""
+        self.put_task(self.authorized_state(max_quota_windows=2))
+        self.subscribe()
+        self.mark()
+        journal.append_event(self.repo, TID, {
+            "event": "quota_consumption_pending", "epoch_id": EPOCH_OF_B,
+            "executable_boundary_id": BOUNDARY_OF_B,
+            "target_consumed": 1,
+            "resume_started_at": "2026-09-03T08:00:00.000Z"})
+        result = self.resume()
+        face = result["consumption"]
+        self.assertTrue(face["consumed"])
+        self.assertFalse(face["idempotent"])
+        self.assertEqual(face["consumed_quota_windows"], 1)
+        self.assertEqual(face["remaining_quota_windows"], 1)
+        self.assertEqual(self.continuity_consumed(), 1)  # 恰 +1
+        pendings = [e for e in self.task_events()
+                    if e.get("event") == "quota_consumption_pending"]
+        self.assertEqual(len(pendings), 1)
+        self.assertEqual(pendings[0]["target_consumed"], 1)
+        self.assertEqual(len(self.consumed_events()), 1)
 
 
 # —— ⑦ 三查竞态与证据丢失（QC-07） ——
