@@ -1116,11 +1116,13 @@ waiting_quota → executing
 
 ## 9.2 Tests
 
+> [修正 2026-09-04] 各项按下述注记如实处理：本地证据已落（五工作单元 receipts 链），远端 CI 复核尚未发生——统一 push 后复核四路全绿才允许勾选，不得把未跑的 push 后 CI 写成已绿。
+
 - [ ] 新 RH-01 / RH-02 / RH-03 测试全部通过；
-- [ ] full suite green；
-- [ ] `validate_plugin` 15/15；
-- [ ] CI 独立 green；
-- [ ] no real external model calls in CI。
+- [ ] full suite green —— 本地全绿（2113 tests，五工作单元 receipts 链）；远端 CI 复核随统一 push 执行；
+- [ ] `validate_plugin` 15/15 —— 本地全绿（15/15，五工作单元 receipts 链）；远端 CI 复核随统一 push 执行；
+- [ ] CI 独立 green —— 既有工作流满足（零真实模型调用 / 零凭证 / 注入纪律，见 §7.3 修正注记）；统一 push 后复核四路全绿即关闭；
+- [ ] no real external model calls in CI —— 既有工作流满足（零真实模型调用 / 零凭证 / 注入纪律）；统一 push 后复核四路全绿即关闭。
 
 ## 9.3 Real dogfood
 
@@ -1248,6 +1250,8 @@ same task_id + epoch_id across any injected crash → max one consumption
 
 ## `wu-22-RH05-ci`
 
+> [修正 2026-09-04] 本小节范围已按 §7.1 塌缩收窄为：**统一 push 后确认既有 `validate.yml` 四路 matrix 全绿**。下列原始范围四项（GitHub Actions / full suite / validator / zero external side effects）所对应的工作流已存在且满足全部原始要求（见 §7.1、§7.2、§7.3 修正注记），无需搭建任何 CI。以下原范围保留备查。
+
 范围：
 
 - GitHub Actions；
@@ -1334,3 +1338,37 @@ v2.2.0 stable
 ```
 
 在此之前，不建议继续增加新的 Continuity/Transport 功能。
+
+---
+
+# 14. RH-01~05 实施收口记录（2026-09-04）
+
+> [修正 2026-09-04] 新增本节：记录 wu-rh00..rh04 五个本地工作单元的落地事实与 RH-05 塌缩后的收口状态。全部提交仅本地 commit、**全程未 push**（既定 push 纪律：实施期只本地 commit，全部完成后统一 push 一次）；本节与 §11 `wu-22-RH05-ci` 修正注记、§9.2 修正注记共同构成 RH-05 的收口注记（docs-only，零代码/零工作流改动）。
+
+## 14.1 工作单元 commit 清单与 receipt 指纹
+
+| 工作单元 | 内容 | 本地 commit | ship 审查 | receipt 指纹 |
+| --- | --- | --- | --- | --- |
+| wu-rh00 | 计划文档迁入 docs/ + 四处修正区（§7.1 塌缩重写、§5.4 迁移语义、§8.0 环境注记、决策锁定节） | `eeeffea` | ship | `sha256:a57868f8` |
+| wu-rh01 | Primer single-attempt hardening（timeout 不重发 + post-refresh 确认） | `6567e11` | ship | `sha256:a7e62763` |
+| wu-rh02 | Primer 机械授权（公共 `prime_authorized` 唯一执行入口） | `b454a2f` | ship | `sha256:19251c2f` |
+| wu-rh03 | quota consumption write-ahead pending marker（消费 + 迁移双路径） | `703fba7` | ship | `sha256:be6f4617` |
+| wu-rh04 | boundary 证据命名清理（`representative_boundary_id` + 双键兼容读） | `44f9b9e` | ship | `sha256:8dd36ff9` |
+
+每个工作单元均经独立审查 ship 通过，并留下四条验证 receipt（定向测试 + 全量 discover + validator 等，详见各 commit message），指纹绑定上表；validator 全程 15/15。
+
+## 14.2 测试基线演进
+
+```text
+2076（起点）→ 2079（rh01）→ 2090（rh02）→ 2107（rh03）→ 2113（rh04）
+```
+
+## 14.3 ownership 追认
+
+- RH-02：`tests/test_quota_subscription.py:766` 单行机械更名（`prime_once` → `_prime_once_unchecked`，全仓唯一其他调用点），已披露并追认纳入对应单元 ownership；
+- RH-03：`plugins/glm-conductor/skills/continuity/SKILL.md` 事件表新增 `quota_consumption_pending / quota_accounting_migration_pending` 一行（披露后追认）。
+
+## 14.4 剩余待办
+
+1. **统一 push 后确认 CI**——唯一剩余机械步骤：按 §7.1 塌缩语义，上述本地 commit 统一 push 触发既有 `validate.yml` 四路 matrix（Linux + Windows × Python 3.8 / 3.13，每路 validator + 全量 unittest），四路全绿即关闭 §9.2「CI 独立 green」。push 前无法预先验证远端 CI 结果（时序后果，非缺口）；既有工作流的最近全绿证据为审查基线 `6d2ee2d` 的 run `33769790818`（2026-09-03T14:56:31Z，4m6s）。
+2. RH-06（RG-22-06 真实双 epoch dogfood）与 RH-07（stable release 决策）另行安排，不在本轮五单元范围内。
