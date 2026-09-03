@@ -17,8 +17,10 @@
          网络、无事件、无状态写）。manual / notify 永不 prime。
 
       2. prime_once(...)——单飞幂等执行（幂等闸 → 一次最小模型调用
-         （网络超时单次有界重试，共至多 2 次尝试）→ 强制 quota refresh
-         物化确认 → durable 落账 + journal 事件 → 冻结键返回）。
+         （single-attempt：绝不自动重发——重发即是 P0-QP-07 要防的
+         「同旧 boundary 连发多个 prime」；歧义超时以 post-refresh
+         确认代替重发）→ 强制 quota refresh 物化确认 → durable 落账
+         + journal 事件 → 冻结键返回）。
          v2.2 C5a 起 window_primed 事件落在控制面 journal
          .glm-conductor/quota/events.jsonl（journal.append_control_
          plane_event，与 watcher.json / primer.json 同层）——不再借用
@@ -56,10 +58,14 @@ fail-closed 不对称的理由（本模块与 quota 观察面的方向差异，�
       的派生口径；boundary_id 为 prime 时点的旧 boundary / epoch_id）；
     - 键命中 → 直接返回既有 durable 结果（idempotent=True），零模型
       调用、零 quota 网络、零 journal 事件（同键重入零网络零事件）；
-    - 失败尝试同样落账（error_kind 非空）——超时后 provider 侧可能已
-      物化（响应丢失），重发即是 P0-QP-07 要防的「同旧 boundary 连发
-      多个 prime」；失败后的重试编排归 C5 凭账本判断，本层机械保证
-      每键至多一次执行；
+    - 失败尝试同样落账（error_kind 非空）——超时表示「结果未知」而非
+      「provider 一定没有执行」（响应可能已丢失），重发即是 P0-QP-07
+      要防的「同旧 boundary 连发多个 prime」，因此本层绝不自动重发
+      （single-attempt）：歧义超时改以 prime 后强制 refresh 的窗口
+      身份推进做事后确认（推进 → materialized=True，timeout +
+      materialized=True 是合法组合；未确认 → materialized=False）；
+      失败后的重试编排归 C5 凭账本判断，本层机械保证每键至多一次
+      执行；
     - primer.json 损坏 / 缺失 → 按「无记录」处理继续执行（fail-open for
       execution）：重复 prime 的代价是少量 token（对已物化窗口重复触碰
       不产生新 epoch），而拒绝执行的代价是恢复链永久卡死——又一次代价
@@ -194,8 +200,10 @@ DEFAULT_PRIME_TIMEOUT_SECONDS = 30.0
 # 限长响应（字节）：max_tokens=64 的最小响应远小于此；超限归 malformed
 _DEFAULT_MAX_BYTES = 65536
 
-# 网络超时的单次有界重试（共至多 2 次尝试；非超时错误一律不重试）
-MAX_PRIME_ATTEMPTS = 2
+# 模型调用不设重试常量：single-attempt（RH-01，v2.2 Release Hardening）
+# ——一个幂等键下模型调用至多发一次（P0-QP-07：同旧 boundary 绝不连发），
+# 歧义超时（请求可能已到达 provider、结果未知）由 prime_once 以
+# post-refresh 确认代替重发，绝不回环重试。
 
 # —— journal 词汇 ——
 
@@ -504,29 +512,32 @@ def _int_or_none(value):
 
 
 def _attempt_once(transport, url, headers, body, timeout):
-    """单次传输尝试 → 结构化 outcome dict。
+    """单次传输尝试 → 结构化 outcome dict（single-attempt 的唯一执行面）。
 
-    返回 {"ok", "retryable", "kind", "detail", "tokens_in",
+    返回 {"ok", "ambiguous_timeout", "kind", "detail", "tokens_in",
     "tokens_out"}：ok=True 时 kind/detail 为 None 且 tokens 已提取；
     ok=False 时 kind ∈ PRIMER_ERROR_KINDS，detail 只含安全令牌——异常
     类型名（如 "socket.timeout" / "URLError"）、"HTTP <状态码>"、
     "bounded_response_exceeded" / "JSONDecodeError" /
     "response_not_object" / "invalid_status"，绝不透传异常文本 / URL /
-    响应体。retryable=True 仅限网络超时类（socket.timeout 及 URLError
-    包裹的超时 reason）——单次有界重试的触发条件；其余错误一律不重试
-    （规格原文：网络超时才重试；auth / 4xx / malformed 重发无意义）。
+    响应体。ambiguous_timeout=True 仅限网络超时类（socket.timeout 及
+    URLError 包裹的超时 reason）——语义是「请求可能已到达 provider、
+    结果未知」，调用方（prime_once）据此以 post-refresh 确认代替重发；
+    其余失败（非超时 URLError / OSError、HTTP 状态码、解析错误）均为
+    明确未到达 provider 或结果明确无效，绝不是歧义超时。
     """
-    outcome = {"ok": False, "retryable": False, "kind": None,
+    outcome = {"ok": False, "ambiguous_timeout": False, "kind": None,
                "detail": None, "tokens_in": None, "tokens_out": None}
     try:
         status, raw = transport(url, body, headers, timeout)
     except socket.timeout:
-        # 超时：provider 侧可能已执行（响应丢失）——可重试且必须落账
+        # 超时：provider 侧可能已执行（响应丢失）——结果未知（歧义），
+        # 绝不自动重发（P0-QP-07），由 prime_once 做 post-refresh 确认
         outcome["kind"], outcome["detail"] = "network", "socket.timeout"
-        outcome["retryable"] = True
+        outcome["ambiguous_timeout"] = True
         return outcome
     except urllib.error.HTTPError as exc:
-        # 非 2xx / 被禁重定向（默认传输路径）；状态码分类，不重试
+        # 非 2xx / 被禁重定向（默认传输路径）；状态码分类（非歧义失败）
         code = getattr(exc, "code", None)
         outcome["kind"] = _classify_status(code)
         outcome["detail"] = "HTTPError"
@@ -534,8 +545,9 @@ def _attempt_once(transport, url, headers, body, timeout):
     except urllib.error.URLError as exc:
         reason = getattr(exc, "reason", None)
         if isinstance(reason, socket.timeout):
+            # URLError 包裹的超时：同为歧义超时（请求可能已到达 provider）
             outcome["kind"], outcome["detail"] = "network", "URLError"
-            outcome["retryable"] = True
+            outcome["ambiguous_timeout"] = True
         else:
             outcome["kind"], outcome["detail"] = "network", "URLError"
         return outcome
@@ -576,19 +588,6 @@ def _attempt_once(transport, url, headers, body, timeout):
     return outcome
 
 
-def _prime_call(transport, url, headers, body, timeout):
-    """一次最小模型调用（超时单次有界重试，共至多 MAX_PRIME_ATTEMPTS 次
-    尝试）；返回 _attempt_once 的 outcome（去掉 retryable 键）。"""
-    outcome = {"ok": False, "kind": "unknown", "detail": None,
-               "tokens_in": None, "tokens_out": None}
-    for attempt in range(MAX_PRIME_ATTEMPTS):
-        outcome = _attempt_once(transport, url, headers, body, timeout)
-        if outcome["ok"] or not outcome["retryable"]:
-            break
-    return {key: outcome[key]
-            for key in ("ok", "kind", "detail", "tokens_in", "tokens_out")}
-
-
 # —— 快照容错提取（观察面读法：缺 / 坏按「不可确认」处理） ——
 
 def _windows_of(detail):
@@ -603,6 +602,22 @@ def _windows_of(detail):
         return None
     windows = snapshot.get("windows")
     return windows if isinstance(windows, list) else None
+
+
+def _executable_confirmed(post_detail, post_windows):
+    """post refresh 可用时的 executable 复评（成功路径与歧义超时确认
+    路径共用；复用 epoch.evaluate_epoch——weekly 优先语义不复制逻辑）。
+
+    post_detail / post_windows 不可用 → False；词汇外 provider 状态
+    （evaluate_epoch 抛 ValueError）→ 保守不可执行。"""
+    if post_detail is None or post_windows is None:
+        return False
+    try:
+        evaluation = evaluate_epoch(provider_status=post_detail.get("status"),
+                                    windows=post_windows)
+        return bool(evaluation["executable"])
+    except ValueError:
+        return False
 
 
 def _safe_fetch(fetch_refresh, repo_root):
@@ -714,8 +729,9 @@ def prime_once(repo_root, *, boundary_id, provider_identity_hash,
         primed_at）；None → 当前 UTC；
       - fetch_refresh：注入 quota 强制刷新 fetch_refresh(repo_root) →
         resolve_quota_detail 形状 detail；None →
-        resolver.resolve_quota_detail(force_refresh=True)（prime 前基线
-        与 prime 后确认各调一次）。
+        resolver.resolve_quota_detail(force_refresh=True)（成功与歧义
+        超时路径：prime 前基线与 prime 后确认各调一次；非歧义失败仅
+        prime 前基线一次，零确认刷新）。
 
     流程（顺序冻结）：
       1. 幂等闸：durable 记录查 (identity, boundary_id)——命中 → 直接
@@ -725,12 +741,23 @@ def prime_once(repo_root, *, boundary_id, provider_identity_hash,
          → 结构化失败（no-credential，零传输）；baseURL 容错读 zcode
          provider 配置，host 过 ALLOWED_HOSTS 闸；
       3. prime 前基线快照（强制刷新；失败容忍 → 基线 None）；
-      4. 一次最小模型调用（网络超时单次有界重试，共至多 2 次尝试）；
-      5. 物化确认：prime 后强制 quota refresh，只看 prime 前后窗口身份
-         变化（epoch.same_epoch）——HTTP 200 不是证据、百分比下降不是
-         证据（§C4 红线）；executable = materialized 且
-         epoch.evaluate_epoch（provider AVAILABLE 且无阻塞 EXHAUSTED
-         窗——weekly 优先语义复用既有判定，不复制逻辑）；
+      4. 一次最小模型调用（single-attempt：绝不自动重发——重发即是
+         P0-QP-07 要防的「同旧 boundary 连发多个 prime」）；
+      5. 分支收尾：
+           成功 → 物化确认：prime 后强制 quota refresh，只看 prime
+             前后窗口身份变化（epoch.same_epoch）——HTTP 200 不是证据、
+             百分比下降不是证据（§C4 红线）；
+           歧义超时（ambiguous_timeout：请求可能已到达 provider、结果
+             未知）→ 绝不重发，同样执行 prime 后强制 refresh：epoch
+             推进 → materialized=True（timeout + materialized=True 是
+             合法组合），未确认（同 epoch / 刷新不可用）→
+             materialized=False；随后按失败落账（error_kind 保持
+             "network"）；
+           其余失败（no-credential / auth / HTTP 5xx / malformed /
+             非歧义 network / unknown）→ 零确认面直接失败落账；
+         executable = materialized 且 epoch.evaluate_epoch（provider
+         AVAILABLE 且无阻塞 EXHAUSTED 窗——weekly 优先语义复用既有
+         判定，不复制逻辑）；
       6. durable 落账（primer.json 七键记录）+ best-effort journal
          window_primed 事件；失败尝试同样落账（error_kind 非空——
          P0-QP-07：同旧 boundary 绝不连发）。
@@ -738,13 +765,15 @@ def prime_once(repo_root, *, boundary_id, provider_identity_hash,
     返回（PRIMER_RESULT_KEYS 冻结 8 键；authorized 恒 True——调用契约
     是先过 authorize_prime 闸，本函数不重复授权）：
       {"authorized": True,
-       "primed": bool（模型调用完成，即 error 为 None）,
+       "primed": bool（模型调用完成，即 error 为 None——primed 语义与
+                  materialized 正交，timeout + materialized=True 是合法
+                  组合）,
        "materialized": bool（且仅当窗口身份推进被二次 refresh 确认）,
        "executable": bool（materialized 且 epoch 复评可执行——
                         refresh 后仍有阻塞窗 → False，无 ActivationReady
                         概念产生，归 C5）,
        "tokens": {"input": int|None, "output": int|None},
-       "latency_ms": int|None（含重试在内的全程耗时）,
+       "latency_ms": int|None（模型调用全程耗时）,
        "idempotent": bool（命中既有 durable 结果时 True）,
        "error": None | {"kind": <PRIMER_ERROR_KINDS>,
                         "detail": <异常类型名 / "HTTP <code>" / 安全令牌>}}
@@ -783,26 +812,32 @@ def prime_once(repo_root, *, boundary_id, provider_identity_hash,
     primed_at = _format_iso_z(moment)
 
     # —— 2. 凭证与端点（本地只读；无凭证 → 结构化失败，零传输） ——
-    def _fail(kind, detail):
-        """失败收尾：七键落账 + best-effort journal + 冻结键返回。"""
+    def _fail(kind, detail, *, materialized=False, executable=False,
+              tokens_in=None, tokens_out=None):
+        """失败收尾：七键落账 + best-effort journal + 冻结键返回。
+
+        默认 materialized/executable=False（明确未到达 provider 的失败，
+        零确认面）；歧义超时路径传入 post-refresh 确认结果（RH-01：
+        超时绝不重发，落账后同键重入即命中幂等闸——零传输零刷新）。"""
         record = {
             "primed_at": primed_at,
-            "materialized": False,
-            "executable": False,
-            "tokens_in": None,
-            "tokens_out": None,
+            "materialized": materialized,
+            "executable": executable,
+            "tokens_in": tokens_in,
+            "tokens_out": tokens_out,
             "latency_ms": latency_ms,
             "error_kind": kind,
         }
         _put_record(repo_root, provider_identity_hash, boundary_id, record)
         _journal_prime(repo_root, boundary_id=boundary_id,
                        provider_identity_hash=provider_identity_hash,
-                       materialized=False, executable=False,
-                       tokens_in=None, tokens_out=None,
+                       materialized=materialized, executable=executable,
+                       tokens_in=tokens_in, tokens_out=tokens_out,
                        latency_ms=latency_ms, idempotent=False)
-        return _result(primed=False, materialized=False, executable=False,
-                       tokens_in=None, tokens_out=None,
-                       latency_ms=latency_ms, idempotent=False,
+        return _result(primed=False, materialized=materialized,
+                       executable=executable, tokens_in=tokens_in,
+                       tokens_out=tokens_out, latency_ms=latency_ms,
+                       idempotent=False,
                        error={"kind": kind, "detail": detail})
 
     _credential_source, api_key = resolve_credential()
@@ -823,14 +858,31 @@ def prime_once(repo_root, *, boundary_id, provider_identity_hash,
     pre_detail, _pre_error = _safe_fetch(fetch, repo_root)
     pre_windows = _windows_of(pre_detail)
 
-    # —— 4. 一次最小模型调用（超时单次有界重试，共至多 2 次） ——
+    # —— 4. 一次最小模型调用（single-attempt：绝不自动重发——P0-QP-07） ——
     started = time.perf_counter()
-    outcome = _prime_call(send, url, headers, body,
-                          DEFAULT_PRIME_TIMEOUT_SECONDS)
+    outcome = _attempt_once(send, url, headers, body,
+                            DEFAULT_PRIME_TIMEOUT_SECONDS)
     latency_ms = int(round((time.perf_counter() - started) * 1000))
 
     if not outcome["ok"]:
-        return _fail(outcome["kind"], outcome["detail"])
+        if not outcome["ambiguous_timeout"]:
+            # 非歧义失败（明确未到达 provider / 结果明确无效）→ 零确认面
+            return _fail(outcome["kind"], outcome["detail"])
+        # —— 5a. 歧义超时确认（RH-01）：绝不重发，post-refresh 代替 ——
+        # 超时表示「结果未知」而非「provider 一定没有执行」：epoch 推进
+        # → materialized=True（timeout + materialized=True 是合法组合）；
+        # 同 epoch / 刷新不可用 → materialized=False（宁可 False 不虚构）
+        post_detail, _post_error = _safe_fetch(fetch, repo_root)
+        post_windows = _windows_of(post_detail)
+        materialized = (pre_windows is not None
+                        and post_windows is not None
+                        and not same_epoch(pre_windows, post_windows))
+        executable = materialized and _executable_confirmed(post_detail,
+                                                            post_windows)
+        return _fail(outcome["kind"], outcome["detail"],
+                     materialized=materialized, executable=executable,
+                     tokens_in=outcome["tokens_in"],
+                     tokens_out=outcome["tokens_out"])
 
     # —— 5. 物化确认：prime 后强制 quota refresh，只看窗口身份变化 ——
     post_detail, _post_error = _safe_fetch(fetch, repo_root)
@@ -841,15 +893,8 @@ def prime_once(repo_root, *, boundary_id, provider_identity_hash,
     # executable：复用 epoch.evaluate_epoch（weekly 优先语义不复制）；
     # 且必须以物化确认为前提——未经确认的 AVAILABLE 不构成新 executable
     # epoch（§C4 红线：200 与百分比都不是证据）
-    executable = False
-    if materialized and post_windows is not None:
-        post_status = post_detail.get("status")
-        try:
-            evaluation = evaluate_epoch(provider_status=post_status,
-                                        windows=post_windows)
-            executable = bool(evaluation["executable"])
-        except ValueError:
-            executable = False  # 注入面给出词汇外状态 → 保守不可执行
+    executable = materialized and _executable_confirmed(post_detail,
+                                                        post_windows)
 
     # —— 6. durable 落账 + best-effort journal ——
     record = {

@@ -28,10 +28,14 @@ P0-QP-03（粒度告警）/ P0-QP-07（幂等设计门——随本文件取证�
         阻塞语义（复用 epoch.evaluate_epoch，不复制逻辑）
     注入（TransportInjectionTest + BaseUrlTest + StoreTest，20+ 例）：
         transport/fetch_refresh/clock 全注入零真实网络零真实模型调用、
-        请求形态冻结（P0-QP-00 §1.2 逐字）、超时单次有界重试（共至多
-        2 次）、非超时不重试、错误只取类型名/状态码（§37）、凭证缺失
-        零传输、原子写无 tmp 残留、PermissionError 有界重试耗尽抛
-        PrimerStoreError、baseURL allowlist 闸
+        请求形态冻结（P0-QP-00 §1.2 逐字）、错误只取类型名/状态码
+        （§37）、凭证缺失零传输、原子写无 tmp 残留、PermissionError
+        有界重试耗尽抛 PrimerStoreError、baseURL allowlist 闸
+    single-attempt 加固（SingleAttemptHardeningTest，5 例，RH-01）：
+        超时绝不重发（transport 恰 1 次）、歧义超时 post-refresh 确认
+        （epoch 推进 → materialized=True / 同 epoch → False）、失败
+        记录同键重放幂等（零 transport 零刷新）、非歧义失败（5xx /
+        401 / malformed）零重发零确认刷新
     fail-closed（授权闸各 refuse 例 + 48/49 的 malformed 保守归类 +
         38 的词汇外状态）：授权方向绝不 fail-open
     冻结面（SignatureFreezeTest + 冻结键断言）：prime_once 冻结签名、
@@ -485,8 +489,9 @@ class IdempotencyTest(PrimerCase):
         self.assertIn(IDENTITY, state["primes"])
 
     def test_failed_attempt_durable_and_no_refire(self):
-        # 超时（两次尝试都失败）→ error_kind 落账；重入命中失败记录 →
-        # 零新调用返回既有失败（P0-QP-07：失败后也不连发，重试编排归 C5）
+        # 超时（single-attempt 失败，RH-01）→ error_kind 落账；重入命中
+        # 失败记录 → 零新调用返回既有失败（P0-QP-07：失败后也不连发，
+        # 重试编排归 C5）
         transport = recording_transport([("timeout",)])
         fetch = scripted_fetch([dict(self.PRE)])
         first = self.prime(transport=transport, fetch=fetch)
@@ -495,7 +500,7 @@ class IdempotencyTest(PrimerCase):
                          {"kind": "network", "detail": "socket.timeout"})
         self.assertEqual(self.read_record()["error_kind"], "network")
         second = self.prime(transport=transport, fetch=fetch)
-        self.assertEqual(len(transport.calls), 2)  # 首跑已用 2 次尝试
+        self.assertEqual(len(transport.calls), 1)  # 首跑仅 1 次尝试
         self.assertTrue(second["idempotent"])
         self.assertFalse(second["primed"])
         self.assertEqual(second["error"],
@@ -630,6 +635,126 @@ class MaterializationTest(PrimerCase):
         self.assertFalse(result["executable"])
 
 
+# —— RH-01：single-attempt 加固（超时绝不重发；歧义超时 post-refresh 确认） ——
+
+class SingleAttemptHardeningTest(PrimerCase):
+    """RH-01（v2.2 Release Hardening §3）：一个幂等键下模型调用至多发
+    一次。超时 = 「请求可能已到达 provider、结果未知」（ambiguous_
+    timeout）——绝不自动重发（重发即是 P0-QP-07 要防的「同旧 boundary
+    连发多个 prime」），改以 prime 后强制 refresh 的窗口身份推进做事后
+    确认；非歧义失败（5xx / auth / malformed / 非超时 network）零确认面
+    直接落账。PRIMER-RH-01..05 逐条对应实施规格 §3.4。
+    """
+
+    PRE = detail("AVAILABLE", [win("five_hour", "EXHAUSTED", 0.0,
+                                   RESET_FIVE_OLD)])
+    POST_NEW = detail("AVAILABLE", [win("five_hour", "AVAILABLE", 100.0,
+                                        RESET_FIVE_NEW)])
+    POST_SAME = detail("AVAILABLE", [win("five_hour", "EXHAUSTED", 0.0,
+                                         RESET_FIVE_OLD)])
+
+    def prime_timeout(self, fetch_script):
+        """超时脚本 + 指定 fetch 脚本的一次 prime_once 全注入执行。"""
+        transport = recording_transport([("timeout",)])
+        fetch = scripted_fetch(fetch_script)
+        result = primer.prime_once(
+            self.repo, boundary_id=BOUNDARY,
+            provider_identity_hash=IDENTITY, transport=transport,
+            clock=fixed_clock, fetch_refresh=fetch)
+        return result, transport, fetch
+
+    def test_rh01_timeout_single_transport_call(self):
+        # PRIMER-RH-01：timeout → transport 恰调用 1 次（不再有第二次
+        # 模型请求）
+        result, transport, _fetch = self.prime_timeout(
+            [dict(self.PRE), dict(self.POST_SAME)])
+        self.assertEqual(len(transport.calls), 1)
+        self.assertFalse(result["primed"])
+        self.assertEqual(result["error"],
+                         {"kind": "network", "detail": "socket.timeout"})
+        self.assertIsInstance(result["latency_ms"], int)
+
+    def test_rh02_timeout_epoch_advanced_confirms_materialized(self):
+        # PRIMER-RH-02：timeout + post-refresh epoch 推进 →
+        # materialized=True、primed=False（timeout + materialized=True 是
+        # 合法组合）、零第二次模型调用；executable 照成功路径规则经
+        # evaluate_epoch 复评
+        result, transport, fetch = self.prime_timeout(
+            [dict(self.PRE), dict(self.POST_NEW)])
+        self.assertEqual(len(transport.calls), 1)
+        self.assertEqual(len(fetch.calls), 2)  # 基线 + 歧义确认刷新
+        self.assertFalse(result["primed"])
+        self.assertTrue(result["materialized"])
+        self.assertTrue(result["executable"])
+        self.assertEqual(result["error"],
+                         {"kind": "network", "detail": "socket.timeout"})
+        record = self.read_record()
+        self.assertEqual(record["error_kind"], "network")
+        self.assertTrue(record["materialized"])
+        self.assertTrue(record["executable"])
+        events = self.journal_events()
+        self.assertEqual(len(events), 1)
+        self.assertTrue(events[0]["materialized"])
+        self.assertTrue(events[0]["executable"])
+        self.assertFalse(events[0]["idempotent"])
+
+    def test_rh03_timeout_same_epoch_not_materialized(self):
+        # PRIMER-RH-03：timeout + post-refresh 同 epoch →
+        # materialized=False、零第二次模型调用
+        result, transport, fetch = self.prime_timeout(
+            [dict(self.PRE), dict(self.POST_SAME)])
+        self.assertEqual(len(transport.calls), 1)
+        self.assertEqual(len(fetch.calls), 2)
+        self.assertFalse(result["primed"])
+        self.assertFalse(result["materialized"])
+        self.assertFalse(result["executable"])
+        self.assertEqual(self.read_record()["error_kind"], "network")
+
+    def test_rh04_timeout_record_replay_idempotent(self):
+        # PRIMER-RH-04：timeout 失败落账后同键重放 → idempotent=True、
+        # 零 transport、零 quota refresh、返回记录的 materialized 值
+        first, transport, fetch = self.prime_timeout(
+            [dict(self.PRE), dict(self.POST_NEW)])
+        self.assertTrue(first["materialized"])
+        calls_after_first = len(transport.calls)
+        fetches_after_first = len(fetch.calls)
+        second = primer.prime_once(
+            self.repo, boundary_id=BOUNDARY,
+            provider_identity_hash=IDENTITY, transport=transport,
+            clock=fixed_clock, fetch_refresh=fetch)
+        self.assertTrue(second["idempotent"])
+        self.assertEqual(len(transport.calls), calls_after_first)
+        self.assertEqual(len(fetch.calls), fetches_after_first)
+        self.assertFalse(second["primed"])
+        self.assertTrue(second["materialized"])  # 记录值原样镜像
+        self.assertEqual(second["error"],
+                         {"kind": "network", "detail": None})
+
+    def test_rh05_non_ambiguous_failures_no_resend_no_post_refresh(self):
+        # PRIMER-RH-05：HTTP 5xx / 401 auth / malformed → 零重发、零
+        # post-refresh（fetch_refresh 恰 1 次 = pre 基线，无第 2 次）
+        scripts = [
+            ("http_5xx", [("status", 503)]),
+            ("auth_401", [("raise", urllib.error.HTTPError(
+                MESSAGES_URL, 401, "Unauthorized", None, None))]),
+            ("malformed", [("bytes", 200, b"not json")]),
+        ]
+        for index, (name, script) in enumerate(scripts):
+            with self.subTest(case=name):
+                transport = recording_transport(script)
+                fetch = scripted_fetch([dict(self.PRE)])
+                result = primer.prime_once(
+                    self.repo, boundary_id="glm:rh05%08x" % (index,),
+                    provider_identity_hash=IDENTITY, transport=transport,
+                    clock=fixed_clock, fetch_refresh=fetch)
+                self.assertEqual(len(transport.calls), 1)  # 零重发
+                self.assertEqual(len(fetch.calls), 1)      # 零确认刷新
+                self.assertFalse(result["primed"])
+                self.assertFalse(result["materialized"])
+                self.assertFalse(result["executable"])
+                self.assertIsNotNone(result["error"])
+
+
 # —— 传输注入（零真实网络零真实模型调用；§37 异常类型名化） ——
 
 class TransportInjectionTest(PrimerCase):
@@ -667,25 +792,10 @@ class TransportInjectionTest(PrimerCase):
                                                 "word: pong"}]})
         self.assertEqual(call["timeout"], primer.DEFAULT_PRIME_TIMEOUT_SECONDS)
 
-    def test_timeout_retry_then_success(self):
-        # 网络超时 → 单次有界重试（共至多 2 次尝试），第 2 次成功
-        transport = recording_transport([("timeout",), ("ok", ok_payload())])
-        result = self.prime(transport)
-        self.assertEqual(len(transport.calls), 2)
-        self.assertTrue(result["primed"])
-        self.assertIsNone(result["error"])
-
-    def test_timeout_exhausts_two_attempts(self):
-        transport = recording_transport([("timeout",)])
-        result = self.prime(transport)
-        self.assertEqual(len(transport.calls), 2)  # 恰 2 次，不无限重试
-        self.assertFalse(result["primed"])
-        self.assertEqual(result["error"]["kind"], "network")
-        self.assertEqual(result["error"]["detail"], "socket.timeout")
-        self.assertIsInstance(result["latency_ms"], int)
-
     def test_non_timeout_urlerror_no_retry(self):
-        # URLError（非超时）→ 只尝试 1 次（规格：仅网络超时才重试）
+        # URLError（非超时）→ 只尝试 1 次（非超时 URLError 不算歧义超时
+        # ——RH-01：零重发、零确认刷新，超时用例见
+        # SingleAttemptHardeningTest）
         transport = recording_transport(
             [("raise", urllib.error.URLError("getaddrinfo failed"))])
         result = self.prime(transport)
