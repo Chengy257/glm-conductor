@@ -270,6 +270,21 @@ Quota Subscription 三 API（v2.2 C5a，wu-22-C5a，主计划 §14 adapted）：
         journal.append_control_plane_event 落
         .glm-conductor/quota/events.jsonl）。
 
+订阅接线（v2.2 C5b，wu-22-C5b；C5a 三 API 的消费面）：
+    把订阅资格接进 EXHAUSTED 生命周期的两个转态点——
+      - handle_quota_exhausted：转态成功后 best-effort 注册订阅（epoch
+        身份用转态时点缓存 snapshot 的零网络折算；折算失败不注册零副
+        作用——legacy 路径不变；注册失败不阻断转态，订阅是增强面）；
+      - resume_from_quota：已注册且启用的任务在恢复裁决前过订阅资格
+        门（epoch 折算 → 崩溃窗口对账 → evaluate_subscription_
+        eligibility）；不 eligible（或 epoch 无法折算）→ 不转态保守
+        等待；资格过 → 既有转态照走 + mark_activation_epoch。**转态-
+        记账顺序冻结为 evaluate → 转态 → mark**（先 mark 后转态会在
+        崩溃时卡死同 epoch 恢复，理由见 resume_from_quota docstring）；
+        未注册 / 未启用任务输出零变化（不加 subscription 键）。
+    消费零接线不变：resume_from_quota 绝不调用
+    record_quota_boundary_consumed（消费接线归 Resume Controller）。
+
 分层关系：
     runtime.dispatcher —— 纯决策器：plan_dispatch 零 I/O，只产出「谁可
         派发 / 谁挂起及理由」的决策 dict；本层在 prepare 中消费它；
@@ -1786,7 +1801,15 @@ def handle_quota_exhausted(repo_root, task_id, *, evaluation=None) -> dict:
       7. 返回键冻结 dict：
          {"task_status", "waiting_units", "recommended_resume_at",
           "auto_resume", "remaining_quota_windows",
-          "wake": {"required", "prompt", "budget_exhausted"}, "reason"}。
+          "wake": {"required", "prompt", "budget_exhausted"}, "reason"}；
+      8. C5b 转态点注册订阅（best-effort 增强面，位于 manifest 刷新
+         之前）：epoch 身份用转态时点缓存 snapshot 的零网络折算
+         （_epoch_context_at_transition）；折算失败（无缓存 / 无
+         windows / ValueError）→ 不注册零副作用（legacy 路径不变）；
+         已注册同参 → register 自身幂等（C5a 保证，零写零事件）；注册
+         失败（预期外异常）只降级为「任务未订阅」，绝不阻断 / 回滚
+         已完成的转态——订阅是 resume 面的增强事实，不是转态事务的
+         组成部份。返回键不含订阅信息（冻结七键不变）。
 
     evaluation（可选）：quota 子系统的 evaluate() 输出 dict——提供
     windows 时 recommended_resume_at = scheduler.plan_resume 统一口径
@@ -1852,6 +1875,18 @@ def handle_quota_exhausted(repo_root, task_id, *, evaluation=None) -> dict:
             "auto_resume": view["auto_resume"],
             "consumed_quota_windows": view["consumed_quota_windows"],
             "max_quota_windows": view["max_quota_windows"]})
+    # —— v2.2 C5b：转态点注册 quota subscription（best-effort 增强面） ——
+    # 零网络折算（缓存缺位即折算失败 → 不注册零副作用，legacy 不变）；
+    # 注册失败（预期外异常）不阻断 / 不回滚已完成的转态——订阅是
+    # resume 面的增强事实，与 manifest 同类的 best-effort 挂点（连警告
+    # 事件都不强求，避免 except 路径二次 I/O 失败遮蔽主事务结果）。
+    try:
+        epoch_context = _epoch_context_at_transition(repo_root)
+        if epoch_context is not None:
+            register_quota_subscription(
+                repo_root, task_id, epoch_id=epoch_context["epoch_id"])
+    except Exception:
+        pass
     _write_manifest_safe(repo_root, task_id)
     return {
         "task_status": st.get("status"),
@@ -2400,8 +2435,184 @@ def _reconcile_running_unit(repo_root, task_id, uid):
     return "waiting_quota", entry
 
 
+# —— 订阅接线（v2.2 C5b，wu-22-C5b；C5a 三 API 的 resume 面消费） ——
+
+def _epoch_context_from_snapshot(provider_status, snapshot):
+    """(provider_status, §27 snapshot) → epoch 折算上下文（内部助手）。
+
+    snapshot 缺失 / 无 windows / provider_status 词汇外 / evaluate_epoch
+    任何异常 → None（§31 不虚构 epoch 身份——折算失败与「无数据」同一
+    保守出口）；成功返回 {"epoch_id", "executable", "provider_status"}，
+    epoch_id 恒为 §10.1 形状（evaluate_epoch 的窗口指纹折算，供订阅三
+    API 的字符串等值判定直接消费）。纯折算：零网络零写。
+    """
+    windows = None
+    if isinstance(snapshot, dict):
+        raw = snapshot.get("windows")
+        windows = raw if isinstance(raw, list) else None
+    if windows is None:
+        return None
+    try:
+        from runtime.quota import epoch as quota_epoch  # 函数内 import
+        evaluated = quota_epoch.evaluate_epoch(
+            provider_status=provider_status, windows=windows)
+    except Exception:  # ValueError（status 词汇外）等一律按折算失败处理
+        return None
+    return {"epoch_id": evaluated["epoch_id"],
+            "executable": evaluated["executable"],
+            "provider_status": provider_status}
+
+
+def _epoch_context_at_transition(repo_root):
+    """EXHAUSTED 转态点（handle_quota_exhausted）的零网络 epoch 折算。
+
+    读 resolver 缓存原语（_cache_path / _load_cache——本模块
+    _evaluation_from_refreshed_cache 的同款先例，零 resolver 改动）：
+    prepare 解析 EXHAUSTED 时缓存刚被刷新，转态点折算读同一份
+    snapshot，与「resolver.resolve_quota_detail 的新鲜缓存层」等价。
+    刻意不经 resolve_quota_detail：该入口在缓存缺位 / 陈旧时会走层级 2
+    的 provider 网络抓取——额度转态是账本事务，保持零网络纪律（探测
+    归 resolver 的调用方）；缓存不可用即折算失败 → None → 不注册零
+    副作用（规格的 legacy 不变分支）。
+    """
+    try:
+        from runtime.quota import resolver  # 函数内 import：monkeypatch 友好
+        cache = resolver._load_cache(resolver._cache_path(repo_root))
+    except Exception:
+        return None
+    if not isinstance(cache, dict):
+        return None
+    return _epoch_context_from_snapshot(cache.get("status"),
+                                        cache.get("snapshot"))
+
+
+def _epoch_context_after_refresh(repo_root):
+    """resume 面（resume_from_quota）的 epoch 折算（规格口径）。
+
+    status 解析在此前已完成（resolver 强刷成功即缓存已刷新；显式
+    status 直通则用既有缓存），此处经 resolver.resolve_quota_detail
+    （force_refresh=False——新鲜缓存命中零网络；provider 降级路径由
+    resolver 层级自行容错）读回明细，取 detail.status +
+    detail.snapshot.windows 交 evaluate_epoch 折算。detail 非 dict /
+    无 snapshot / 无 windows / 折算异常 → None（无法确认新 epoch）。
+    """
+    try:
+        from runtime.quota import resolver  # 函数内 import：monkeypatch 友好
+        detail = resolver.resolve_quota_detail(repo_root)
+    except Exception:
+        return None
+    if not isinstance(detail, dict):
+        return None
+    return _epoch_context_from_snapshot(detail.get("status"),
+                                        detail.get("snapshot"))
+
+
+def _reconcile_activation_journal(repo_root, task_id, st, epoch_id):
+    """崩溃窗口对账（v2.2 C5b，C5a reviewer P3 的接线侧兜底）。
+
+    evaluate 之前读控制面 journal（read_control_plane_events，绝不抛）：
+    存在本任务本 epoch 的 quota_epoch_advanced 而
+    state.quota_subscription.last_activation_epoch_id 落后（≠ epoch_id）
+    → journal 证据表明本 epoch 已激活过（如 mark 落盘后 state 被备份
+    恢复 / 回滚覆盖），保守视为已激活：
+      - best-effort 自愈：全新 load → 只改 last_activation_epoch_id →
+        save（绝不借 mark_activation_epoch——mark 会追加第二条控制面
+        事件，破坏 QC-07 每 epoch 恰一次）；失败只记 reason 不阻塞
+        判定（自愈是记账修复，不是恢复闸门）；
+      - 返回对账 reason（中文，点名「journal 证据对账：已激活」）；
+    无证据或 state 已与 journal 一致 → None（资格判定照常）。
+    方向冻结：宁可少恢复一次不重复激活（QC-07）。纯读 + 至多一次
+    自愈写，零转态。
+    """
+    evidence = None
+    for event in journal.read_control_plane_events(repo_root):
+        if (event.get("event") == "quota_epoch_advanced"
+                and event.get("task_id") == task_id
+                and event.get("epoch_id") == epoch_id):
+            evidence = event  # 正确流程下至多一条；取末条（最新证据）
+    if evidence is None:
+        return None
+    block = st.get("quota_subscription")
+    if isinstance(block, dict) \
+            and block.get("last_activation_epoch_id") == epoch_id:
+        return None  # state 已与 journal 一致：evaluate 自会判同 epoch
+    healed = True
+    try:
+        fresh = state.load_state(repo_root, task_id)
+        if fresh is None:
+            healed = False
+        else:
+            fresh_block = fresh.get("quota_subscription")
+            if not isinstance(fresh_block, dict):
+                fresh_block = state.default_quota_subscription()
+                fresh["quota_subscription"] = fresh_block
+            fresh_block["last_activation_epoch_id"] = epoch_id
+            state.save_state(repo_root, fresh)
+    except Exception:
+        healed = False
+    return ("journal 证据对账：epoch %s 已激活（控制面 quota_epoch_advanced "
+            "在案而 state 落后，%s）——保守视为已激活，本 epoch 不重复激活"
+            % (epoch_id,
+               "已自愈重写 last_activation_epoch_id" if healed
+               else "自愈重写失败"))
+
+
+def _resume_subscription_gate(repo_root, task_id, st, provider_status) -> dict:
+    """resume 面订阅资格裁决（v2.2 C5b；返回 "subscription" 面 dict）。
+
+    顺序即决策序（纯读 + 至多一次对账自愈写，零转态零派发）：
+      1. 折算当前 epoch（_epoch_context_after_refresh：resolve_quota_
+         detail + evaluate_epoch）；折算失败 → eligible=False——无法
+         确认新 epoch，保守不恢复（reason 注明）；
+      2. 崩溃窗口对账（evaluate 之前，_reconcile_activation_journal）；
+      3. evaluate_subscription_eligibility 纯判定；对账证据在案时资格
+         被保守推翻（eligible 强制 False + reason 点名 journal 证据）。
+
+    返回 {"registered": True, "eligible": bool, "reasons": [...],
+    "epoch_id": <§10.1 形状或 None（折算失败）>}；eligible=True 且调用
+    方实际完成转态后再补 "activated_epoch_id" / "mark"（转态-记账顺序
+    见 resume_from_quota docstring）。本函数不是消费点：C1b 的
+    resume-time 窗口消费记账（§15.1 消费事务点）恒不在此发生——消费
+    接线归 Resume Controller。
+    """
+    epoch_context = _epoch_context_after_refresh(repo_root)
+    if epoch_context is None:
+        return {"registered": True, "eligible": False,
+                "reasons": ["无法折算当前 quota epoch（额度明细 snapshot "
+                            "缺失、windows 缺失或折算异常）——无法确认新 "
+                            "epoch，保守不恢复"],
+                "epoch_id": None}
+    epoch_id = epoch_context["epoch_id"]
+    journal_reason = _reconcile_activation_journal(
+        repo_root, task_id, st, epoch_id)
+    evaluation = evaluate_subscription_eligibility(
+        repo_root, task_id, current_epoch_id=epoch_id,
+        current_executable=epoch_context["executable"],
+        provider_status=epoch_context["provider_status"])
+    reasons = list(evaluation["reasons"])
+    eligible = evaluation["eligible"]
+    if journal_reason is not None:
+        eligible = False
+        reasons.append(journal_reason)
+    return {"registered": True, "eligible": eligible,
+            "reasons": reasons, "epoch_id": epoch_id}
+
+
+def _subscription_active(st) -> bool:
+    """任务是否处于「已注册且启用」的订阅态（容错读，纯函数）。
+
+    quota_subscription 块缺省 / 形状异常按默认块解释（未订阅）；
+    registered_epoch_id 非 null 且 enabled 严格为 True 才算接线对象——
+    legacy 任务在本开关下零分支进入，输出零变化。
+    """
+    block = _quota_subscription_view(st)
+    return (block.get("registered_epoch_id") is not None
+            and block.get("enabled") is True)
+
+
 def resume_from_quota(repo_root, task_id, *, status=None) -> dict:
-    """额度唤醒 / SessionStart 的恢复首步（v2.1 §14 恢复入口）。
+    """额度唤醒 / SessionStart 的恢复首步（v2.1 §14 恢复入口；v2.2 C5b
+    增订阅资格门）。
 
     流程：
       1. load_state（任务缺失 TaskManagerError）；
@@ -2416,7 +2627,22 @@ def resume_from_quota(repo_root, task_id, *, status=None) -> dict:
          snapshot，交 scheduler.evaluate + plan_resume 统一口径计算
          recommended_resume_at（§30 最晚 reset + 宽限；缓存不可读 /
          reset 未知 → None 不虚构）；
-      4. status ∈ QUOTA_RESUME_STATUSES（AVAILABLE / PRESSURE）且任务
+      4. C5b 订阅资格门（仅「已注册且 enabled=True」且任务处于
+         waiting_quota / waiting_user 时介入；未注册 / 未启用 → 本步
+         整体跳过，输出零变化）：
+           a. 折算当前 epoch：epoch.evaluate_epoch(detail.status,
+              detail.snapshot.windows)——detail 经 resolver.resolve_
+              quota_detail 读回（status 解析刚完成，新鲜缓存命中零网
+              络）；折算失败（无 snapshot / 无 windows / ValueError）→
+              无法确认新 epoch，保守不转态；
+           b. 崩溃窗口对账（evaluate 之前，_reconcile_activation_
+              journal）：控制面 journal 已有本任务本 epoch 的
+              quota_epoch_advanced 而 state 落后 → 保守视为已激活
+              （best-effort 自愈重写，QC-07 宁可少恢复不重复激活）；
+           c. evaluate_subscription_eligibility 纯判定（对账证据在案
+              时资格被保守推翻）；不 eligible 或四态不放行（EXHAUSTED
+              / UNKNOWN）→ 零转态，返回 dict 增 "subscription" 面；
+      5. status ∈ QUOTA_RESUME_STATUSES（AVAILABLE / PRESSURE）且任务
          处于 waiting_quota / waiting_user → 恢复对账（RB-21-01）：
          逐 waiting_quota 单元按中断来源分类落点——
            - 无 runtime.quota_interrupted_from（legacy）或来源 ready →
@@ -2427,19 +2653,33 @@ def resume_from_quota(repo_root, task_id, *, status=None) -> dict:
              manual_ruling → 保持 waiting_quota；对账异常 fail-closed
              按 manual_ruling。成功落点的单元清除中断来源标记；
          任一 manual_ruling → 任务不转 executing（保持 waiting_quota、
-         resumed=False，不落 quota_resumed）；否则任务转回 executing
-         （waiting_quota → executing 与 waiting_user → executing 均为
-         表内边）+ save + journal quota_resumed {status, source,
-         unit_recovery} + manifest 刷新，返回 {"resumed": True, ...}；
-      5. 其余情形（EXHAUSTED / UNKNOWN 保守等待；任务已不在等待态——
-         如重复唤醒）零转态，返回 {"resumed": False, ...}。
+         resumed=False，不落 quota_resumed；订阅面照附、零 mark）；
+         否则任务转回 executing（waiting_quota → executing 与
+         waiting_user → executing 均为表内边）+ save + journal
+         quota_resumed {status, source, unit_recovery}；
+      6. C5b 订阅任务资格过且实际转态 → mark_activation_epoch(epoch_id)
+         记账。**转态-记账顺序冻结为 evaluate → 转态 → mark**：若先
+         mark 后转态，「mark 已落盘、转态未落盘」的崩溃窗口会把同
+         epoch 的下次恢复卡死（last_activation 已等于当前 epoch，资格
+         门恒判同 epoch 无资格，任务滞留 waiting_quota 直至窗口滚动出
+         新 epoch）——后转态顺序下同一崩溃窗口至多损失一次记账，恢复
+         面零卡死（QC-07 方向：宁可少记账不卡死恢复）；
+      7. manifest 刷新 + 返回 {"resumed": True, ...}；其余情形
+         （EXHAUSTED / UNKNOWN 保守等待；任务已不在等待态——如重复
+         唤醒）零转态，返回 {"resumed": False, ...}。
 
-    返回键：既有冻结四键 {"resumed", "status", "recommended_resume_at",
-    "wake_budget_remaining"} 原样保留 + 新增 "unit_recovery"（RB-21-01：
-    unit id → {"classification", ...按分类透传的 action_required /
-    evidence / rationale}；非恢复分支为 {}）。recommended_resume_at
-    仅在 wake 强刷后 EXHAUSTED 时给出 plan_resume 口径时刻，显式
-    status 恒 None（不读缓存、不虚构）。
+    返回键：既有冻结五键 {"resumed", "status", "recommended_resume_at",
+    "wake_budget_remaining", "unit_recovery"} 原样保留；已注册且启用
+    的任务（waiting 态进入本门时）另增 additive 键 "subscription"：
+      {"registered": True, "eligible": <bool>, "reasons": [...],
+       "epoch_id": <§10.1 形状或 None（折算失败）>}；
+    资格过且实际完成转态的恢复再增 "activated_epoch_id" 与 "mark"
+    （mark_activation_epoch 的冻结三键返回）。未注册 / 未启用任务不
+    加该键（输出零变化——比 registered:false 更硬的 legacy 契约）。
+    recommended_resume_at 仅在 wake 强刷后 EXHAUSTED 时给出 plan_resume
+    口径时刻，显式 status 恒 None（不读缓存、不虚构）。
+    本函数不是消费点：C1b 的 resume-time 窗口消费记账（§15.1 消费事务
+    点冻结的那个 API）恒不被本函数调用——消费接线归 Resume Controller。
     """
     api = "resume_from_quota"
     st = _require_state(repo_root, task_id, api)
@@ -2463,6 +2703,20 @@ def resume_from_quota(repo_root, task_id, *, status=None) -> dict:
         "wake_budget_remaining": _wake_budget_remaining(st),
         "unit_recovery": {},
     }
+    # —— C5b 订阅资格门：已注册且启用的 waiting 任务先裁资格 ——
+    # 未注册 / 未启用（含 legacy 缺块按默认块解释）零分支进入；门内
+    # 不放行（不 eligible / epoch 无法折算 / 四态 EXHAUSTED·UNKNOWN）
+    # → 零转态保守等待，资格面照附（QC-07：宁可少恢复不重复激活）
+    subscription = None
+    if _subscription_active(st) \
+            and st.get("status") in ("waiting_quota", "waiting_user"):
+        subscription = _resume_subscription_gate(repo_root, task_id, st,
+                                                 status)
+        if not (subscription["eligible"]
+                and status in QUOTA_RESUME_STATUSES):
+            result["subscription"] = subscription
+            return result
+        result["subscription"] = subscription
     if status not in QUOTA_RESUME_STATUSES:
         # EXHAUSTED / UNKNOWN：保守等待，零转态（UNKNOWN 不虚构可用性）
         return result
@@ -2504,6 +2758,15 @@ def resume_from_quota(repo_root, task_id, *, status=None) -> dict:
     journal.append_event(repo_root, task_id, {
         "event": "quota_resumed", "status": status, "source": source,
         "unit_recovery": result["unit_recovery"]})
+    if subscription is not None:
+        # C5b 转态-记账顺序（evaluate → 转态 → mark）：mark 在转态落盘
+        # 之后，同 epoch 重标的幂等闸由 mark 自身保证（QC-07 每 epoch
+        # 恰一次）；事件写失败（OSError）按 mark 契约自然上抛不吞——
+        # 转态已 durable，调用方看得见记账证据缺失
+        mark = mark_activation_epoch(repo_root, task_id,
+                                     epoch_id=subscription["epoch_id"])
+        subscription["activated_epoch_id"] = subscription["epoch_id"]
+        subscription["mark"] = mark
     _write_manifest_safe(repo_root, task_id)
     result["resumed"] = True
     result["wake_budget_remaining"] = _wake_budget_remaining(st)

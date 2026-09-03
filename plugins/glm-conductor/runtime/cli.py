@@ -746,7 +746,10 @@ def _quota_resume(repo_root, task_id, raw_status=None) -> int:
     resume_from_quota 薄壳）。status 缺省 None → API 内经 resolver 四级
     层级解析；显式四态直通（CLI 侧词汇闸，非法 → 退出码 2）。EXHAUSTED
     / UNKNOWN 保守等待（resumed=false）是合法结果——退出码 0；任务
-    缺失（TaskManagerError）→ _QuotaFlowRejected（退出码 1）。"""
+    缺失（TaskManagerError）→ _QuotaFlowRejected（退出码 1）。
+    v2.2 C5b：API 返回 dict 原样直出（零加工）——已注册且启用订阅的
+    任务另含 additive 键 "subscription"（资格面），legacy 任务输出零
+    变化；既有键与退出码契约不动。"""
     from runtime import task_manager
     if raw_status is not None and raw_status not in QUOTA_STATUSES:
         raise ValueError(
