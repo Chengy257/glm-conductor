@@ -2258,13 +2258,17 @@ def migrate_quota_window_accounting(repo_root, task_id) -> dict:
       - 一次性：journal 已有 quota_accounting_migrated → 幂等 no-op
         （零写零事件），返回既有记录 + "idempotent": True。
 
-    verified 证据口径：逐条 quota_boundary_consumed 事件取身份键
-    （epoch_id 优先；legacy 人工证据（如 §22.6 所引 2026-09-01T22:20Z
-    boundary five_hour:2026-09-01T21:59:00Z 条目）回退 boundary_id
-    alias；两者皆缺视为不可核验、跳过），按身份去重——同 epoch 重放
-    / 同 boundary 旧证据只计一次（与
+    verified 证据口径（v2.2 C7 双键联合去重，wu-22-C7 ③）：逐条
+    quota_boundary_consumed 事件取其全部在案身份键（epoch_id /
+    boundary_id / executable_boundary_id，每个存在的非空 str；legacy
+    人工证据（如 §22.6 所引 2026-09-01T22:20Z boundary
+    five_hour:2026-09-01T21:59:00Z 条目）以 boundary_id alias 在案，
+    新形态证据以 epoch_id + executable_boundary_id 在案；全缺视为不
+    可核验、跳过）。事件仅当其全部身份键均未见时计入，计入即把全部
+    身份键登入 seen——同 epoch 重放、以及「同窗 legacy boundary-only
+    证据 + 新形态 epoch 证据」不再双计（与
     record_quota_boundary_consumed 的 task_id + epoch_id 幂等 key
-    同构）。
+    同构，并向 boundary 证据面扩展；distinct 窗口照常各计一次）。
 
     归属拆分（§22.6 冻结口径）：
       attributed_consumed = min(legacy_consumed, verified_consumed)
@@ -2313,16 +2317,23 @@ def migrate_quota_window_accounting(repo_root, task_id) -> dict:
     for event in events:
         if event.get("event") != "quota_boundary_consumed":
             continue
-        identity = event.get("epoch_id")
-        if not isinstance(identity, str) or identity == "":
-            # legacy 人工证据只落 boundary_id alias（§22.6 归属口径）
-            identity = event.get("boundary_id")
-        if not isinstance(identity, str) or identity == "":
+        # 双键联合身份去重（v2.2 C7 ③，wu-22-C7）：每条事件的全部在案
+        # 身份键（epoch_id / boundary_id / executable_boundary_id，每个
+        # 存在的非空 str）联合登记——事件仅当全部身份键均未见时计入，
+        # 计入即全部登入 seen。同 epoch 重放 / 同窗 legacy boundary-only
+        # 证据 + 新形态 epoch 证据只计一次，distinct 窗口照常各计一次；
+        # 五字段事件形状 / one-shot / max 不退款语义零变化。
+        identities = []
+        for field in ("epoch_id", "boundary_id", "executable_boundary_id"):
+            value = event.get(field)
+            if isinstance(value, str) and value != "":
+                identities.append(value)
+        if not identities:
             continue  # 无身份键的条目不可核验，不计入
-        if identity in seen:
-            continue  # 同 epoch 重放 / 同 boundary 旧证据只计一次
-        seen.add(identity)
-        verified_ids.append(identity)
+        if any(identity in seen for identity in identities):
+            continue  # 任一身份键已见 → 同窗证据只计一次
+        seen.update(identities)
+        verified_ids.append(identities[0])  # 归属键：epoch_id 优先
     verified_consumed = len(verified_ids)
     new_consumed = max(legacy_consumed, verified_consumed)
     attributed = min(legacy_consumed, verified_consumed)
@@ -2617,9 +2628,136 @@ def _subscription_active(st) -> bool:
             and block.get("enabled") is True)
 
 
+# —— 消费接线（v2.2 C7，wu-22-C7 ①；修正计划 §15.1 消费事务点冻结） ——
+
+def _consumption_boundary_id(repo_root):
+    """消费段 executable_boundary_id 派生（v2.2 C7；D10 形态，无宽限）。
+
+    读当前 epoch snapshot 的 windows（resolver.resolve_quota_detail——
+    与 _epoch_context_after_refresh 同款入口，新鲜缓存命中零网络），
+    复用 wake planner 的 D10 boundary 数学（_bridge_boundary，grace=0
+    ——boundary 只是「被消费的新窗口自身身份」，不是 wake 时刻）：多窗
+    取最早可解析 reset，boundary_id = "<kind>:<reset_at>"（Z 形式串）。
+    detail 缺失 / windows 缺失 / 无可解析窗口 → None（§31 不虚构，调用
+    方跳过消费）；epoch_id 恒为幂等 / 归属权威键，boundary 仅辅助证据。
+    纯读零写。
+    """
+    windows = None
+    try:
+        from runtime.quota import resolver  # 函数内 import：monkeypatch 友好
+        detail = resolver.resolve_quota_detail(repo_root)
+    except Exception:
+        return None
+    if isinstance(detail, dict):
+        snapshot = detail.get("snapshot")
+        if isinstance(snapshot, dict) \
+                and isinstance(snapshot.get("windows"), list):
+            windows = snapshot["windows"]
+    if windows is None:
+        return None
+    boundary, _reset_z, _wake_at = _bridge_boundary(windows, 0)
+    return boundary
+
+
+def _resume_consumption(repo_root, task_id, st, epoch_id) -> dict:
+    """resume 消费段（v2.2 C7 ①；§15.1 消费事务点 = 转态 durable +
+    mark 之后的 commit point）。仅由 resume_from_quota 在订阅路径实际
+    转态后调用；legacy 未注册任务零进入。§22.1 不消费清单（bridge
+    fire / create / arm / no-op、still exhausted、weekly blocked、
+    provider unavailable、manual/notify warm-only、primer、repeated
+    probe）一律到不了本函数。
+
+    顺序即事务序（授权预闸 → boundary 派生 → 迁移 → 消费记账）：
+      1. 授权预闸（_continuity_view 三查镜像；任一不过 → 零调用零副
+         作用，face 给中文 reason）：auto_resume ∈ {auto_once,
+         until_done} AND authorization.source == "user" AND 剩余窗口
+         > 0——manual / notify 永不消费（§22.1）；
+      2. executable_boundary_id 派生（_consumption_boundary_id，D10
+         形态 kind:reset_at，无宽限，即被消费的新窗口自身身份）；无
+         可解析窗口 → 跳过消费不虚构（§31）；
+      3. migrate_quota_window_accounting（幂等 one-shot 先行——迁移
+         先于新形态事件，防双记账；失败 OSError 自然上抛可见）；
+      4. record_quota_boundary_consumed（幂等 key = task_id +
+         epoch_id，resume_started_at = 当前 UTC）：内部三查是预闸后
+         的机械强制（纵深防御）——竞态 TaskManagerError → face 降级
+         不抛（转态已 durable 不回滚），OSError 自然上抛（QC-07 证据
+         丢失必须可见，与 mark 同款）。
+
+    返回 consumption face dict（返回面 additive 键 "consumption"）：
+      {"consumed", "epoch_id", "executable_boundary_id",
+       "consumed_quota_windows", "remaining_quota_windows", "idempotent",
+       "reason"|"error"}——consumed=True 为已记账（幂等命中标
+       idempotent=True）；False 必附中文 reason（预闸不过 / 窗口不可
+       解析跳过）或 error（record 三查竞态的中文拒绝消息）。
+    """
+    view = _continuity_view(st)
+    if view["auto_resume"] not in ("auto_once", "until_done"):
+        return {"consumed": False, "epoch_id": epoch_id,
+                "executable_boundary_id": None,
+                "consumed_quota_windows": view["consumed_quota_windows"],
+                "remaining_quota_windows": view["remaining"],
+                "idempotent": False,
+                "reason": ("授权预闸不过：auto_resume=%r 不在自动续跑授权"
+                           "族（auto_once / until_done）——manual / notify"
+                           " 任务零调用零副作用，永不消费窗口预算（§22.1）"
+                           % (view["auto_resume"],))}
+    if view["source"] != "user":
+        return {"consumed": False, "epoch_id": epoch_id,
+                "executable_boundary_id": None,
+                "consumed_quota_windows": view["consumed_quota_windows"],
+                "remaining_quota_windows": view["remaining"],
+                "idempotent": False,
+                "reason": ("授权预闸不过：authorization.source=%r 非 "
+                           "\"user\"——跨额度窗口自动续跑必须用户明确授权"
+                           "，拒绝消费窗口预算（§22.1）" % (view["source"],))}
+    if view["remaining"] <= 0:
+        return {"consumed": False, "epoch_id": epoch_id,
+                "executable_boundary_id": None,
+                "consumed_quota_windows": view["consumed_quota_windows"],
+                "remaining_quota_windows": view["remaining"],
+                "idempotent": False,
+                "reason": ("授权预闸不过：窗口预算已耗尽（consumed %d / "
+                           "max %d，剩余 %d）——不消费新 epoch，转 "
+                           "waiting_user 等待用户重新授权（§14.5）"
+                           % (view["consumed_quota_windows"],
+                              view["max_quota_windows"], view["remaining"]))}
+    boundary = _consumption_boundary_id(repo_root)
+    if boundary is None:
+        return {"consumed": False, "epoch_id": epoch_id,
+                "executable_boundary_id": None,
+                "consumed_quota_windows": view["consumed_quota_windows"],
+                "remaining_quota_windows": view["remaining"],
+                "idempotent": False,
+                "reason": ("无法从当前 epoch 快照派生 executable_boundary_"
+                           "id（额度明细缺失 / windows 缺失 / 无可解析窗"
+                           "口）——§31 不虚构，跳过消费（epoch_id 仍是幂等"
+                           "与归属权威键）")}
+    # 迁移先于新形态事件（§22.6 one-shot；幂等重放零写；OSError 上抛）
+    migrate_quota_window_accounting(repo_root, task_id)
+    try:
+        record = record_quota_boundary_consumed(
+            repo_root, task_id, epoch_id=epoch_id,
+            executable_boundary_id=boundary,
+            resume_started_at=_utc_now_iso())
+    except TaskManagerError as exc:
+        # 三查竞态（预闸后预算/授权被并发改写）：转态已 durable，face
+        # 降级不抛（绝不炸掉已完成的恢复）；OSError 不在此捕获
+        return {"consumed": False, "epoch_id": epoch_id,
+                "executable_boundary_id": boundary,
+                "consumed_quota_windows": view["consumed_quota_windows"],
+                "remaining_quota_windows": view["remaining"],
+                "idempotent": False,
+                "error": str(exc)}
+    return {"consumed": True, "epoch_id": epoch_id,
+            "executable_boundary_id": record["executable_boundary_id"],
+            "consumed_quota_windows": record["consumed_quota_windows"],
+            "remaining_quota_windows": record["remaining_quota_windows"],
+            "idempotent": bool(record.get("idempotent", False))}
+
+
 def resume_from_quota(repo_root, task_id, *, status=None) -> dict:
     """额度唤醒 / SessionStart 的恢复首步（v2.1 §14 恢复入口；v2.2 C5b
-    增订阅资格门）。
+    增订阅资格门；v2.2 C7 增消费接线）。
 
     流程：
       1. load_state（任务缺失 TaskManagerError）；
@@ -2671,9 +2809,21 @@ def resume_from_quota(repo_root, task_id, *, status=None) -> dict:
          门恒判同 epoch 无资格，任务滞留 waiting_quota 直至窗口滚动出
          新 epoch）——后转态顺序下同一崩溃窗口至多损失一次记账，恢复
          面零卡死（QC-07 方向：宁可少记账不卡死恢复）；
-      7. manifest 刷新 + 返回 {"resumed": True, ...}；其余情形
+      7. C7 消费段（仅订阅路径实际转态后，_resume_consumption；§15.1
+         消费事务点 = 转态 durable + mark 之后的 commit point）：授权
+         预闸（_continuity_view 三查镜像：auto_resume ∈ {auto_once,
+         until_done} AND source=="user" AND remaining>0；不过 →
+         consumption face {consumed:False, reason} 零调用零副作用，
+         manual / notify 永不消费 §22.1）→ executable_boundary_id 派生
+         （当前 epoch 快照最早可解析窗口的 D10 形态 "kind:reset_at"，
+         无宽限；无可解析窗口跳过消费不虚构 §31）→ 先 migrate_quota_
+         window_accounting（幂等 one-shot 先行，防双记账）再 record_
+         quota_boundary_consumed（幂等 key = task_id + epoch_id；
+         三查竞态 TaskManagerError → face 降级不抛——转态已 durable；
+         OSError 自然上抛——QC-07 证据丢失必须可见，与 mark 同款）；
+      8. manifest 刷新 + 返回 {"resumed": True, ...}；其余情形
          （EXHAUSTED / UNKNOWN 保守等待；任务已不在等待态——如重复
-         唤醒）零转态，返回 {"resumed": False, ...}。
+         唤醒）零转态，返回 {"resumed": False, ...}（走不到消费段）。
 
     返回键：既有冻结五键 {"resumed", "status", "recommended_resume_at",
     "wake_budget_remaining", "unit_recovery"} 原样保留；已注册且启用
@@ -2685,8 +2835,36 @@ def resume_from_quota(repo_root, task_id, *, status=None) -> dict:
     加该键（输出零变化——比 registered:false 更硬的 legacy 契约）。
     recommended_resume_at 仅在 wake 强刷后 EXHAUSTED 时给出 plan_resume
     口径时刻，显式 status 恒 None（不读缓存、不虚构）。
-    本函数不是消费点：C1b 的 resume-time 窗口消费记账（§15.1 消费事务
-    点冻结的那个 API）恒不被本函数调用——消费接线归 Resume Controller。
+    v2.2 C7 消费面：资格过且实际完成转态（+mark）的订阅路径恢复再增
+    additive 键 "consumption"（_resume_consumption 的 face dict）：
+      {"consumed", "epoch_id", "executable_boundary_id",
+       "consumed_quota_windows", "remaining_quota_windows", "idempotent",
+       "reason"|"error"}——consumed=True 为已记账（幂等命中标
+       idempotent=True）；False 必附中文 reason（授权预闸不过 / 窗口
+       不可解析跳过，§31 不虚构）或 error（record 三查竞态——转态已
+       durable，不回滚恢复）；重复唤醒（任务已 executing）与 legacy
+       未注册任务零消费键。
+
+    §C7 检查表映射（修正计划 C7：TASK_RESUME 前六查 → 本函数落点）：
+      - new executable epoch    = C5b 订阅资格门（epoch 折算 +
+                                  evaluate_subscription_eligibility +
+                                  崩溃对账，QC-07 同 epoch 不重复激活）；
+      - authorization           = 消费段授权预闸三查之 auto_resume ∈
+                                  {auto_once, until_done} AND
+                                  authorization.source == "user"
+                                  （manual / notify 永不消费 §22.1）；
+      - window budget           = 预闸三查之 remaining > 0（预闸把
+                                  关，record 内部三查机械复核）；
+      - task active             = waiting 族检查（waiting_quota /
+                                  waiting_user 才进门与恢复对账）；
+      - manifest/repo reconcile = 既有单元对账（_reconcile_running_
+                                  unit 四分落点）+ 收尾 manifest 刷新；
+      - permit/lease            = wave-prepare 派发域（M4 租约事务的
+                                  既有职责，此处仅文档化指向——本函数
+                                  不新造调度器）。
+    消费事务序（预闸 → boundary 派生 → 迁移 → 记账）见 _resume_
+    consumption；boundary 为 D10 形态 "kind:reset_at"（最早可解析窗口
+    自身身份，无宽限），epoch_id 恒为幂等 / 归属权威键。
     """
     api = "resume_from_quota"
     st = _require_state(repo_root, task_id, api)
@@ -2773,6 +2951,10 @@ def resume_from_quota(repo_root, task_id, *, status=None) -> dict:
                                      epoch_id=subscription["epoch_id"])
         subscription["activated_epoch_id"] = subscription["epoch_id"]
         subscription["mark"] = mark
+        # —— C7 消费段（§15.1 消费事务点冻结：转态 durable + mark 之后
+        # 的 commit point；仅订阅路径附加，legacy 未注册任务零进入）——
+        result["consumption"] = _resume_consumption(
+            repo_root, task_id, st, subscription["epoch_id"])
     _write_manifest_safe(repo_root, task_id)
     result["resumed"] = True
     result["wake_budget_remaining"] = _wake_budget_remaining(st)

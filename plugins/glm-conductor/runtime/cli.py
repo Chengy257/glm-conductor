@@ -133,9 +133,14 @@
         四级层级解析（四级来源记入 journal quota_resolved）；显式四态
         （QUOTA_STATUSES）直通（source="explicit"，零解析零网络）。
         输出 {resumed, status, recommended_resume_at,
-        wake_budget_remaining}。status 非法 → 退出码 2；任务缺失 →
-        退出码 1；EXHAUSTED / UNKNOWN 保守等待（resumed=false，零转态）
-        是合法结果——退出码仍 0。
+        wake_budget_remaining}；已注册且启用订阅的任务另含 additive 键
+        "subscription"（资格面，v2.2 C5b）与转态恢复时的 "consumption"
+        （消费记账面，v2.2 C7 §15.1 消费事务点——consumed=False 附中文
+        reason / error 降级形态）。status 非法 → 退出码 2；任务缺失 →
+        退出码 1；恢复链 OSError（证据写失败）→ 退出码 3 + {error,
+        guidance}（durable 转态可能已落，幂等重跑安全）；EXHAUSTED /
+        UNKNOWN 保守等待（resumed=false，零转态）是合法结果——退出码
+        仍 0。
     wake-record <repo_root> <task_id> <automation_id> <fires_at>
         唤醒窗口扣减记账（v2.1 M5 §14.4，task_manager.
         record_quota_wake 薄壳；v2.1 legacy 兼容入口——v2.2 persistent
@@ -215,7 +220,12 @@
           save_state 校验闸或状态转换门拒绝——含盘上 state.json 损坏
           的解析拒绝）；
       1 = 异常（任务不存在 / 溯源执行被拒 / 事务被拒 / 意外错误；
-          错误 JSON 只含异常类型名与消息，供操作者排查）。
+          错误 JSON 只含异常类型名与消息，供操作者排查）；
+      3 = durable-but-degraded（v2.2 C7，仅 quota-resume：恢复链
+          OSError——state 落盘 / journal / mark / consumption 证据写
+          失败；错误 JSON 面 {error, guidance}：durable 转态可能已落
+          盘、quota-resume 幂等重跑安全、检查任务 journal 核对 mark /
+          consumption 记账）。
 
 依赖方向：
     本模块是薄壳：校验与变换都在 runtime.execution_policy /
@@ -305,6 +315,13 @@ class _QuotaFlowRejected(Exception):
     """quota 连续性事务被 task_manager 拒绝（任务缺失 / 状态族不符 /
     TaskManagerError；quota-exhausted / quota-resume / wake-record /
     wake-prompt 共用）——运行期拒绝，退出码 1。"""
+
+
+class _QuotaFlowDegraded(Exception):
+    """quota-resume 恢复链遭遇 I/O 失败（OSError：state 落盘 / journal
+    / mark / consumption 证据写；v2.2 C7 wu-22-C7 ②）——durable-but-
+    degraded，退出码 3：durable 转态可能已落盘、quota-resume 幂等重跑
+    安全（区别于 1 拒绝 / 2 参数；错误 JSON 面 {error, guidance}）。"""
 
 
 class _VerifyRejected(Exception):
@@ -770,7 +787,12 @@ def _quota_resume(repo_root, task_id, raw_status=None) -> int:
     缺失（TaskManagerError）→ _QuotaFlowRejected（退出码 1）。
     v2.2 C5b：API 返回 dict 原样直出（零加工）——已注册且启用订阅的
     任务另含 additive 键 "subscription"（资格面），legacy 任务输出零
-    变化；既有键与退出码契约不动。"""
+    变化；既有键与退出码契约不动。
+    v2.2 C7：订阅路径转态恢复另含 additive 键 "consumption"（消费记账
+    面，含 reason / error 降级形态）；恢复链 OSError（state 落盘 /
+    journal / mark / consumption 证据写失败）→ _QuotaFlowDegraded
+    （退出码 3 + {error, guidance} JSON 面——durable 转态可能已落、
+    幂等重跑安全，QC-07 证据丢失必须可见）。"""
     from runtime import task_manager
     if raw_status is not None and raw_status not in QUOTA_STATUSES:
         raise ValueError(
@@ -781,6 +803,8 @@ def _quota_resume(repo_root, task_id, raw_status=None) -> int:
                                                 status=raw_status)
     except task_manager.TaskManagerError as exc:
         raise _QuotaFlowRejected(str(exc)) from exc
+    except OSError as exc:  # C7：durable-but-degraded → 退出码 3
+        raise _QuotaFlowDegraded(str(exc)) from exc
     _emit(result)
     return 0
 
@@ -1255,7 +1279,8 @@ def _dispatch(args) -> int:
 
 
 def main(argv=None) -> int:
-    """CLI 入口：返回退出码（0 成功 / 2 校验拒绝 / 1 异常）。
+    """CLI 入口：返回退出码（0 成功 / 2 校验拒绝 / 1 异常 / 3 durable-
+    but-degraded）。
 
     argv 缺省取 sys.argv[1:]；测试可直接传列表调用。异常映射：
     ValueError（用法 / 参数值 / setter / save_state 校验栈）→ 2；
@@ -1263,8 +1288,12 @@ def main(argv=None) -> int:
     消费 / 已失效）/ _WaveMissing（wave 记录不存在）/ _WaveRejected
     （wave 准备被派发事务层拒绝）/ _QuotaFlowRejected（quota 连续性
     事务被拒）/ _VerifyRejected（溯源执行或审查申报被拒）/
-    _QuotaWatcherConflict（quota-watcher 单实例锁冲突）→ 1；其余
-    意外异常 → 1（错误 JSON 含异常类型名，stdout 契约不破）。
+    _QuotaWatcherConflict（quota-watcher 单实例锁冲突）→ 1；
+    _QuotaFlowDegraded（quota-resume 恢复链 OSError，v2.2 C7）→ 3
+    （错误 JSON 面 {error, guidance}：durable 转态可能已落盘、
+    quota-resume 幂等重跑安全、检查任务 journal 核对 mark /
+    consumption 记账）；其余意外异常 → 1（错误 JSON 含异常类型名，
+    stdout 契约不破）。
     """
     args = list(sys.argv[1:]) if argv is None else list(argv)
     try:
@@ -1277,6 +1306,13 @@ def main(argv=None) -> int:
             _QuotaWatcherConflict) as exc:
         _emit({"error": str(exc)})
         return 1
+    except _QuotaFlowDegraded as exc:  # C7：durable-but-degraded → 3
+        _emit({"error": str(exc),
+               "guidance": ("durable 转态可能已落盘（任务状态机可能已推"
+                            "进）；quota-resume 幂等，可安全重跑；请检查"
+                            "任务 journal 核对 mark / consumption 记账是"
+                            "否在案")})
+        return 3
     except Exception as exc:  # 意外异常兜底：stdout 契约不破
         _emit({"error": "%s: %s" % (type(exc).__name__, exc)})
         return 1

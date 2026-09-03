@@ -1051,7 +1051,8 @@ class ResumeSubscriptionGateTest(WiringCase):
         result = self.resume(windows=WINDOWS_B)
         self.assertTrue(result["resumed"])
         self.assertEqual(sorted(result.keys()),
-                         sorted(RESUME_FROZEN_KEYS + ["subscription"]))
+                         sorted(RESUME_FROZEN_KEYS
+                                + ["subscription", "consumption"]))
         face = result["subscription"]
         self.assertTrue(face["registered"])
         self.assertTrue(face["eligible"])
@@ -1321,7 +1322,8 @@ class CliSubscriptionFaceTest(WiringCase):
         self.assertEqual(code, 0)
         self.assertTrue(payload["resumed"])
         self.assertEqual(sorted(payload.keys()),
-                         sorted(RESUME_FROZEN_KEYS + ["subscription"]))
+                         sorted(RESUME_FROZEN_KEYS
+                                + ["subscription", "consumption"]))
         self.assertTrue(payload["subscription"]["eligible"])
         self.assertEqual(payload["subscription"]["activated_epoch_id"],
                          EPOCH_OF_B)

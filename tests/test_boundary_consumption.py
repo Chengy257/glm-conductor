@@ -11,7 +11,9 @@
     consumed/remaining；
   - §22.6：migrate_quota_window_accounting——保守迁移 max 语义不退款
     （new_consumed >= legacy_consumed 恒成立）、数字相同仍写一次性
-    quota_accounting_migrated 五字段事件、重复触发幂等 no-op；
+    quota_accounting_migrated 五字段事件、重复触发幂等 no-op；v2.2 C7
+    双键联合去重（epoch_id / boundary_id / executable_boundary_id 全
+    身份键登记 seen，同窗 legacy + 新形态证据不双计）；
   - §22.5：reconcile_wake_bridge_from_host——纯账本对账（host_status
     由调用方显式传入，零宿主调用 / 零 CronList 概念）、对账只能降级
     / 确认、journal 历史单独绝不制造 armed 桥；
@@ -113,15 +115,19 @@ class ConsumptionTestBase(unittest.TestCase):
             boundary_id=boundary_id, reset_at="2026-09-01T21:59:00Z",
             wake_at="2026-09-01T22:04:00Z")
 
-    def append_consumed_event(self, *, epoch_id=None, boundary_id=None):
+    def append_consumed_event(self, *, epoch_id=None, boundary_id=None,
+                              executable_boundary_id=None):
         """直接向 journal 注入一条 quota_boundary_consumed 证据（迁移
         verified 口径的输入；模拟 §22.6 所引 2026-09-01 人工证据时用
-        boundary_id alias 形态）。"""
+        boundary_id alias 形态；v2.2 C7 双键去重用例另以
+        executable_boundary_id 注入新形态 §C1b 事件）。"""
         event = {"event": "quota_boundary_consumed"}
         if epoch_id is not None:
             event["epoch_id"] = epoch_id
         if boundary_id is not None:
             event["boundary_id"] = boundary_id
+        if executable_boundary_id is not None:
+            event["executable_boundary_id"] = executable_boundary_id
         event["resume_started_at"] = RESUME_AT
         return journal.append_event(self.repo, TID, event)
 
@@ -285,12 +291,28 @@ class RecordQuotaBoundaryConsumedTest(ConsumptionTestBase):
                 self.repo, TID, epoch_id=EPOCH_A,
                 executable_boundary_id=BOUNDARY_A, resume_started_at=RESUME_AT)
 
-    def test_resume_from_quota_not_wired_to_consumption(self):
-        """§15.1 纪律锚定：C1b 只提供 API 不接线——resume_from_quota
-        函数体内不调用新消费 API（接线归 Resume Controller 工作单元）。"""
+    def test_resume_from_quota_wired_to_consumption_at_commit_point(self):
+        """§15.1 纪律锚定（v2.2 C7 翻转 C1b 的「不接线」锚——接线归
+        C7 Resume Controller 单元，wu-22-C7 已落地）：resume_from_quota
+        剥离 docstring 的函数体内消费段接线在案（_resume_consumption
+        落在 mark 之后的 commit point），且消费段体内 record 调用唯一
+        （resume 侧 §15.1 唯一消费点）并先 migrate 后 record（迁移先于
+        新形态事件，防双记账）。"""
         import inspect
-        body = inspect.getsource(task_manager.resume_from_quota)
-        self.assertNotIn("record_quota_boundary_consumed", body)
+        resume_body = inspect.getsource(
+            task_manager.resume_from_quota).split('"""', 2)[2]
+        self.assertIn("_resume_consumption(", resume_body)
+        self.assertIn("mark_activation_epoch(", resume_body)
+        self.assertLess(resume_body.index("mark_activation_epoch("),
+                        resume_body.index("_resume_consumption("))
+        segment_body = inspect.getsource(
+            task_manager._resume_consumption).split('"""', 2)[2]
+        self.assertEqual(
+            segment_body.count("record_quota_boundary_consumed("), 1)
+        self.assertIn("migrate_quota_window_accounting(", segment_body)
+        self.assertLess(
+            segment_body.index("migrate_quota_window_accounting("),
+            segment_body.index("record_quota_boundary_consumed("))
 
 
 # —— migrate_quota_window_accounting（§22.6） ——
@@ -369,6 +391,54 @@ class MigrateQuotaWindowAccountingTest(ConsumptionTestBase):
         self.assertEqual(result["verified_boundary_ids"], [EPOCH_A])
         self.assertEqual(result["new_consumed"], 1)
         self.assertEqual(self.consumed(), 1)
+
+    # —— v2.2 C7 双键联合去重（wu-22-C7 ③）：seen 登记全部身份键 ——
+
+    def test_dual_key_legacy_boundary_and_new_epoch_same_window_count_once(self):
+        """同窗 legacy boundary-only 人工证据 + 新形态 epoch 证据
+        （executable_boundary_id 同窗同值）不再双计——verified 计一次，
+        max 不退款语义不变（new >= legacy 恒成立）。"""
+        self.save_task(max_quota_windows=3)
+        self.set_consumed(1)
+        self.append_consumed_event(boundary_id=BOUNDARY_A)
+        self.append_consumed_event(epoch_id=EPOCH_A,
+                                   executable_boundary_id=BOUNDARY_A)
+        result = task_manager.migrate_quota_window_accounting(
+            self.repo, TID)
+        self.assertEqual(len(result["verified_boundary_ids"]), 1)
+        self.assertEqual(result["new_consumed"], 1)
+        self.assertEqual(result["new_consumed"] >= result["legacy_consumed"],
+                         True)
+        self.assertEqual(self.consumed(), 1)
+
+    def test_dual_key_same_boundary_via_executable_field_dedup(self):
+        """executable_boundary_id 在案身份值同样登记进 seen：不同 epoch
+        但 executable_boundary_id 同窗的两条证据只计第一条。"""
+        self.save_task(max_quota_windows=3)
+        self.set_consumed(1)
+        self.append_consumed_event(epoch_id=EPOCH_A,
+                                   executable_boundary_id=BOUNDARY_A)
+        self.append_consumed_event(epoch_id=EPOCH_B,
+                                   executable_boundary_id=BOUNDARY_A)
+        result = task_manager.migrate_quota_window_accounting(
+            self.repo, TID)
+        self.assertEqual(result["verified_boundary_ids"], [EPOCH_A])
+        self.assertEqual(result["new_consumed"], 1)
+        self.assertEqual(self.consumed(), 1)
+
+    def test_dual_key_distinct_windows_count_separately(self):
+        """去重面不放大：身份键全不同的 distinct 窗口照常各计一次。"""
+        self.save_task(max_quota_windows=4)
+        self.set_consumed(1)
+        self.append_consumed_event(epoch_id=EPOCH_A,
+                                   executable_boundary_id=BOUNDARY_A)
+        self.append_consumed_event(epoch_id=EPOCH_B,
+                                   executable_boundary_id=BOUNDARY_B)
+        result = task_manager.migrate_quota_window_accounting(
+            self.repo, TID)
+        self.assertEqual(result["verified_boundary_ids"], [EPOCH_A, EPOCH_B])
+        self.assertEqual(result["new_consumed"], 2)
+        self.assertEqual(self.consumed(), 2)
 
     def test_identityless_events_not_verified(self):
         """epoch_id / boundary_id 皆缺的条目不可核验，不计入 verified。"""
