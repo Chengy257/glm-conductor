@@ -354,6 +354,15 @@ def count_trailing_gate_blocks(repo, task_id):
     无关（参数名保留 repo 仅为签名兼容）。
     连续 = 逐条向前直到遇到任一非 gate_blocked 事件或耗尽。模型在两次
     block 之间完成真实工作（journal 出现其他事件）→ 链断 → 重新计数。
+    唯一 carve-out（wu-22-C8a）：reason 为 "continuity_" 前缀字符串的
+    gate_degraded 事件**跳过不破链**——那是 continuity health 检查在
+    每次 Stop 求值时无条件写的 gate 侧注记（降级放行方向的可见记账），
+    不是模型在两次 block 之间做的真实工作；若让它破链，域内降级 +
+    持续违规任务的 trailing 链恒为 [gate_degraded(continuity_*),
+    gate_blocked]，计数永不达 GATE_BLOCK_LIMIT，gate_exhausted 释放阀
+    失效 → 无限 block。其余 gate_degraded（orphaned_task /
+    corrupt_state / evaluation_error 等模型侧或既有降级语义）及
+    gate_passed 等其他事件照旧破链。
     read_events 的容错语义（坏行跳过）天然适配部分写入场景。
     """
     from runtime import journal
@@ -362,6 +371,11 @@ def count_trailing_gate_blocks(repo, task_id):
     for item in reversed(journal.read_events(repo, task_id)):
         if item.get("event") == "gate_blocked":
             count += 1
+        elif (item.get("event") == "gate_degraded"
+                and isinstance(item.get("reason"), str)
+                and item["reason"].startswith("continuity_")):
+            # gate 侧 continuity 注记 ≠ 模型工作：跳过不破链
+            continue
         else:
             break
     return count

@@ -770,6 +770,66 @@ class ContinuityTrioMatrixGateTest(GitRepoFixture):
             ["gate_blocked", "gate_blocked", "gate_exhausted"])
         self.assertEqual(events[-1]["check"], "continuity_transport_unknown")
 
+    def test_continuity_degrade_interleaved_still_exhausts(self):
+        # wu-22-C8a 回归：continuity 降级注记（gate_degraded，
+        # reason=continuity_*）是 gate 侧每次 Stop 求值时无条件写的
+        # 观测面事件，不是模型在两次 block 之间做的真实工作——不得
+        # 打断 trailing gate_blocked 计数链。域内 obligation=degraded
+        # 短路降级 + 持续四重违规（ownership 越界）：前两次 Stop 各记
+        # [gate_degraded(continuity_*), gate_blocked]，第 3 次 Stop
+        # 必须经既有 gate_exhausted 释放阀放行（恢复 C8 之前语义），
+        # 而不是被注记破链后无限 block。
+        self.add_continuity_task(
+            continuation=make_continuation(obligation="degraded"))
+        self.write("src/rogue.ts", b"rogue\n")
+        first = run_gate("{}", self.repo)
+        second = run_gate("{}", self.repo)
+        self.assertEqual(json.loads(first.stdout)["decision"], "block")
+        self.assertEqual(json.loads(second.stdout)["decision"], "block")
+        self.assertIn("ENFORCEMENT DEGRADED", first.stderr)
+        self.assertEqual(
+            [e["event"] for e in self.journal_events()],
+            ["gate_degraded", "gate_blocked",
+             "gate_degraded", "gate_blocked"])
+        events = self.journal_events()
+        self.assertEqual(events[0]["reason"],
+                         "continuity_obligation_degraded")
+        self.assertEqual(events[1]["check"], "ownership")
+        third = run_gate("{}", self.repo)
+        self.assertEqual(third.returncode, 0)
+        self.assertEqual(third.stdout, "")  # 释放阀放行，不再 block
+        self.assertIn("ENFORCEMENT GATE EXHAUSTED", third.stderr)
+        events = self.journal_events()
+        # 第 3 次 Stop 先经降级注记（求值期写），再经释放阀记
+        # gate_exhausted——注记夹在链中不再破链
+        self.assertEqual(
+            [e["event"] for e in events],
+            ["gate_degraded", "gate_blocked",
+             "gate_degraded", "gate_blocked",
+             "gate_degraded", "gate_exhausted"])
+        self.assertEqual(events[-1]["check"], "ownership")
+
+    def test_non_continuity_degrade_still_breaks_exhaustion_chain(self):
+        # 对照（carve-out 不泛化）：两次 Stop 之间夹一条非 continuity_
+        # 前缀的 gate_degraded（模型侧 / 既有降级语义，如
+        # orphaned_task）照旧破链——第 3 次 Stop 不得触发
+        # gate_exhausted，释放阀不被降级注记泛化绕过。
+        self.add_continuity_task(
+            continuation=make_continuation(obligation="degraded"))
+        self.write("src/rogue.ts", b"rogue\n")
+        first = run_gate("{}", self.repo)
+        self.assertEqual(json.loads(first.stdout)["decision"], "block")
+        # 在两次 Stop 之间向任务 journal 手工注入非 continuity 降级事件
+        journal_mod.append_event(self.repo, TID, {
+            "event": "gate_degraded", "reason": "orphaned_task"})
+        second = run_gate("{}", self.repo)
+        third = run_gate("{}", self.repo)
+        self.assertEqual(json.loads(second.stdout)["decision"], "block")
+        self.assertEqual(json.loads(third.stdout)["decision"], "block")
+        self.assertNotIn("ENFORCEMENT GATE EXHAUSTED", third.stderr)
+        self.assertNotIn("gate_exhausted",
+                         [e["event"] for e in self.journal_events()])
+
     def test_obligation_degraded_short_circuit_at_gate(self):
         # obligation=degraded → 直接降级放行（handoff 缺失也不重审为 block）
         self.add_continuity_task(
