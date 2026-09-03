@@ -257,6 +257,6 @@ C4 `runtime/quota/primer.py`（commit 9147e01）机械落地：幂等单飞键 =
   回合）；reviewer 留账项全吸收
   （C6 四项入 C6 提交、C7 P3-3 guidance 措辞澄清留待未来措辞更新
   ——重跑 quota-resume 不补记账，仅 journal 核对）。
-  **13:3xZ 复审修正（fix-first 落地）**：行 3 首触回算勘正
+  **13:1xZ 复审修正（fix-first 落地）**：行 3 首触回算勘正
   18:40:17Z；§5.1 采样数勘正 32；头部/§2 primer 缺席措辞改时点
   口径；§8 端点 grep 声明改审计时点（pre-C4）时态。

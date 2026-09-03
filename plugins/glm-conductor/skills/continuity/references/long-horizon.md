@@ -209,11 +209,11 @@ delegability or assurance.
 - **触发内容** = 上述结构化 resume prompt（已替换 TASK_ID 与 checkpoint 路径）
 - **触发节奏** = 安全周期性再激活，例如每 30-60 分钟检查一次，而非 sleep 5 小时
 
-**调度触发即存活探针**：唤醒成功启动即说明模型执行当前可用，直接进入恢复流程；唤醒失败或未启动则不会产生任何仓库改动，自然等待下次触发。额度感知调度（provider-api 模式，见 SKILL.md「Quota-Aware Scheduling」）在此之上提供精确 reset 时间规划；不可用时回退到本探针机制，不实现常驻额度轮询器。
+**调度触发即存活探针**：唤醒成功启动即说明模型执行当前可用，直接进入恢复流程；唤醒失败或未启动则不会产生任何仓库改动，自然等待下次触发。额度感知调度（provider-api 模式，见 SKILL.md「Quota-Aware Scheduling」）在此之上提供精确 reset 时间规划；不可用时回退到本探针机制。v2.2 起常驻观察如需启用，用 runtime 提供的可选 `quota-watcher`（本地 poll-only 进程，零模型调用）——不自写轮询脚本；唤醒载体优先用 persistent wake bridge（`wake-plan` 裁决 → 主会话宿主 CronCreate → `arm` 记账，recurring 桥按间隔重复触发），一次性 resume prompt 仍适用于单次场景。
 
 **同会话投递要求**：若希望结果回到当前会话，必须从当前聊天/会话内创建绑定本会话的定时续作；从通用入口创建的分离 automation 不会把结果送回当前会话，两者不等价。跨会话自包含恢复（全新上下文 + 指定 checkpoint）始终可用，适用于不需要同会话投递的场景。
 
-不硬编码重置周期：额度政策可能变化，任何固定周期都会在政策变化后静默失效。额度感知调度在 reset 时间已知时按 max(reset)+grace 精确规划唤醒，未知或不可得时回退到周期性再激活——两者都只依赖"唤醒时重新检查"这一动作，与具体政策解耦。
+不硬编码重置周期：额度政策可能变化，任何固定周期都会在政策变化后静默失效。额度感知调度在 reset 时间已知时按 max(reset)+grace 精确规划唤醒（v2.2 executable boundary 口径：阻塞窗中最晚可解析 reset+grace），未知或不可得时回退到周期性再激活——两者都只依赖"唤醒时重新检查"这一动作，与具体政策解耦。窗口滚动语义（v2.2 实测口径）：下一个 reset_at 只在新窗口内发生模型调用时才物化，纯查询绝不推进它——纯轮询观察不会把窗口"等过去"，恢复时必须触发真实模型调用（或经 primer，默认关闭）才算换新。
 
 每次唤醒的任务量应小——做一轮检查，然后恢复或继续一段工作——避免单次唤醒塞满全部剩余工作。
 
@@ -235,9 +235,11 @@ ZCode 闲时任务支持配置了自定义模型的子智能体。无人值守�
 目标完成并验收后的动作清单（只作用于本任务）：
 
 1. 删除本任务目录 `.glm-conductor/tasks/<task-id>/`（仅此目录，不得触碰其他任务的状态）
-2. 移除与该 TASK_ID 关联的定时任务
+2. 移除与该 TASK_ID 关联的定时任务——persistent wake bridge 的宿主 CronDelete 是**会话侧单次尝试**动作（v2.2 C1a：绝不重试；删除失败按降级上报，不循环尝试）
 3. 终止该任务的闲时任务排队
 4. 向用户报告最终状态
+
+会话侧宿主动作纪律（v2.2）：runtime 自身零宿主 `Cron*` 调用——CronCreate/CronDelete/CronUpdate 由主会话执行；宿主事实（CronList 观测结论）经 `wake-reconcile <repo> <task> <host_status>` 显式回灌对账，对账只能确认/降级，绝不制造 armed。窗口预算与 automation 存活解耦：arm/fire/create 一律不消费，消费只发生在 `quota-resume` 的 §15.1 commit point（同 epoch 幂等）。
 
 ## Failure Cases
 
