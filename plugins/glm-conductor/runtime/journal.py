@@ -7,6 +7,10 @@
     append-only 追加、容错读取、尾部查询。用途是本地执行溯源
     （调试 / 恢复 / 审计），不是遥测
     （docs/glm-conductor-v2-upgrade-guide-final.md §54-§56）。
+    v2.2 C5a（wu-22-C5a）起增设控制面 journal
+    `.glm-conductor/quota/events.jsonl`（与 watcher.json / primer.json
+    同层）：无任务上下文的控制面事件（quota_epoch_advanced、
+    window_primed 等）统一落此处，不再借用伪任务目录。
 
 约束（§56）：
     - append-only：append_event 是本模块唯一写入口，只以追加模式（"a"）
@@ -98,6 +102,10 @@ RECOMMENDED_EVENTS = (
     # 授权 / §C4 红线；词汇仍开放式，本常量只作文档性推荐，append_event
     # 不强制成员资格）——
     "window_primed",  # Window Primer 单飞执行落账（§8.1：一次最小模型调用使新窗口 materialize + 强制 quota refresh 二次确认；materialized 只看 reset_at/epoch 变化——HTTP 200 与百分比下降都不是证据，§C4 红线；executable=False 时无 ActivationReady 概念，归 C5）
+    # —— v2.2 C5a 控制面事件（修正计划 §13 事件词汇 / §QC-07；本常量
+    # 只作文档性推荐，append_event / append_control_plane_event 均不
+    # 强制成员资格）——
+    "quota_epoch_advanced",  # quota epoch 推进记账（§QC-07：epoch 推进 → 恰一条；落在控制面 journal 而非任务 journal——epoch 推进无任务上下文也可发生，落点见 append_control_plane_event）
 )
 
 
@@ -199,3 +207,91 @@ def tail_events(repo_root, task_id, n=20, *, event=None):
     if event is not None:
         events = [item for item in events if item.get("event") == event]
     return events[-n:]
+
+
+# —— 控制面 journal（v2.2 C5a，wu-22-C5a） ——
+
+# 控制面 journal 相对布局：<repo_root>/.glm-conductor/quota/events.jsonl
+# （与 watcher.json / primer.json 同层不同文件，互不越界）。控制面事件
+# 无任务上下文（quota epoch 推进先于任何具体任务存在），落在 quota
+# 目录而非 tasks/<伪任务>/——伪任务目录会被 discover_tasks 判为
+# orphaned 噪声、污染任务枚举（C4 reviewer P2 的正解落点）。
+CONTROL_PLANE_DIR_PARTS = (".glm-conductor", "quota")
+
+
+def control_plane_journal_path(repo_root):
+    """返回控制面 journal 路径 <repo_root>/.glm-conductor/quota/events.jsonl。"""
+    return (Path(repo_root) / CONTROL_PLANE_DIR_PARTS[0]
+            / CONTROL_PLANE_DIR_PARTS[1] / JOURNAL_FILENAME)
+
+
+def append_control_plane_event(repo_root, event, *, ts=None):
+    """向控制面 journal 追加一条事件，返回写入的完整事件 dict（含 ts）。
+
+    与 append_event 逐字同构（同一校验、同一单行 JSON 落盘格式、同一
+    ts 管理纪律），只是落点不同——本函数写
+    `.glm-conductor/quota/events.jsonl`，不触碰任何任务 journal；
+    append_event 的既有行为与签名零改动（两函数并存，互不委托）。
+    quota_epoch_advanced 等 §13 控制面事件经本函数落盘（QC-07：每
+    epoch 恰一条，落点 = 控制面）。
+
+    校验（结构性错误抛 JournalError，且在任何 I/O 之前完成）：
+      - event 必须是 dict 且含非空 str 的 "event" 键；
+      - event 不得含 "ts" 键（时间戳由本函数管理，调用方不得伪造）。
+
+    ts：缺省时自动生成 datetime.now(timezone.utc).isoformat(
+        timespec="milliseconds")；也可显式传入 ISO8601 字符串
+        （测试 / 回放用）。
+
+    写入：单行 JSON（UTF-8、ensure_ascii=False、键序保持插入序，
+    ts 为首键）+ "\\n"，目录不存在自动创建（parents=True）。
+    I/O 异常（OSError 等）自然向上抛，不吞。
+    """
+    if not isinstance(event, dict):
+        raise JournalError("event 必须是 dict，得到 %s" % type(event).__name__)
+    name = event.get("event")
+    if not isinstance(name, str) or not name:
+        raise JournalError('event 必须含非空 str 的 "event" 键')
+    if "ts" in event:
+        raise JournalError('event 不得自带 "ts" 键（时间戳由 append_control_plane_event 管理）')
+
+    if ts is None:
+        ts = datetime.now(timezone.utc).isoformat(timespec="milliseconds")
+
+    # 不改动调用方传入的 dict；ts 置首，其余键保持插入序
+    record = {"ts": ts}
+    record.update(event)
+
+    path = control_plane_journal_path(repo_root)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    # newline="\n"：Windows 下也不做换行翻译，保证文件恒为 "\n" 分隔的 jsonl
+    with path.open("a", encoding="utf-8", newline="\n") as fh:
+        fh.write(json.dumps(record, ensure_ascii=False) + "\n")
+    return record
+
+
+def read_control_plane_events(repo_root):
+    """按文件顺序读取控制面 journal 的全部事件，返回 dict 列表。
+
+    容错：文件不存在返回 []；空白行跳过；坏行（JSON 解析失败或解析
+    结果非 dict）跳过——与 read_events 的默认容错同风格（截断尾行
+    常见于写入中断，不能让整个日志不可读）。按 "\\n" 切分行（理由同
+    read_events：事件值中的 U+0085 / U+2028 / U+2029 是合法 JSON 单行
+    内容，splitlines 会在这些字符处错误断行）；errors="replace" 容忍
+    尾部撕裂的多字节字符。本函数绝不抛（供测试与后续消费方容错读）。
+    """
+    path = control_plane_journal_path(repo_root)
+    if not path.is_file():
+        return []
+    text = path.read_text(encoding="utf-8", errors="replace")
+    events = []
+    for line in text.split("\n"):
+        if not line.strip():
+            continue
+        try:
+            item = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(item, dict):
+            events.append(item)
+    return events

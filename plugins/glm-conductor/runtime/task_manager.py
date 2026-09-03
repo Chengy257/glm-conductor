@@ -254,6 +254,22 @@ DRAINING 派发闸（v2.2 M4，wu-22-04；决策记录 D6/D7/D13）：
     journal），随后 prepare_dispatch 即可直接准入下一单元——主会话
     不再手工转态。
 
+Quota Subscription 三 API（v2.2 C5a，wu-22-C5a，主计划 §14 adapted）：
+    「Task 只订阅 quota，不再拥有 quota clock」的执行面落点——订阅
+    事实记在任务 state 顶层 quota_subscription 块（形状真相源
+    state.DEFAULT_QUOTA_SUBSCRIPTION / 规则 8.9 validator；epoch 身份
+    用 §10.1 epoch_id 字符串等值比较，不引入 §14 草图的 int 序数）：
+      - register_quota_subscription：幂等注册（同参重注册零写零事件，
+        冻结口径见其 docstring），continuation_mode 缺省镜像
+        execution_policy.continuity.auto_resume，任务 journal 记
+        quota_subscription_registered；
+      - evaluate_subscription_eligibility：纯资格判定（零转态零写零
+        事件；不做 authorization / budget / reconcile，归 C7）；
+      - mark_activation_epoch：激活记账（QC-07 每 epoch 恰一次——同
+        epoch_id 重标零写零事件；控制面 quota_epoch_advanced 事件经
+        journal.append_control_plane_event 落
+        .glm-conductor/quota/events.jsonl）。
+
 分层关系：
     runtime.dispatcher —— 纯决策器：plan_dispatch 零 I/O，只产出「谁可
         派发 / 谁挂起及理由」的决策 dict；本层在 prepare 中消费它；
@@ -3338,3 +3354,250 @@ def degrade_continuity(repo_root, task_id, *,
     journal.append_event(repo_root, task_id, {
         "event": "continuity_degraded", "reason": reason})
     return {"obligation": "degraded", "reason": reason}
+
+
+# —— Quota Subscription（v2.2 C5a，wu-22-C5a；主计划 §14 规范 adapted） ——
+
+# §14 「Task 只订阅 quota，不再拥有 quota clock」的执行面落点：订阅事实
+# 记在任务 state 顶层 quota_subscription 块（形状真相源是 state.py 的
+# DEFAULT_QUOTA_SUBSCRIPTION / 规则 8.9 validator），本节提供三个事务
+# API（注册 / 纯资格判定 / 激活记账）。
+#
+# 规格适配（§14 草图 → 本实现）：§14 草图的 registered_epoch:17 是 int
+# 序数示意——epoch 身份一律用 §10.1 epoch_id 字符串（"glm:"+指纹前
+# 16 hex，C2 冻结：fingerprint 等值比较、与窗口顺序无关、durable 重建
+# 安全），新旧判定只用字符串等值，不引入任何 int 序数。
+#
+# 词汇：minimum_state / continuation_mode 两枚举与「供比较的档位序」
+# 的单一真相源在 state.py（QUOTA_SUBSCRIPTION_MINIMUM_STATES /
+# QUOTA_SUBSCRIPTION_CONTINUATION_MODES / is_quota_epoch_id），本节只
+# 消费不复制。
+
+# minimum_state 档位序的本地冻结映射（QC-07 判定用；序见
+# QUOTA_SUBSCRIPTION_MINIMUM_STATES 注释——索引越小档位越高，
+# AVAILABLE > PRESSURE > DRAINING > EXHAUSTED。provider_status 达到
+# minimum_state 档位及以上 = rank(provider_status) <=
+# rank(minimum_state)）。
+_QUOTA_SUBSCRIPTION_STATE_RANK = {
+    name: rank for rank, name in enumerate(state.QUOTA_SUBSCRIPTION_MINIMUM_STATES)
+}
+
+# register_quota_subscription 返回冻结六键（块五键视图 + idempotent）
+QUOTA_SUBSCRIPTION_RESULT_KEYS = (
+    "enabled", "registered_epoch_id", "last_activation_epoch_id",
+    "minimum_state", "continuation_mode", "idempotent")
+
+
+def _quota_subscription_view(st) -> dict:
+    """容错读任务的 quota_subscription 块（legacy 缺块 / 形状异常按
+    default_quota_subscription() 兜底——纠错归 validate_state 规则 8.9）。
+    纯读：不改入参、零 I/O。"""
+    block = st.get("quota_subscription")
+    if not isinstance(block, dict):
+        return state.default_quota_subscription()
+    return block
+
+
+def _subscription_state_satisfied(provider_status, minimum_state) -> bool:
+    """provider_status 是否达到 minimum_state 档位及以上（纯函数）。
+
+    档位序本地冻结（_QUOTA_SUBSCRIPTION_STATE_RANK 注释）：任一方不在
+    四档词汇内（含观测面 UNKNOWN——订阅阈值词汇与观测四态不同，绝不
+    猜测折算）→ False（保守不满足，§31 不虚构）。
+    """
+    rank = _QUOTA_SUBSCRIPTION_STATE_RANK.get(provider_status)
+    minimum = _QUOTA_SUBSCRIPTION_STATE_RANK.get(minimum_state)
+    if rank is None or minimum is None:
+        return False
+    return rank <= minimum
+
+
+def register_quota_subscription(repo_root, task_id, *, epoch_id,
+                                minimum_state="AVAILABLE",
+                                continuation_mode=None) -> dict:
+    """注册 / 更新任务的 quota subscription（§14；幂等）。
+
+    写顶层 quota_subscription 块：enabled=True、registered_epoch_id=
+    epoch_id、minimum_state、continuation_mode（五键冻结形状，过
+    validate_state 规则 8.9 闸落盘）。last_activation_epoch_id 不由本
+    API 触碰（激活记账归 mark_activation_epoch）。
+
+    幂等语义（冻结口径）：块已存在且五键目标值全部相等（含经镜像解析
+    后的 continuation_mode）→ 零状态写、零 journal 事件，返回当前块
+    视图 + "idempotent": True；否则（无块建块 / 任一键值变化）写块 +
+    任务 journal 一条 quota_subscription_registered 事件
+    {registered_epoch_id, minimum_state, continuation_mode}，返回
+    "idempotent": False。
+
+    参数（校验先于任何 I/O，中文 ValueError）：
+      - epoch_id：§10.1 形状（"glm:"+16hex，state.is_quota_epoch_id）；
+      - minimum_state：∈ state.QUOTA_SUBSCRIPTION_MINIMUM_STATES，缺省
+        "AVAILABLE"；
+      - continuation_mode：None（缺省）→ 从任务 execution_policy.
+        continuity.auto_resume 容错镜像读（_continuity_view——缺块 /
+        词汇外保守落 "manual"，§14.2-§14.5 同一事实源）；显式传入须
+        ∈ state.QUOTA_SUBSCRIPTION_CONTINUATION_MODES。
+
+    任务缺失 → TaskManagerError；JSON 损坏 ValueError 上抛。
+    返回冻结六键 dict（QUOTA_SUBSCRIPTION_RESULT_KEYS）。
+    """
+    api = "register_quota_subscription"
+    if not state.is_quota_epoch_id(epoch_id):
+        raise ValueError(
+            "%s：epoch_id 必须是 \"glm:\"+16 位十六进制的 epoch_id"
+            "（§10.1 形状），得到 %r" % (api, epoch_id))
+    if minimum_state not in state.QUOTA_SUBSCRIPTION_MINIMUM_STATES:
+        raise ValueError(
+            "%s：minimum_state %r 不在合法取值内（%s）"
+            % (api, minimum_state,
+               ", ".join(state.QUOTA_SUBSCRIPTION_MINIMUM_STATES)))
+    if continuation_mode is not None \
+            and continuation_mode \
+            not in state.QUOTA_SUBSCRIPTION_CONTINUATION_MODES:
+        raise ValueError(
+            "%s：continuation_mode %r 不在合法取值内（%s）"
+            % (api, continuation_mode,
+               ", ".join(state.QUOTA_SUBSCRIPTION_CONTINUATION_MODES)))
+    st = _require_state(repo_root, task_id, api)
+    if continuation_mode is None:
+        # §14：缺省镜像执行策略的续跑授权词汇（同一事实源，不复制默认）
+        continuation_mode = _continuity_view(st)["auto_resume"]
+    block = st.get("quota_subscription")
+    target = {
+        "enabled": True,
+        "registered_epoch_id": epoch_id,
+        "last_activation_epoch_id": (
+            block.get("last_activation_epoch_id")
+            if isinstance(block, dict) else None),
+        "minimum_state": minimum_state,
+        "continuation_mode": continuation_mode,
+    }
+    if isinstance(block, dict) and all(
+            block.get(key) == value for key, value in target.items()):
+        # 同参重注册：零写零事件（幂等返回；返回块视图拷贝，不改 st）
+        result = _quota_subscription_view(st)
+        result = dict(result)
+        result["idempotent"] = True
+        return result
+    st["quota_subscription"] = target
+    state.save_state(repo_root, st)
+    journal.append_event(repo_root, task_id, {
+        "event": "quota_subscription_registered",
+        "registered_epoch_id": epoch_id,
+        "minimum_state": minimum_state,
+        "continuation_mode": continuation_mode})
+    result = dict(target)
+    result["idempotent"] = False
+    return result
+
+
+def evaluate_subscription_eligibility(repo_root, task_id, *,
+                                      current_epoch_id,
+                                      current_executable,
+                                      provider_status) -> dict:
+    """纯资格判定：本任务当前 epoch 是否有资格激活（§14 eligible）。
+
+    纯函数纪律：只读 state.json，零转态、零写、零事件、零网络——
+    派发 / 恢复的编排方在 resume 决策前调用，结果只供裁决。**不做
+    authorization / budget / reconcile**（§14 执行面流水线中授权 / 预算
+    / 对账各归其位，接线归 C7），本函数只回答订阅本身的资格。
+
+    判定矩阵（全部满足才 eligible；不短路——reasons 逐条点名全部未过
+    条件，审计面风格与 primer.authorize_prime 同源）：
+      1. 已注册：块存在且 registered_epoch_id 非 null；
+      2. 已启用：enabled 为 True；
+      3. 新 epoch：current_epoch_id != last_activation_epoch_id
+         （字符串等值比较——§14 adapted：epoch_id 是 §10.1 指纹身份，
+         无 int 序数可比；last_activation 为 null = 从未激活 → 通过）；
+      4. 可执行：current_executable 为真（§10.1 evaluate_epoch 的
+         executable 判定结果，由调用方传入，本层不重复折算）；
+      5. 阈值满足：provider_status 达到 minimum_state 档位及以上
+         （四档序 AVAILABLE > PRESSURE > DRAINING > EXHAUSTED，
+         _subscription_state_satisfied；词汇外值保守不满足）。
+
+    返回冻结两键：{"eligible": bool, "reasons": [中文原因...]}。
+    任务缺失 → TaskManagerError；current_epoch_id 形状非法 → ValueError
+    （先于 I/O 校验；形状闸与注册口径一致，防调用方拿序数/任意串
+    充当 epoch 身份）。
+    """
+    api = "evaluate_subscription_eligibility"
+    if not state.is_quota_epoch_id(current_epoch_id):
+        raise ValueError(
+            "%s：current_epoch_id 必须是 \"glm:\"+16 位十六进制的 "
+            "epoch_id（§10.1 形状），得到 %r" % (api, current_epoch_id))
+    st = _require_state(repo_root, task_id, api)
+    block = _quota_subscription_view(st)
+    reasons = []
+    if block.get("registered_epoch_id") is None:
+        reasons.append("任务 %s 未注册 quota subscription"
+                       "（registered_epoch_id 为空）" % task_id)
+    if block.get("enabled") is not True:
+        reasons.append("quota subscription 未启用（enabled != true）")
+    if block.get("last_activation_epoch_id") == current_epoch_id:
+        reasons.append(
+            "epoch %s 已激活过（last_activation_epoch_id 相同）——QC-07 "
+            "每 epoch 恰一次，同 epoch 不得重复激活" % current_epoch_id)
+    if not current_executable:
+        reasons.append("当前 epoch 不可执行（current_executable != true）")
+    minimum_state = block.get("minimum_state")
+    if not _subscription_state_satisfied(provider_status, minimum_state):
+        reasons.append(
+            "provider_status %r 未达到 minimum_state %r 档位及以上"
+            "（%s）" % (provider_status, minimum_state,
+                        " > ".join(state.QUOTA_SUBSCRIPTION_MINIMUM_STATES)))
+    return {"eligible": not reasons, "reasons": reasons}
+
+
+def mark_activation_epoch(repo_root, task_id, *, epoch_id) -> dict:
+    """记录任务在本 epoch 已激活（QC-07：每 epoch 恰一次推进记账）。
+
+    写 quota_subscription.last_activation_epoch_id = epoch_id + 控制
+    面 journal 一条 quota_epoch_advanced 事件（经
+    journal.append_control_plane_event 落
+    .glm-conductor/quota/events.jsonl——epoch 推进无任务上下文也可
+    发生，控制面事件不进任务 journal、不借伪任务目录）。
+
+    幂等语义（冻结口径；QC-07 的机械保证）：
+      - epoch_id 与本任务 last_activation_epoch_id 等值（同值重入；
+        null 不等任何合法 epoch_id，故首标必推进）→ 零状态写、零
+        控制面事件，返回 "marked": False + "idempotent": True；
+      - epoch_id 不同（含首次从 null 起标）→ 视为推进（epoch_id 是
+        §10.1 指纹等值身份，无序数、不分前进后退）→ 更新 + 恰一条
+        事件，返回 "marked": True + "idempotent": False。
+
+    事件字段（控制面 journal）：{"event": "quota_epoch_advanced",
+    "task_id", "epoch_id", "previous_epoch_id"}。落盘顺序：先 state
+    后事件；事件写入失败（OSError）自然上抛不吞——QC-07 证据丢失
+    必须让调用方看见（绝不静默降级）。
+
+    参数：epoch_id 须 §10.1 形状（先于 I/O 校验，ValueError）。
+    任务缺失 → TaskManagerError。返回冻结三键
+    {"marked", "last_activation_epoch_id", "idempotent"}。
+    """
+    api = "mark_activation_epoch"
+    if not state.is_quota_epoch_id(epoch_id):
+        raise ValueError(
+            "%s：epoch_id 必须是 \"glm:\"+16 位十六进制的 epoch_id"
+            "（§10.1 形状），得到 %r" % (api, epoch_id))
+    st = _require_state(repo_root, task_id, api)
+    block = _quota_subscription_view(st)
+    previous = block.get("last_activation_epoch_id")
+    if previous == epoch_id:
+        # 同 epoch 重标：零写零事件（QC-07 每 epoch 恰一次的幂等闸）
+        return {"marked": False,
+                "last_activation_epoch_id": previous,
+                "idempotent": True}
+    if not isinstance(st.get("quota_subscription"), dict):
+        # legacy 缺块：按默认块落位再记账（enabled/registered 不由本
+        # API 触碰——订阅与否归 register_quota_subscription）
+        st["quota_subscription"] = state.default_quota_subscription()
+    st["quota_subscription"]["last_activation_epoch_id"] = epoch_id
+    state.save_state(repo_root, st)
+    journal.append_control_plane_event(repo_root, {
+        "event": "quota_epoch_advanced",
+        "task_id": task_id,
+        "epoch_id": epoch_id,
+        "previous_epoch_id": previous})
+    return {"marked": True,
+            "last_activation_epoch_id": epoch_id,
+            "idempotent": False}

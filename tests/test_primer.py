@@ -229,7 +229,9 @@ class PrimerCase(unittest.TestCase):
         return state["primes"][identity][boundary]
 
     def journal_events(self):
-        return journal.read_events(self.repo, primer.PRIMER_JOURNAL_TASK_ID)
+        # v2.2 C5a：window_primed 落控制面 journal（quota/events.jsonl），
+        # 不再借用伪任务目录（C4 reviewer P2 正解）
+        return journal.read_control_plane_events(self.repo)
 
 
 # —— §8.3 三重授权闸 ——

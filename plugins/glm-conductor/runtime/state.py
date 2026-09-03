@@ -47,6 +47,18 @@
         scheduler_context 词汇 / tombstone 形状 / reason 与各字段的
         null 或合法值）；无该键即 legacy v2.1 形态，完全合法，由消费方
         按默认块解释（无义务态）。
+      - 额度订阅（v2.2 C5a，wu-22-C5a，控制面数据载体）：可选顶层
+        "quota_subscription" 块——new_task_state() 构造默认块
+        （default_quota_subscription，enabled=False + 两个 epoch_id
+        键为 null + minimum_state="AVAILABLE" + continuation_mode=
+        "manual"），validate_state 规则 8.9 做形状校验（enabled 布尔 /
+        epoch_id 两键 null 或 "glm:"+16hex 形状 / minimum_state 四档
+        枚举 / continuation_mode 四枚举）；无该键即 legacy 形态，完全
+        合法，由消费方按默认块解释（未订阅）。规格适配：主计划 §14
+        草图的 registered_epoch:17 是 int 序数示意，实现以 §10.1
+        epoch_id（"glm:"+指纹前 16 位的字符串）为准——epoch 新旧判定
+        用字符串等值比较（C2 冻结：fingerprint 等值、顺序无关、
+        durable 重建安全），不引入任何 int 序数。
     本文件是 Stop 完成门钩子等强制状态源的确定性来源。
 
 路径布局：
@@ -250,6 +262,62 @@ def default_continuation() -> dict:
         "wake_bridge": dict(DEFAULT_CONTINUATION["wake_bridge"]),
         "tombstone": DEFAULT_CONTINUATION["tombstone"],
     }
+
+
+# —— v2.2 C5a（wu-22-C5a）：quota_subscription 词汇与默认块 ——
+
+# epoch_id 合法形状（§10.1 冻结）："glm:" + 指纹前 16 位十六进制。
+# §14 草图的 registered_epoch:17 是 int 序数示意，实现一律用本形状的
+# 字符串身份（C2 冻结：fingerprint 等值比较，无序数、durable 重建安全）
+QUOTA_EPOCH_ID_RE = re.compile(r"^glm:[0-9a-f]{16}$")
+
+# minimum_state 四态档位词汇（§14 adapted）：订阅方声明的「低到此档即
+# 有资格」阈值。供比较的词汇序在此本地冻结——索引越小档位越高，即
+# AVAILABLE > PRESSURE > DRAINING > EXHAUSTED（可执行度优劣序，注释即
+# 契约：消费方按索引比较，绝不引入第二套排序）。注意这不是观测四态
+# （parser.QUOTA_STATUSES 含 UNKNOWN、无 DRAINING）——本词汇是订阅
+# 阈值档位词汇，观测面出现词汇外的 status（如 UNKNOWN）时按「不满足
+# 阈值」保守处理，绝不猜测折算。
+QUOTA_SUBSCRIPTION_MINIMUM_STATES = (
+    "AVAILABLE", "PRESSURE", "DRAINING", "EXHAUSTED")
+
+# continuation_mode 词汇：镜像 execution_policy.continuity.auto_resume
+# 的冻结四枚举（§14.2-§14.5 授权词汇，register 缺省经容错读镜像）。
+QUOTA_SUBSCRIPTION_CONTINUATION_MODES = (
+    "manual", "notify", "auto_once", "until_done")
+
+# v2.2 C5a：顶层 quota_subscription 默认块（§14 规范 adapted 的五键
+# 形状，逐字段不得增删改名；模块常量只读，default_quota_subscription()
+# 每次返回全新拷贝。enabled=False 即未订阅初始态；两个 epoch_id 键为
+# null = 尚未注册 / 尚未激活；continuation_mode="manual" 与
+# default_execution_policy 的 continuity.auto_resume 保守默认同源）
+DEFAULT_QUOTA_SUBSCRIPTION = {
+    "enabled": False,
+    "registered_epoch_id": None,
+    "last_activation_epoch_id": None,
+    "minimum_state": "AVAILABLE",
+    "continuation_mode": "manual",
+}
+
+
+def default_quota_subscription() -> dict:
+    """返回 v2.2 C5a quota_subscription 默认块的全新拷贝。
+
+    每次调用构造新 dict，调用方改写返回值不影响模块常量
+    DEFAULT_QUOTA_SUBSCRIPTION；legacy 缺块 / 形状异常的消费方按本块
+    解释（未订阅：enabled=False，无注册 epoch、无激活记录，阈值
+    AVAILABLE，续跑模式 manual）。
+    """
+    return dict(DEFAULT_QUOTA_SUBSCRIPTION)
+
+
+def is_quota_epoch_id(value) -> bool:
+    """判断 value 是否为合法 epoch_id 形状（"glm:"+16 位十六进制）。
+
+    §10.1 冻结形状的唯一判定入口（state 校验与 task_manager 三 API
+    共用，防两处正则漂移）；None / 非 str / 形状不符 → False。
+    """
+    return isinstance(value, str) and QUOTA_EPOCH_ID_RE.match(value) is not None
 
 
 # —— 路径定位 ——
@@ -831,6 +899,56 @@ def _validate_continuation(continuation):
     return errors
 
 
+def _validate_quota_subscription(subscription):
+    """校验可选顶层 quota_subscription 块（v2.2 C5a 订阅事实块，§14
+    规范 adapted——epoch 身份用 §10.1 epoch_id 字符串，不用 §14 草图的
+    int 序数）。
+
+    只做形状校验（错误消息中文、路径前缀 quota_subscription.，聚合
+    不短路）：
+      - subscription 非 dict → 错误；
+      - enabled 存在时 → 必须是 bool（True/False 之外的任何值——含
+        "true"/1 等经典 fail-open 坏值——一律报错）；
+      - registered_epoch_id / last_activation_epoch_id 存在时 → null
+        或 is_quota_epoch_id 形状（"glm:"+16 位十六进制；§10.1）；
+      - minimum_state 存在时 → ∈ QUOTA_SUBSCRIPTION_MINIMUM_STATES
+        （None 亦拒——枚举无 null 空档，缺省语义靠缺键表达）；
+      - continuation_mode 存在时 → ∈ QUOTA_SUBSCRIPTION_CONTINUATION_
+        MODES（None 亦拒，同上）；
+      - 未知键忽略（向前兼容）。
+    缺键合法：缺哪个键就按 DEFAULT_QUOTA_SUBSCRIPTION 对应默认解释
+    （与 continuation 块「存在才校验，缺键按默认」同风格）。无
+    quota_subscription 键 → 完全合法（legacy 形态，消费方按
+    default_quota_subscription 解释——未订阅）。
+    """
+    if not isinstance(subscription, dict):
+        return ["quota_subscription 必须是 JSON 对象"]
+    errors = []
+    if "enabled" in subscription \
+            and not isinstance(subscription["enabled"], bool):
+        errors.append("quota_subscription.enabled 必须是布尔值")
+    for key in ("registered_epoch_id", "last_activation_epoch_id"):
+        if key in subscription:
+            value = subscription[key]
+            if value is not None and not is_quota_epoch_id(value):
+                errors.append(
+                    "quota_subscription.%s 必须是 null 或 \"glm:\"+16 位"
+                    "十六进制的 epoch_id（§10.1 形状）" % key)
+    if "minimum_state" in subscription \
+            and subscription["minimum_state"] \
+            not in QUOTA_SUBSCRIPTION_MINIMUM_STATES:
+        errors.append(_enum_error("quota_subscription.minimum_state",
+                                  subscription["minimum_state"],
+                                  QUOTA_SUBSCRIPTION_MINIMUM_STATES))
+    if "continuation_mode" in subscription \
+            and subscription["continuation_mode"] \
+            not in QUOTA_SUBSCRIPTION_CONTINUATION_MODES:
+        errors.append(_enum_error("quota_subscription.continuation_mode",
+                                  subscription["continuation_mode"],
+                                  QUOTA_SUBSCRIPTION_CONTINUATION_MODES))
+    return errors
+
+
 def validate_state(state) -> "list[str]":
     """校验状态 dict，返回错误消息列表（中文，含字段路径）；空列表 = 合法。
 
@@ -848,6 +966,12 @@ def validate_state(state) -> "list[str]":
     scheduler_context 词汇 / tombstone 形状，错误路径前缀
     continuation.）；缺失时完全合法（legacy v2.1 形态，消费方按
     default_continuation 解释——obligation="none" 无义务态）。
+    可选顶层 quota_subscription 块（v2.2 C5a 订阅事实块，§14 adapted
+    ——epoch_id 字符串等值身份，不引入 int 序数）：存在时按规则 8.9
+    做形状校验（enabled 布尔 / epoch_id 两键 null 或 "glm:"+16hex /
+    minimum_state 四档枚举 / continuation_mode 四枚举，缺键按默认，
+    错误路径前缀 quota_subscription.）；缺失时完全合法（legacy 形态，
+    消费方按 default_quota_subscription 解释——未订阅）。
     """
     if not isinstance(state, dict):
         return ["state 必须是 JSON 对象"]
@@ -942,6 +1066,15 @@ def validate_state(state) -> "list[str]":
     if "continuation" in state:
         errors.extend(_validate_continuation(state["continuation"]))
 
+    # 规则 8.9：quota_subscription（v2.2 C5a 可选顶层额度订阅事实块；
+    # 无该键完全合法——legacy 形态，消费方按 default_quota_subscription
+    # 解释（未订阅）；存在时按 §14 adapted 五键形状校验，缺键按默认，
+    # 错误路径前缀 quota_subscription.，聚合不短路——与规则 8.8 的
+    # continuation 前缀同风格）
+    if "quota_subscription" in state:
+        errors.extend(
+            _validate_quota_subscription(state["quota_subscription"]))
+
     # 规则 9：status ∈ TASK_STATUSES
     if "status" in state:
         status = state["status"]
@@ -990,6 +1123,12 @@ def new_task_state(task_id, goal, route, *, ownership_files=(),
     next_wake_at/bridge_interval_minutes 五扩展键；义务推进 /
     wake bridge 记账由控制回路单元经纯变换写入）。
 
+    v2.2 C5a（wu-22-C5a）：构造结果恒含顶层 "quota_subscription" 默认块
+    （default_quota_subscription()——enabled=False 未订阅初始态，两个
+    epoch_id 键为 null，minimum_state="AVAILABLE"，continuation_mode=
+    "manual"；epoch 身份用 §10.1 epoch_id 字符串，注册 / 激活记账由
+    task_manager 三 API 写入）。
+
     v2.1 §11.5（wu-21-09）：dispatch.max_workers 默认 1 → 2——与
     dispatcher.DEFAULT_MAX_WORKERS=2、execution_policy parallelism
     默认块（default_workers=max_workers=2）三处口径一致；真实并发
@@ -1035,6 +1174,9 @@ def new_task_state(task_id, goal, route, *, ownership_files=(),
         # v2.2 M1：续跑义务 + wake bridge 事实块（§23.2 冻结默认形状；
         # obligation 推进与 bridge 记账由控制回路单元经纯变换写入）
         "continuation": default_continuation(),
+        # v2.2 C5a：额度订阅事实块（§14 adapted 默认形状；注册 / 资格
+        # 判定 / 激活记账由 task_manager 三 API 写入）
+        "quota_subscription": default_quota_subscription(),
     }
     if repository_root is not None:
         bind_repository_root(st, repository_root)

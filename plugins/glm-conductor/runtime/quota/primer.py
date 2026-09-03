@@ -19,6 +19,11 @@
       2. prime_once(...)——单飞幂等执行（幂等闸 → 一次最小模型调用
          （网络超时单次有界重试，共至多 2 次尝试）→ 强制 quota refresh
          物化确认 → durable 落账 + journal 事件 → 冻结键返回）。
+         v2.2 C5a 起 window_primed 事件落在控制面 journal
+         .glm-conductor/quota/events.jsonl（journal.append_control_
+         plane_event，与 watcher.json / primer.json 同层）——不再借用
+         tasks/<伪任务>/events.jsonl 目录（C4 reviewer P2 正解：伪任务
+         目录会被 discover_tasks 判为 orphaned 噪声）。
 
       3. primer.json durable 存取——独立文件独立常量（不复用任务
          state / journal / watcher.json），原子写纪律照抄
@@ -109,7 +114,7 @@ import urllib.parse
 import urllib.request
 
 from runtime.execution_policy import primer_enabled as _policy_primer_enabled
-from runtime.journal import append_event as _append_event
+from runtime.journal import append_control_plane_event as _append_control_plane_event
 from runtime.quota import resolver
 from runtime.quota._http import build_default_opener
 from runtime.quota.credentials import PROVIDER_KEY, resolve_credential
@@ -195,11 +200,12 @@ MAX_PRIME_ATTEMPTS = 2
 # —— journal 词汇 ——
 
 PRIMER_JOURNAL_EVENT = "window_primed"
-# control-plane 事件没有任务上下文（prime_once 冻结签名无 task_id）：
-# 落在固定伪任务目录 .glm-conductor/tasks/<本常量>/events.jsonl（只写
-# journal，绝不写 state.json——watcher.determine_mode / CLI 任务枚举对
-# 无 state.json 的目录按「非任务」跳过，不产生旁路影响）
-PRIMER_JOURNAL_TASK_ID = "quota-control-plane"
+# 控制面 journal 落点（v2.2 C5a，wu-22-C5a，正解 C4 reviewer P2）：
+# window_primed 是无任务上下文的控制面事件，经
+# journal.append_control_plane_event 落
+# .glm-conductor/quota/events.jsonl（与 watcher.json / primer.json
+# 同层）——不再借用 tasks/<伪任务>/events.jsonl 目录（伪任务目录会被
+# discover_tasks 判为 orphaned 噪声、污染任务枚举）。事件字段零变化。
 
 
 class PrimerStoreError(RuntimeError):
@@ -665,6 +671,12 @@ def _journal_prime(repo_root, *, boundary_id, provider_identity_hash,
     idempotent。durable primer.json 已是幂等真相源，journal 失败
     （OSError，如 Windows AV 目录锁）降级不抛——绝不遮蔽 prime 本身的
     结果（模块 docstring「接线边界」节）；事件不含任何凭证材料（§37）。
+
+    落点（v2.2 C5a 起）：控制面 journal
+    .glm-conductor/quota/events.jsonl（journal.append_control_plane_
+    event；与 watcher.json / primer.json 同层）——window_primed 无任务
+    上下文，不再写 tasks/<伪任务>/events.jsonl 目录（C4 reviewer P2
+    的 orphaned 噪声正解）。事件字段零变化。
     """
     event = {
         "event": PRIMER_JOURNAL_EVENT,
@@ -677,7 +689,7 @@ def _journal_prime(repo_root, *, boundary_id, provider_identity_hash,
         "idempotent": idempotent,
     }
     try:
-        _append_event(repo_root, PRIMER_JOURNAL_TASK_ID, event)
+        _append_control_plane_event(repo_root, event)
     except OSError:
         pass
 
