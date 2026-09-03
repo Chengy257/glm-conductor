@@ -273,12 +273,14 @@ def append_control_plane_event(repo_root, event, *, ts=None):
 def read_control_plane_events(repo_root):
     """按文件顺序读取控制面 journal 的全部事件，返回 dict 列表。
 
-    容错：文件不存在返回 []；空白行跳过；坏行（JSON 解析失败或解析
-    结果非 dict）跳过——与 read_events 的默认容错同风格（截断尾行
-    常见于写入中断，不能让整个日志不可读）。按 "\\n" 切分行（理由同
-    read_events：事件值中的 U+0085 / U+2028 / U+2029 是合法 JSON 单行
-    内容，splitlines 会在这些字符处错误断行）；errors="replace" 容忍
-    尾部撕裂的多字节字符。本函数绝不抛（供测试与后续消费方容错读）。
+    容错契约（**内容层**，与 read_events 的默认容错同风格）：文件不
+    存在返回 []；空白行跳过；坏行（JSON 解析失败或解析结果非 dict）
+    跳过——截断尾行常见于写入中断，不能让整个日志不可读。按 "\\n"
+    切分行（理由同 read_events：事件值中的 U+0085 / U+2028 / U+2029
+    是合法 JSON 单行内容，splitlines 会在这些字符处错误断行）；
+    errors="replace" 容忍尾部撕裂的多字节字符。坏内容不构成错误
+    （上述规则吞掉），但 **I/O 层异常不在容错面内**：OSError（权限
+    被拒 / 路径是目录 / 目录锁等）自然上抛——调用方自行兜底。
     """
     path = control_plane_journal_path(repo_root)
     if not path.is_file():

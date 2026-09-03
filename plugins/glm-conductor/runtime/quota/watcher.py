@@ -437,8 +437,10 @@ def run_once(repo_root, *, fetch=None, clock=None,
     **不走锁接管**：现存记录 pid 活着且 heartbeat 新鲜 → 冲突退出
     （ran=False，零写盘）；无记录 / stale → 抓取一次并写记录
     （generation 不 +1——不是接管；pid 写为本次进程，退出即死，后续
-    acquire 自然走接管路径；stop_requested 保留原值，once 不消费
-    既有停止请求）。
+    acquire 自然走接管路径）。写回前与 run 的两个分支同形调用
+    _merge_stop_flag（v2.2 C6 reviewer 留账吸收）：once 自身不消费
+    停止请求，但「读记录 → 写回」窗口内落下的并发 CLI stop 旗标经
+    OR 合并保留——once 的整体覆盖写绝不抹掉旗标。
 
     返回（键冻结）：
       {"ran": bool, "record": dict|None,
@@ -477,6 +479,7 @@ def run_once(repo_root, *, fetch=None, clock=None,
     record["pid"] = os.getpid()
     record["heartbeat_at"] = _format_iso_z(now)
     record["last_observation"] = observation
+    _merge_stop_flag(repo_root, record)  # 并发 stop 不被覆盖写抹掉（与 run 同形）
     watcher_store.write_watcher_state(repo_root, record)
     return {"ran": True, "record": record, "conflict": None}
 

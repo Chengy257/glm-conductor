@@ -54,6 +54,18 @@ primer_enabled——§8.3 Window Primer 特性闸）：
     bridge_interval_minutes 非 bool int 且 5 <= 值 <= 1440；未知键忽略
     （向前兼容）。
 
+activation_transport 可选顶层键（v2.2 C6，修正计划 §16/§C6）：
+    execution_policy.activation_transport 声明任务的 Activation
+    Transport 身份（recurring_bridge 唯一 stable，probe_then_hold /
+    self_retiming / session_injector 实验预留）。与 primer_enabled 同款
+    可选键模式：DEFAULT_EXECUTION_POLICY 冻结默认块不含该键（缺键
+    完全合法，legacy / 新任务形状不变，按 stable 缺省解释）；validator
+    词汇闸四值；消费方（runtime.activation_transport）经
+    activation_transport() 容错读——缺 / 坏形状一律缺省
+    recurring_bridge，绝不抛。授权 setter（set_parallel_authorization /
+    set_resume_authorization）经 _copy_policy 原样保留该键——授权写入
+    不得重置用户的 transport 选择（quota_control 子块同款保留纪律）。
+
 授权不变量（计划 §5.4 全表，全部强制，validate_execution_policy 逐条落）：
     hard_limit == 4；1 <= max_workers <= 4；
     parallelism.mode ∈ {serial, standard}，serial → max_workers == 1，
@@ -164,6 +176,17 @@ DEFAULT_EXECUTION_POLICY = {
     # 解释）；dict(...) 拷贝与同名模块常量解耦
     "quota_control": dict(DEFAULT_QUOTA_CONTROL),
 }
+
+# v2.2 C6（修正计划 §16/§C6）：顶层可选键 activation_transport 的冻结
+# 四值词汇（recurring_bridge 唯一 stable，其余三个实验预留）。独立声明
+# 不 import runtime.activation_transport（后者 import task_manager，
+# 反向依赖成环）；与 activation_transport.TRANSPORT_KINDS 的对齐由测试
+# 锚定（tests.test_activation_transport）。
+ACTIVATION_TRANSPORTS = ("recurring_bridge", "probe_then_hold",
+                         "self_retiming", "session_injector")
+
+# activation_transport 的缺省 stable 传输（缺键 / 坏形状容错读落点）
+DEFAULT_ACTIVATION_TRANSPORT = "recurring_bridge"
 
 # —— 构造 ——
 
@@ -434,6 +457,18 @@ def validate_execution_policy(policy) -> "list[str]":
                        DEFAULT_QUOTA_CONTROL["pressure_percent"],
                        effective_draining, effective_pressure))
 
+    # —— activation_transport（v2.2 C6 可选顶层键，修正计划 §16/§C6
+    # Activation Transport 身份声明：缺键完全合法（DEFAULT_EXECUTION_
+    # POLICY 冻结块不含该键，legacy / 新任务形状不变，按 stable 缺省
+    # 解释）；存在时必须 ∈ ACTIVATION_TRANSPORTS 四值——实验值合法
+    # （预留声明可先行落盘），词汇闸只管形状，「实验不可 arm」语义归
+    # activation_transport.arm_transport）——
+    if "activation_transport" in policy \
+            and policy["activation_transport"] not in ACTIVATION_TRANSPORTS:
+        errors.append(_enum_error("activation_transport",
+                                  policy["activation_transport"],
+                                  ACTIVATION_TRANSPORTS))
+
     # —— 跨字段耦合（涉及字段均合法时才判，不重复报基线错误）——
 
     # §5.4：parallelism.mode ↔ max_workers
@@ -510,6 +545,11 @@ def _copy_policy(policy) -> dict:
     qc_block = policy.get("quota_control")
     if isinstance(qc_block, dict):
         updated["quota_control"] = dict(qc_block)
+    # v2.2 C6：可选顶层键 activation_transport 原样保留（与 quota_control
+    # 子块同款保留纪律——授权写入不得重置用户的 transport 声明；值
+    # 形状纠错归 validate_execution_policy，不在此放大）
+    if "activation_transport" in policy:
+        updated["activation_transport"] = policy["activation_transport"]
     return updated
 
 
@@ -696,6 +736,31 @@ def primer_enabled(policy) -> bool:
     value = (block.get("primer_enabled")
              if isinstance(block, dict) else None)
     return value is True
+
+
+# —— Activation Transport 身份容错读（v2.2 C6，修正计划 §16/§C6） ——
+
+
+def activation_transport(policy) -> str:
+    """容错读顶层可选键 activation_transport（任务的 Activation
+    Transport 身份声明），返回 ACTIVATION_TRANSPORTS 四值词汇内的 str。
+
+    消费口径（供 runtime.activation_transport.activation_transport_
+    status 使用，与 validate_execution_policy 的缺省解释一致；观测面
+    fail-open 纪律——缺 / 坏形状一律缺省，绝不抛）：
+      - policy 非 dict / 键缺失 → DEFAULT_ACTIVATION_TRANSPORT
+        （recurring_bridge——§16/§17：stable 主路径缺省，legacy 任务
+        形状零变化）；
+      - 值不在 ACTIVATION_TRANSPORTS 四值词汇内（含 bool / 数字 / 空
+        串等坏形状）→ 同样缺省（形状纠错归 validate_execution_policy，
+        手写 state 不炸消费方）；
+      - 合法值（含实验预留值）原样透传。
+    纯函数：只读入参、零 I/O。
+    """
+    value = (policy.get("activation_transport")
+             if isinstance(policy, dict) else None)
+    return value if value in ACTIVATION_TRANSPORTS \
+        else DEFAULT_ACTIVATION_TRANSPORT
 
 
 # —— 有效并发预算（计划 §12 表） ——

@@ -238,13 +238,15 @@ class HooksManifestTest(unittest.TestCase):
             "PreToolUse 条目应指向 pre_tool_use.py: %r" % pre_args)
 
     def test_bash_matcher_entry_appended(self):
-        # B7.2：PreToolUse 数组追加 Bash matcher 第二项（Agent|Task 项不动）
+        # B7.2：PreToolUse 数组追加 Bash matcher 第二项（Agent|Task 项
+        # 不动）；v2.2 C6（wu-22-C6）再追加 CronCreate 第三项——既有
+        # 两条的相对序与内容零改动（additive，hooks.json +3 条目之一）
         with open(str(HOOKS_JSON), "r", encoding="utf-8") as fh:
             manifest = json.load(fh)
         entries = manifest["hooks"]["PreToolUse"]
         matchers = [entry.get("matcher") for entry in entries
                     if isinstance(entry, dict)]
-        self.assertEqual(matchers, ["Agent|Task", "Bash"])
+        self.assertEqual(matchers, ["Agent|Task", "Bash", "CronCreate"])
         hook = entries[matchers.index("Bash")]["hooks"][0]
         self.assertEqual(hook["type"], "process")
         self.assertEqual(hook["command"], "python3")

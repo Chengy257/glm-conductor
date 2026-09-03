@@ -25,7 +25,8 @@ sys.executable）/ §C3（复用 observer / resolver / epoch，不复制额度
        写回前 OR 合并并发 stop 旗标（读→写窗口竞争回归）
     4  run_once：无记录 → ran=True generation=1 / 活锁新鲜 → 冲突
        ran=False 零写盘 / stale（过期 heartbeat）→ 放行且 generation
-       不 +1（不走锁接管）
+       不 +1（不走锁接管）/ 写回前同形 _merge_stop_flag——读→写窗口
+       内落下的并发 stop 旗标不被整体覆盖写抹掉（v2.2 C6 吸收）
     5  provider identity hash：同凭证稳定 / 异凭证不同 / 16 位十六进制
        （只落哈希不落凭证 §37）
     6  CLI quota-watcher：status / stop / once / 用法错 / start 派生
@@ -443,6 +444,33 @@ class RunOnceTest(RepoFixture):
         self.assertTrue(result["ran"])
         self.assertEqual(result["record"]["generation"], 4)  # 不 +1
         self.assertEqual(result["record"]["pid"], os.getpid())
+
+    def test_once_writeback_preserves_concurrent_stop_flag(self):
+        """once 写回前同形 _merge_stop_flag（v2.2 C6 reviewer 留账吸收）：
+        「读记录 → 写回」窗口内落下的并发 CLI stop 旗标不被 once 的整体
+        覆盖写抹掉（与 run 两个分支的写前 OR 合并同构）。
+
+        确定性复现：stale 记录放行 once；fetch 注入钩子在「读记录之后、
+        写回之前」对同一 repo 真实调用 watcher_store.request_stop（真文
+        件读改写，零 mock）。修复前 once 用唤醒时的旧内存副本整体覆盖
+        写，旗标被抹（CLI stop 静默失效，watcher 永不退出）；修复后写
+        前重读 OR 合并——断言旗标存活。
+        """
+        self.write_raw_state(self.live_record(
+            generation=4, pid=os.getpid(),
+            heartbeat_at=_format_iso_z(NOW - timedelta(seconds=1000))))
+
+        def stopper_fetch(repo_root):
+            watcher_store.request_stop(repo_root)
+            return fake_detail("AVAILABLE", [])
+
+        result = watcher.run_once(
+            self.repo, fetch=stopper_fetch,
+            clock=FakeClock(NOW, 1.0), provider_identity_hash=IDENTITY)
+        self.assertTrue(result["ran"])
+        self.assertEqual(result["record"]["generation"], 4)  # 仍非接管
+        record = watcher_store.read_watcher_state(self.repo)
+        self.assertTrue(record["stop_requested"])  # 修复前：被抹 → False
 
 
 # —— 5：provider identity hash（§37：只落哈希不落凭证） ——

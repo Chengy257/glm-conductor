@@ -2510,7 +2510,8 @@ def _epoch_context_after_refresh(repo_root):
 def _reconcile_activation_journal(repo_root, task_id, st, epoch_id):
     """崩溃窗口对账（v2.2 C5b，C5a reviewer P3 的接线侧兜底）。
 
-    evaluate 之前读控制面 journal（read_control_plane_events，绝不抛）：
+    evaluate 之前读控制面 journal（read_control_plane_events——内容层
+    容错：坏行 / 缺文件按无证据处理；OSError 上抛）：
     存在本任务本 epoch 的 quota_epoch_advanced 而
     state.quota_subscription.last_activation_epoch_id 落后（≠ epoch_id）
     → journal 证据表明本 epoch 已激活过（如 mark 落盘后 state 被备份
@@ -2557,7 +2558,7 @@ def _reconcile_activation_journal(repo_root, task_id, st, epoch_id):
                else "自愈重写失败"))
 
 
-def _resume_subscription_gate(repo_root, task_id, st, provider_status) -> dict:
+def _resume_subscription_gate(repo_root, task_id, st) -> dict:
     """resume 面订阅资格裁决（v2.2 C5b；返回 "subscription" 面 dict）。
 
     顺序即决策序（纯读 + 至多一次对账自愈写，零转态零派发）：
@@ -2567,6 +2568,12 @@ def _resume_subscription_gate(repo_root, task_id, st, provider_status) -> dict:
       2. 崩溃窗口对账（evaluate 之前，_reconcile_activation_journal）；
       3. evaluate_subscription_eligibility 纯判定；对账证据在案时资格
          被保守推翻（eligible 强制 False + reason 点名 journal 证据）。
+
+    v2.2 C6（wu-22-C6 reviewer 留账吸收）：签名移除死参数
+    provider_status——资格判定消费的是 evaluate_subscription_
+    eligibility 内部经 _epoch_context_after_refresh 折算出的
+    provider_status（status 参数的解析结果从不进入本函数），参数自
+    C5b 落地起即为死参数；移除零行为变化（reviewer 实测佐证）。
 
     返回 {"registered": True, "eligible": bool, "reasons": [...],
     "epoch_id": <§10.1 形状或 None（折算失败）>}；eligible=True 且调用
@@ -2710,8 +2717,7 @@ def resume_from_quota(repo_root, task_id, *, status=None) -> dict:
     subscription = None
     if _subscription_active(st) \
             and st.get("status") in ("waiting_quota", "waiting_user"):
-        subscription = _resume_subscription_gate(repo_root, task_id, st,
-                                                 status)
+        subscription = _resume_subscription_gate(repo_root, task_id, st)
         if not (subscription["eligible"]
                 and status in QUOTA_RESUME_STATUSES):
             result["subscription"] = subscription
@@ -3619,6 +3625,105 @@ def degrade_continuity(repo_root, task_id, *,
     return {"obligation": "degraded", "reason": reason}
 
 
+# —— Scheduler Capability 观测镜像（v2.2 C6，wu-22-C6；修正计划 §22.5） ——
+
+def observe_scheduler_context(repo_root, task_id, *, origin=None,
+                              create=None, update=None, pause=None,
+                              delete=None, parent_automation_id=None,
+                              source_session=None) -> dict:
+    """scheduler 能力观测镜像进任务 continuation.scheduler_context
+    （hooks PostToolUse / PostToolUseFailure Cron* 路径的唯一任务面
+    journal 写点；修正计划 §22.5）。
+
+    证据只进不退（merge 语义，冻结）：
+      - None 不覆盖（None = 本次观察未携带该维度证据）；
+      - origin ∈ state.SCHEDULER_ORIGINS；"unknown" 视同未观察（不
+        覆盖）——interactive / scheduled_task 只允许 unknown→证据值
+        单向升级，落定后恒定（D15-e：Phase 0 #13 硬门）；
+      - create / update / pause / delete ∈ state.SCHEDULER_CAPABILITIES；
+        "unknown" 视同未观察；allowed / forbidden 只落一次（首个证据
+        冻结——只进不退，forbidden 在案后不被任何后续观察冲掉）；
+      - parent_automation_id：None 不覆盖；非 None 覆盖为最新观察到的
+        automation 身份（观测镜像；bridge 身份权威在
+        continuation.wake_bridge.automation_id）。
+
+    §22.5 硬边界：**绝不碰 wake_bridge.status**——观测不制造 armed，
+    不降级、不确认任何桥状态；re-arm 只走 arm_wake_bridge 显式路径。
+    本 API 是 hook 观测路径的唯一 journal 写点（C4 伪任务教训的对偶：
+    hook 直接 append_event 的旁路被冻结，记账必须经本 API 过
+    save_state validator 闸）。
+
+    变更闸：全部观察均无新值（None / unknown / 既有同值）→ 零写零
+    事件，返回 "idempotent": True；任一维度实际变化 → 单次
+    save_state + 恰一条 scheduler_capability_observed 事件。
+
+    事件字段（任务 journal，冻结十键）：{"event":
+    "scheduler_capability_observed", origin, create, update, pause,
+    delete, parent_automation_id, source_session, changed}（changed =
+    实际变化维度名列表；观察值原样落账，None = 未观察）。
+
+    参数校验（先于任何 I/O，中文 ValueError）：origin /
+    create / update / pause / delete 词汇闸；parent_automation_id /
+    source_session 非 None 时须非空 str。任务缺失 TaskManagerError。
+    返回冻结三键 {"changed": [...], "scheduler_context": {...},
+    "idempotent": bool}（scheduler_context 为落盘后视图拷贝）。
+    """
+    api = "observe_scheduler_context"
+    if origin is not None and origin not in state.SCHEDULER_ORIGINS:
+        raise ValueError(
+            "%s：origin %r 不在合法取值内（%s）"
+            % (api, origin, ", ".join(state.SCHEDULER_ORIGINS)))
+    for name, value in (("create", create), ("update", update),
+                        ("pause", pause), ("delete", delete)):
+        if value is not None and value not in state.SCHEDULER_CAPABILITIES:
+            raise ValueError(
+                "%s：%s %r 不在合法取值内（%s）"
+                % (api, name, value, ", ".join(state.SCHEDULER_CAPABILITIES)))
+    for name, value in (("parent_automation_id", parent_automation_id),
+                        ("source_session", source_session)):
+        if value is not None \
+                and (not isinstance(value, str) or value == ""):
+            raise ValueError(
+                "%s：%s 必须是 None 或非空字符串，得到 %r"
+                % (api, name, value))
+    st = _require_state(repo_root, task_id, api)
+    continuation = _ensure_continuation(st)
+    ctx = continuation.get("scheduler_context")
+    if not isinstance(ctx, dict):
+        # 形状异常（理论不可达：save_state 闸兜底）按默认块重起，
+        # 既有未知形状不放大
+        ctx = state.default_continuation()["scheduler_context"]
+        continuation["scheduler_context"] = ctx
+    changed = []
+    if origin in ("interactive", "scheduled_task") \
+            and ctx.get("origin", "unknown") != origin \
+            and ctx.get("origin", "unknown") == "unknown":
+        ctx["origin"] = origin
+        changed.append("origin")
+    for name, value in (("create", create), ("update", update),
+                        ("pause", pause), ("delete", delete)):
+        if value in ("allowed", "forbidden") \
+                and ctx.get(name, "unknown") == "unknown":
+            ctx[name] = value
+            changed.append(name)
+    if parent_automation_id is not None \
+            and ctx.get("parent_automation_id") != parent_automation_id:
+        ctx["parent_automation_id"] = parent_automation_id
+        changed.append("parent_automation_id")
+    if not changed:
+        return {"changed": [], "scheduler_context": dict(ctx),
+                "idempotent": True}
+    state.save_state(repo_root, st)
+    journal.append_event(repo_root, task_id, {
+        "event": "scheduler_capability_observed",
+        "origin": origin, "create": create, "update": update,
+        "pause": pause, "delete": delete,
+        "parent_automation_id": parent_automation_id,
+        "source_session": source_session, "changed": changed})
+    return {"changed": changed, "scheduler_context": dict(ctx),
+            "idempotent": False}
+
+
 # —— Quota Subscription（v2.2 C5a，wu-22-C5a；主计划 §14 规范 adapted） ——
 
 # §14 「Task 只订阅 quota，不再拥有 quota clock」的执行面落点：订阅事实
@@ -3690,7 +3795,8 @@ def register_quota_subscription(repo_root, task_id, *, epoch_id,
     视图 + "idempotent": True；否则（无块建块 / 任一键值变化）写块 +
     任务 journal 一条 quota_subscription_registered 事件
     {registered_epoch_id, minimum_state, continuation_mode}，返回
-    "idempotent": False。
+    "idempotent": False。非幂等重写按 merge 落盘：既有块未知键原样
+    保留（v2.2 C6 reviewer 留账吸收），幂等比较仍只比五规范键。
 
     参数（校验先于任何 I/O，中文 ValueError）：
       - epoch_id：§10.1 形状（"glm:"+16hex，state.is_quota_epoch_id）；
@@ -3737,12 +3843,22 @@ def register_quota_subscription(repo_root, task_id, *, epoch_id,
     }
     if isinstance(block, dict) and all(
             block.get(key) == value for key, value in target.items()):
-        # 同参重注册：零写零事件（幂等返回；返回块视图拷贝，不改 st）
+        # 同参重注册：零写零事件（幂等返回；返回块视图拷贝，不改 st）。
+        # 幂等比较只看五规范键——既有块携带的未知键不影响幂等判定
+        # （v2.2 C6 reviewer 留账吸收）
         result = _quota_subscription_view(st)
         result = dict(result)
         result["idempotent"] = True
         return result
-    st["quota_subscription"] = target
+    if isinstance(block, dict):
+        # 非幂等重写路径（v2.2 C6 reviewer 留账吸收）：merge 而非整块
+        # 替换——既有块的未知键原样保留（向前兼容，五规范键被 target
+        # 覆盖），未来版本新增的合法键不被本 API 意外抹掉
+        merged = dict(block)
+        merged.update(target)
+    else:
+        merged = target
+    st["quota_subscription"] = merged
     state.save_state(repo_root, st)
     journal.append_event(repo_root, task_id, {
         "event": "quota_subscription_registered",

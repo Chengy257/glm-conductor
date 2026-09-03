@@ -166,6 +166,25 @@
         wake_bridge.status 十值词汇 + scheduler_context（origin +
         capability 缓存）+ mode/generation 及墓碑。零写副作用；任务
         缺失 → 退出码 1。
+    wake-reconcile <repo_root> <task_id> <host_status> [observed_at]
+        手动 / 历史 bridge 宿主事实对账（v2.2 C6 面，C1 裁决 #9：
+        宿主事实由会话侧显式供给，runtime 零 CronList；
+        task_manager.reconcile_wake_bridge_from_host 薄壳）：
+        host_status ∈ {active, deleted, completed, unknown}（§22.5——
+        对账只能降级 / 确认，绝不制造 armed）；observed_at 可选
+        ISO8601。输出 {task_id, host_status, bridge_status_before,
+        bridge_status, automation_id, activation_transport, reconciled,
+        observed_at}。host_status 词汇外（ValueError）→ 退出码 2；
+        任务缺失 → 退出码 1。
+    transport-status <repo_root> <task_id>
+        Activation Transport 事实面只读查询（v2.2 C6 wu-22-C6，修正
+        计划 §16/§C6；C8 Stop 门 armed 检查与 dogfood 的接口面，
+        runtime.activation_transport 薄壳）：输出冻结十二键
+        {task_id, transport, stable, armed, bridge_status, next_wake_at,
+        current_boundary_id, automation_id, bridge_interval_minutes,
+        scheduler_origin, scheduler_create, reasons}（ensure_ascii=
+        False——中文 reasons 面向主会话直接阅读）。零写副作用；任务
+        缺失 → 退出码 1。
     quota-watcher <repo_root> start|status|stop|once
         Real-Time Quota Watcher 操作面（v2.2 修正计划 C3 wu-22-C3，
         §6/§6.1，runtime.quota.watcher / watcher_store 薄壳）：
@@ -249,6 +268,8 @@ USAGE = (
     "wake-prompt <repo_root> <task_id> | "
     "wake-plan <repo_root> <task_id> | "
     "wake-status <repo_root> <task_id> | "
+    "wake-reconcile <repo_root> <task_id> <host_status> [observed_at] | "
+    "transport-status <repo_root> <task_id> | "
     "quota-watcher <repo_root> start|status|stop|once")
 
 # policy-set-resume 的 max_quota_windows 缺省推导表（§5.4 耦合的
@@ -864,6 +885,48 @@ def _wake_status(repo_root, task_id) -> int:
     return 0
 
 
+# —— v2.2 修正计划 C6（wu-22-C6）：wake-reconcile / transport-status ——
+
+def _wake_reconcile(repo_root, task_id, host_status, observed_at=None) -> int:
+    """wake-reconcile：宿主事实会话侧对账（task_manager.
+    reconcile_wake_bridge_from_host 薄壳，v2.2 C1 裁决 #9）。
+
+    C6 面向：宿主事实由调用方（主会话 / dogfood 操作者）显式供给
+    （CronList 观测结论），runtime 零宿主探针——本子命令是 C1b 纯账本
+    对账 helper 的显式输入口。host_status 词汇闸在 API 内（先于 I/O，
+    中文 ValueError → 退出码 2）；任务缺失（TaskManagerError）→
+    _QuotaFlowRejected（退出码 1）。§22.5：对账只能降级 / 确认，
+    绝不制造 armed。"""
+    from runtime import task_manager
+    try:
+        result = task_manager.reconcile_wake_bridge_from_host(
+            repo_root, task_id, host_status=host_status,
+            observed_at=observed_at)
+    except task_manager.TaskManagerError as exc:
+        raise _QuotaFlowRejected(str(exc)) from exc
+    _emit(result)
+    return 0
+
+
+def _transport_status(repo_root, task_id) -> int:
+    """transport-status：Activation Transport 事实面只读查询
+    （runtime.activation_transport.activation_transport_status 薄壳，
+    v2.2 C6 / C8 / dogfood 面）。
+
+    输出冻结十二键（transport / stable / armed / bridge_status /
+    reasons ...；ensure_ascii=False——中文 reasons 面向主会话直接阅读，
+    同 wake-plan / wake-status 观测面口径）。零写副作用；任务缺失
+    （TaskManagerError）→ _QuotaFlowRejected（退出码 1）。"""
+    from runtime import activation_transport, task_manager
+    try:
+        result = activation_transport.activation_transport_status(
+            repo_root, task_id)
+    except task_manager.TaskManagerError as exc:
+        raise _QuotaFlowRejected(str(exc)) from exc
+    _emit_utf8(result)
+    return 0
+
+
 # —— v2.2 修正计划 C3（wu-22-C3）：Real-Time Quota Watcher ——
 
 def _quota_watcher_start(repo_root) -> int:
@@ -1154,6 +1217,20 @@ def _dispatch(args) -> int:
             raise _UsageError(
                 "wake-status 需要 <repo_root> <task_id> 两个参数。" + USAGE)
         return _wake_status(rest[0], rest[1])
+    if cmd == "wake-reconcile":
+        if len(rest) not in (3, 4):
+            raise _UsageError(
+                "wake-reconcile 需要 <repo_root> <task_id> <host_status> "
+                "[observed_at] 三或四个参数。" + USAGE)
+        return _wake_reconcile(
+            rest[0], rest[1], rest[2],
+            rest[3] if len(rest) == 4 else None)
+    if cmd == "transport-status":
+        if len(rest) != 2:
+            raise _UsageError(
+                "transport-status 需要 <repo_root> <task_id> 两个参数。"
+                + USAGE)
+        return _transport_status(rest[0], rest[1])
     if cmd == "quota-watcher":
         if len(rest) != 2:
             raise _UsageError(

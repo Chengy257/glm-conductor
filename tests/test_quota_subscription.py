@@ -340,6 +340,33 @@ class RegisterTest(SubscriptionCase):
         # 更新注册不触碰激活记录
         self.assertIsNone(self.subscription()["last_activation_epoch_id"])
 
+    def test_rewrite_preserves_unknown_keys_merge_not_replace(self):
+        # v2.2 C6 reviewer 留账吸收：非幂等重写路径按 merge 落盘——
+        # 既有块的未知键原样保留（不整块替换），五规范键被新值覆盖
+        self.put_task()
+        self.register()
+        st = state.load_state(self.repo, TID)
+        st["quota_subscription"]["future_key"] = {"v": 1}
+        save_task(self.repo, st)
+        self.register(epoch_id=EPOCH_B)
+        block = self.subscription()
+        self.assertEqual(block["future_key"], {"v": 1})  # 未知键保留
+        self.assertEqual(block["registered_epoch_id"], EPOCH_B)  # 五键更新
+        self.assertIs(block["enabled"], True)
+
+    def test_idempotent_comparison_ignores_unknown_keys(self):
+        # 幂等比较仍只比五规范键：块内多出未知键 + 同参重注册 → 幂等
+        # 零写（未知键不放大为「变化」）
+        self.put_task()
+        self.register()
+        st = state.load_state(self.repo, TID)
+        st["quota_subscription"]["future_key"] = 1
+        save_task(self.repo, st)
+        bytes_before = self.state_bytes()
+        again = self.register()
+        self.assertTrue(again["idempotent"])
+        self.assertEqual(self.state_bytes(), bytes_before)
+
     def test_continuation_mode_mirrors_execution_policy(self):
         # 缺省镜像 execution_policy.continuity.auto_resume（§14 同一
         # 事实源）：until_done + user source 的合法授权块

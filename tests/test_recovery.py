@@ -446,15 +446,17 @@ class HooksManifestTest(unittest.TestCase):
             hook["args"], ["${ZCODE_PLUGIN_ROOT}/hooks/session_start.py"])
 
     def test_existing_entries_coexist(self):
-        # wu-21-03 的既有条目不回退（Stop / PreToolUse×2 / PostToolUse /
-        # PostToolUseFailure 并存）
+        # wu-21-03 的既有条目不回退（Stop / PreToolUse×3 / PostToolUse /
+        # PostToolUseFailure 并存）；v2.2 C6（wu-22-C6）PreToolUse 追加
+        # CronCreate 第三项——既有两条的相对序与内容零改动（additive，
+        # hooks.json +3 条目之一）
         with open(str(HOOKS_JSON), "r", encoding="utf-8") as fh:
             hooks = json.load(fh)["hooks"]
         for event in ("Stop", "PreToolUse", "PostToolUse",
                       "PostToolUseFailure"):
             self.assertIn(event, hooks)
         matchers = [entry.get("matcher") for entry in hooks["PreToolUse"]]
-        self.assertEqual(matchers, ["Agent|Task", "Bash"])
+        self.assertEqual(matchers, ["Agent|Task", "Bash", "CronCreate"])
 
 
 if __name__ == "__main__":
