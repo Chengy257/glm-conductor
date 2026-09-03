@@ -94,6 +94,10 @@ RECOMMENDED_EVENTS = (
     # 成员资格）——
     "quota_accounting_migrated",  # §22.6 存量窗口记账保守迁移一次性事件（max 语义，不退款）
     "wake_bridge_reconciled",     # §22.5 手动/历史桥对账（纯账本；host_status 由调用方显式提供，绝不制造 armed）
+    # —— v2.2 C4 Window Primer 事件（修正计划 §8.1 物化语义 / §8.3 三重
+    # 授权 / §C4 红线；词汇仍开放式，本常量只作文档性推荐，append_event
+    # 不强制成员资格）——
+    "window_primed",  # Window Primer 单飞执行落账（§8.1：一次最小模型调用使新窗口 materialize + 强制 quota refresh 二次确认；materialized 只看 reset_at/epoch 变化——HTTP 200 与百分比下降都不是证据，§C4 红线；executable=False 时无 ActivationReady 概念，归 C5）
 )
 
 

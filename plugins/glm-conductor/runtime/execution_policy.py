@@ -38,13 +38,18 @@
     execution_policy 顶层键完全合法（R7，按本默认块解释）。
 
 quota_control 可选子块（v2.2 M1，决策记录 D5；不在 POLICY_SUB_BLOCKS
-四必填内；v2.2 M1a D15-d 增补 bridge_interval_minutes）：
+四必填内；v2.2 M1a D15-d 增补 bridge_interval_minutes；v2.2 C4 增补
+primer_enabled——§8.3 Window Primer 特性闸）：
     {"pressure_percent": 35.0, "draining_percent": 20.0,
      "bridge_interval_minutes": 60}——execution phase 阈值配置
     （pressure / draining 触发线，百分比）+ Persistent Wake Bridge 的
-    固定间隔分钟数（D15-d 保守默认 60，overlap 未验证前不收紧到 30）。
-    缺块完全合法（legacy / 新任务按默认 35/20/60 解释），块内缺键按
-    同键默认解释；约束 0 <= draining_percent < pressure_percent <= 100
+    固定间隔分钟数（D15-d 保守默认 60，overlap 未验证前不收紧到 30）；
+    另有可选键 primer_enabled（bool；§8.3 的 "primer.enabled" 语义落点
+    ——True 才允许 Window Primer 的 control-plane 模型调用，缺省恒
+    False 即结构性关闭，消费方经 primer_enabled() 容错读）。注意
+    primer_enabled 与 consumed_quota_windows 同款「可选键」处理：不在
+    默认块内（默认块形状由既有冻结测试逐字段锚定，缺键按 False 解释
+    形状不变）；约束 0 <= draining_percent < pressure_percent <= 100
     （对合并默认后的生效配置判定）；百分比逐键有限数值（bool 拒绝）；
     bridge_interval_minutes 非 bool int 且 5 <= 值 <= 1440；未知键忽略
     （向前兼容）。
@@ -405,6 +410,15 @@ def validate_execution_policy(policy) -> "list[str]":
                     errors.append(
                         "quota_control.bridge_interval_minutes 必须是 "
                         "5-1440 的整数（bool 拒绝），得到 %r" % (interval,))
+            # primer_enabled（v2.2 C4 Window Primer，§8.3 特性闸）：存在
+            # 时必须 bool（True/False；缺省按 False 解释——§8.3 结构性
+            # 关闭默认，True 才允许 control-plane 模型调用）
+            if "primer_enabled" in qc_block \
+                    and not isinstance(qc_block["primer_enabled"], bool):
+                errors.append(
+                    "quota_control.primer_enabled 必须是 bool（缺省按 "
+                    "false 解释——§8.3 primer 结构性关闭默认），得到 %r"
+                    % (qc_block["primer_enabled"],))
             # 阈值不变量（D5 冻结约束）：对合并默认后的生效配置判定——
             # 半定义形状（单键越界）同样落网，缺省键按默认参与比较
             effective = default_quota_control(policy)
@@ -661,6 +675,27 @@ def default_quota_control(policy) -> dict:
         if _is_count(interval) and 5 <= interval <= 1440:
             merged["bridge_interval_minutes"] = interval
     return merged
+
+
+def primer_enabled(policy) -> bool:
+    """容错读 quota_control.primer_enabled（v2.2 C4 Window Primer 特性
+    闸，§8.3 "primer.enabled" 的语义落点），返回 bool。
+
+    消费口径（供 runtime/quota/primer.py 的 authorize_prime 三重授权闸
+    使用，与 validate_execution_policy 的缺省解释一致）：
+      - policy 非 dict / quota_control 缺块或非 dict / 键缺失 → False
+        （§8.3 冻结：真实 provider Phase0 完成并显式启用前，primer.enabled
+        恒 false——**缺省即结构性关闭**，这是模型调用授权，方向与观察面
+        fail-open 相反：坏形状绝不解释为开启）；
+      - 值必须逐字是 True 才返回 True（bool 之外的一切——"true"/1/非空
+        串——一律 False，机械强制非文档约定）。
+    纯函数：只读入参、零 I/O；形状纠错归 validate_execution_policy。
+    """
+    block = (policy.get("quota_control")
+             if isinstance(policy, dict) else None)
+    value = (block.get("primer_enabled")
+             if isinstance(block, dict) else None)
+    return value is True
 
 
 # —— 有效并发预算（计划 §12 表） ——
