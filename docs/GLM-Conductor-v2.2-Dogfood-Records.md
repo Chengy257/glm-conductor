@@ -12,8 +12,8 @@
 
 | # | 窗口 reset_at | 证据源 |
 |---|---|---|
-| 1 | 2026-09-02T03:19:22Z | journal quota_resolved 序列 |
-| 2 | 2026-09-02T08:35:48Z | 同上 |
+| 1 | 2026-09-02T03:19:22Z | journal wake_bridge_fired #18 跨界恢复 |
+| 2 | 2026-09-02T08:35:48Z | journal wake_bridge_fired #25/#27/#28 |
 | 3 | 2026-09-02T23:40:18Z | 同上 + 实验文档 §5 |
 | 4 | 2026-09-03T07:14:27Z | recorder CSV（空闲型穿越全程） |
 | 5 | 2026-09-03T12:28:09Z | recorder CSV（活跃型穿越全程） |
@@ -21,14 +21,12 @@
 （当前窗口 reset 2026-09-03T17:28:12Z 进行中，第三轮穿越采集由
 watcher/recorder 自动续录。）
 
-**≥2 quota epochs 真实长任务：成立**（跨 5 个已穿越窗口边界、5 个以上
-epoch 身份，C2 epoch_id 逐窗变化有 journal/CSV 记录）。
+**≥2 quota epochs 真实长任务：成立**（跨 5 个已穿越窗口边界；epoch_id 机制 C2 于 09-02 落地后覆盖后两窗，CSV 留有 4 个 distinct epoch_id 记录）
 
 ## 1. RG-22-01：低余量长任务（部分验证——门机械全验证，全自动恢复环未整环跑）
 
-- **PRESSURE/DRAINING 机械门生产实战**：2026-09-02T02:13Z 额度 13% 时
-  quota-observe 机器自判 DRAINING + wake_required=true，M4 闸机械硬拒
-  新波次（"主会话自觉 hold"退役）；09-03 05:2xZ 22% PRESSURE 预算收缩
+- **PRESSURE/DRAINING 机械门生产实战**：2026-09-02T02:19Z 额度 9% 时
+  quota-observe 机器自判 DRAINING、M4 闸机械停派（journal 在案；更早 02:13Z 13% 快照为 memory 级记录，journalled 02:19Z 独立支持同一结论）（"主会话自觉 hold"退役）；09-03 05:3xZ 22% PRESSURE 预算收缩
   1（D7 收口纪律执行）。
 - **DRAINING 机械交接协议**：每窗口收口均走 checkpoint.md §0 重写 +
   manifest 刷新 + 账本对账（恢复三会话实测 repository>checkpoint 修复
@@ -62,10 +60,11 @@ completion 时的会话侧单次 CronDelete 纪律已文档化（wu-22-10 封存
 
 ## 5. RG-22-05：宿主关闭/任务跳过（实证成立）
 
-2026-09-02T08:2xZ 用户取消会话：桥被删（单次 CronDelete 成功，第三
-正样本）→ **零 ghost**（宿主 automation 列表空，journal bridge_deleted
-在案）→ 次日新会话经 SessionStart + checkpoint 序列完整恢复（repo 零
-错误修改）。correctness 不依赖 wake 成功：实测成立。
+2026-09-02T08:3xZ 用户取消会话：桥被删（单次 CronDelete 成功——**首个
+正样本**，此前 Phase 0 尝试全败；第三正样本是 09-02T19:56:08Z 对重建
+桥的对账删除）→ **零 ghost**（宿主 automation 列表空，journal
+bridge_deleted 在案）→ 同日新会话（journal 13:23Z / 北京 21:23）经
+SessionStart + checkpoint 序列完整恢复（repo 零错误修改）。correctness 不依赖 wake 成功：实测成立。
 
 ## 6. RG-22-06：双窗 until-done（部分实证 + 机械保证，活跑待办）
 
@@ -83,7 +82,7 @@ completion 时的会话侧单次 CronDelete 纪律已文档化（wu-22-10 封存
 | 能力 | fresh interactive | scheduled-owned |
 |---|---|---|
 | Create | ✅ 3 次成功（含重建） | ❌ 嵌套禁止（Phase 0 #13） |
-| Update | ⚠️ glitch（SCHED-01 失败，死路径备份 retarget） | 未测 |
+| Update | ⚠️ 已知 CronUpdate glitch（v2.1 时代实测）；SCHED-01 复验未执行（并入 P0-HOLD/QC 矩阵覆盖）；retarget 保留为死路径备份 | 未测 |
 | Pause | 未测 | 未测 |
 | Delete | ✅ 3 正样本（含 1 次 scheduled-owned 自删） | ✅ |
 | Recurring 连发 | ✅ 28 拍无故障（≤5.2s 偏差三连拍 SCHED-04） | 同会话注入 |
