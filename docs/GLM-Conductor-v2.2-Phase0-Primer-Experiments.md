@@ -4,6 +4,8 @@
 >
 > **纪律**：任何一条硬前置不成立 → C4 停在实验阶段，绝不伪造 epoch / 伪造实验结果。全部通过前 `primer.enabled` 恒 false。（**时点注记**：Phase0 实验期间 primer 特性代码缺席 = 结构性关闭；C4 落地后特性已存在但 `primer_enabled` 缺省恒 false——授权闸 fail-closed，启用须显式配置 + 用户决策。）
 
+> **Correction（2026-09-04，release hardening RH-01/RH-02）**：本文档为历史实验记录，以下事实以修正后的 stable 契约为准——P0-QP-07 / §4 / §7 中「超时单次有界重试」措辞**已被 RH-01 取代**（同一幂等键至多一次 provider-side 模型请求；ambiguous timeout → 不重发 → post-refresh confirmation，见 `docs/GLM-Conductor-v2.2-Release-Hardening-Implementation-Plan.md` §3 与 CHANGELOG 2.2.0）；如文中有 RH-02 之前的「调用方纪律」式 primer 授权描述，同样由 RH-02 取代（primer 授权由公共执行 API `prime_authorized` 机械强制，不再依赖调用方自律）。历史原文保留，不重写。
+
 ## 门总览
 
 | # | 门 | 状态 | 证据 |
@@ -16,7 +18,7 @@
 | P0-QP-04 | Prime 成本记录 | **首笔已录**（19+38 tokens / 6.15s / 0 个可观测百分点） | §1.3 |
 | P0-QP-05 | Rolling-window anchor 行为 | **PASS（实证确认）**——reset_at 锚定过期后首触物化时刻，恒不得从旧边界外推 | §5 |
 | P0-QP-06 | Weekly / multi-window blocking | **机制确认（2026-09-03 用户裁决：weekly 优先判定、不得归 0）**——control.py 阻塞窗语义已机械对齐（QC-05）；真实 weekly 耗尽样本转 C11 机会性佐证 | §6 |
-| P0-QP-07 | Prime 幂等（同旧 boundary 不连发） | **CLOSED（设计门随 C4 落地）**——primer.py 幂等键 (provider_identity_hash, boundary_id)，FAILED 尝试也落账防重发，超时单次有界重试，71 测试锚定（commit 9147e01） | §7 |
+| P0-QP-07 | Prime 幂等（同旧 boundary 不连发） | **CLOSED（设计门随 C4 落地）**——primer.py 幂等键 (provider_identity_hash, boundary_id)，FAILED 尝试也落账防重发，超时单次有界重试，71 测试锚定（commit 9147e01）（注：「超时单次有界重试」已被 RH-01 取代为不重发——见顶部 Correction） | §7 |
 | P0-QP-08 | 无 demand 时禁止 Prime（PASSIVE 零 control-plane model call） | **PASS（结构审计）** | §8 |
 
 ---
@@ -127,7 +129,7 @@ reset_at 冻结、晨间首次会话调用后翻转的完整时间线将作为 C
 调用 → 刷新 → 观察边界变化；HTTP 200 本身不构成证据，§C4 红线）。
 **C4 走全量分支 B**：primer.py 按已冻结设计实施（§8.3 三重授权闸
 机械强制、幂等键=(provider_identity, 旧 boundary/epoch_id) 单飞 +
-超时单次有界重试、物化确认只看二次 refresh 后 reset_at/boundary
+超时单次有界重试（已被 RH-01 取代：ambiguous timeout 不重发，见顶部 Correction）、物化确认只看二次 refresh 后 reset_at/boundary
 变化、绝不用百分比下降自证、weekly 阻塞 → 无 ActivationReady）；
 primer.enabled 恒 false 缺省直至用户显式启用。
 
@@ -204,6 +206,8 @@ ActivationReady（control.evaluate_task_quota_phase 已有 BLOCKED 语义，
 primer 侧归 C4 对齐）。
 
 ## 7. P0-QP-07：Prime 幂等（CLOSED——设计门随 C4 落地）
+
+> **Correction（RH-01，2026-09-04）**：本节「网络超时单次有界重试（仅 socket.timeout，至多 2 次）」是 C4 落地时（commit 9147e01）的历史契约；RH-01 已将其冻结为 **single-attempt**——同一幂等键 `(provider_identity_hash, boundary_id)` 至多一次 provider-side 模型请求，ambiguous timeout 不重发、仅 post-refresh confirmation。以下保留历史原文。
 
 网络超时 / watcher restart 时不得对同旧 boundary 连发多个 prime。
 C4 `runtime/quota/primer.py`（commit 9147e01）机械落地：幂等单飞键 =

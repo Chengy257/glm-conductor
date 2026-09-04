@@ -1,6 +1,6 @@
 # GLM Conductor 架构（权威文档）
 
-> 本文档是 GLM Conductor 的**唯一架构真相源**，描述 v2.0.1（v2-dev 开发线）的实际运行时行为。
+> 本文档是 GLM Conductor 的**唯一架构真相源**，描述 v2.2 release candidate / stable contract（v2-dev 开发线）的实际运行时行为。
 > 契约细节以插件目录为准（`plugins/glm-conductor/` 下的 agents 与 skills）；本文档与其保持一致，冲突时以修复到一致为准，不得偏离开源文档单独演化。
 > 历史提案存于 `docs/history/`，仅作参考，不构成当前实现依据。
 
@@ -9,7 +9,7 @@
 ```
 GLM Conductor
 
-Selective orchestration for GLM coding agents in ZCode.
+Selective orchestration and durable quota-aware continuity for GLM coding agents in ZCode.
 ```
 
 GLM Conductor 是 ZCode 插件，为 GLM 双模型体系（GLM-5.3 主会话 + GLM-5.3-Flash 子智能体）提供选择性编排：主会话任架构师并判断密集的工作，有界、规格完备的实施委派给 Flash 执行者，assurance:high 的交付物由全新上下文的只读审查者独立终审，长任务由与路由正交的连续性层安全续跑。v2 起，关键运行时契约（v1 为提示词契约）由**强制层**（插件钩子 + 运行时状态）确定性执行——"从提示词契约到强制执行契约"。
@@ -154,9 +154,11 @@ continuity 是与路由正交的生命周期维度，不是第五种 route。
 
 | 模式 | 适用 | 行为 |
 | --- | --- | --- |
-| foreground（默认） | 当前会话内可完成 | 正常执行，不创建任何 continuation |
+| foreground（交互默认） | 当前会话内可完成 | 正常执行，不创建任何 continuation |
 | resumable | 可能跨会话/跨可用性窗口中断的长任务 | 里程碑后写 checkpoint + 定时唤醒，唤醒后先检查再恢复 |
 | idle | 非紧急、可无人值守 | 优先交给 ZCode 原生闲时任务 |
+
+**两层默认语义（v2.2 冻结解释）**：foreground 是普通、未创建 durable task 的短任务的**产品/交互默认**（不创建 continuation state，零干预）；一旦创建 durable task / `execution_policy`，runtime 保守默认为 `continuity.mode=resumable` + `auto_resume=manual`（`max_quota_windows=0`）——**可恢复，但没有自动跨窗授权**。`resumable != automatic resume`：自动跨窗续跑（auto_once / until_done）须显式授权升档，不得理解为「安装后所有任务默认自动续跑」。
 
 ### 7.1 任务标识与状态布局
 
@@ -192,10 +194,11 @@ checkpoint 是导航状态，不是仓库真相源：不复制完整 diff、不�
 
 ### 7.3 调度与边界
 
-- 定时唤醒用安全周期性再激活（检查-恢复或等待），不 sleep 到固定时间；**调度触发本身就是存活探针**——额度感知调度（§7 quota 节）在 reset 已知时精确规划唤醒，不可用时回退本探针，不引入常驻额度轮询器
+- 定时唤醒用安全周期性再激活（检查-恢复或等待），不 sleep 到固定时间；**调度触发本身就是存活探针**——v2.2 correctness path（§7.5）：provider quota truth 由 resolver / 可选 resident Watcher 观察维护；恢复资格由 Quota Epoch + 额度订阅（subscription eligibility）判定；同会话激活机会由 Persistent Recurring Bridge 提供并保持 armed。bridge fire 只是 probe / execution opportunity——fire ≠ 新 epoch、fire ≠ 额度消费；`reset_at` 绝不从旧 boundary 按固定 +5h 外推（锚定物化时刻，见 §7.5 实测口径）；`CronUpdate` / `CronDelete` 成功与否不属于 correctness 前提；宿主不可用导致 wake 漏发时 durable ledger 依然有效，由下次 SessionStart 兜底恢复
+- 观察与调度分工（v2.2 冻结解释）：`observer.py` 保持纯决策层（零 I/O、零 daemon、零 timer、零网络）；可选 resident Watcher（§7.5 C3）是独立的进程级常驻 I/O 控制循环——poll-only、零模型调用，负责 provider quota truth 的持续观察，不负责 task dispatch、resume 授权、Scheduled Task 创建或 Session 注入
 - 同会话投递：结果要回到当前会话，必须从当前聊天创建绑定本会话的定时续作
 - 原生插件级 quota API 仍不存在（getQuotaRemaining 等均属虚构）、不硬编码 5 小时重置；额度查询走 provider-api 监控端点（§7 Quota-Aware Continuity），凭证不可得时回退周期性探针——额度观察只作为证据使用，不作为路由轴
-- 完成清理只作用于本任务：删除 `.glm-conductor/tasks/<task-id>/` 单个目录、停止关联的定时任务、终止闲时排队，避免幽灵唤醒
+- 完成清理只作用于本任务：删除 `.glm-conductor/tasks/<task-id>/` 单个目录、停止关联的定时任务、终止闲时排队，避免幽灵唤醒；`CronUpdate` / `CronDelete` 成功与否不属于 correctness 依赖——清理失败不破坏任务正确性，tombstone / no-task 状态下的后续激活是安全 no-op
 - `.glm-conductor/` 是本地运行时状态：优先写入 `.git/info/exclude` 本地排除，不自动修改 tracked `.gitignore`
 
 ### 7.4 Quota-Aware Continuity（alpha3）
@@ -205,9 +208,9 @@ checkpoint 是导航状态，不是仓库真相源：不复制完整 diff、不�
 - **provider 抽象与解析**（§24-§27）：`provider.py` 定抽象边界（QuotaProvider / QuotaProviderError 五类错误），`parser.py` 把监控端点响应解析为标准化快照——按语义字段判窗（unit=3/number=5 → five_hour；unit=6/number=1 → weekly；与 type 无关），周窗可选（lite 套餐实测无周窗），容忍加性未知字段；`zai.py` / `bigmodel.py` 两个适配器走 `_http.py` 共享硬化层
 - **安全条款**（§37 全部代码级落地并有测试锚定）：HTTPS only、严格 host allowlist（api.z.ai / open.bigmodel.cn，构造期拦截、绝不向清单外转发凭证）、短超时（5s）、限长响应（64KiB）、重定向禁用、原始响应不落盘、凭证零落盘（Authorization 头只存在于请求构造处，错误消息模板不含 key）
 - **凭证链**（§36 provider-api 模式）：环境变量 `GLM_CONDUCTOR_QUOTA_API_KEY` 优先，已登录 ZCode 的 `~/.zcode/v2/config.json` provider 配置为文档化回退；两者皆不可得 → unavailable → 周期性探针回退
-- **评估与规划**（§28-§33）：`scheduler.py` 纯函数四态评估（AVAILABLE / PRESSURE / EXHAUSTED / UNKNOWN，fail-open）与恢复规划——PRESSURE 在安全里程碑落 checkpoint；EXHAUSTED 取全部阻塞窗 max(reset)+grace 精确唤醒且唤醒后强制刷新；reset 未知或数据不可得 → 周期性回退，绝不虚构 reset 时间
+- **评估与规划**（§28-§33）：`scheduler.py` 纯函数四态评估（AVAILABLE / PRESSURE / EXHAUSTED / UNKNOWN，fail-open）与恢复规划——PRESSURE 在安全里程碑落 checkpoint；EXHAUSTED 取全部阻塞窗 max(reset)+grace 精确唤醒且唤醒后强制刷新；reset 未知或数据不可得 → 周期性回退，绝不虚构 reset 时间（v2.2 起 EXHAUSTED 唤醒的 correctness path 由 §7.5 承接：epoch / subscription 判恢复资格、recurring bridge 提供同会话激活机会；本条 alpha3 精确唤醒规划存活于 `quota-resume` 的 `scheduler.plan_resume`，不再作为唯一唤醒依赖）
 - **诊断面**（§43）：`/glm-conductor:quota` 命令驱动 `report.py`（文本 + `--json` 双输出，zai→bigmodel 有界探测，退出码恒 0，零凭证输出）
-- **查询时机**（§34）：只在刷新点查询（任务开始 / 路由选定后 / 大段派发前 / 里程碑后 / 调度恢复前后）+ 实例内短 TTL 缓存，不做常驻轮询
+- **查询时机**（§34）：只在刷新点查询（任务开始 / 路由选定后 / 大段派发前 / 里程碑后 / 调度恢复前后）+ 实例内短 TTL 缓存，不做常驻轮询（指会话内观察面；v2.2 起可选 resident Watcher（§7.5 C3）是独立的进程级常驻观察，零模型调用，与会话观察面互不替代）
 
 ### 7.5 Quota Control Plane / Activation Transport / Continuity Health（v2.2）
 
