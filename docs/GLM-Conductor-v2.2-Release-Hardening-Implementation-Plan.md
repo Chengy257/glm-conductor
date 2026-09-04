@@ -1117,12 +1117,14 @@ waiting_quota → executing
 ## 9.2 Tests
 
 > [修正 2026-09-04] 各项按下述注记如实处理：本地证据已落（五工作单元 receipts 链），远端 CI 复核尚未发生——统一 push 后复核四路全绿才允许勾选，不得把未跑的 push 后 CI 写成已绿。
+>
+> [复核 2026-09-04] 统一 push 已执行（`6d2ee2d..3d38985` → origin/v2-dev，2026-09-04T02:11Z），远端 CI run `33828629148` 于 `3d38985` 四路 matrix 全绿（ubuntu/windows × Python 3.8/3.13 各 success，3m12s，2026-09-04T02:12Z 触发）。以下各项据此勾选。
 
-- [ ] 新 RH-01 / RH-02 / RH-03 测试全部通过；
-- [ ] full suite green —— 本地全绿（2113 tests，五工作单元 receipts 链）；远端 CI 复核随统一 push 执行；
-- [ ] `validate_plugin` 15/15 —— 本地全绿（15/15，五工作单元 receipts 链）；远端 CI 复核随统一 push 执行；
-- [ ] CI 独立 green —— 既有工作流满足（零真实模型调用 / 零凭证 / 注入纪律，见 §7.3 修正注记）；统一 push 后复核四路全绿即关闭；
-- [ ] no real external model calls in CI —— 既有工作流满足（零真实模型调用 / 零凭证 / 注入纪律）；统一 push 后复核四路全绿即关闭。
+- [x] 新 RH-01 / RH-02 / RH-03 测试全部通过 —— 本地 receipts 链全绿 + 远端 run `33828629148` 四路全量 unittest 复核；
+- [x] full suite green —— 本地全绿（2113 tests，五工作单元 receipts 链）+ 远端 run `33828629148` 四路复核；
+- [x] `validate_plugin` 15/15 —— 本地全绿（15/15）+ 远端 run `33828629148` 四路复核；
+- [x] CI 独立 green —— run `33828629148`（`3d38985`，push 触发）四路全绿；
+- [x] no real external model calls in CI —— 既有工作流注入纪律（零真实模型调用 / 零凭证），run `33828629148` 四路通过即证。
 
 ## 9.3 Real dogfood
 
@@ -1370,5 +1372,5 @@ v2.2.0 stable
 
 ## 14.4 剩余待办
 
-1. **统一 push 后确认 CI**——唯一剩余机械步骤：按 §7.1 塌缩语义，上述本地 commit 统一 push 触发既有 `validate.yml` 四路 matrix（Linux + Windows × Python 3.8 / 3.13，每路 validator + 全量 unittest），四路全绿即关闭 §9.2「CI 独立 green」。push 前无法预先验证远端 CI 结果（时序后果，非缺口）；既有工作流的最近全绿证据为审查基线 `6d2ee2d` 的 run `33769790818`（2026-09-03T14:56:31Z，4m6s）。
+1. ~~**统一 push 后确认 CI**~~ **已完成（2026-09-04T02:11-02:15Z）**：统一 push 执行（`6d2ee2d..3d38985` → origin/v2-dev），远端 CI run `33828629148` 于 `3d38985` 四路 matrix 全绿（ubuntu/windows × Python 3.8/3.13 各 success，3m12s）——§9.2 Tests 五项已全部勾选关闭（含本条收口记录在内的后续 docs 提交按常规再触发一轮 CI，属正常流水，不改变本项结论）。
 2. RH-06（RG-22-06 真实双 epoch dogfood）与 RH-07（stable release 决策）另行安排，不在本轮五单元范围内。
