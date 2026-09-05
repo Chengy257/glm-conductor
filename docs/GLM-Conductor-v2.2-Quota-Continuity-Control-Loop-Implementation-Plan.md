@@ -2677,6 +2677,8 @@ clean session
 
 > 第二个窗口恢复不得依赖 Scheduled Task create。
 
+> **[PASS 2026-09-05]** 真实双窗活跑通过：任务 v22-rh06-be1301（BioWorkflows 干净项目会话，载体 seclip-srna-bs-seq v0.1 三子流程）。三互异 epoch（584f DRAINING 注册 / 61ff / 5335）；两轮 waiting_quota→executing 跨窗恢复；同桥 automation-2d2c80aa… 全程唯一（journal fires=10）；consumed 恰 2/2；第二窗恢复零新建（§5.4 活体拒波 ×2 + persistent bridge 传输）；同窗重复 fire 零重复激活/消费；watcher stop/absence 零状态破坏；完成清理独立于 CronDelete（completed → tombstone → 单次 delete 成功）。勾选依据 = stable 收口会话 raw-journal 独立重演 13/13；全量证据 `docs/GLM-Conductor-v2.2-Dogfood-Records.md` §11。
+
 ---
 
 ## RG-22-07：Scheduler Capability Matrix（D15 新增）

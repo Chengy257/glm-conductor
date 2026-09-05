@@ -1102,17 +1102,19 @@ waiting_quota → executing
 
 ## 9.1 Code correctness
 
-- [ ] Primer same-boundary transport call max 1；
-- [ ] timeout 不自动重复 model request；
-- [ ] timeout 后可执行 post-refresh confirmation；
-- [ ] Primer public model-call API 机械授权；
-- [ ] manual/notify 永远无法触发 Primer；
-- [ ] quota consumption crash replay 不重复 +1；
-- [ ] migration crash replay 不重复上调；
-- [ ] bridge arm/fire/create 仍保持 zero consumption；
-- [ ] observer 仍保持 pure；
-- [ ] Watcher 仍保持 model-call-free；
-- [ ] reserved transports 仍不半实现。
+> [勾选 2026-09-05] 依据 = RH-01..05 五单元 ship 收据链（指纹 a57868f8 / a7e62763 / 19251c2f / be6f4617 / 8dd36ff9）+ 全量 2113 绿 + validator 15/15 + CI run 33828629148 四路复核 + RH-06 活跑（§9.3）。
+
+- [x] Primer same-boundary transport call max 1 —— RH-01（PRIMER-RH-01..05：timeout 恰 1 次 transport、record replay 零 transport）；
+- [x] timeout 不自动重复 model request —— RH-01（重试循环删除；ambiguous timeout 走 post-refresh 不重发）；
+- [x] timeout 后可执行 post-refresh confirmation —— RH-01（timeout + epoch advanced → materialized=True，零第二次 model call）；
+- [x] Primer public model-call API 机械授权 —— RH-02（prime_authorized 三重闸；PRIMER-AUTH-01..06）；
+- [x] manual/notify 永远无法触发 Primer —— RH-02（未授权形态零副作用拒绝，四重断言）；
+- [x] quota consumption crash replay 不重复 +1 —— RH-03（CONSUME-TXN-01..05 write-ahead pending）；
+- [x] migration crash replay 不重复上调 —— RH-03（MIGRATE-TXN-01 冻结五数恢复）；
+- [x] bridge arm/fire/create 仍保持 zero consumption —— C 系测试 + RH-06 活跑（10 fires / 2 resumes / consumed=2 解耦）；
+- [x] observer 仍保持 pure —— M2 测试面（2113 全量内）；
+- [x] Watcher 仍保持 model-call-free —— C3 测试 + RH-06 §5.10（stop/absence 双变体零状态破坏）；
+- [x] reserved transports 仍不半实现 —— C6（arm 一律 TransportReservedError）。
 
 ## 9.2 Tests
 
@@ -1128,14 +1130,16 @@ waiting_quota → executing
 
 ## 9.3 Real dogfood
 
-- [ ] RG-22-06 跨至少两个新 executable epoch；
-- [ ] same persistent bridge identity；
-- [ ] no nested Scheduled Task creation；
-- [ ] accounting delta == successful cross-epoch resumes；
-- [ ] repeated fire in same epoch zero duplicate consumption；
-- [ ] watcher failure/absence does not corrupt task state；
-- [ ] completion cleanup remains best-effort only；
-- [ ] correctness does not depend on CronDelete/CronUpdate success。
+> [勾选 2026-09-05] 依据 = RH-06 双窗活跑（任务 v22-rh06-be1301 @ BioWorkflows，载体 seclip-srna-bs-seq v0.1）；勾选证据 = stable 收口会话对原始账本（events.jsonl 301 事件 + 控制面 2 事件 + state.json）的独立重演 13/13，不采信执行侧自述；时间戳 UTC。
+
+- [x] RG-22-06 跨至少两个新 executable epoch —— glm:61ff…、glm:5335… 两跨（Epoch N 584f 为 DRAINING 注册期，零激活零消费）；
+- [x] same persistent bridge identity —— automation-2d2c80aa…（armed 09-04T19:39:54Z → deleted 09-05T21:48:07Z 全程同一）；
+- [x] no nested Scheduled Task creation —— journal 零创建事件 + batch 注记 "zero nested create" + session_facts 单 automation；
+- [x] accounting delta == successful cross-epoch resumes —— 2 == 2（fires=10 ≠ resumes=2 ≠ consumed=2，解耦成立）；
+- [x] repeated fire in same epoch zero duplicate consumption —— fire#2（09-04T21:41:03Z，同 epoch 61ff）至下一 epoch 事件间 journal 零消费/零注册/零激活；
+- [x] watcher failure/absence does not corrupt task state —— §5.10 双变体（absent → "nothing to stop"；running → 原子 stop + 重启接管）；
+- [x] completion cleanup remains best-effort only —— 单次 CronDelete（成功，first and only attempt, no retry）；
+- [x] correctness does not depend on CronDelete/CronUpdate success —— completed（21:38:27Z）先于 delete（21:48:07Z）+ tombstone（21:47:49Z）双保险在位（成功分支）。
 
 ---
 
@@ -1373,4 +1377,4 @@ v2.2.0 stable
 ## 14.4 剩余待办
 
 1. ~~**统一 push 后确认 CI**~~ **已完成（2026-09-04T02:11-02:15Z）**：统一 push 执行（`6d2ee2d..3d38985` → origin/v2-dev），远端 CI run `33828629148` 于 `3d38985` 四路 matrix 全绿（ubuntu/windows × Python 3.8/3.13 各 success，3m12s）——§9.2 Tests 五项已全部勾选关闭（含本条收口记录在内的后续 docs 提交按常规再触发一轮 CI，属正常流水，不改变本项结论）。
-2. RH-06（RG-22-06 真实双 epoch dogfood）与 RH-07（stable release 决策）另行安排，不在本轮五单元范围内。
+2. ~~RH-06（RG-22-06 真实双 epoch dogfood）~~ **已完成（2026-09-05）**：双窗活跑任务 v22-rh06-be1301（BioWorkflows，载体 feature/seclip-srna-bs-seq-v0.1）§5.13 十三项全过，含完成清理链（completed 21:38:27Z → tombstone 21:47:49Z → 单次 CronDelete 成功 21:48:07Z）；stable 收口会话独立复核 13/13（raw-journal 重演）；证据补录 `docs/GLM-Conductor-v2.2-Dogfood-Records.md` §11。RH-07（stable 终审）仍待——按 stable 计划 ST-04 执行。
