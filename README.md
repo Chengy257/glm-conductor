@@ -55,7 +55,7 @@ v2 起，插件把原本写在提示词里的关键契约升级为**运行时强
 - **授权续跑（v2.1 M5 起，v2.2 收口）**——额度 EXHAUSTED 走确定性转态链：四态授权（manual / notify / auto_once / until_done，升档须用户授权落盘）+ 自足 wake prompt（宿主实锚：wake=同会话续行）；Persistent Wake Bridge（`wake-plan` 裁决 → 主会话宿主 CronCreate → `arm` 记账）是 stable 主路径；预算耗尽转 `waiting_user`，恢复首步恒为 `quota-resume`
 - **Activation Transport（v2.2）**——"额度可用"与"休眠会话拿到新回合"是两件事，后者单独抽象：`recurring_bridge` 是唯一 stable 传输（一个任务 ↔ 一个常驻循环 automation）；`probe_then_hold` / `self_retiming` / `session_injector` 为预留（`arm` 一律 `TransportReservedError` 拒绝，绝不半实现）；`transport-status` 输出冻结 12 键事实面
 - **Stop 门 continuity health（v2.2）**——完成门第 0 位检查（只约束休眠交接域：waiting_quota/waiting_user 或 PRESSURE/DRAINING + resumable + 自动续跑）：三件套按依赖序核查——handoff durable（checkpoint + resume manifest）、当期 epoch 已注册订阅、激活传输已 armed；`create=forbidden` 或 scheduled-origin 一律降级放行不无限拦截（watcher 缺席/过期只是降级注记）
-- **能力边界（stable 口径）**——watcher 只做常驻额度观察，**不直接向休眠会话注入回合**；同会话激活依赖宿主 Scheduled Task（host 关闭/休眠时自动唤醒可能漏发，durable SessionStart 恢复兜底）；`recurring_bridge` 是唯一 stable activation transport；`CronUpdate`/`CronDelete` 成功与否不属于 correctness 依赖；单任务/单控制器模型不变，worker 上限 4
+- **能力边界（stable 口径）**——watcher 只做常驻额度观察，**不直接向休眠会话注入回合**；同会话激活依赖宿主 Scheduled Task（host 关闭/休眠时自动唤醒可能漏发，durable SessionStart 恢复兜底）；`recurring_bridge` 是唯一 stable activation transport；`CronUpdate`/`CronDelete` 成功与否不属于 correctness 依赖；单控制器（单编排主会话）模型不变，worker 上限 4
 - **额度感知连续性**——查询 Coding Plan 用量（凭证零落盘），四态评估；不可用时 fail-open 回退周期性探针；`/glm-conductor:quota` 随时诊断
 - **跨会话恢复**——任务专属 checkpoint + 八步恢复检查，仓库真实状态始终优先于记录
 

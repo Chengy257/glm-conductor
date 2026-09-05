@@ -15,11 +15,11 @@ continuity 是与路由正交的生命周期维度，不是第五种 route。
 
 | 模式 | 适用 | 行为 |
 | --- | --- | --- |
-| foreground（默认） | 普通任务、当前会话内可完成、需用户实时互动 | 正常执行，不创建任何 continuation |
+| foreground（交互默认） | 普通任务、当前会话内可完成、需用户实时互动 | 正常执行，不创建任何 continuation |
 | resumable | 长前台任务、可能跨额度窗口/因可用性中断、仍希望延续当前目标 | 里程碑后写 checkpoint + 安排同目标定时唤醒，唤醒后先检查再恢复 |
 | idle | 非紧急长任务、可无人值守、验证可自动完成 | 优先交给 ZCode 原生闲时任务执行 |
 
-- **foreground** 是默认值：不创建任何 continuation，任务随会话自然开始与结束
+- **foreground** 是交互默认值（普通未追踪短任务的产品默认；durable 任务 execution_policy 保守默认 resumable + manual + max_quota_windows=0，见 architecture §7 两层默认语义）：不创建任何 continuation，任务随会话自然开始与结束
 - **resumable** 仍在前台工作，但为中断做好准备：checkpoint 是恢复的依据，定时唤醒是恢复的触发器
 - **idle** 把整段工作交给 ZCode 原生闲时任务，主会话不占用前台交互
 
