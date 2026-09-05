@@ -1130,14 +1130,14 @@ waiting_quota → executing
 
 ## 9.3 Real dogfood
 
-> [勾选 2026-09-05] 依据 = RH-06 双窗活跑（任务 v22-rh06-be1301 @ BioWorkflows，载体 seclip-srna-bs-seq v0.1）；勾选证据 = stable 收口会话对原始账本（events.jsonl 301 事件 + 控制面 2 事件 + state.json）的独立重演 13/13，不采信执行侧自述；时间戳 UTC。
+> [勾选 2026-09-05] 依据 = RH-06 双窗活跑（任务 v22-rh06-be1301 @ BioWorkflows，载体 seclip-srna-bs-seq v0.1）；勾选证据 = stable 收口会话对原始账本（events.jsonl 301 事件 + 控制面 2 事件 + state.json）与 watcher 工件的独立重演 14/14（清单 14 项：N+1/N+2 转态与 dup-fire 零激活/零消费各两项；watcher 条款经工件重演、受控 stop 输出为执行侧观察工件佐证），不采信执行侧自述；时间戳 UTC。
 
 - [x] RG-22-06 跨至少两个新 executable epoch —— glm:61ff…、glm:5335… 两跨（Epoch N 584f 为 DRAINING 注册期，零激活零消费）；
 - [x] same persistent bridge identity —— automation-2d2c80aa…（armed 09-04T19:39:54Z → deleted 09-05T21:48:07Z 全程同一）；
 - [x] no nested Scheduled Task creation —— journal 零创建事件 + batch 注记 "zero nested create" + session_facts 单 automation；
 - [x] accounting delta == successful cross-epoch resumes —— 2 == 2（fires=10 ≠ resumes=2 ≠ consumed=2，解耦成立）；
 - [x] repeated fire in same epoch zero duplicate consumption —— fire#2（09-04T21:41:03Z，同 epoch 61ff）至下一 epoch 事件间 journal 零消费/零注册/零激活；
-- [x] watcher failure/absence does not corrupt task state —— §5.10 双变体（absent → "nothing to stop"；running → 原子 stop + 重启接管）；
+- [x] watcher failure/absence does not corrupt task state —— 工件重演：watcher.json 原子 stop_requested=true 且观测/心跳/世代字段保全、watcher.log 单实例锁冲突干净退出、任务账本零破坏；absent 变体 "nothing to stop" 与重启接管为执行侧 §5.10 受控观察（工件佐证）；
 - [x] completion cleanup remains best-effort only —— 单次 CronDelete（成功，first and only attempt, no retry）；
 - [x] correctness does not depend on CronDelete/CronUpdate success —— completed（21:38:27Z）先于 delete（21:48:07Z）+ tombstone（21:47:49Z）双保险在位（成功分支）。
 
@@ -1377,4 +1377,4 @@ v2.2.0 stable
 ## 14.4 剩余待办
 
 1. ~~**统一 push 后确认 CI**~~ **已完成（2026-09-04T02:11-02:15Z）**：统一 push 执行（`6d2ee2d..3d38985` → origin/v2-dev），远端 CI run `33828629148` 于 `3d38985` 四路 matrix 全绿（ubuntu/windows × Python 3.8/3.13 各 success，3m12s）——§9.2 Tests 五项已全部勾选关闭（含本条收口记录在内的后续 docs 提交按常规再触发一轮 CI，属正常流水，不改变本项结论）。
-2. ~~RH-06（RG-22-06 真实双 epoch dogfood）~~ **已完成（2026-09-05）**：双窗活跑任务 v22-rh06-be1301（BioWorkflows，载体 feature/seclip-srna-bs-seq-v0.1）§5.13 十三项全过，含完成清理链（completed 21:38:27Z → tombstone 21:47:49Z → 单次 CronDelete 成功 21:48:07Z）；stable 收口会话独立复核 13/13（raw-journal 重演）；证据补录 `docs/GLM-Conductor-v2.2-Dogfood-Records.md` §11。RH-07（stable 终审）仍待——按 stable 计划 ST-04 执行。
+2. ~~RH-06（RG-22-06 真实双 epoch dogfood）~~ **已完成（2026-09-05）**：双窗活跑任务 v22-rh06-be1301（BioWorkflows，载体 feature/seclip-srna-bs-seq-v0.1）§5.13 十四项全过，含完成清理链（completed 21:38:27Z → tombstone 21:47:49Z → 单次 CronDelete 成功 21:48:07Z）；stable 收口会话独立复核 14/14（raw-journal + watcher 工件重演）；证据补录 `docs/GLM-Conductor-v2.2-Dogfood-Records.md` §11。RH-07（stable 终审）仍待——按 stable 计划 ST-04 执行。

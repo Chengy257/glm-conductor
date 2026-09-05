@@ -113,7 +113,7 @@ stable 等 RG-22-06 活跑通过后升格。
   （50+ 行，两轮边界穿越全程）——持续采集，第三轮（17:28:12Z）自动入账。
 - 实验文档 §5.1 双轮穿越佐证 + §5 六行证据表 = 机制裁决的实测背书。
 
-## 11. Stable 收口补录：RH-06 双窗活跑（2026-09-04/05，PASS 13/13）
+## 11. Stable 收口补录：RH-06 双窗活跑（2026-09-04/05，PASS 14/14）
 
 （本节为 stable 计划 ST-02b 补录；勾选依据 = stable 收口会话对原始账本的独立重演——events.jsonl 301 事件 + 控制面 quota/events.jsonl 2 事件 + state.json/session_facts.json，不采信执行侧自述。时间戳 UTC。）
 
@@ -134,7 +134,9 @@ stable 等 RG-22-06 活跑通过后升格。
 | checkpoint | 19:44:02Z | 21:49:09Z | 03:24:40Z |
 | 嵌套 CronCreate | 无 | 无 | 无 |
 
-**§5.13 十三项判定**（独立重演，全 PASS）：三互异 epoch / 两新 executable epoch / 同一 automation 全程 / runCount 增长（journal fires 10 拍跨 25h；宿主 runCount 0→1→7 为执行侧 CronList 观察，自动化已删不可重查——以 journal 行为性增长为准）/ 零嵌套 CronCreate / 两轮 waiting_quota→executing（C5 域事件链：quota_waiting → quota_resumed + 激活标记 + 消费）/ 两激活标记（控制面恰好 2 条 quota_epoch_advanced，QC-07 幂等闸机械保证）/ consumed 恰 2 / 同窗重复 fire 零重复激活零消费（fire#2 至下一 epoch 事件间 journal 零增量）/ 两轮 handoff checkpoint+manifest 新鲜 / §5.10 watcher stop/absence 双变体零状态破坏 / 清理独立性（成功分支）。
+（相对 §5.12 模板缺 runCount / manifest refreshed 两行：宿主 runCount 为执行侧 CronList 观察（自动化已删不可重查），以判定段 journal fires=10 为行为性证据；manifest 新鲜由两轮 checkpoint/manifest 链与 manifest.json 在位佐证——并入判定段。）
+
+**§5.13 十四项判定**（独立重演，全 PASS；计划清单 14 项——N+1/N+2 转态与 dup-fire 零激活/零消费各为两项，下文合并列举）：三互异 epoch / 两新 executable epoch / 同一 automation 全程 / runCount 增长（journal fires 10 拍跨 24h02m，首拍 09-04T20:41:53Z → 末拍 09-05T20:44:21Z；宿主 runCount 0→1→7 为执行侧 CronList 观察，自动化已删不可重查——以 journal 行为性增长为准）/ 零嵌套 CronCreate / 两轮 waiting_quota→executing（C5 域事件链：quota_waiting → quota_resumed + 激活标记 + 消费）/ 两激活标记（控制面恰好 2 条 quota_epoch_advanced，QC-07 幂等闸机械保证）/ consumed 恰 2 / 同窗重复 fire 零重复激活、零重复消费（fire#2 至下一 epoch 事件间 journal 零增量）/ 两轮 handoff checkpoint+manifest 新鲜 / watcher stop/absence 零状态破坏（工件重演：watcher.json 原子 stop_requested=true 且观测/心跳/世代字段保全、watcher.log 单实例锁冲突干净退出、任务账本零破坏；"nothing to stop" 输出与重启接管为执行侧 §5.10 受控观察，工件佐证）/ 清理独立性（成功分支）。
 
 **终账解耦**：fires(journal)=10；cross-epoch resumes=2；consumed=2/2 —— arm/fire/create 零消费，§15.1 commit-point 恰两笔（write-ahead pending 先行 = RH-03 形状；representative_boundary_id = RH-04 形状）。
 
@@ -142,6 +144,6 @@ stable 等 RG-22-06 活跑通过后升格。
 
 **载体收口**（不影响 RH-06 判定）：24 单元 + R1/R2 完成；D3/D4 用户裁决取消（scope_narrowed）；终审一轮 fix-first 按用户裁决归档为 bs-seq TODO §5（a859fd0）后二轮 ship；三条任务级 WSL 终验 exit-0。
 
-**出处注记**（诚实记录）：宿主 runCount 与 §5.6 resumed:false 为执行侧宿主观察/CLI 记录，均有 journal 零增量主证兜底；独立复核原文与重演脚本存 stable 会话 `.glm-conductor/tmp/`（rh06_independent_verification.md / rh06_rederive*.py）。
+**出处注记**（诚实记录）：宿主 runCount、§5.6 resumed:false、§5.10 受控 stop 的 CLI 输出（"nothing to stop" / 重启接管）为执行侧宿主观察/CLI 记录——runCount 与 §5.6 有 journal 零增量主证兜底，§5.10 有 watcher 工件（watcher.json/watcher.log）佐证；独立复核原文与重演脚本存 stable 会话 `.glm-conductor/tmp/`（rh06_independent_verification.md / rh06_rederive*.py）。
 
 **与 §9 第 16 条的关系**：本节即第 16 条的闭合记录——修正记账口径的桥活跑双窗 dogfood 已过，v2.2.0 stable 升格的运行时证据条件全部满足（RH-07 终审另按 stable 计划 ST-04 执行）。
