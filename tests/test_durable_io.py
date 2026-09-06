@@ -474,14 +474,18 @@ class FixedTmpBanTest(unittest.TestCase):
     """多进程 capable 写方迁移回归（WU-221-A2）：纯文本扫描
     plugins/glm-conductor/runtime/**/*.py（rglob，零 tempdir、零网络、
     确定性），凡代码行出现固定临时名构造字面量（`.tmp"`——tmp 路径 +
-    双引号收尾）的文件必须属于单写者保留白名单；四个已迁移写方
-    （quota/resolver.py、quota/watcher_store.py、quota/primer.py、
-    scheduler_facts.py）绝不出现，且各自含 durable_io 接线证据。
-    durable_io.py 自身的唯一临时名字面量（TEMP_MARKER 的
-    ".durable-tmp." 前缀 + "%s%d.%s.tmp" 唯一化格式串）合法，按文件名
-    在白名单中显式放行——该文件绝不构造固定 <path>.tmp 名。"""
+    双引号收尾；v2.2.1 a5 rider 起连同单引号形态 `'.tmp'` 一并扫描，
+    全仓现存零单引号命中——加宽后 offender 集合与原先逐行一致）的文
+    件必须属于单写者保留白名单；四个已迁移写方（quota/resolver.py、
+    quota/watcher_store.py、quota/primer.py、scheduler_facts.py）绝不
+    出现，且各自含 durable_io 接线证据。durable_io.py 自身的唯一临时
+    名字面量（TEMP_MARKER 的 ".durable-tmp." 前缀 + "%s%d.%s.tmp" 唯一
+    化格式串）合法，按文件名显式放行——该文件绝不构造固定 <path>.tmp
+    名。单写者白名单按**全相对路径**匹配（a5 rider：同名文件出现在
+    其他子目录不再被 basename 放行豁免；durable_io.py 全仓唯一，仍按
+    文件名放行）。"""
 
-    FIXED_TMP_LITERAL = '.tmp"'
+    FIXED_TMP_LITERALS = ('.tmp"', "'.tmp'")
     RUNTIME_PARTS = Path("plugins") / "glm-conductor" / "runtime"
     MIGRATED_WRITERS = (
         "quota/resolver.py",
@@ -490,11 +494,13 @@ class FixedTmpBanTest(unittest.TestCase):
         "scheduler_facts.py",
     )
     # 单写者固定 .tmp 保留（记录在案：docs/architecture.md §7.6 分类
-    # 表）+ durable_io.py 唯一临时名常量按文件名显式放行
-    FIXED_TMP_ALLOWLIST = frozenset((
+    # 表），按相对 runtime 根的全 posix 路径匹配
+    SINGLE_WRITER_ALLOWLIST = frozenset((
         "state.py", "dispatch_wave.py", "lease.py",
-        "provenance.py", "resume_manifest.py", "durable_io.py",
+        "provenance.py", "resume_manifest.py",
     ))
+    # durable_io.py：唯一临时名常量文件（全仓唯一），按文件名放行
+    UNIQUE_TEMP_MODULE_BASENAME = "durable_io.py"
 
     def test_no_fixed_tmp_writer_among_migrated_modules(self):
         runtime_root = (Path(__file__).resolve().parents[1]
@@ -504,7 +510,8 @@ class FixedTmpBanTest(unittest.TestCase):
             rel = path.relative_to(runtime_root).as_posix()
             text = path.read_text(encoding="utf-8")
             for lineno, line in enumerate(text.splitlines(), start=1):
-                if self.FIXED_TMP_LITERAL in line:
+                if any(literal in line
+                       for literal in self.FIXED_TMP_LITERALS):
                     offenders.append("%s:%d:%s"
                                      % (rel, lineno, line.strip()))
         report = "\n".join(offenders) if offenders else "(none)"
@@ -517,14 +524,17 @@ class FixedTmpBanTest(unittest.TestCase):
                 "fixed .tmp writer must not remain in migrated module "
                 "%s\noffending lines:\n%s" % (migrated, report))
 
-        # (b) 出现该字面量的文件必须全部在单写者白名单内
+        # (b) 出现该字面量的文件必须全部在白名单内：五个单写者保留按
+        # 全相对路径匹配；durable_io.py（唯一临时名）按文件名放行
         for entry in offenders:
-            basename = entry.split(":", 1)[0].rsplit("/", 1)[-1]
+            rel = entry.split(":", 1)[0]
+            if rel.rsplit("/", 1)[-1] == self.UNIQUE_TEMP_MODULE_BASENAME:
+                continue
             self.assertIn(
-                basename, self.FIXED_TMP_ALLOWLIST,
+                rel, self.SINGLE_WRITER_ALLOWLIST,
                 "unexpected fixed .tmp writer (allowlist: %s)\n"
                 "offending lines:\n%s"
-                % (", ".join(sorted(self.FIXED_TMP_ALLOWLIST)), report))
+                % (", ".join(sorted(self.SINGLE_WRITER_ALLOWLIST)), report))
 
         # (c) 接线证据：四个已迁移写方各自含 durable_io 文本
         for migrated in self.MIGRATED_WRITERS:
