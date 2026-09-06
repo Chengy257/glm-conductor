@@ -69,8 +69,10 @@ fail-closed 不对称的理由（本模块与 quota 观察面的方向差异，�
 
 幂等语义（P0-QP-07，本实现随代码取证关闭该设计门）：
     - 幂等键 = (provider_identity_hash, boundary_id)（identity 为来源+
-      凭证 sha256 前 16 位，同 watcher.compute_provider_identity_hash
-      的派生口径；boundary_id 为 prime 时点的旧 boundary / epoch_id）；
+      凭证 sha256 前 16 位，派生口径即 runtime.quota.identity 的
+      compute_provider_identity_hash（v2.2.1 WU-221-B1 起自 watcher
+      抽取的共享落点）；boundary_id 为 prime 时点的旧 boundary /
+      epoch_id）；
     - 键命中 → 直接返回既有 durable 结果（idempotent=True），零模型
       调用、零 quota 网络、零 journal 事件（同键重入零网络零事件）；
     - 失败尝试同样落账（error_kind 非空）——超时表示「结果未知」而非
@@ -149,6 +151,7 @@ from runtime.quota import resolver
 from runtime.quota._http import build_default_opener
 from runtime.quota.credentials import PROVIDER_KEY, resolve_credential
 from runtime.quota.epoch import evaluate_epoch, same_epoch
+from runtime.quota.identity import compute_provider_identity_hash
 from runtime.quota.provider import ALLOWED_HOSTS, ERROR_KINDS
 from runtime.quota.scheduler import _format_iso_z, _normalize_now
 
@@ -860,8 +863,8 @@ def _prime_once_unchecked(repo_root, *, boundary_id,
       - boundary_id：prime 时点的旧 boundary / epoch_id（幂等键之一；
         非空 str，否则 ValueError）；
       - provider_identity_hash：provider identity 指纹（幂等键之二；
-        派生口径同 watcher.compute_provider_identity_hash——来源+凭证
-        sha256 前 16 位；非空 str，否则 ValueError）；
+        派生口径同 runtime.quota.identity.compute_provider_identity_hash
+        ——来源+凭证 sha256 前 16 位；非空 str，否则 ValueError）；
       - transport：注入传输层 transport(url, body, headers, timeout) ->
         (status:int, body:bytes)；None → make_default_transport()（测试
         必注入——零真实网络零真实模型调用）；

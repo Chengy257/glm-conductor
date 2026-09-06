@@ -76,14 +76,17 @@ journal（task 面接线归 C5+）。
       （绝不透传异常文本，resolver 同纪律），循环继续；
     - provider identity hash = sha256("来源:凭证")[:16]——只落哈希
       不落凭证材料（runtime/quota/_http.py §37 安全条款 / 升级指南
-      §36-§38；不可逆指纹，用于 §6 单实例锁身份）；
+      §36-§38；不可逆指纹，用于 §6 单实例锁身份）；v2.2.1
+      WU-221-B1 起派生落点 runtime/quota/identity.py（本模块
+      re-export，语义零变化）；
     - quota/* 包纪律：不 import runtime.state / runtime.task_manager；
       executing 族词汇以本地冻结常量镜像（tests 与
       task_manager.QUOTA_WAIT_TASK_STATUSES 对齐锚定）。
 
 依赖：
     仅 Python 3 标准库 + runtime.quota.scheduler / observer / epoch /
-    resolver / credentials / watcher_store；observer 纯决策层零改动。
+    identity / resolver / credentials / watcher_store；observer 纯决策
+    层零改动。
 
 来源：
     docs/GLM-Conductor-v2.2-Quota-Control-Plane-Architecture-Correction-
@@ -93,7 +96,6 @@ journal（task 面接线归 C5+）。
     wu-22-C3。
 """
 
-import hashlib
 import json
 import os
 import sys
@@ -103,6 +105,7 @@ from datetime import datetime, timedelta, timezone
 from runtime.quota import epoch as quota_epoch
 from runtime.quota import observer, resolver
 from runtime.quota import watcher_store
+from runtime.quota.identity import compute_provider_identity_hash
 from runtime.quota.observer import should_refresh as _should_refresh
 from runtime.quota.scheduler import (
     _format_iso_z,
@@ -152,20 +155,10 @@ def _safe_fetch(fetch_fn, repo_root):
         return None, type(exc).__name__
 
 
-def compute_provider_identity_hash(environ=None):
-    """provider identity 指纹（§6 单实例锁身份字段）：sha256("来源:凭证")
-    十六进制前 16 位。
-
-    只落哈希绝不落凭证材料（runtime/quota/_http.py §37 安全条款 /
-    升级指南 §36-§38——哈希不可逆，不含 key 本体）；无凭证
-    → ("none" 来源的确定性占位哈希)——watcher 仍可 PASSIVE 运行，
-    acquire 语义不受影响。
-    """
-    from runtime.quota.credentials import resolve_credential
-    _source, api_key = resolve_credential(environ=environ)
-    material = "%s:%s" % ("none" if api_key is None else "credential",
-                          api_key or "")
-    return hashlib.sha256(material.encode("utf-8")).hexdigest()[:16]
+# compute_provider_identity_hash 自 v2.2.1 WU-221-B1 起落点
+# runtime/quota/identity.py（watcher / primer 共用派生口径）——本模块
+# 经顶部 import re-export，既有调用面 watcher.compute_provider_identity_hash
+# 保持可用（签名 / env 处理 / 16-hex 输出语义零变化）。
 
 
 # —— §7 模式判定（冻结；只读任务 state，绝不写） ——
