@@ -252,7 +252,7 @@ def _phase_and_reset(detail):
     return observation["execution_phase"], observation["reset_at"]
 
 
-def _build_observation(detail, error, now):
+def _build_observation(detail, error, now, provider_identity_hash=None):
     """抓取结果 → last_observation dict（含 §27 窗口的 per-window
     reset_at 摘要 + epoch 折算；fetch 失败 → error 字段记类型名，
     其余观察键 None 不虚构）。
@@ -261,6 +261,13 @@ def _build_observation(detail, error, now):
     probe_boundary_at / executable / canonical windows）；status 词汇外
     （evaluate_epoch ValueError，理论不可达——resolver 恒出四态）→
     epoch 键全部 None 不虚构。
+
+    v2.2.1 WU-221-B2（QuotaIdentity）：观察记录持久化了 epoch 事实，
+    新记录可选携带 provider_identity_hash（观察者身份可得才写——
+    run / run_once 调用点持有单实例锁身份，直传透出；无身份上下文的
+    直调传 None = 缺省，按 legacy 形态省略该键，绝不虚构占位值）。
+    指纹为非秘密 16-hex（runtime.quota.identity 共享派生口径），落
+    watcher.json 不含也不可还原凭证材料（§37）。
     """
     observation = {
         "observed_at": _format_iso_z(now),
@@ -272,6 +279,8 @@ def _build_observation(detail, error, now):
         "windows": [],
         "error": error,
     }
+    if provider_identity_hash is not None:
+        observation["provider_identity_hash"] = provider_identity_hash
     if error is not None or not isinstance(detail, dict):
         return observation
     status = detail.get("status")
@@ -418,7 +427,8 @@ def run(repo_root, *, fetch=None, clock=None, sleep=None,
         mode = mode_reader(repo_root)  # 每 tick 重判（demand-coupled）
         if _should_refresh(now=now, next_check_at=next_poll_at):
             detail, error = _safe_fetch(fetch_fn, repo_root)
-            observation = _build_observation(detail, error, now)
+            observation = _build_observation(detail, error, now,
+                                             provider_identity_hash=identity)
             phase, reset_at = _phase_and_reset(detail)
             interval = next_poll_interval(
                 mode=mode, execution_phase=phase, reset_at=reset_at,
@@ -496,7 +506,8 @@ def run_once(repo_root, *, fetch=None, clock=None,
                     existing.get("provider_identity_hash"),
             }}
     detail, error = _safe_fetch(fetch_fn, repo_root)
-    observation = _build_observation(detail, error, now)
+    observation = _build_observation(detail, error, now,
+                                     provider_identity_hash=identity)
     mode = mode_reader(repo_root)
     fallback = dict(existing) if existing is not None else {
         "schema_version": 1,

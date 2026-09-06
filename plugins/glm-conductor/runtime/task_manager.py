@@ -285,6 +285,38 @@ Quota Subscription 三 API（v2.2 C5a，wu-22-C5a，主计划 §14 adapted）：
     消费零接线不变：resume_from_quota 绝不调用
     record_quota_boundary_consumed（消费接线归 Resume Controller）。
 
+QuotaIdentity 复合身份（v2.2.1 WU-221-B2，六个记账面的统一升级）：
+    epoch 身份从裸 epoch_id 升级为 QuotaIdentity =
+    (provider_identity_hash, epoch_id)——同名 epoch 在不同 provider
+    身份下互不相认（A 的 epoch E 不授权 / 不幂等拦截 / 不代替 B 的
+    E）。判定的唯一共享落点 =
+    runtime.quota.epoch.quota_identity_matches（双形态：记录侧指纹
+    缺席 = v2.2 legacy = 保守信任，present-and-different = 异身份 =
+    按各面既有的「无先前记录」路径处理）。本模块各面落点：
+      - 订阅注册（register_quota_subscription）：块与事件可选携带
+        provider_identity_hash（调用点身份可得才写，None = legacy
+        形态省略，绝不为此解析凭证）；幂等比较仍只比五规范键；
+      - 订阅资格（evaluate_subscription_eligibility）：块的注册指纹
+        异于当前身份 → 不 eligible（条件 2b）；QC-07 同 epoch 判定
+        升为双形态（quota_identity_matches）；
+      - 激活记账（mark_activation_epoch）：QC-07 幂等闸双形态——
+        同 epoch 同身份零写零事件；异身份同名 epoch 是新事件（B 的
+        首次激活恰一条新控制面事件，事件与块注记携带当前指纹）；
+      - 崩溃对账（_reconcile_activation_journal）：journal 证据匹配
+        双形态——异身份的 quota_epoch_advanced 不作 QC-07 证据；
+      - 消费记账（record_quota_boundary_consumed）：幂等 / RH-03
+        pending 扫描双形态——A 对 E 的消费不满足也不拦截 B 的 E，
+        B 按自身身份记账；新事件携带当前指纹；
+      - 直接读者身份闸（_cache_identity_usable + b2-review
+        carryover 收口）：_execution_phase_decision /
+        _evaluation_from_refreshed_cache / _epoch_context_at_
+        transition 三个绕过 resolver 层级的 _load_cache 消费点补上
+        resolver（WU-221-B1）同款身份检查——异身份缓存视同无缓存
+        （各走既有 no-cache 路径），legacy 无指纹缓存保守信任。
+    epoch_id 格式零变化（"glm:"+16hex，§10.1 冻结口径）；指纹为
+    非秘密 16-hex（runtime.quota.identity 共享派生，不含凭证材料
+    ——可落 journal / state，绝不落日志的是凭证本体，§37）。
+
 分层关系：
     runtime.dispatcher —— 纯决策器：plan_dispatch 零 I/O，只产出「谁可
         派发 / 谁挂起及理由」的决策 dict；本层在 prepare 中消费它；
@@ -532,6 +564,42 @@ def _effective_worker_cap(st, quota_status, max_workers,
     return eff if eff >= 1 else 0
 
 
+def _current_provider_identity_hash():
+    """当前 provider 身份指纹（v2.2.1 WU-221-B2 QuotaIdentity；非秘密
+    16-hex——sha256("来源:凭证") 前缀截断，绝不含凭证材料，§37）。
+
+    经共享落点 runtime.quota.identity.compute_provider_identity_hash
+    派生（函数内 import：monkeypatch 友好）；每次调用恰派生一次，调
+    用方在同流程内复用同一结果（不二次解析凭证——resolve_credential
+    是纯本地读取，零网络）。
+    """
+    from runtime.quota.identity import compute_provider_identity_hash
+    return compute_provider_identity_hash()
+
+
+def _cache_identity_usable(cache, current_identity_hash):
+    """直接读者（绕过 resolver 层级的 _load_cache 消费点）的缓存身份闸
+    （v2.2.1 WU-221-B2 QuotaIdentity；b2-review carryover 的收口）。
+
+    resolver 自 WU-221-B1 起对缓存复用做身份绑定，但直接读缓存原语的
+    调用方（prepare 的 execution phase 闸 / resume 的 recommended_
+    resume_at / 转态点订阅折算 / CLI wake-plan）不经过该判定——本闸
+    把同一身份检查补到每个直接消费点：
+
+      - 缓存未携带 provider_identity_hash（v2.2 legacy 形态）→ 可用
+        （保守信任——本单元的兼容性裁决：legacy 缓存行为逐字不变）；
+      - 缓存指纹 == 当前身份 → 可用；
+      - 缓存指纹 != 当前身份（异身份缓存）→ 不可用：调用方视同无缓存，
+        走各自既有的 no-cache 路径（fail-open，绝不据其做决策）。
+
+    纯函数：只读入参、零 I/O、零派生（当前指纹由调用方传入——同一
+    调用流程内只派生一次）。
+    """
+    stored = (cache.get("provider_identity_hash")
+              if isinstance(cache, dict) else None)
+    return stored is None or stored == current_identity_hash
+
+
 def _resolve_quota(api, repo_root, task_id, quota_status) -> str:
     """wu-21-10 运行时额度解析（v2.1 §13）：显式字符串直通，None → resolver。
 
@@ -594,6 +662,12 @@ def _execution_phase_decision(repo_root, st, max_workers):
         from runtime.quota import control, resolver  # 函数内 import：monkeypatch 友好
         cache = resolver._load_cache(resolver._cache_path(repo_root))
         if not isinstance(cache, dict):
+            return None
+        # v2.2.1 WU-221-B2（QuotaIdentity）直接读者身份闸：异身份缓存
+        # 视同无缓存（fail-open 返回 None，闸不激活——D7 第 4 条语义
+        # 先于闸门）；legacy 无指纹缓存保守信任，行为逐字不变。
+        if not _cache_identity_usable(
+                cache, _current_provider_identity_hash()):
             return None
         snapshot = cache.get("snapshot")
         windows = (snapshot.get("windows")
@@ -1657,6 +1731,12 @@ def _evaluation_from_refreshed_cache(repo_root):
         cache = resolver._load_cache(resolver._cache_path(repo_root))
         if not isinstance(cache, dict):
             return None
+        # v2.2.1 WU-221-B2（QuotaIdentity）直接读者身份闸：异身份缓存
+        # 视同无缓存（→ None 不虚构建议时刻）；legacy 无指纹缓存保守
+        # 信任，行为逐字不变。
+        if not _cache_identity_usable(
+                cache, _current_provider_identity_hash()):
+            return None
         snapshot = cache.get("snapshot")
         if not isinstance(snapshot, dict):
             return None
@@ -1883,8 +1963,13 @@ def handle_quota_exhausted(repo_root, task_id, *, evaluation=None) -> dict:
     try:
         epoch_context = _epoch_context_at_transition(repo_root)
         if epoch_context is not None:
+            # v2.2.1 WU-221-B2（QuotaIdentity）：转态点的身份上下文取
+            # 自幸存缓存的指纹（缓存无指纹 = legacy 形态 → 传 None，
+            # 块与事件按既有形状省略该键——绝不虚构、绝不为此解析凭证）
             register_quota_subscription(
-                repo_root, task_id, epoch_id=epoch_context["epoch_id"])
+                repo_root, task_id, epoch_id=epoch_context["epoch_id"],
+                provider_identity_hash=epoch_context.get(
+                    "provider_identity_hash"))
     except Exception:
         pass
     _write_manifest_safe(repo_root, task_id)
@@ -2104,7 +2189,8 @@ def record_quota_wake(repo_root, task_id, *, automation_id, fires_at) -> dict:
 
 def record_quota_boundary_consumed(repo_root, task_id, *, epoch_id,
                                    executable_boundary_id,
-                                   resume_started_at) -> dict:
+                                   resume_started_at,
+                                   provider_identity_hash=None) -> dict:
     """resume-time 窗口消费记账（v2.2 C1b；修正计划 §22.1 + §C1b +
     §15.1 消费事务点冻结）。
 
@@ -2166,7 +2252,10 @@ def record_quota_boundary_consumed(repo_root, task_id, *, epoch_id,
 
     参数校验（先于任何 I/O，失败零副作用）：epoch_id /
     executable_boundary_id / resume_started_at 必须是非空 str，否则
-    ValueError（中文消息含字段名）。kwargs 参数名保留
+    ValueError（中文消息含字段名）。provider_identity_hash（v2.2.1
+    WU-221-B2 QuotaIdentity）：None（缺省）→ 经共享模块派生当前指纹
+    一次（derive-and-emit——消费记账是权威账，新事件必携带）；非 None
+    须为非空 str。kwargs 参数名保留
     executable_boundary_id（RH-04 方案 A：调用面零扰动，_resume_
     consumption 等调用方零改动；该实参写入事件的
     representative_boundary_id 字段）。返回 {"consumed_quota_windows",
@@ -2174,6 +2263,18 @@ def record_quota_boundary_consumed(repo_root, task_id, *, epoch_id,
     "executable_boundary_id", "resume_started_at"}（返回键名零变化——
     executable_boundary_id 键承载代表窗口身份值）；幂等命中路径既有
     键保留并增标 "idempotent": True。任务缺失 TaskManagerError。
+
+    v2.2.1 WU-221-B2（QuotaIdentity）幂等 / 归属升级：幂等扫描从
+    「epoch_id 等值」升为 quota_identity_matches 双形态判定（epoch_id
+    等值 AND 事件指纹缺席或等于当前指纹）——
+      - legacy 事件（无指纹）保守信任，幂等语义逐字不变（v2.2 记录
+        保持在案可读）；
+      - 异身份同名 epoch 的 committed / pending 证据按「无先前记录」
+        处理：A 对 epoch E 的消费既不满足也不幂等拦截 B 的消费，B 在
+        A 之后消费 E 按其自身身份记账（绝不跨身份借用账目）；
+      - 新写的 pending / committed 事件携带 provider_identity_hash =
+        当前指纹；恢复闭合的 committed 沿用 pending 冻结的指纹
+        （legacy pending 无指纹则省略该键——绝不虚构）。
     """
     api = "record_quota_boundary_consumed"
     for field, value in (("epoch_id", epoch_id),
@@ -2182,23 +2283,41 @@ def record_quota_boundary_consumed(repo_root, task_id, *, epoch_id,
         if not isinstance(value, str) or value == "":
             raise ValueError(
                 "%s：%s 必须是非空字符串，得到 %r" % (api, field, value))
+    if provider_identity_hash is not None \
+            and (not isinstance(provider_identity_hash, str)
+                 or provider_identity_hash == ""):
+        raise ValueError(
+            "%s：provider_identity_hash 必须是 None（经共享模块派生）"
+            "或非空 str（16-hex 非秘密指纹），得到 %r"
+            % (api, provider_identity_hash))
+    identity = (provider_identity_hash
+                if provider_identity_hash is not None
+                else _current_provider_identity_hash())
     st = _require_state(repo_root, task_id, api)
     view = _continuity_view(st)
+    from runtime.quota import epoch as quota_epoch  # 函数内 import：monkeypatch 友好
     # 幂等（§22.1 / §15.1）：同 epoch_id 已消费 → 原样返回既有消耗
     # 结果（取首条匹配——正确流程下至多一条；历史脏数据重复时首条是
     # 原始账）。同一趟扫描顺带收集同 epoch 的 RH-03 pending 证据
     # （quota_consumption_pending）——committed 命中即幂等返回（优先
     # 级最高）；pending 仅在 committed 缺席时进入恢复闭合分支。
+    # WU-221-B2：匹配均为 QuotaIdentity 双形态（异身份事件不算数）。
     prior = None
     pendings = []
     for event in journal.read_events(repo_root, task_id):
         name = event.get("event")
         if name == "quota_boundary_consumed" \
-                and event.get("epoch_id") == epoch_id:
+                and quota_epoch.quota_identity_matches(
+                    event.get("epoch_id"),
+                    event.get("provider_identity_hash"),
+                    epoch_id, identity):
             prior = event
             break
         if name == "quota_consumption_pending" \
-                and event.get("epoch_id") == epoch_id:
+                and quota_epoch.quota_identity_matches(
+                    event.get("epoch_id"),
+                    event.get("provider_identity_hash"),
+                    epoch_id, identity):
             pendings.append(event)
     if prior is not None:
         consumed = prior.get("consumed")
@@ -2282,12 +2401,17 @@ def record_quota_boundary_consumed(repo_root, task_id, *, epoch_id,
             continuity["consumed_quota_windows"] = target
             state.save_state(repo_root, st)
         # 投影已落或刚补齐 → 只补 committed 事件（消费记账按 pending
-        # 冻结值闭合，boundary / resume_started_at 取冻结值）
-        journal.append_event(repo_root, task_id, {
+        # 冻结值闭合，boundary / resume_started_at / 身份指纹取冻结值
+        # ——legacy pending 无指纹则省略该键，绝不虚构）
+        close_event = {
             "event": "quota_boundary_consumed", "epoch_id": epoch_id,
             "representative_boundary_id": pending_boundary,
             "resume_started_at": pending_started_at,
-            "consumed": target, "remaining": remaining})
+            "consumed": target, "remaining": remaining}
+        pending_identity = pending.get("provider_identity_hash")
+        if isinstance(pending_identity, str) and pending_identity:
+            close_event["provider_identity_hash"] = pending_identity
+        journal.append_event(repo_root, task_id, close_event)
         return {
             "consumed_quota_windows": target,
             "remaining_quota_windows": remaining,
@@ -2334,14 +2458,16 @@ def record_quota_boundary_consumed(repo_root, task_id, *, epoch_id,
         "event": "quota_consumption_pending", "epoch_id": epoch_id,
         "representative_boundary_id": executable_boundary_id,
         "target_consumed": consumed,
-        "resume_started_at": resume_started_at})
+        "resume_started_at": resume_started_at,
+        "provider_identity_hash": identity})
     state.save_state(repo_root, st)
     view = _continuity_view(st)
     journal.append_event(repo_root, task_id, {
         "event": "quota_boundary_consumed", "epoch_id": epoch_id,
         "representative_boundary_id": executable_boundary_id,
         "resume_started_at": resume_started_at, "consumed": consumed,
-        "remaining": view["remaining"]})
+        "remaining": view["remaining"],
+        "provider_identity_hash": identity})
     return {
         "consumed_quota_windows": consumed,
         "remaining_quota_windows": view["remaining"],
@@ -2722,8 +2848,20 @@ def _epoch_context_at_transition(repo_root):
         return None
     if not isinstance(cache, dict):
         return None
-    return _epoch_context_from_snapshot(cache.get("status"),
-                                        cache.get("snapshot"))
+    # v2.2.1 WU-221-B2（QuotaIdentity）直接读者身份闸：异身份缓存视同
+    # 无缓存（→ None → 不注册零副作用，legacy 不变分支）；legacy 无指
+    # 纹缓存保守信任。幸存缓存的指纹（若有）即转态点可得的身份上下文
+    # ——注册面据此按「身份可得则携带」规则落 provider_identity_hash。
+    if not _cache_identity_usable(
+            cache, _current_provider_identity_hash()):
+        return None
+    context = _epoch_context_from_snapshot(cache.get("status"),
+                                           cache.get("snapshot"))
+    if context is not None:
+        cache_identity = cache.get("provider_identity_hash")
+        if isinstance(cache_identity, str) and cache_identity:
+            context["provider_identity_hash"] = cache_identity
+    return context
 
 
 def _epoch_context_after_refresh(repo_root):
@@ -2747,7 +2885,8 @@ def _epoch_context_after_refresh(repo_root):
                                         detail.get("snapshot"))
 
 
-def _reconcile_activation_journal(repo_root, task_id, st, epoch_id):
+def _reconcile_activation_journal(repo_root, task_id, st, epoch_id,
+                                  provider_identity_hash=None):
     """崩溃窗口对账（v2.2 C5b，C5a reviewer P3 的接线侧兜底）。
 
     evaluate 之前读控制面 journal（read_control_plane_events——内容层
@@ -2764,12 +2903,27 @@ def _reconcile_activation_journal(repo_root, task_id, st, epoch_id):
     无证据或 state 已与 journal 一致 → None（资格判定照常）。
     方向冻结：宁可少恢复一次不重复激活（QC-07）。纯读 + 至多一次
     自愈写，零转态。
+
+    v2.2.1 WU-221-B2（QuotaIdentity）：证据匹配升为双形态比较（
+    epoch.quota_identity_matches）——journal 事件携带
+    provider_identity_hash 时须等于当前身份才算本任务的激活证据，
+    缺席（legacy 事件）保守信任，异身份事件按无证据处理（A 身份的
+    激活绝不作为 B 身份的 QC-07 证据）。当前身份：入参非空 str 直用
+    （同一 resume 流程只派生一次），否则经共享模块派生一次。
     """
+    identity = (provider_identity_hash
+                if isinstance(provider_identity_hash, str)
+                and provider_identity_hash
+                else _current_provider_identity_hash())
+    from runtime.quota import epoch as quota_epoch  # 函数内 import：monkeypatch 友好
     evidence = None
     for event in journal.read_control_plane_events(repo_root):
         if (event.get("event") == "quota_epoch_advanced"
                 and event.get("task_id") == task_id
-                and event.get("epoch_id") == epoch_id):
+                and quota_epoch.quota_identity_matches(
+                    event.get("epoch_id"),
+                    event.get("provider_identity_hash"),
+                    epoch_id, identity)):
             evidence = event  # 正确流程下至多一条；取末条（最新证据）
     if evidence is None:
         return None
@@ -2815,6 +2969,11 @@ def _resume_subscription_gate(repo_root, task_id, st) -> dict:
     provider_status（status 参数的解析结果从不进入本函数），参数自
     C5b 落地起即为死参数；移除零行为变化（reviewer 实测佐证）。
 
+    v2.2.1 WU-221-B2（QuotaIdentity）：当前身份指纹在本函数经共享
+    模块派生恰一次，同流程内供崩溃对账与纯判定共用——绝不二次解析
+    凭证；异身份的既有记录按各面「无先前记录」语义处理（不授权、
+    不幂等拦截）。
+
     返回 {"registered": True, "eligible": bool, "reasons": [...],
     "epoch_id": <§10.1 形状或 None（折算失败）>}；eligible=True 且调用
     方实际完成转态后再补 "activated_epoch_id" / "mark"（转态-记账顺序
@@ -2830,12 +2989,15 @@ def _resume_subscription_gate(repo_root, task_id, st) -> dict:
                             "epoch，保守不恢复"],
                 "epoch_id": None}
     epoch_id = epoch_context["epoch_id"]
+    identity = _current_provider_identity_hash()
     journal_reason = _reconcile_activation_journal(
-        repo_root, task_id, st, epoch_id)
+        repo_root, task_id, st, epoch_id,
+        provider_identity_hash=identity)
     evaluation = evaluate_subscription_eligibility(
         repo_root, task_id, current_epoch_id=epoch_id,
         current_executable=epoch_context["executable"],
-        provider_status=epoch_context["provider_status"])
+        provider_status=epoch_context["provider_status"],
+        current_provider_identity_hash=identity)
     reasons = list(evaluation["reasons"])
     eligible = evaluation["eligible"]
     if journal_reason is not None:
@@ -2898,7 +3060,8 @@ def _consumption_boundary_id(repo_root):
     return boundary
 
 
-def _resume_consumption(repo_root, task_id, st, epoch_id) -> dict:
+def _resume_consumption(repo_root, task_id, st, epoch_id,
+                        provider_identity_hash=None) -> dict:
     """resume 消费段（v2.2 C7 ①；§15.1 消费事务点 = 转态 durable +
     mark 之后的 commit point）。仅由 resume_from_quota 在订阅路径实际
     转态后调用；legacy 未注册任务零进入。§22.1 不消费清单（bridge
@@ -2932,6 +3095,11 @@ def _resume_consumption(repo_root, task_id, st, epoch_id) -> dict:
        解析跳过）或 error（record 三查竞态的中文拒绝消息）。face 键
        executable_boundary_id 为 RH-04 冻结返回键名（零变化，承载代表
        窗口身份值；事件字段已改记 representative_boundary_id）。
+
+    v2.2.1 WU-221-B2（QuotaIdentity）：provider_identity_hash 透传
+    record_quota_boundary_consumed（None = record 侧经共享模块派生；
+    resume_from_quota 在同流程内已派生时直传复用）——消费幂等 / 归属
+    按 QuotaIdentity 双形态判定，异身份同名 epoch 的既有消费不算数。
     """
     view = _continuity_view(st)
     if view["auto_resume"] not in ("auto_once", "until_done"):
@@ -2981,7 +3149,8 @@ def _resume_consumption(repo_root, task_id, st, epoch_id) -> dict:
         record = record_quota_boundary_consumed(
             repo_root, task_id, epoch_id=epoch_id,
             executable_boundary_id=boundary,
-            resume_started_at=_utc_now_iso())
+            resume_started_at=_utc_now_iso(),
+            provider_identity_hash=provider_identity_hash)
     except TaskManagerError as exc:
         # 三查竞态（预闸后预算/授权被并发改写）：转态已 durable，face
         # 降级不抛（绝不炸掉已完成的恢复）；OSError 不在此捕获
@@ -3139,9 +3308,14 @@ def resume_from_quota(repo_root, task_id, *, status=None) -> dict:
     # 未注册 / 未启用（含 legacy 缺块按默认块解释）零分支进入；门内
     # 不放行（不 eligible / epoch 无法折算 / 四态 EXHAUSTED·UNKNOWN）
     # → 零转态保守等待，资格面照附（QC-07：宁可少恢复不重复激活）
+    # v2.2.1 WU-221-B2（QuotaIdentity）：当前 provider 身份指纹在本
+    # 流程派生一次（共享模块——纯本地读取零网络），供 mark / 消费
+    # 记账复用（资格门内部自派生一次——其冻结签名不携带身份参数）。
     subscription = None
+    subscription_identity = None
     if _subscription_active(st) \
             and st.get("status") in ("waiting_quota", "waiting_user"):
+        subscription_identity = _current_provider_identity_hash()
         subscription = _resume_subscription_gate(repo_root, task_id, st)
         if not (subscription["eligible"]
                 and status in QUOTA_RESUME_STATUSES):
@@ -3195,13 +3369,16 @@ def resume_from_quota(repo_root, task_id, *, status=None) -> dict:
         # 恰一次）；事件写失败（OSError）按 mark 契约自然上抛不吞——
         # 转态已 durable，调用方看得见记账证据缺失
         mark = mark_activation_epoch(repo_root, task_id,
-                                     epoch_id=subscription["epoch_id"])
+                                     epoch_id=subscription["epoch_id"],
+                                     provider_identity_hash=
+                                     subscription_identity)
         subscription["activated_epoch_id"] = subscription["epoch_id"]
         subscription["mark"] = mark
         # —— C7 消费段（§15.1 消费事务点冻结：转态 durable + mark 之后
         # 的 commit point；仅订阅路径附加，legacy 未注册任务零进入）——
         result["consumption"] = _resume_consumption(
-            repo_root, task_id, st, subscription["epoch_id"])
+            repo_root, task_id, st, subscription["epoch_id"],
+            provider_identity_hash=subscription_identity)
     _write_manifest_safe(repo_root, task_id)
     result["resumed"] = True
     result["wake_budget_remaining"] = _wake_budget_remaining(st)
@@ -4211,7 +4388,8 @@ def _subscription_state_satisfied(provider_status, minimum_state) -> bool:
 
 def register_quota_subscription(repo_root, task_id, *, epoch_id,
                                 minimum_state="AVAILABLE",
-                                continuation_mode=None) -> dict:
+                                continuation_mode=None,
+                                provider_identity_hash=None) -> dict:
     """注册 / 更新任务的 quota subscription（§14；幂等）。
 
     写顶层 quota_subscription 块：enabled=True、registered_epoch_id=
@@ -4227,6 +4405,14 @@ def register_quota_subscription(repo_root, task_id, *, epoch_id,
     "idempotent": False。非幂等重写按 merge 落盘：既有块未知键原样
     保留（v2.2 C6 reviewer 留账吸收），幂等比较仍只比五规范键。
 
+    v2.2.1 WU-221-B2（QuotaIdentity）：provider_identity_hash（可选，
+    非秘密 16-hex 身份指纹）随注册落块与事件——调用点身份可得才携带
+    （转态点注册取自幸存缓存的指纹；无身份上下文的调用点传 None =
+    缺省，按 legacy 形态省略该键，绝不虚构占位值），且绝不为此发起
+    凭证解析。幂等比较仍只比五规范键（指纹是 additive 注记，不参与
+    幂等判定）；已有块不带指纹的同参重注册绝不改写存量记录补写指纹
+    （无破坏性改写纪律）。
+
     参数（校验先于任何 I/O，中文 ValueError）：
       - epoch_id：§10.1 形状（"glm:"+16hex，state.is_quota_epoch_id）；
       - minimum_state：∈ state.QUOTA_SUBSCRIPTION_MINIMUM_STATES，缺省
@@ -4234,7 +4420,9 @@ def register_quota_subscription(repo_root, task_id, *, epoch_id,
       - continuation_mode：None（缺省）→ 从任务 execution_policy.
         continuity.auto_resume 容错镜像读（_continuity_view——缺块 /
         词汇外保守落 "manual"，§14.2-§14.5 同一事实源）；显式传入须
-        ∈ state.QUOTA_SUBSCRIPTION_CONTINUATION_MODES。
+        ∈ state.QUOTA_SUBSCRIPTION_CONTINUATION_MODES；
+      - provider_identity_hash：None（缺省）→ 块与事件均省略该键
+        （legacy 形态）；非 None 须为非空 str。
 
     任务缺失 → TaskManagerError；JSON 损坏 ValueError 上抛。
     返回冻结六键 dict（QUOTA_SUBSCRIPTION_RESULT_KEYS）。
@@ -4256,6 +4444,13 @@ def register_quota_subscription(repo_root, task_id, *, epoch_id,
             "%s：continuation_mode %r 不在合法取值内（%s）"
             % (api, continuation_mode,
                ", ".join(state.QUOTA_SUBSCRIPTION_CONTINUATION_MODES)))
+    if provider_identity_hash is not None \
+            and (not isinstance(provider_identity_hash, str)
+                 or provider_identity_hash == ""):
+        raise ValueError(
+            "%s：provider_identity_hash 必须是 None（legacy 形态，省略"
+            "身份指纹）或非空 str（16-hex 非秘密指纹），得到 %r"
+            % (api, provider_identity_hash))
     st = _require_state(repo_root, task_id, api)
     if continuation_mode is None:
         # §14：缺省镜像执行策略的续跑授权词汇（同一事实源，不复制默认）
@@ -4273,8 +4468,9 @@ def register_quota_subscription(repo_root, task_id, *, epoch_id,
     if isinstance(block, dict) and all(
             block.get(key) == value for key, value in target.items()):
         # 同参重注册：零写零事件（幂等返回；返回块视图拷贝，不改 st）。
-        # 幂等比较只看五规范键——既有块携带的未知键不影响幂等判定
-        # （v2.2 C6 reviewer 留账吸收）
+        # 幂等比较只看五规范键——既有块携带的未知键（含 WU-221-B2 的
+        # provider_identity_hash）不影响幂等判定（v2.2 C6 reviewer
+        # 留账吸收 + B2 additive 键纪律）
         result = _quota_subscription_view(st)
         result = dict(result)
         result["idempotent"] = True
@@ -4286,14 +4482,23 @@ def register_quota_subscription(repo_root, task_id, *, epoch_id,
         merged = dict(block)
         merged.update(target)
     else:
-        merged = target
+        merged = dict(target)
+    if provider_identity_hash is not None:
+        # v2.2.1 WU-221-B2：身份可得才随本次注册写落 additive 指纹键
+        #（不参与幂等比较；None 时保持既有块原样——绝不改写存量记录
+        # 补写指纹）
+        merged["provider_identity_hash"] = provider_identity_hash
     st["quota_subscription"] = merged
     state.save_state(repo_root, st)
-    journal.append_event(repo_root, task_id, {
+    event = {
         "event": "quota_subscription_registered",
         "registered_epoch_id": epoch_id,
         "minimum_state": minimum_state,
-        "continuation_mode": continuation_mode})
+        "continuation_mode": continuation_mode,
+    }
+    if provider_identity_hash is not None:
+        event["provider_identity_hash"] = provider_identity_hash
+    journal.append_event(repo_root, task_id, event)
     result = dict(target)
     result["idempotent"] = False
     return result
@@ -4302,26 +4507,43 @@ def register_quota_subscription(repo_root, task_id, *, epoch_id,
 def evaluate_subscription_eligibility(repo_root, task_id, *,
                                       current_epoch_id,
                                       current_executable,
-                                      provider_status) -> dict:
+                                      provider_status,
+                                      current_provider_identity_hash=None
+                                      ) -> dict:
     """纯资格判定：本任务当前 epoch 是否有资格激活（§14 eligible）。
 
     纯函数纪律：只读 state.json，零转态、零写、零事件、零网络——
     派发 / 恢复的编排方在 resume 决策前调用，结果只供裁决。**不做
     authorization / budget / reconcile**（§14 执行面流水线中授权 / 预算
     / 对账各归其位，接线归 C7），本函数只回答订阅本身的资格。
+    （v2.2.1 WU-221-B2 注：current_provider_identity_hash 缺省 None 时
+    经共享模块派生当前指纹——resolve_credential 是纯本地读取，零网络
+    零写，纯函数纪律不受扰。）
 
     判定矩阵（全部满足才 eligible；不短路——reasons 逐条点名全部未过
     条件，审计面风格与 primer.authorize_prime 同源）：
       1. 已注册：块存在且 registered_epoch_id 非 null；
       2. 已启用：enabled 为 True；
-      3. 新 epoch：current_epoch_id != last_activation_epoch_id
-         （字符串等值比较——§14 adapted：epoch_id 是 §10.1 指纹身份，
-         无 int 序数可比；last_activation 为 null = 从未激活 → 通过）；
+      2b. 同身份（v2.2.1 WU-221-B2 QuotaIdentity）：块的
+          provider_identity_hash 缺席（v2.2 legacy 注册 = 保守信任）
+          或等于当前身份指纹——异身份注册的订阅不视为本身份的订阅
+          （A 名下注册的 epoch E 不授权 B 同名 epoch 的恢复）；
+      3. 新 epoch：last_activation_epoch_id 与 current_epoch_id 经
+         quota_identity_matches 双形态判定为不同（epoch_id 字符串
+         等值 + 记录侧指纹缺席或相等——§14 adapted：epoch_id 是
+         §10.1 指纹身份，无 int 序数可比；last_activation 为 null =
+         从未激活 → 通过；异身份的同名激活不构成 QC-07 拦截）；
       4. 可执行：current_executable 为真（§10.1 evaluate_epoch 的
          executable 判定结果，由调用方传入，本层不重复折算）；
       5. 阈值满足：provider_status 达到 minimum_state 档位及以上
          （四档序 AVAILABLE > PRESSURE > DRAINING > EXHAUSTED，
          _subscription_state_satisfied；词汇外值保守不满足）。
+
+    参数（全 keyword-only，除前两个位置参数）：
+      - current_provider_identity_hash：当前 provider 身份指纹
+        （16-hex 非秘密）；None（缺省）→ 经共享模块派生一次；调用方
+        （_resume_subscription_gate）在同流程内已派生时直传复用，避免
+        二次解析凭证。
 
     返回冻结两键：{"eligible": bool, "reasons": [中文原因...]}。
     任务缺失 → TaskManagerError；current_epoch_id 形状非法 → ValueError
@@ -4333,15 +4555,36 @@ def evaluate_subscription_eligibility(repo_root, task_id, *,
         raise ValueError(
             "%s：current_epoch_id 必须是 \"glm:\"+16 位十六进制的 "
             "epoch_id（§10.1 形状），得到 %r" % (api, current_epoch_id))
+    if current_provider_identity_hash is not None \
+            and (not isinstance(current_provider_identity_hash, str)
+                 or current_provider_identity_hash == ""):
+        raise ValueError(
+            "%s：current_provider_identity_hash 必须是 None（经共享模块"
+            "派生）或非空 str（16-hex 非秘密指纹），得到 %r"
+            % (api, current_provider_identity_hash))
     st = _require_state(repo_root, task_id, api)
     block = _quota_subscription_view(st)
+    identity = (current_provider_identity_hash
+                if current_provider_identity_hash is not None
+                else _current_provider_identity_hash())
+    from runtime.quota import epoch as quota_epoch  # 函数内 import：monkeypatch 友好
     reasons = []
     if block.get("registered_epoch_id") is None:
         reasons.append("任务 %s 未注册 quota subscription"
                        "（registered_epoch_id 为空）" % task_id)
     if block.get("enabled") is not True:
         reasons.append("quota subscription 未启用（enabled != true）")
-    if block.get("last_activation_epoch_id") == current_epoch_id:
+    block_hash = block.get("provider_identity_hash")
+    if (block.get("registered_epoch_id") is not None
+            and block_hash is not None and block_hash != identity):
+        reasons.append(
+            "quota subscription 注册于其他 provider 身份（块的 "
+            "provider_identity_hash 与当前身份不一致）——QuotaIdentity "
+            "不视为本身份的订阅，保守不恢复")
+    if quota_epoch.quota_identity_matches(
+            block.get("last_activation_epoch_id"),
+            block_hash,
+            current_epoch_id, identity):
         reasons.append(
             "epoch %s 已激活过（last_activation_epoch_id 相同）——QC-07 "
             "每 epoch 恰一次，同 epoch 不得重复激活" % current_epoch_id)
@@ -4356,7 +4599,8 @@ def evaluate_subscription_eligibility(repo_root, task_id, *,
     return {"eligible": not reasons, "reasons": reasons}
 
 
-def mark_activation_epoch(repo_root, task_id, *, epoch_id) -> dict:
+def mark_activation_epoch(repo_root, task_id, *, epoch_id,
+                          provider_identity_hash=None) -> dict:
     """记录任务在本 epoch 已激活（QC-07：每 epoch 恰一次推进记账）。
 
     写 quota_subscription.last_activation_epoch_id = epoch_id + 控制
@@ -4366,19 +4610,27 @@ def mark_activation_epoch(repo_root, task_id, *, epoch_id) -> dict:
     发生，控制面事件不进任务 journal、不借伪任务目录）。
 
     幂等语义（冻结口径；QC-07 的机械保证）：
-      - epoch_id 与本任务 last_activation_epoch_id 等值（同值重入；
-        null 不等任何合法 epoch_id，故首标必推进）→ 零状态写、零
-        控制面事件，返回 "marked": False + "idempotent": True；
-      - epoch_id 不同（含首次从 null 起标）→ 视为推进（epoch_id 是
-        §10.1 指纹等值身份，无序数、不分前进后退）→ 更新 + 恰一条
-        事件，返回 "marked": True + "idempotent": False。
+      - epoch_id 与本任务 last_activation_epoch_id 经 QuotaIdentity
+        双形态判定为同一次激活（epoch_id 等值 AND 块指纹缺席或等于
+        当前指纹——v2.2.1 WU-221-B2：缺席 = legacy = 信任；异身份的
+        同名激活不构成幂等拦截，B 的首次激活是新事件）→ 零状态写、
+        零控制面事件，返回 "marked": False + "idempotent": True；
+      - 其余（含首次从 null 起标、异身份同名 epoch）→ 视为推进
+        （epoch_id 是 §10.1 指纹等值身份，无序数、不分前进后退）→
+        更新 + 恰一条事件，返回 "marked": True + "idempotent": False。
 
     事件字段（控制面 journal）：{"event": "quota_epoch_advanced",
-    "task_id", "epoch_id", "previous_epoch_id"}。落盘顺序：先 state
-    后事件；事件写入失败（OSError）自然上抛不吞——QC-07 证据丢失
-    必须让调用方看见（绝不静默降级）。
+    "task_id", "epoch_id", "previous_epoch_id", "provider_identity_
+    hash"}（末键 v2.2.1 WU-221-B2 增补——非秘密 16-hex 身份指纹，
+    legacy 事件无此键，读侧双形态兼容）。落盘顺序：先 state 后事件；
+    事件写入失败（OSError）自然上抛不吞——QC-07 证据丢失必须让调用
+    方看见（绝不静默降级）。
 
-    参数：epoch_id 须 §10.1 形状（先于 I/O 校验，ValueError）。
+    参数：epoch_id 须 §10.1 形状（先于 I/O 校验，ValueError）；
+    provider_identity_hash：None（缺省）→ 经共享模块派生当前指纹一次
+    （derive-and-emit——激活记账是权威账，写入必携带）；非 None 须为
+    非空 str（调用方同流程内已派生时直传复用）。state 侧块注记同步
+    落 provider_identity_hash = 当前指纹（本次激活记录的写入者身份）。
     任务缺失 → TaskManagerError。返回冻结三键
     {"marked", "last_activation_epoch_id", "idempotent"}。
     """
@@ -4387,11 +4639,25 @@ def mark_activation_epoch(repo_root, task_id, *, epoch_id) -> dict:
         raise ValueError(
             "%s：epoch_id 必须是 \"glm:\"+16 位十六进制的 epoch_id"
             "（§10.1 形状），得到 %r" % (api, epoch_id))
+    if provider_identity_hash is not None \
+            and (not isinstance(provider_identity_hash, str)
+                 or provider_identity_hash == ""):
+        raise ValueError(
+            "%s：provider_identity_hash 必须是 None（经共享模块派生）"
+            "或非空 str（16-hex 非秘密指纹），得到 %r"
+            % (api, provider_identity_hash))
+    identity = (provider_identity_hash
+                if provider_identity_hash is not None
+                else _current_provider_identity_hash())
     st = _require_state(repo_root, task_id, api)
     block = _quota_subscription_view(st)
     previous = block.get("last_activation_epoch_id")
-    if previous == epoch_id:
-        # 同 epoch 重标：零写零事件（QC-07 每 epoch 恰一次的幂等闸）
+    from runtime.quota import epoch as quota_epoch  # 函数内 import：monkeypatch 友好
+    if quota_epoch.quota_identity_matches(
+            previous, block.get("provider_identity_hash"),
+            epoch_id, identity):
+        # 同 epoch 同身份重标：零写零事件（QC-07 每 epoch 恰一次的幂
+        # 等闸；legacy 无指纹块按缺席信任语义照常拦截）
         return {"marked": False,
                 "last_activation_epoch_id": previous,
                 "idempotent": True}
@@ -4400,12 +4666,14 @@ def mark_activation_epoch(repo_root, task_id, *, epoch_id) -> dict:
         # API 触碰——订阅与否归 register_quota_subscription）
         st["quota_subscription"] = state.default_quota_subscription()
     st["quota_subscription"]["last_activation_epoch_id"] = epoch_id
+    st["quota_subscription"]["provider_identity_hash"] = identity
     state.save_state(repo_root, st)
     journal.append_control_plane_event(repo_root, {
         "event": "quota_epoch_advanced",
         "task_id": task_id,
         "epoch_id": epoch_id,
-        "previous_epoch_id": previous})
+        "previous_epoch_id": previous,
+        "provider_identity_hash": identity})
     return {"marked": True,
             "last_activation_epoch_id": epoch_id,
             "idempotent": False}

@@ -847,13 +847,27 @@ def _wake_plan(repo_root, task_id) -> int:
     （resolver._load_cache / _cache_path 容错原语：缺失 / 坏 JSON /
     status 词汇陈旧 / fetched_at 不可解析一律视为无缓存 → 传 None，
     plan 内按 UNKNOWN 保守 fail-open），绝不触发 provider 抓取、绝不
-    重试网络。任务缺失（TaskManagerError）→ _QuotaFlowRejected（退出
-    码 1）。输出 §22.2 冻结九键（ensure_ascii=False，同 M3 观测面）。"""
+    重试网络。v2.2.1 WU-221-B2（QuotaIdentity）直接读者身份闸：缓存
+    绑定异身份（provider_identity_hash 与当前指纹不一致）→ 视同无
+    缓存（走既有 no-cache 路径，plan 按 UNKNOWN fail-open）；legacy
+    无指纹缓存保守信任（行为逐字不变）；当前指纹经共享模块
+    （runtime.quota.identity）派生恰一次。任务缺失（TaskManagerError）
+    → _QuotaFlowRejected（退出码 1）。输出 §22.2 冻结九键
+    （ensure_ascii=False，同 M3 观测面）。"""
     from runtime import task_manager
     from runtime.quota import resolver  # 函数内 import：monkeypatch 友好
+    from runtime.quota.identity import (  # 函数内 import：monkeypatch 友好
+        compute_provider_identity_hash)
     provider_status = None
     windows = None
     cache = resolver._load_cache(resolver._cache_path(repo_root))
+    if isinstance(cache, dict):
+        # v2.2.1 WU-221-B2：异身份缓存视同无缓存（指纹非秘密 16-hex，
+        # 派生只读本地凭证，零网络；legacy 无指纹缓存保守信任）
+        cached_identity = cache.get("provider_identity_hash")
+        if cached_identity is not None \
+                and cached_identity != compute_provider_identity_hash():
+            cache = None
     if isinstance(cache, dict):
         provider_status = cache.get("status")
         snapshot = cache.get("snapshot")

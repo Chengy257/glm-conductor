@@ -73,6 +73,14 @@ fail-closed 不对称的理由（本模块与 quota 观察面的方向差异，�
       compute_provider_identity_hash（v2.2.1 WU-221-B1 起自 watcher
       抽取的共享落点）；boundary_id 为 prime 时点的旧 boundary /
       epoch_id）；
+    - v2.2.1 WU-221-B2（QuotaIdentity）注记：本面自诞生起即按复合
+      身份 (provider_identity_hash, epoch/boundary) 记账——幂等键的
+      第一维就是身份指纹，A 身份的 primed 记录在结构上不可能拦截
+      B 身份的同 boundary prime（各按自身身份记账，cross-account
+      回归天然成立）；window_primed 事件同样携带
+      provider_identity_hash。本单元零行为变化，仅确认口径同源
+      （quota_identity_matches 双形态判定的 trusted/foreign 语义与
+      本面「异身份 = 键不命中」语义一致）；
     - 键命中 → 直接返回既有 durable 结果（idempotent=True），零模型
       调用、零 quota 网络、零 journal 事件（同键重入零网络零事件）；
     - 失败尝试同样落账（error_kind 非空）——超时表示「结果未知」而非
