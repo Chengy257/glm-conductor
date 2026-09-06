@@ -60,7 +60,7 @@
     事实缓存是独立 durable 面，与任务账本零耦合）。
 
 来源：
-    docs/GLM-Conductor-v2.2-Quota-Control-Plane-Architecture-Correction-
+    docs/history/v2.2/GLM-Conductor-v2.2-Quota-Control-Plane-Architecture-Correction-
     and-Agent-Implementation-Plan.md §C6（Activation Transport &
     Scheduler Capability Adapter）/ §22.5（观测不制造 armed）+ 工作单元
     wu-22-C6 ③。

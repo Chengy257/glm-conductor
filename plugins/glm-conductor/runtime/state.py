@@ -68,7 +68,7 @@
 schema 来源：
     docs/glm-conductor-v2-upgrade-guide-final.md §7（推荐 schema 的权威定义）；
     continuation 块见
-    docs/GLM-Conductor-v2.2-Quota-Continuity-Control-Loop-Implementation-Plan.md
+    docs/history/v2.2/GLM-Conductor-v2.2-Quota-Continuity-Control-Loop-Implementation-Plan.md
     §8（obligation / wake_bridge 冻结 schema）/ §23（默认块与向后兼容）；
     v2.2 M1a Persistent Bridge 扩展（scheduler_context / wake_bridge 五
     扩展键 / tombstone / 10 值 status）见同计划 D15-e 决策（WU-22-01a，
