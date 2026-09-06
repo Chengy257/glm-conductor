@@ -405,6 +405,50 @@ from runtime.continuity.wake_bridge import (
     write_completion_tombstone,
 )
 
+# v2.2.1 WU-221-C1（行为保持抽取）：quota SUBSCRIPTION 订阅域的规范定义
+# 已移至 runtime.continuity.subscription（依赖方向冻结：task_manager →
+# continuity.resume → continuity.subscription，绝不反向）；以下 re-import
+# 保证既有 task_manager.<名字> 解析点（handle_quota_exhausted /
+# resume_from_quota / _resume_consumption 留守调用点 + cli / hooks /
+# tests）零变化。
+from runtime.continuity.subscription import (
+    QUOTA_SUBSCRIPTION_RESULT_KEYS,
+    _QUOTA_SUBSCRIPTION_STATE_RANK,
+    _cache_identity_usable,
+    _epoch_context_after_refresh,
+    _epoch_context_at_transition,
+    _epoch_context_from_snapshot,
+    _quota_subscription_view,
+    _reconcile_activation_journal,
+    _subscription_active,
+    _subscription_state_satisfied,
+    evaluate_subscription_eligibility,
+    mark_activation_epoch,
+    register_quota_subscription,
+)
+
+# v2.2.1 WU-221-C1（行为保持抽取）：用户授权续跑（RESUME）域的词汇常量与
+# 规划/对账/资格门/边界派生助手已移至 runtime.continuity.resume
+# （resume_from_quota / _resume_consumption / handle_quota_exhausted 三个
+# 事务编排体留守本模块——其内部调用须经本模块名字空间解析，测试
+# monkeypatch 面契约）；以下 re-import 保证全部解析点零变化。
+from runtime.continuity.resume import (
+    QUOTA_RESUME_GRACE_SECONDS,
+    QUOTA_RESUME_STATUSES,
+    QUOTA_WAIT_TASK_STATUSES,
+    QUOTA_WAIT_UNIT_STATUSES,
+    _clear_quota_interrupt_origin,
+    _consumption_boundary_id,
+    _evaluation_from_refreshed_cache,
+    _quota_wake_decision,
+    _recommended_resume_at,
+    _reconcile_running_unit,
+    _resume_subscription_gate,
+    _wake_budget_remaining,
+    quota_wake_prompt,
+    record_quota_wake,
+)
+
 
 def _write_manifest_safe(repo_root, task_id):
     """Resume Manifest 安全挂点（v2.1 M3 wu-21-07，§10.3 失败语义）。
@@ -580,27 +624,10 @@ def _effective_worker_cap(st, quota_status, max_workers,
     return eff if eff >= 1 else 0
 
 
-def _cache_identity_usable(cache, current_identity_hash):
-    """直接读者（绕过 resolver 层级的 _load_cache 消费点）的缓存身份闸
-    （v2.2.1 WU-221-B2 QuotaIdentity；b2-review carryover 的收口）。
-
-    resolver 自 WU-221-B1 起对缓存复用做身份绑定，但直接读缓存原语的
-    调用方（prepare 的 execution phase 闸 / resume 的 recommended_
-    resume_at / 转态点订阅折算 / CLI wake-plan）不经过该判定——本闸
-    把同一身份检查补到每个直接消费点：
-
-      - 缓存未携带 provider_identity_hash（v2.2 legacy 形态）→ 可用
-        （保守信任——本单元的兼容性裁决：legacy 缓存行为逐字不变）；
-      - 缓存指纹 == 当前身份 → 可用；
-      - 缓存指纹 != 当前身份（异身份缓存）→ 不可用：调用方视同无缓存，
-        走各自既有的 no-cache 路径（fail-open，绝不据其做决策）。
-
-    纯函数：只读入参、零 I/O、零派生（当前指纹由调用方传入——同一
-    调用流程内只派生一次）。
-    """
-    stored = (cache.get("provider_identity_hash")
-              if isinstance(cache, dict) else None)
-    return stored is None or stored == current_identity_hash
+# _cache_identity_usable（v2.2.1 WU-221-C1（行为保持抽取））：直接读者缓存身份
+# 闸的规范定义移至 runtime.continuity.subscription（转态点订阅折算 / resume
+# 缓存回读 / 本模块 execution phase 闸三方共用；经顶部 re-import 保持解析点
+# 零变化）。
 
 
 def _resolve_quota(api, repo_root, task_id, quota_status) -> str:
@@ -1662,151 +1689,16 @@ def recover_leases(repo_root, task_id, *, now=None) -> dict:
 
 
 # —— 用户授权续跑（v2.1 §14/§22.7，wu-21-11 Authorized Quota Resume） ——
-
-# handle_quota_exhausted 的合法入口任务状态（执行态族；任务不在此族
-# → TaskManagerError——额度转态是执行期编排决策，created 等前置态
-# 不存在「因额度耗尽而挂起」的语义）
-QUOTA_WAIT_TASK_STATUSES = ("executing", "joining", "verifying", "reviewing")
-
-# 额度耗尽时随任务一并转 waiting_quota 的单元状态（§62 表内边
-# ready→waiting_quota、running→waiting_quota 均合法；waiting_quota
-# 原地保持——已在等待态的单元不重复转、只计入 waiting_units 清单）
-QUOTA_WAIT_UNIT_STATUSES = ("ready", "running", "waiting_quota")
-
-# recommended_resume_at 的宽限秒数（§30 口径：reset 之后再等一等，
-# 防唤醒过早；与 runtime.quota.scheduler.DEFAULT_GRACE_SECONDS 同源）
-QUOTA_RESUME_GRACE_SECONDS = 300
-
-# resume_from_quota 允许恢复执行的额度四态（AVAILABLE 直恢复；
-# PRESSURE 也恢复——恢复后并发预算经既有 §12 折算自动收缩到 1；
-# EXHAUSTED / UNKNOWN 保守等待，UNKNOWN 不虚构可用性）
-QUOTA_RESUME_STATUSES = ("AVAILABLE", "PRESSURE")
-
-
-def _recommended_resume_at(evaluation):
-    """由 evaluation 计算建议恢复时刻（统一走 scheduler.plan_resume）。
-
-    RB-21-01 起本函数降级为 runtime.quota.scheduler.plan_resume 的薄
-    容错 wrapper——本模块不再维护第二套 reset 数学（历史的「最早
-    EXHAUSTED 窗 reset + 宽限」min 口径已删除；统一为 §30 最晚多窗
-    口径：resume_at = max(全部 EXHAUSTED 窗 reset) + 宽限，多窗同时
-    EXHAUSTED 时不产生 premature wake 浪费 auto_once 的单窗预算）：
-      - evaluation None / 非 dict / status 缺失或非法 / 规划异常 →
-        None（不抛——调用方按「未知」处理，§31 不虚构）；
-      - EXHAUSTED → plan["resume_at"]（任一阻塞窗 reset 不可解析 →
-        periodic_fallback，plan["resume_at"] 为 None）；
-      - 非 EXHAUSTED → None（AVAILABLE / PRESSURE 不需要调度时刻）。
-    """
-    if not isinstance(evaluation, dict):
-        return None
-    try:
-        from runtime.quota import scheduler  # 函数内 import：monkeypatch 友好
-        plan = scheduler.plan_resume(
-            evaluation, grace_seconds=QUOTA_RESUME_GRACE_SECONDS)
-    except Exception:
-        return None
-    if not isinstance(plan, dict):
-        return None
-    if evaluation.get("status") != "EXHAUSTED":
-        return None
-    return plan.get("resume_at")
-
-
-def _evaluation_from_refreshed_cache(repo_root):
-    """强刷后的额度缓存 snapshot → scheduler.evaluate 的 evaluation。
-
-    resume_from_quota 的 EXHAUSTED 分支专用：wake 已以 force_refresh=
-    True 强制刷新，provider 抓取成功时 resolver 缓存（
-    <repo_root>/.glm-conductor/quota-cache.json）保存完整 snapshot
-    （形状 {"provider", "fetched_at", "snapshot", "status"}）——复用
-    resolver 的缓存原语（_cache_path / _load_cache，零 resolver 改动）
-    读回 snapshot，经 scheduler.evaluate 产出 evaluation，交
-    _recommended_resume_at（plan_resume 统一口径）计算建议恢复时刻。
-
-    缓存缺失 / snapshot 非 dict / 求值异常 → None（§31 不虚构）。
-    边界（mid-batch review P3）：provider 层在 wake 时抓取失败 →
-    resolver 回退陈旧缓存 status，此处读到的 snapshot 是休眠前的
-    旧账——recommended_resume_at 仍只是建议值（不虚构、主会话按
-    四态重解析裁决），消费方不得将其当作已验证的可用性事实。
-    """
-    try:
-        from runtime.quota import resolver, scheduler  # 函数内 import
-        cache = resolver._load_cache(resolver._cache_path(repo_root))
-        if not isinstance(cache, dict):
-            return None
-        # v2.2.1 WU-221-B2（QuotaIdentity）直接读者身份闸：异身份缓存
-        # 视同无缓存（→ None 不虚构建议时刻）；legacy 无指纹缓存保守
-        # 信任，行为逐字不变。
-        if not _cache_identity_usable(
-                cache, _current_provider_identity_hash()):
-            return None
-        snapshot = cache.get("snapshot")
-        if not isinstance(snapshot, dict):
-            return None
-        return scheduler.evaluate(snapshot)
-    except Exception:
-        return None
-
-
-def _quota_wake_decision(view) -> dict:
-    """授权矩阵纯决策（§14.2-§14.5；输入 _continuity_view 的输出）。
-
-    返回 {"required", "budget_exhausted", "prompt_mode", "reason",
-    "transition_waiting_user"}：
-      - required：「授权允许自动恢复执行」——manual / notify 恒 False；
-      - prompt_mode："wake"（auto_once / until_done 且已授权且有预算
-        ——自足唤醒 prompt）；"reminder"（notify——提醒模板，任务实际
-        执行前仍需用户动作）；None（不产出 prompt）；
-      - transition_waiting_user：auto_once / until_done 且已授权且预算
-        耗尽（remaining <= 0）→ True（§14.5 授权耗尽语义）；source
-        非 "user" 的未授权分支不转（合法 state 里 auto_once/until_done
-        恒已授权——execution_policy §5.4 不变量保证，该分支是纵深防御）；
-      - reason：中文一句话裁决理由。
-    纯函数：零 I/O。
-    """
-    auto_resume = view["auto_resume"]
-    remaining = view["remaining"]
-    if auto_resume == "manual":
-        return {
-            "required": False, "budget_exhausted": False,
-            "prompt_mode": None, "transition_waiting_user": False,
-            "reason": "auto_resume=manual：不创建自动化唤醒，未来 "
-                      "SessionStart 恢复注入会提示用户手动续跑",
-        }
-    if auto_resume == "notify":
-        return {
-            "required": False, "budget_exhausted": False,
-            "prompt_mode": "reminder", "transition_waiting_user": False,
-            "reason": "auto_resume=notify：授权允许提醒、不允许自动恢复"
-                      "执行——可自建一次性提醒 automation（maxRuns=1，"
-                      "prompt 文本已随返回给出），任务实际执行前仍需用户"
-                      "动作",
-        }
-    # —— auto_once / until_done（跨窗口自动续跑授权族） ——
-    if view["source"] != "user":
-        return {
-            "required": False, "budget_exhausted": remaining <= 0,
-            "prompt_mode": None, "transition_waiting_user": False,
-            "reason": "auto_resume=%r 未获得用户授权（authorization."
-                      "source != \"user\"），不自动恢复执行" % auto_resume,
-        }
-    if remaining <= 0:
-        return {
-            "required": False, "budget_exhausted": True,
-            "prompt_mode": None, "transition_waiting_user": True,
-            "reason": "auto_resume=%r 的窗口预算已耗尽（consumed %d / "
-                      "max %d），不得再创建任何自动化唤醒——转 waiting_user"
-                      "等待用户重新授权（§14.5）"
-                      % (auto_resume, view["consumed_quota_windows"],
-                         view["max_quota_windows"]),
-        }
-    return {
-        "required": True, "budget_exhausted": False,
-        "prompt_mode": "wake", "transition_waiting_user": False,
-        "reason": "auto_resume=%r 已获用户授权且窗口预算剩余 %d：创建"
-                  "一次性自动化唤醒（maxRuns=1）恢复执行"
-                  % (auto_resume, remaining),
-    }
+#
+# v2.2.1 WU-221-C1（行为保持抽取）：本域词汇常量（QUOTA_WAIT_TASK_STATUSES /
+# QUOTA_WAIT_UNIT_STATUSES / QUOTA_RESUME_GRACE_SECONDS /
+# QUOTA_RESUME_STATUSES）与 _recommended_resume_at /
+# _evaluation_from_refreshed_cache / _quota_wake_decision 的规范定义移至
+# runtime.continuity.resume（依赖方向冻结：task_manager → continuity.resume
+# → continuity.subscription，绝不反向），经顶部 re-import 保持解析点零变化。
+# handle_quota_exhausted 留守本模块：它是额度耗尽的「转态编排」（单元/任务
+# 转态 + dispatch.active 清空 + manifest 刷新），且其 register/授权矩阵/
+# prompt 调用点须经本模块名字空间解析（测试 monkeypatch 面契约）。
 
 
 def handle_quota_exhausted(repo_root, task_id, *, evaluation=None) -> dict:
@@ -1946,205 +1838,10 @@ def handle_quota_exhausted(repo_root, task_id, *, evaluation=None) -> dict:
     }
 
 
-def quota_wake_prompt(repo_root, task_id) -> str:
-    """生成自足的一次性额度唤醒 prompt（v2.1 §14.4 wake 形态锁定）。
-
-    宿主实测（2026-08-31 wake 入账本）：ZCode automation wake 是同会话
-    续行——prompt 以用户 turn 注入、SessionStart 不重放，因此 prompt
-    必须自足：task_id、账本根 / 任务仓库根、恢复首步（resume_from_quota
-    → 按账本就绪继续）、额度检查口径、预算状态（已消耗 / 共几窗 /
-    剩余）、红线（绝不重试 CronDelete/CronUpdate、发布动作征询用户、
-    RB-1 完成证据门指纹口径）与一次性（maxRuns=1）语义全部内置。
-
-    纯函数：只读 state.json（预算读 execution_policy.continuity），
-    零写副作用；任务缺失 TaskManagerError。中文模板，主会话把它放进
-    automation 的 prompt 字段即可（automation 创建/删除本身归主会话
-    的宿主工具，runtime 只产出指令与记账）。
-    """
-    api = "quota_wake_prompt"
-    st = _require_state(repo_root, task_id, api)
-    view = _continuity_view(st)
-    waiting_ids = [
-        unit.get("id") for unit in st.get("work_units") or []
-        if isinstance(unit, dict) and unit.get("status") == "waiting_quota"]
-    work_root = state.resolve_repository_root(st, str(repo_root))
-    lines = [
-        "GLM CONDUCTOR 额度唤醒（一次性 automation：recurring=false、"
-        "maxRuns=1，本次触发即自完成）",
-        "",
-        "任务 task_id：%s" % task_id,
-        "账本根：%s" % repo_root,
-        "任务仓库根：%s" % work_root,
-        "等待恢复的单元：%s" % ("、".join(waiting_ids) if waiting_ids
-                               else "无（任务级挂起）"),
-        "",
-        "本唤醒是一次性自动化（maxRuns=1）：触发即终结，绝不依赖 "
-        "CronUpdate 修改参数或改期。",
-        "",
-        "第一步（必须最先执行）——额度检查与恢复：",
-        "1. 解析当前额度四态（绝不重试网络；--force-refresh 强制走 "
-        "provider——唤醒后不得信任休眠期间的本地缓存；provider 不可用"
-        "时按陈旧缓存 → UNKNOWN 层级回退）：",
-        "   python3 plugins/glm-conductor/runtime/cli.py quota-resolve "
-        "--force-refresh '%s'"
-        % repo_root,
-        "2. 调用 runtime.task_manager.resume_from_quota(repo_root=r'%s', "
-        "task_id='%s')（内部同样强制刷新额度并对中断单元做恢复对账）："
-        % (repo_root, task_id),
-        "   - AVAILABLE / PRESSURE → 任务转回 executing、waiting_quota "
-        "单元按中断来源恢复（ready 来源直回 ready；running 来源先 "
-        "reconcile 四分：干净重派回 ready、成果可复用直达 verifying、"
-        "有进度回 ready 待主会话组装进度包续作、人工裁决保持等待），"
-        "按账本就绪顺序经 prepare_dispatch / "
-        "prepare_dispatch_wave 继续（遵守 orchestration 纪律：SELECTIVE "
-        "ROUTE、permit 门与租约时序不得绕过）；",
-        "   - EXHAUSTED / UNKNOWN → 零转态保守等待：不得派发、不得再建"
-        "唤醒，按 recovery 摘要重排或降级 SessionStart 恢复。",
-        "",
-        "预算状态：已消耗 %d / 共 %d 窗（剩余 %d 窗）。本唤醒本身不消耗"
-        "窗口预算（automation arm/fire/create 一律不消费，D15-g："
-        "automation lifecycle ≠ quota epoch consumption）；窗口预算仅在"
-        "任务成功恢复执行（resume commit point）时消耗；预算耗尽后不得"
-        "再创建任何自动化唤醒，一律降级 SessionStart 恢复。"
-        % (view["consumed_quota_windows"], view["max_quota_windows"],
-           view["remaining"]),
-        "",
-        "红线（违反即事故）：",
-        "- 绝不重试 CronDelete / CronUpdate（本机已知 glitch）；清理"
-        "失败容忍，降级 SessionStart 恢复；",
-        "- 发布类动作（git push、对外发布、删除性操作）必须先征询用户；",
-        "- 单元完成必须过 RB-1 完成证据门：finish_unit 前亲自运行该"
-        "单元全部 required 验证命令，并用 record_unit_verification 记录"
-        "绑定当前改动的 pass 指纹证据（record 与 finish 之间不得产生 "
-        "git 提交，否则证据 stale 须重验）。",
-    ]
-    return "\n".join(lines)
-
-
-def record_quota_wake(repo_root, task_id, *, automation_id, fires_at) -> dict:
-    """window 扣减记账（v2.1 legacy arm-time 记账；v2.1 §14.4：主会话
-    CronCreate 成功后调用）。
-
-    LEGACY / DEPRECATED（v2.2 C1a）：本入口仅为 v2.1 one-shot 兼容
-    保留；v2.2 persistent path 禁止调用（automation arm/fire/create
-    一律不消费窗口预算，D15-g：automation lifecycle ≠ quota epoch
-    consumption）——消费点唯一合法位置 = resume commit point（修正
-    计划 §15.1），C1b 落地新记账 API 后本入口退役。
-
-    - 幂等（SH-21-01）：journal 已有同 automation_id 的
-      quota_wake_recorded 事件 → 直接返回既有消耗结果（不递增、
-      不新建事件、零写副作用），返回 dict 既有键保留并增标
-      "idempotent": True——cron glitch 重放 / 误重试不再重复消耗
-      窗口预算（幂等只按 automation_id 判定，不同 automation_id
-      照常各消耗一窗）；
-    - 写入前授权复核（SH-21-01 三查，读取口径与 _continuity_view /
-      _quota_wake_decision 一致——execution_policy 块缺/坏按默认块
-      解释为 manual）：auto_resume ∈ {auto_once, until_done} /
-      authorization.source == "user" / 剩余窗口 > 0，任一不满足 →
-      TaskManagerError（中文消息指明 violated 条件，零副作用——
-      无事件、state.json 字节不变；manual/notify 任务不得经本 API
-      制造 consumed window）；
-    - continuity.consumed_quota_windows += 1（缺键按 0 起算；legacy
-      缺 execution_policy 块时以默认块补齐后写——半定义块过不了
-      validate_state 的完整性闸）；
-    - journal quota_wake_recorded {automation_id, fires_at, consumed,
-      remaining}；
-    - 与 automation 存活解耦：wake 未触发、automation 被清理或丢失
-      都不回滚（正确性底线永远是未来 SessionStart 恢复注入，automation
-      只是 best-effort bridge）；无回滚 API，不同 automation_id 的
-      二次调用纯递增。
-
-    参数校验（先于任何 I/O，失败零副作用）：automation_id / fires_at
-    必须是非空 str，否则 ValueError（中文消息含字段名）。返回
-    {"consumed_quota_windows", "remaining_quota_windows",
-    "max_quota_windows", "automation_id", "fires_at"}；幂等命中路径
-    既有键保留并增标 "idempotent": True。
-    """
-    api = "record_quota_wake"
-    if not isinstance(automation_id, str) or automation_id == "":
-        raise ValueError(
-            "%s：automation_id 必须是非空字符串，得到 %r"
-            % (api, automation_id))
-    if not isinstance(fires_at, str) or fires_at == "":
-        raise ValueError(
-            "%s：fires_at 必须是非空字符串（ISO8601 口径），得到 %r"
-            % (api, fires_at))
-    st = _require_state(repo_root, task_id, api)
-    view = _continuity_view(st)
-    # SH-21-01 幂等：同 automation_id 已记过账 → 原样返回既有消耗结果
-    # （取首条匹配——正确流程下至多一条；历史脏数据重复时首条是原始账）
-    prior = None
-    for event in journal.read_events(repo_root, task_id):
-        if event.get("event") == "quota_wake_recorded" \
-                and event.get("automation_id") == automation_id:
-            prior = event
-            break
-    if prior is not None:
-        consumed = prior.get("consumed")
-        if isinstance(consumed, bool) or not isinstance(consumed, int) \
-                or consumed < 0:
-            consumed = view["consumed_quota_windows"]
-        remaining = prior.get("remaining")
-        if isinstance(remaining, bool) or not isinstance(remaining, int) \
-                or remaining < 0:
-            remaining = view["remaining"]
-        recorded_fires_at = prior.get("fires_at")
-        if not isinstance(recorded_fires_at, str) or recorded_fires_at == "":
-            recorded_fires_at = fires_at
-        return {
-            "consumed_quota_windows": consumed,
-            "remaining_quota_windows": remaining,
-            "max_quota_windows": view["max_quota_windows"],
-            "automation_id": automation_id,
-            "fires_at": recorded_fires_at,
-            "idempotent": True,
-        }
-    # SH-21-01 写入前授权复核（三查逐条指明 violated 条件；在任何
-    # mutation / 落盘之前——拒绝路径零副作用）
-    if view["auto_resume"] not in ("auto_once", "until_done"):
-        raise TaskManagerError(
-            "%s：auto_resume=%r 不在自动续跑授权族（auto_once / "
-            "until_done）内——manual / notify 任务不得记账消耗窗口预算"
-            "（额度恢复一律走 SessionStart 恢复注入 / 用户手动续跑）"
-            % (api, view["auto_resume"]))
-    if view["source"] != "user":
-        raise TaskManagerError(
-            "%s：authorization.source=%r 非 \"user\"——跨额度窗口自动"
-            "续跑必须用户明确授权，拒绝记账窗口消耗（纵深防御，与 "
-            "_quota_wake_decision 口径一致）" % (api, view["source"]))
-    if view["remaining"] <= 0:
-        raise TaskManagerError(
-            "%s：窗口预算已耗尽（consumed %d / max %d，剩余 %d）——"
-            "不得再记账新的自动化唤醒，转 waiting_user 等待用户重新"
-            "授权（§14.5）" % (api, view["consumed_quota_windows"],
-                               view["max_quota_windows"],
-                               view["remaining"]))
-    policy = st.get("execution_policy")
-    if not isinstance(policy, dict):
-        # legacy 任务无授权事实源块：以默认块补齐（完整四子块形状，
-        # 否则 validate_state 拒绝落盘）——记账语义与默认 manual/0 授权
-        # 解释一致，只是把「已消耗窗口」显式落盘
-        policy = default_execution_policy()
-        st["execution_policy"] = policy
-    continuity = policy.get("continuity")
-    if not isinstance(continuity, dict):
-        continuity = default_execution_policy()["continuity"]
-        policy["continuity"] = continuity
-    consumed = consumed_quota_windows(policy) + 1
-    continuity["consumed_quota_windows"] = consumed
-    state.save_state(repo_root, st)
-    view = _continuity_view(st)
-    journal.append_event(repo_root, task_id, {
-        "event": "quota_wake_recorded", "automation_id": automation_id,
-        "fires_at": fires_at, "consumed": consumed,
-        "remaining": view["remaining"]})
-    return {
-        "consumed_quota_windows": consumed,
-        "remaining_quota_windows": view["remaining"],
-        "max_quota_windows": view["max_quota_windows"],
-        "automation_id": automation_id,
-        "fires_at": fires_at,
-    }
+# quota_wake_prompt / record_quota_wake（v2.2.1 WU-221-C1（行为保持抽取））：
+# v2.1 one-shot wake 的自足 prompt 生成与 arm-time 窗口扣减记账（LEGACY /
+# DEPRECATED 兼容面），规范定义移至 runtime.continuity.resume，经顶部
+# re-import 保持 cli / tests 解析点零变化。
 
 
 # —— §15.1 消费记账（record_quota_boundary_consumed）/ §22.6 迁移
@@ -2153,342 +1850,19 @@ def record_quota_wake(repo_root, task_id, *, automation_id, fires_at) -> dict:
 # re-import 保持 resume 消费段调用点与全部 task_manager.<名字> 解析点
 # 零变化 ——
 
-def _wake_budget_remaining(st) -> int:
-    """任务 state 的剩余唤醒窗口预算（max(0, max - consumed)，容错读）。"""
-    policy = st.get("execution_policy")
-    continuity = (policy.get("continuity")
-                  if isinstance(policy, dict) else None)
-    max_windows = (continuity.get("max_quota_windows")
-                   if isinstance(continuity, dict) else None)
-    if isinstance(max_windows, bool) or not isinstance(max_windows, int) \
-            or max_windows < 0:
-        max_windows = 0
-    return max(0, max_windows - consumed_quota_windows(policy))
-
-
-def _clear_quota_interrupt_origin(unit) -> None:
-    """清除单元的中断来源标记（RB-21-01 恢复落点收尾）。
-
-    runtime.quota_interrupted_from 成功恢复后即失义（下一轮额度中断
-    会重新写入），清除避免陈旧标记误导后续对账；runtime dict 因此变
-    空则整键删除（保持单元形状最简）。runtime 缺失 / 非 dict 时零操作。
-    """
-    runtime_meta = unit.get("runtime")
-    if not isinstance(runtime_meta, dict):
-        return
-    runtime_meta.pop("quota_interrupted_from", None)
-    if not runtime_meta:
-        unit.pop("runtime", None)
-
-
-def _reconcile_running_unit(repo_root, task_id, uid):
-    """对 running 中断单元做四分对账 → (落点状态, unit_recovery 条目)。
-
-    调 runtime.reconcile.reconcile_agent_run（纯读对账，RB-21-01：
-    resume 链禁止盲目 waiting_quota→ready——worker 现场可能有残留），
-    按 classification 决定落点：
-      - redispatch_clean → "ready"（无执行内容无残留，全新派发）；
-      - reuse_result → "verifying"（agent 成果可复用，经 §62 演进的
-        waiting_quota→verifying 新边直达验证；条目带
-        action_required="recover_agent_result"，主会话须先捞取成果）；
-      - resume_with_progress → "ready"（有进度无完整证据；条目透传
-        evidence 证据句柄，主会话组装 Previous Progress Package 随新
-        规格续派——编排纪律，runtime 不机械阻止）；
-      - manual_ruling（及未知分类，防御）→ "waiting_quota"（保持等待，
-        禁止自动猜测；条目透传 rationale）。
-
-    fail-closed：reconcile 异常（求值失败 / 环境问题）→ 按 manual_ruling
-    处理（rationale 注明 reconcile error 与异常类型名），绝不让异常炸掉
-    整个 resume。
-    """
-    try:
-        from runtime import reconcile  # 函数内 import：monkeypatch 友好
-        report = reconcile.reconcile_agent_run(repo_root, task_id, uid)
-    except Exception as exc:
-        return "waiting_quota", {
-            "classification": "manual_ruling",
-            "rationale": ["reconcile error: %s" % type(exc).__name__]}
-    classification = (report.get("classification")
-                      if isinstance(report, dict) else None)
-    if classification == "redispatch_clean":
-        return "ready", {"classification": classification}
-    if classification == "reuse_result":
-        return "verifying", {
-            "classification": classification,
-            "action_required": "recover_agent_result",
-            "evidence": report.get("evidence")}
-    if classification == "resume_with_progress":
-        return "ready", {
-            "classification": classification,
-            "evidence": report.get("evidence")}
-    # manual_ruling 与未知分类（防御保留位）：保持 waiting_quota
-    entry = {"classification":
-             classification if isinstance(classification, str)
-             and classification else "manual_ruling"}
-    rationale = (report.get("rationale")
-                 if isinstance(report, dict) else None)
-    if rationale is not None:
-        entry["rationale"] = rationale
-    return "waiting_quota", entry
-
-
-# —— 订阅接线（v2.2 C5b，wu-22-C5b；C5a 三 API 的 resume 面消费） ——
-
-def _epoch_context_from_snapshot(provider_status, snapshot):
-    """(provider_status, §27 snapshot) → epoch 折算上下文（内部助手）。
-
-    snapshot 缺失 / 无 windows / provider_status 词汇外 / evaluate_epoch
-    任何异常 → None（§31 不虚构 epoch 身份——折算失败与「无数据」同一
-    保守出口）；成功返回 {"epoch_id", "executable", "provider_status"}，
-    epoch_id 恒为 §10.1 形状（evaluate_epoch 的窗口指纹折算，供订阅三
-    API 的字符串等值判定直接消费）。纯折算：零网络零写。
-    """
-    windows = None
-    if isinstance(snapshot, dict):
-        raw = snapshot.get("windows")
-        windows = raw if isinstance(raw, list) else None
-    if windows is None:
-        return None
-    try:
-        from runtime.quota import epoch as quota_epoch  # 函数内 import
-        evaluated = quota_epoch.evaluate_epoch(
-            provider_status=provider_status, windows=windows)
-    except Exception:  # ValueError（status 词汇外）等一律按折算失败处理
-        return None
-    return {"epoch_id": evaluated["epoch_id"],
-            "executable": evaluated["executable"],
-            "provider_status": provider_status}
-
-
-def _epoch_context_at_transition(repo_root):
-    """EXHAUSTED 转态点（handle_quota_exhausted）的零网络 epoch 折算。
-
-    读 resolver 缓存原语（_cache_path / _load_cache——本模块
-    _evaluation_from_refreshed_cache 的同款先例，零 resolver 改动）：
-    prepare 解析 EXHAUSTED 时缓存刚被刷新，转态点折算读同一份
-    snapshot，与「resolver.resolve_quota_detail 的新鲜缓存层」等价。
-    刻意不经 resolve_quota_detail：该入口在缓存缺位 / 陈旧时会走层级 2
-    的 provider 网络抓取——额度转态是账本事务，保持零网络纪律（探测
-    归 resolver 的调用方）；缓存不可用即折算失败 → None → 不注册零
-    副作用（规格的 legacy 不变分支）。
-    """
-    try:
-        from runtime.quota import resolver  # 函数内 import：monkeypatch 友好
-        cache = resolver._load_cache(resolver._cache_path(repo_root))
-    except Exception:
-        return None
-    if not isinstance(cache, dict):
-        return None
-    # v2.2.1 WU-221-B2（QuotaIdentity）直接读者身份闸：异身份缓存视同
-    # 无缓存（→ None → 不注册零副作用，legacy 不变分支）；legacy 无指
-    # 纹缓存保守信任。幸存缓存的指纹（若有）即转态点可得的身份上下文
-    # ——注册面据此按「身份可得则携带」规则落 provider_identity_hash。
-    if not _cache_identity_usable(
-            cache, _current_provider_identity_hash()):
-        return None
-    context = _epoch_context_from_snapshot(cache.get("status"),
-                                           cache.get("snapshot"))
-    if context is not None:
-        cache_identity = cache.get("provider_identity_hash")
-        if isinstance(cache_identity, str) and cache_identity:
-            context["provider_identity_hash"] = cache_identity
-    return context
-
-
-def _epoch_context_after_refresh(repo_root):
-    """resume 面（resume_from_quota）的 epoch 折算（规格口径）。
-
-    status 解析在此前已完成（resolver 强刷成功即缓存已刷新；显式
-    status 直通则用既有缓存），此处经 resolver.resolve_quota_detail
-    （force_refresh=False——新鲜缓存命中零网络；provider 降级路径由
-    resolver 层级自行容错）读回明细，取 detail.status +
-    detail.snapshot.windows 交 evaluate_epoch 折算。detail 非 dict /
-    无 snapshot / 无 windows / 折算异常 → None（无法确认新 epoch）。
-    """
-    try:
-        from runtime.quota import resolver  # 函数内 import：monkeypatch 友好
-        detail = resolver.resolve_quota_detail(repo_root)
-    except Exception:
-        return None
-    if not isinstance(detail, dict):
-        return None
-    return _epoch_context_from_snapshot(detail.get("status"),
-                                        detail.get("snapshot"))
-
-
-def _reconcile_activation_journal(repo_root, task_id, st, epoch_id,
-                                  provider_identity_hash=None):
-    """崩溃窗口对账（v2.2 C5b，C5a reviewer P3 的接线侧兜底）。
-
-    evaluate 之前读控制面 journal（read_control_plane_events——内容层
-    容错：坏行 / 缺文件按无证据处理；OSError 上抛）：
-    存在本任务本 epoch 的 quota_epoch_advanced 而
-    state.quota_subscription.last_activation_epoch_id 落后（≠ epoch_id）
-    → journal 证据表明本 epoch 已激活过（如 mark 落盘后 state 被备份
-    恢复 / 回滚覆盖），保守视为已激活：
-      - best-effort 自愈：全新 load → 只改 last_activation_epoch_id →
-        save（绝不借 mark_activation_epoch——mark 会追加第二条控制面
-        事件，破坏 QC-07 每 epoch 恰一次）；失败只记 reason 不阻塞
-        判定（自愈是记账修复，不是恢复闸门）；
-      - 返回对账 reason（中文，点名「journal 证据对账：已激活」）；
-    无证据或 state 已与 journal 一致 → None（资格判定照常）。
-    方向冻结：宁可少恢复一次不重复激活（QC-07）。纯读 + 至多一次
-    自愈写，零转态。
-
-    v2.2.1 WU-221-B2（QuotaIdentity）：证据匹配升为双形态比较（
-    epoch.quota_identity_matches）——journal 事件携带
-    provider_identity_hash 时须等于当前身份才算本任务的激活证据，
-    缺席（legacy 事件）保守信任，异身份事件按无证据处理（A 身份的
-    激活绝不作为 B 身份的 QC-07 证据）。当前身份：入参非空 str 直用
-    （同一 resume 流程只派生一次），否则经共享模块派生一次。
-    """
-    identity = (provider_identity_hash
-                if isinstance(provider_identity_hash, str)
-                and provider_identity_hash
-                else _current_provider_identity_hash())
-    from runtime.quota import epoch as quota_epoch  # 函数内 import：monkeypatch 友好
-    evidence = None
-    for event in journal.read_control_plane_events(repo_root):
-        if (event.get("event") == "quota_epoch_advanced"
-                and event.get("task_id") == task_id
-                and quota_epoch.quota_identity_matches(
-                    event.get("epoch_id"),
-                    event.get("provider_identity_hash"),
-                    epoch_id, identity)):
-            evidence = event  # 正确流程下至多一条；取末条（最新证据）
-    if evidence is None:
-        return None
-    block = st.get("quota_subscription")
-    if isinstance(block, dict) \
-            and block.get("last_activation_epoch_id") == epoch_id:
-        return None  # state 已与 journal 一致：evaluate 自会判同 epoch
-    healed = True
-    try:
-        fresh = state.load_state(repo_root, task_id)
-        if fresh is None:
-            healed = False
-        else:
-            fresh_block = fresh.get("quota_subscription")
-            if not isinstance(fresh_block, dict):
-                fresh_block = state.default_quota_subscription()
-                fresh["quota_subscription"] = fresh_block
-            fresh_block["last_activation_epoch_id"] = epoch_id
-            state.save_state(repo_root, fresh)
-    except Exception:
-        healed = False
-    return ("journal 证据对账：epoch %s 已激活（控制面 quota_epoch_advanced "
-            "在案而 state 落后，%s）——保守视为已激活，本 epoch 不重复激活"
-            % (epoch_id,
-               "已自愈重写 last_activation_epoch_id" if healed
-               else "自愈重写失败"))
-
-
-def _resume_subscription_gate(repo_root, task_id, st) -> dict:
-    """resume 面订阅资格裁决（v2.2 C5b；返回 "subscription" 面 dict）。
-
-    顺序即决策序（纯读 + 至多一次对账自愈写，零转态零派发）：
-      1. 折算当前 epoch（_epoch_context_after_refresh：resolve_quota_
-         detail + evaluate_epoch）；折算失败 → eligible=False——无法
-         确认新 epoch，保守不恢复（reason 注明）；
-      2. 崩溃窗口对账（evaluate 之前，_reconcile_activation_journal）；
-      3. evaluate_subscription_eligibility 纯判定；对账证据在案时资格
-         被保守推翻（eligible 强制 False + reason 点名 journal 证据）。
-
-    v2.2 C6（wu-22-C6 reviewer 留账吸收）：签名移除死参数
-    provider_status——资格判定消费的是 evaluate_subscription_
-    eligibility 内部经 _epoch_context_after_refresh 折算出的
-    provider_status（status 参数的解析结果从不进入本函数），参数自
-    C5b 落地起即为死参数；移除零行为变化（reviewer 实测佐证）。
-
-    v2.2.1 WU-221-B2（QuotaIdentity）：当前身份指纹在本函数经共享
-    模块派生恰一次，同流程内供崩溃对账与纯判定共用——绝不二次解析
-    凭证；异身份的既有记录按各面「无先前记录」语义处理（不授权、
-    不幂等拦截）。
-
-    返回 {"registered": True, "eligible": bool, "reasons": [...],
-    "epoch_id": <§10.1 形状或 None（折算失败）>}；eligible=True 且调用
-    方实际完成转态后再补 "activated_epoch_id" / "mark"（转态-记账顺序
-    见 resume_from_quota docstring）。本函数不是消费点：C1b 的
-    resume-time 窗口消费记账（§15.1 消费事务点）恒不在此发生——消费
-    接线归 Resume Controller。
-    """
-    epoch_context = _epoch_context_after_refresh(repo_root)
-    if epoch_context is None:
-        return {"registered": True, "eligible": False,
-                "reasons": ["无法折算当前 quota epoch（额度明细 snapshot "
-                            "缺失、windows 缺失或折算异常）——无法确认新 "
-                            "epoch，保守不恢复"],
-                "epoch_id": None}
-    epoch_id = epoch_context["epoch_id"]
-    identity = _current_provider_identity_hash()
-    journal_reason = _reconcile_activation_journal(
-        repo_root, task_id, st, epoch_id,
-        provider_identity_hash=identity)
-    evaluation = evaluate_subscription_eligibility(
-        repo_root, task_id, current_epoch_id=epoch_id,
-        current_executable=epoch_context["executable"],
-        provider_status=epoch_context["provider_status"],
-        current_provider_identity_hash=identity)
-    reasons = list(evaluation["reasons"])
-    eligible = evaluation["eligible"]
-    if journal_reason is not None:
-        eligible = False
-        reasons.append(journal_reason)
-    return {"registered": True, "eligible": eligible,
-            "reasons": reasons, "epoch_id": epoch_id}
-
-
-def _subscription_active(st) -> bool:
-    """任务是否处于「已注册且启用」的订阅态（容错读，纯函数）。
-
-    quota_subscription 块缺省 / 形状异常按默认块解释（未订阅）；
-    registered_epoch_id 非 null 且 enabled 严格为 True 才算接线对象——
-    legacy 任务在本开关下零分支进入，输出零变化。
-    """
-    block = _quota_subscription_view(st)
-    return (block.get("registered_epoch_id") is not None
-            and block.get("enabled") is True)
+# v2.2.1 WU-221-C1（行为保持抽取）：
+#   - _wake_budget_remaining / _clear_quota_interrupt_origin /
+#     _reconcile_running_unit / _resume_subscription_gate /
+#     _consumption_boundary_id 规范定义移至 runtime.continuity.resume；
+#   - 订阅接线段（_epoch_context_from_snapshot / _epoch_context_at_transition
+#     / _epoch_context_after_refresh / _reconcile_activation_journal /
+#     _subscription_active）规范定义移至 runtime.continuity.subscription。
+# 均经顶部 re-import 保持 resume_from_quota / _resume_consumption /
+# handle_quota_exhausted（留守本模块）及 cli / hooks / tests 的解析点零变化。
 
 
 # —— 消费接线（v2.2 C7，wu-22-C7 ①；修正计划 §15.1 消费事务点冻结） ——
 
-def _consumption_boundary_id(repo_root):
-    """消费段 representative_boundary_id 派生（v2.2 C7；D10 形态，无宽
-    限；RH-04 改名——派生数学零变化）。
-
-    读当前 epoch snapshot 的 windows（resolver.resolve_quota_detail——
-    与 _epoch_context_after_refresh 同款入口，新鲜缓存命中零网络），
-    复用 wake planner 的 D10 boundary 数学（_bridge_boundary，grace=0
-    ——值只是「被消费的新窗口自身身份」，不是 wake 时刻）：多窗取最早
-    可解析 reset，返回 "<kind>:<reset_at>"（Z 形式串）。
-
-    RH-04 语义澄清（方案 A 改名不改数学）：本值 = epoch 中用于人类
-    审计的代表窗口身份（representative），并非 C2 冻结的 executable
-    boundary（= max(blocking EXHAUSTED reset_at) + grace）——旧字段名
-    executable_boundary_id 名不符实，故新事件字段改记
-    representative_boundary_id；RH-04 之前的旧事件（含 pending / 
-    committed）以 legacy 键 executable_boundary_id 在案，读侧一律双键
-    兼容（先 new 后 legacy），绝不重写旧 journal。
-
-    detail 缺失 / windows 缺失 / 无可解析窗口 → None（§31 不虚构，调用
-    方跳过消费）；epoch_id 恒为幂等 / 归属权威键，该值仅辅助证据。
-    纯读零写。
-    """
-    windows = None
-    try:
-        from runtime.quota import resolver  # 函数内 import：monkeypatch 友好
-        detail = resolver.resolve_quota_detail(repo_root)
-    except Exception:
-        return None
-    if isinstance(detail, dict):
-        snapshot = detail.get("snapshot")
-        if isinstance(snapshot, dict) \
-                and isinstance(snapshot.get("windows"), list):
-            windows = snapshot["windows"]
-    if windows is None:
-        return None
-    boundary, _reset_z, _wake_at = _bridge_boundary(windows, 0)
-    return boundary
 
 
 def _resume_consumption(repo_root, task_id, st, epoch_id,
@@ -2926,349 +2300,10 @@ def observe_scheduler_context(repo_root, task_id, *, origin=None,
 
 
 # —— Quota Subscription（v2.2 C5a，wu-22-C5a；主计划 §14 规范 adapted） ——
-
-# §14 「Task 只订阅 quota，不再拥有 quota clock」的执行面落点：订阅事实
-# 记在任务 state 顶层 quota_subscription 块（形状真相源是 state.py 的
-# DEFAULT_QUOTA_SUBSCRIPTION / 规则 8.9 validator），本节提供三个事务
-# API（注册 / 纯资格判定 / 激活记账）。
 #
-# 规格适配（§14 草图 → 本实现）：§14 草图的 registered_epoch:17 是 int
-# 序数示意——epoch 身份一律用 §10.1 epoch_id 字符串（"glm:"+指纹前
-# 16 hex，C2 冻结：fingerprint 等值比较、与窗口顺序无关、durable 重建
-# 安全），新旧判定只用字符串等值，不引入任何 int 序数。
-#
-# 词汇：minimum_state / continuation_mode 两枚举与「供比较的档位序」
-# 的单一真相源在 state.py（QUOTA_SUBSCRIPTION_MINIMUM_STATES /
-# QUOTA_SUBSCRIPTION_CONTINUATION_MODES / is_quota_epoch_id），本节只
-# 消费不复制。
-
-# minimum_state 档位序的本地冻结映射（QC-07 判定用；序见
-# QUOTA_SUBSCRIPTION_MINIMUM_STATES 注释——索引越小档位越高，
-# AVAILABLE > PRESSURE > DRAINING > EXHAUSTED。provider_status 达到
-# minimum_state 档位及以上 = rank(provider_status) <=
-# rank(minimum_state)）。
-_QUOTA_SUBSCRIPTION_STATE_RANK = {
-    name: rank for rank, name in enumerate(state.QUOTA_SUBSCRIPTION_MINIMUM_STATES)
-}
-
-# register_quota_subscription 返回冻结六键（块五键视图 + idempotent）
-QUOTA_SUBSCRIPTION_RESULT_KEYS = (
-    "enabled", "registered_epoch_id", "last_activation_epoch_id",
-    "minimum_state", "continuation_mode", "idempotent")
-
-
-def _quota_subscription_view(st) -> dict:
-    """容错读任务的 quota_subscription 块（legacy 缺块 / 形状异常按
-    default_quota_subscription() 兜底——纠错归 validate_state 规则 8.9）。
-    纯读：不改入参、零 I/O。"""
-    block = st.get("quota_subscription")
-    if not isinstance(block, dict):
-        return state.default_quota_subscription()
-    return block
-
-
-def _subscription_state_satisfied(provider_status, minimum_state) -> bool:
-    """provider_status 是否达到 minimum_state 档位及以上（纯函数）。
-
-    档位序本地冻结（_QUOTA_SUBSCRIPTION_STATE_RANK 注释）：任一方不在
-    四档词汇内（含观测面 UNKNOWN——订阅阈值词汇与观测四态不同，绝不
-    猜测折算）→ False（保守不满足，§31 不虚构）。
-    """
-    rank = _QUOTA_SUBSCRIPTION_STATE_RANK.get(provider_status)
-    minimum = _QUOTA_SUBSCRIPTION_STATE_RANK.get(minimum_state)
-    if rank is None or minimum is None:
-        return False
-    return rank <= minimum
-
-
-def register_quota_subscription(repo_root, task_id, *, epoch_id,
-                                minimum_state="AVAILABLE",
-                                continuation_mode=None,
-                                provider_identity_hash=None) -> dict:
-    """注册 / 更新任务的 quota subscription（§14；幂等）。
-
-    写顶层 quota_subscription 块：enabled=True、registered_epoch_id=
-    epoch_id、minimum_state、continuation_mode（五键冻结形状，过
-    validate_state 规则 8.9 闸落盘）。last_activation_epoch_id 不由本
-    API 触碰（激活记账归 mark_activation_epoch）。
-
-    幂等语义（冻结口径）：块已存在且五键目标值全部相等（含经镜像解析
-    后的 continuation_mode）→ 零状态写、零 journal 事件，返回当前块
-    视图 + "idempotent": True；否则（无块建块 / 任一键值变化）写块 +
-    任务 journal 一条 quota_subscription_registered 事件
-    {registered_epoch_id, minimum_state, continuation_mode}，返回
-    "idempotent": False。非幂等重写按 merge 落盘：既有块未知键原样
-    保留（v2.2 C6 reviewer 留账吸收），幂等比较仍只比五规范键。
-
-    v2.2.1 WU-221-B2（QuotaIdentity）：provider_identity_hash（可选，
-    非秘密 16-hex 身份指纹）随注册落块与事件——调用点身份可得才携带
-    （转态点注册取自幸存缓存的指纹；无身份上下文的调用点传 None =
-    缺省，按 legacy 形态省略该键，绝不虚构占位值），且绝不为此发起
-    凭证解析。幂等比较仍只比五规范键（指纹是 additive 注记，不参与
-    幂等判定）；已有块不带指纹的同参重注册绝不改写存量记录补写指纹
-    （无破坏性改写纪律）。
-
-    参数（校验先于任何 I/O，中文 ValueError）：
-      - epoch_id：§10.1 形状（"glm:"+16hex，state.is_quota_epoch_id）；
-      - minimum_state：∈ state.QUOTA_SUBSCRIPTION_MINIMUM_STATES，缺省
-        "AVAILABLE"；
-      - continuation_mode：None（缺省）→ 从任务 execution_policy.
-        continuity.auto_resume 容错镜像读（_continuity_view——缺块 /
-        词汇外保守落 "manual"，§14.2-§14.5 同一事实源）；显式传入须
-        ∈ state.QUOTA_SUBSCRIPTION_CONTINUATION_MODES；
-      - provider_identity_hash：None（缺省）→ 块与事件均省略该键
-        （legacy 形态）；非 None 须为非空 str。
-
-    任务缺失 → TaskManagerError；JSON 损坏 ValueError 上抛。
-    返回冻结六键 dict（QUOTA_SUBSCRIPTION_RESULT_KEYS）。
-    """
-    api = "register_quota_subscription"
-    if not state.is_quota_epoch_id(epoch_id):
-        raise ValueError(
-            "%s：epoch_id 必须是 \"glm:\"+16 位十六进制的 epoch_id"
-            "（§10.1 形状），得到 %r" % (api, epoch_id))
-    if minimum_state not in state.QUOTA_SUBSCRIPTION_MINIMUM_STATES:
-        raise ValueError(
-            "%s：minimum_state %r 不在合法取值内（%s）"
-            % (api, minimum_state,
-               ", ".join(state.QUOTA_SUBSCRIPTION_MINIMUM_STATES)))
-    if continuation_mode is not None \
-            and continuation_mode \
-            not in state.QUOTA_SUBSCRIPTION_CONTINUATION_MODES:
-        raise ValueError(
-            "%s：continuation_mode %r 不在合法取值内（%s）"
-            % (api, continuation_mode,
-               ", ".join(state.QUOTA_SUBSCRIPTION_CONTINUATION_MODES)))
-    if provider_identity_hash is not None \
-            and (not isinstance(provider_identity_hash, str)
-                 or provider_identity_hash == ""):
-        raise ValueError(
-            "%s：provider_identity_hash 必须是 None（legacy 形态，省略"
-            "身份指纹）或非空 str（16-hex 非秘密指纹），得到 %r"
-            % (api, provider_identity_hash))
-    st = _require_state(repo_root, task_id, api)
-    if continuation_mode is None:
-        # §14：缺省镜像执行策略的续跑授权词汇（同一事实源，不复制默认）
-        continuation_mode = _continuity_view(st)["auto_resume"]
-    block = st.get("quota_subscription")
-    target = {
-        "enabled": True,
-        "registered_epoch_id": epoch_id,
-        "last_activation_epoch_id": (
-            block.get("last_activation_epoch_id")
-            if isinstance(block, dict) else None),
-        "minimum_state": minimum_state,
-        "continuation_mode": continuation_mode,
-    }
-    if isinstance(block, dict) and all(
-            block.get(key) == value for key, value in target.items()):
-        # 同参重注册：零写零事件（幂等返回；返回块视图拷贝，不改 st）。
-        # 幂等比较只看五规范键——既有块携带的未知键（含 WU-221-B2 的
-        # provider_identity_hash）不影响幂等判定（v2.2 C6 reviewer
-        # 留账吸收 + B2 additive 键纪律）
-        result = _quota_subscription_view(st)
-        result = dict(result)
-        result["idempotent"] = True
-        return result
-    if isinstance(block, dict):
-        # 非幂等重写路径（v2.2 C6 reviewer 留账吸收）：merge 而非整块
-        # 替换——既有块的未知键原样保留（向前兼容，五规范键被 target
-        # 覆盖），未来版本新增的合法键不被本 API 意外抹掉
-        merged = dict(block)
-        merged.update(target)
-    else:
-        merged = dict(target)
-    if provider_identity_hash is not None:
-        # v2.2.1 WU-221-B2：身份可得才随本次注册写落 additive 指纹键
-        #（不参与幂等比较；None 时保持既有块原样——绝不改写存量记录
-        # 补写指纹）
-        merged["provider_identity_hash"] = provider_identity_hash
-    st["quota_subscription"] = merged
-    state.save_state(repo_root, st)
-    event = {
-        "event": "quota_subscription_registered",
-        "registered_epoch_id": epoch_id,
-        "minimum_state": minimum_state,
-        "continuation_mode": continuation_mode,
-    }
-    if provider_identity_hash is not None:
-        event["provider_identity_hash"] = provider_identity_hash
-    journal.append_event(repo_root, task_id, event)
-    result = dict(target)
-    result["idempotent"] = False
-    return result
-
-
-def evaluate_subscription_eligibility(repo_root, task_id, *,
-                                      current_epoch_id,
-                                      current_executable,
-                                      provider_status,
-                                      current_provider_identity_hash=None
-                                      ) -> dict:
-    """纯资格判定：本任务当前 epoch 是否有资格激活（§14 eligible）。
-
-    纯函数纪律：只读 state.json，零转态、零写、零事件、零网络——
-    派发 / 恢复的编排方在 resume 决策前调用，结果只供裁决。**不做
-    authorization / budget / reconcile**（§14 执行面流水线中授权 / 预算
-    / 对账各归其位，接线归 C7），本函数只回答订阅本身的资格。
-    （v2.2.1 WU-221-B2 注：current_provider_identity_hash 缺省 None 时
-    经共享模块派生当前指纹——resolve_credential 是纯本地读取，零网络
-    零写，纯函数纪律不受扰。）
-
-    判定矩阵（全部满足才 eligible；不短路——reasons 逐条点名全部未过
-    条件，审计面风格与 primer.authorize_prime 同源）：
-      1. 已注册：块存在且 registered_epoch_id 非 null；
-      2. 已启用：enabled 为 True；
-      2b. 同身份（v2.2.1 WU-221-B2 QuotaIdentity）：块的
-          provider_identity_hash 缺席（v2.2 legacy 注册 = 保守信任）
-          或等于当前身份指纹——异身份注册的订阅不视为本身份的订阅
-          （A 名下注册的 epoch E 不授权 B 同名 epoch 的恢复）；
-      3. 新 epoch：last_activation_epoch_id 与 current_epoch_id 经
-         quota_identity_matches 双形态判定为不同（epoch_id 字符串
-         等值 + 记录侧指纹缺席或相等——§14 adapted：epoch_id 是
-         §10.1 指纹身份，无 int 序数可比；last_activation 为 null =
-         从未激活 → 通过；异身份的同名激活不构成 QC-07 拦截）；
-      4. 可执行：current_executable 为真（§10.1 evaluate_epoch 的
-         executable 判定结果，由调用方传入，本层不重复折算）；
-      5. 阈值满足：provider_status 达到 minimum_state 档位及以上
-         （四档序 AVAILABLE > PRESSURE > DRAINING > EXHAUSTED，
-         _subscription_state_satisfied；词汇外值保守不满足）。
-
-    参数（全 keyword-only，除前两个位置参数）：
-      - current_provider_identity_hash：当前 provider 身份指纹
-        （16-hex 非秘密）；None（缺省）→ 经共享模块派生一次；调用方
-        （_resume_subscription_gate）在同流程内已派生时直传复用，避免
-        二次解析凭证。
-
-    返回冻结两键：{"eligible": bool, "reasons": [中文原因...]}。
-    任务缺失 → TaskManagerError；current_epoch_id 形状非法 → ValueError
-    （先于 I/O 校验；形状闸与注册口径一致，防调用方拿序数/任意串
-    充当 epoch 身份）。
-    """
-    api = "evaluate_subscription_eligibility"
-    if not state.is_quota_epoch_id(current_epoch_id):
-        raise ValueError(
-            "%s：current_epoch_id 必须是 \"glm:\"+16 位十六进制的 "
-            "epoch_id（§10.1 形状），得到 %r" % (api, current_epoch_id))
-    if current_provider_identity_hash is not None \
-            and (not isinstance(current_provider_identity_hash, str)
-                 or current_provider_identity_hash == ""):
-        raise ValueError(
-            "%s：current_provider_identity_hash 必须是 None（经共享模块"
-            "派生）或非空 str（16-hex 非秘密指纹），得到 %r"
-            % (api, current_provider_identity_hash))
-    st = _require_state(repo_root, task_id, api)
-    block = _quota_subscription_view(st)
-    identity = (current_provider_identity_hash
-                if current_provider_identity_hash is not None
-                else _current_provider_identity_hash())
-    from runtime.quota import epoch as quota_epoch  # 函数内 import：monkeypatch 友好
-    reasons = []
-    if block.get("registered_epoch_id") is None:
-        reasons.append("任务 %s 未注册 quota subscription"
-                       "（registered_epoch_id 为空）" % task_id)
-    if block.get("enabled") is not True:
-        reasons.append("quota subscription 未启用（enabled != true）")
-    block_hash = block.get("provider_identity_hash")
-    if (block.get("registered_epoch_id") is not None
-            and block_hash is not None and block_hash != identity):
-        reasons.append(
-            "quota subscription 注册于其他 provider 身份（块的 "
-            "provider_identity_hash 与当前身份不一致）——QuotaIdentity "
-            "不视为本身份的订阅，保守不恢复")
-    if quota_epoch.quota_identity_matches(
-            block.get("last_activation_epoch_id"),
-            block_hash,
-            current_epoch_id, identity):
-        reasons.append(
-            "epoch %s 已激活过（last_activation_epoch_id 相同）——QC-07 "
-            "每 epoch 恰一次，同 epoch 不得重复激活" % current_epoch_id)
-    if not current_executable:
-        reasons.append("当前 epoch 不可执行（current_executable != true）")
-    minimum_state = block.get("minimum_state")
-    if not _subscription_state_satisfied(provider_status, minimum_state):
-        reasons.append(
-            "provider_status %r 未达到 minimum_state %r 档位及以上"
-            "（%s）" % (provider_status, minimum_state,
-                        " > ".join(state.QUOTA_SUBSCRIPTION_MINIMUM_STATES)))
-    return {"eligible": not reasons, "reasons": reasons}
-
-
-def mark_activation_epoch(repo_root, task_id, *, epoch_id,
-                          provider_identity_hash=None) -> dict:
-    """记录任务在本 epoch 已激活（QC-07：每 epoch 恰一次推进记账）。
-
-    写 quota_subscription.last_activation_epoch_id = epoch_id + 控制
-    面 journal 一条 quota_epoch_advanced 事件（经
-    journal.append_control_plane_event 落
-    .glm-conductor/quota/events.jsonl——epoch 推进无任务上下文也可
-    发生，控制面事件不进任务 journal、不借伪任务目录）。
-
-    幂等语义（冻结口径；QC-07 的机械保证）：
-      - epoch_id 与本任务 last_activation_epoch_id 经 QuotaIdentity
-        双形态判定为同一次激活（epoch_id 等值 AND 块指纹缺席或等于
-        当前指纹——v2.2.1 WU-221-B2：缺席 = legacy = 信任；异身份的
-        同名激活不构成幂等拦截，B 的首次激活是新事件）→ 零状态写、
-        零控制面事件，返回 "marked": False + "idempotent": True；
-      - 其余（含首次从 null 起标、异身份同名 epoch）→ 视为推进
-        （epoch_id 是 §10.1 指纹等值身份，无序数、不分前进后退）→
-        更新 + 恰一条事件，返回 "marked": True + "idempotent": False。
-
-    事件字段（控制面 journal）：{"event": "quota_epoch_advanced",
-    "task_id", "epoch_id", "previous_epoch_id", "provider_identity_
-    hash"}（末键 v2.2.1 WU-221-B2 增补——非秘密 16-hex 身份指纹，
-    legacy 事件无此键，读侧双形态兼容）。落盘顺序：先 state 后事件；
-    事件写入失败（OSError）自然上抛不吞——QC-07 证据丢失必须让调用
-    方看见（绝不静默降级）。
-
-    参数：epoch_id 须 §10.1 形状（先于 I/O 校验，ValueError）；
-    provider_identity_hash：None（缺省）→ 经共享模块派生当前指纹一次
-    （derive-and-emit——激活记账是权威账，写入必携带）；非 None 须为
-    非空 str（调用方同流程内已派生时直传复用）。state 侧块注记同步
-    落 provider_identity_hash = 当前指纹（本次激活记录的写入者身份）。
-    任务缺失 → TaskManagerError。返回冻结三键
-    {"marked", "last_activation_epoch_id", "idempotent"}。
-    """
-    api = "mark_activation_epoch"
-    if not state.is_quota_epoch_id(epoch_id):
-        raise ValueError(
-            "%s：epoch_id 必须是 \"glm:\"+16 位十六进制的 epoch_id"
-            "（§10.1 形状），得到 %r" % (api, epoch_id))
-    if provider_identity_hash is not None \
-            and (not isinstance(provider_identity_hash, str)
-                 or provider_identity_hash == ""):
-        raise ValueError(
-            "%s：provider_identity_hash 必须是 None（经共享模块派生）"
-            "或非空 str（16-hex 非秘密指纹），得到 %r"
-            % (api, provider_identity_hash))
-    identity = (provider_identity_hash
-                if provider_identity_hash is not None
-                else _current_provider_identity_hash())
-    st = _require_state(repo_root, task_id, api)
-    block = _quota_subscription_view(st)
-    previous = block.get("last_activation_epoch_id")
-    from runtime.quota import epoch as quota_epoch  # 函数内 import：monkeypatch 友好
-    if quota_epoch.quota_identity_matches(
-            previous, block.get("provider_identity_hash"),
-            epoch_id, identity):
-        # 同 epoch 同身份重标：零写零事件（QC-07 每 epoch 恰一次的幂
-        # 等闸；legacy 无指纹块按缺席信任语义照常拦截）
-        return {"marked": False,
-                "last_activation_epoch_id": previous,
-                "idempotent": True}
-    if not isinstance(st.get("quota_subscription"), dict):
-        # legacy 缺块：按默认块落位再记账（enabled/registered 不由本
-        # API 触碰——订阅与否归 register_quota_subscription）
-        st["quota_subscription"] = state.default_quota_subscription()
-    st["quota_subscription"]["last_activation_epoch_id"] = epoch_id
-    st["quota_subscription"]["provider_identity_hash"] = identity
-    state.save_state(repo_root, st)
-    journal.append_control_plane_event(repo_root, {
-        "event": "quota_epoch_advanced",
-        "task_id": task_id,
-        "epoch_id": epoch_id,
-        "previous_epoch_id": previous,
-        "provider_identity_hash": identity})
-    return {"marked": True,
-            "last_activation_epoch_id": epoch_id,
-            "idempotent": False}
+# v2.2.1 WU-221-C1（行为保持抽取）：订阅三事务 API（register_quota_
+# subscription / evaluate_subscription_eligibility / mark_activation_epoch）
+# 及其私有视图与档位序（_quota_subscription_view / _subscription_state_
+# satisfied / _QUOTA_SUBSCRIPTION_STATE_RANK / QUOTA_SUBSCRIPTION_RESULT_
+# KEYS）的规范定义移至 runtime.continuity.subscription，经顶部 re-import
+# 保持全部 task_manager.<名字> 解析点（cli / hooks / tests）零变化。
