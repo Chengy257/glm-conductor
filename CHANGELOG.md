@@ -1,10 +1,6 @@
 # Changelog
 
-> Heading note: the 2.2.0 entry below deliberately uses a `###` heading while the release is
-> unreleased — validator check 12 pins the first `## ` heading to `plugin.json`'s version
-> (still 2.1.0 until the release lands). Rename it to `## 2.2.0` when the version bumps.
-
-### 2.2.0 (unreleased)
+## 2.2.0
 
 Quota Continuity Control Loop Closure — the resume chain upgrades from agent discipline to a mechanical guarantee: a dual-layer quota model (provider four-state × execution phase), a persistent wake bridge with an activation-transport abstraction, a resident quota watcher, an epoch-based subscription/consumption ledger, and a Stop-gate continuity health check. Plans: `docs/GLM-Conductor-v2.2-Quota-Continuity-Control-Loop-Implementation-Plan.md` (M-series) + `docs/GLM-Conductor-v2.2-Quota-Control-Plane-Architecture-Correction-and-Agent-Implementation-Plan.md` (C-series, which superseded the old M6-M10 specs per its C0 conflict ruling). Landed units, in brief:
 
