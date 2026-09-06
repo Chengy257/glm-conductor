@@ -1887,61 +1887,69 @@ consumption delta = 2
 
 ## 12.1 Runtime
 
-- [ ] RH-06 跨两个新 executable epoch；
-- [ ] three distinct epoch IDs；
-- [ ] same persistent automation ID；
-- [ ] no nested CronCreate；
-- [ ] two successful waiting_quota → executing transitions；
-- [ ] activation exactly once per epoch；
-- [ ] consumption delta exactly 2；
-- [ ] same-epoch replay zero duplicate consumption；
-- [ ] watcher absence does not corrupt task state；
-- [ ] completion correctness independent of host cleanup。
+> [勾选 2026-09-06] 依据 = RH-06 双窗活跑（v22-rh06-be1301）+ stable 会话独立重演 14/14（Dogfood-Records §11：三 epoch 584f/61ff/5335、automation-2d2c80aa 全程唯一、waiting_quota→executing ×2、激活标记恰 2、consumed 2/2、fire#2 同窗零增量、watcher 工件重演、清理链 completed→tombstone→单次 CronDelete 成功）。
+
+- [x] RH-06 跨两个新 executable epoch；
+- [x] three distinct epoch IDs；
+- [x] same persistent automation ID；
+- [x] no nested CronCreate；
+- [x] two successful waiting_quota → executing transitions；
+- [x] activation exactly once per epoch；
+- [x] consumption delta exactly 2；
+- [x] same-epoch replay zero duplicate consumption；
+- [x] watcher absence does not corrupt task state；
+- [x] completion correctness independent of host cleanup。
 
 ---
 
 ## 12.2 Existing hardening non-regression
 
-- [ ] Primer request max once per idempotency key；
-- [ ] timeout no resend；
-- [ ] post-refresh ambiguity confirmation；
-- [ ] public Primer mechanical authorization；
-- [ ] manual/notify no Primer；
-- [ ] consumption pending transaction crash-safe；
-- [ ] migration pending transaction crash-safe；
-- [ ] arm/fire/create zero quota-window consumption；
-- [ ] observer pure；
-- [ ] watcher zero model call；
-- [ ] reserved transports remain reserved。
+> [勾选 2026-09-06] 依据 = Release-Hardening §9.1 十一项证据勾选（RH-01..05 ship 收据链 a57868f8/a7e62763/19251c2f/be6f4617/8dd36ff9 + 2113 + validator 15/15 + CI run 33828629148） + RH-07 终审九点 correctness 代码级抽查全过。
+
+- [x] Primer request max once per idempotency key；
+- [x] timeout no resend；
+- [x] post-refresh ambiguity confirmation；
+- [x] public Primer mechanical authorization；
+- [x] manual/notify no Primer；
+- [x] consumption pending transaction crash-safe；
+- [x] migration pending transaction crash-safe；
+- [x] arm/fire/create zero quota-window consumption；
+- [x] observer pure；
+- [x] watcher zero model call；
+- [x] reserved transports remain reserved。
 
 ---
 
 ## 12.3 Documentation
 
-- [ ] architecture version updated；
-- [ ] foreground vs resumable/manual defaults clarified；
-- [ ] no stale “no resident watcher” statement；
-- [ ] stable scheduling path reflects Watcher/Epoch/Recurring Bridge；
-- [ ] Phase0 Primer retry wording corrected；
-- [ ] Dogfood RH-06 evidence appended；
-- [ ] Release-Hardening §9.1 / §9.3 closed accurately；
-- [ ] README CN/EN capability boundary accurate。
+> [勾选 2026-09-06] 依据 = ST-02a（b8f15aa）+ ST-02b（3dcb0ba/9c253de/66cbda8）+ ST-03（7047311/0897411/e6314ba）各轮 ship 审查；Dogfood §11 stable addendum；Release-Hardening §9.1/§9.3 按证据关闭。
+
+- [x] architecture version updated；
+- [x] foreground vs resumable/manual defaults clarified；
+- [x] no stale “no resident watcher” statement；
+- [x] stable scheduling path reflects Watcher/Epoch/Recurring Bridge；
+- [x] Phase0 Primer retry wording corrected；
+- [x] Dogfood RH-06 evidence appended；
+- [x] Release-Hardening §9.1 / §9.3 closed accurately；
+- [x] README CN/EN capability boundary accurate。
 
 ---
 
 ## 12.4 Version / Release
 
-- [ ] plugin.json = 2.2.0；
-- [ ] CHANGELOG first `##` = 2.2.0；
-- [ ] README badge = 2.2.0；
-- [ ] README.en badge = 2.2.0；
-- [ ] validator 15/15；
-- [ ] full suite green；
-- [ ] v2-dev push CI green；
-- [ ] independent RH-07 reviewer = ship；
-- [ ] PR CI green；
-- [ ] main post-merge CI green；
-- [ ] GitHub Release `v2.2.0` published from main。
+> [勾选 2026-09-06] 依据 = 版本面四触点原子（0897411）；全量 2113 OK + validator 15/15（本会话亲跑 + 定向 11 域 16 模块 OK）；统一 push b149705..e7a1f33 → CI run 34014359230 四路绿；RH-07 ship（P3 rider e7a1f33 确认 ship）；PR #2 CI 四路绿 MERGEABLE → merge b4f4d3f → main 合并后 CI run 34014682088 绿；tag v2.2.0 → GitHub Release 「GLM Conductor 2.2.0 — Stable」已发布。
+
+- [x] plugin.json = 2.2.0；
+- [x] CHANGELOG first `##` = 2.2.0；
+- [x] README badge = 2.2.0；
+- [x] README.en badge = 2.2.0；
+- [x] validator 15/15；
+- [x] full suite green；
+- [x] v2-dev push CI green；
+- [x] independent RH-07 reviewer = ship；
+- [x] PR CI green；
+- [x] main post-merge CI green；
+- [x] GitHub Release `v2.2.0` published from main。
 
 只有全部勾选：
 
