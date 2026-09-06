@@ -50,9 +50,10 @@ import tempfile
 import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "plugins" / "glm-conductor"))
-from runtime import cli, journal, state, task_manager
+from runtime import cli, journal, scheduler_facts, state, task_manager
 from runtime.quota import resolver
 
 TID = "wake-plan-bridge-1a2b3c"
@@ -989,6 +990,59 @@ class C1aZeroConsumptionTests(WakePlannerTestBase):
         self.assertNotIn("wake-record", task_manager.plan_wake_bridge.__doc__)
         self.assertNotIn("record_quota_wake",
                          task_manager.plan_wake_bridge.__doc__)
+
+
+# —— v2.2.1 WU-221-A3 fix1：scheduler_facts 锁内重复证据的幂等回归 ——
+
+class SchedulerFactsDuplicateEvidenceSentinelTest(unittest.TestCase):
+    """record_observation 的 RMW 锁内哨兵路径回归（v2.2.1 WU-221-A3
+    fix1）：外层读取与锁内重并之间，证据已被并发 hook 落账 → 锁内
+    重并判零新证据 → 哨兵幂等返回既有记录 dict。fix1 前哨兵未携带
+    record 属性，handler 读 .record 即 AttributeError——恰好打在本单
+    元要加固的并发重复证据路径上；本回归确定性钉死该路径。
+
+    触发器（确定性）：外层 read_session_facts 注入为「证据尚不可见」
+    的陈旧账本（模拟外层读先于并发写落盘），盘上账本经同一 merge 路径
+    预先落好同一证据（锁内读到的是含证据的新鲜底版）。"""
+
+    SESSION = "sess-duplicate-sentinel"
+    T0 = "2026-09-01T00:00:00Z"
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.repo = tmp.name
+        self.facts_dir = Path(self.repo) / ".glm-conductor" / "scheduler"
+        self.facts_path = self.facts_dir / "session_facts.json"
+
+    def test_in_lock_duplicate_evidence_returns_idempotent_record(self):
+        # 预写：同一 merge 路径落好证据（盘上账本含 create=allowed）
+        planted = scheduler_facts.record_observation(
+            self.repo, self.SESSION, create="allowed", observed_at=self.T0)
+        self.assertEqual(planted["create"], "allowed")
+        with open(self.facts_path, "rb") as handle:
+            bytes_before = handle.read()
+
+        stale_view = {"schema_version":
+                      scheduler_facts.FACT_SCHEMA_VERSION, "sessions": {}}
+        with mock.patch.object(scheduler_facts, "read_session_facts",
+                               return_value=stale_view):
+            # 外层陈旧视图判「有新证据」进入 RMW；锁内新鲜底版判零新
+            # 证据 → 哨兵幂等返回（fix1 前：AttributeError）
+            result = scheduler_facts.record_observation(
+                self.repo, self.SESSION, create="allowed")
+
+        self.assertIsInstance(result, dict)  # fix1 前：AttributeError
+        self.assertEqual(sorted(result.keys()),
+                         sorted(scheduler_facts.FACT_FIELDS
+                                + ("idempotent",)))
+        self.assertTrue(result["idempotent"])
+        self.assertEqual(result["create"], "allowed")
+        self.assertEqual(result["updated_at"], self.T0)  # 零写：不空转
+        with open(self.facts_path, "rb") as handle:
+            self.assertEqual(handle.read(), bytes_before)  # 目标零触碰
+        self.assertEqual(os.listdir(self.facts_dir),
+                         ["session_facts.json"])  # RMW 锁零残留
 
 
 if __name__ == "__main__":

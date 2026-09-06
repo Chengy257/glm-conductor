@@ -186,7 +186,15 @@ class _ObservationAlreadyPresent(Exception):
     """内部哨兵：RMW 锁内对最新账本重做合并时发现零新证据（同一证据
     已被并发观察落账）——record_observation 据此走幂等返回，目标绝不
     被触碰（atomic_update_json 对 updater 异常的既有纪律：目标不动、
-    锁经 finally 必释放）。"""
+    锁经 finally 必释放）。record 属性携带幂等返回的既有记录 dict
+    （v2.2.1 WU-221-A3 fix1：哨兵必须自携载荷——handler 消费
+    .record，绝不依赖 args 位置约定）。"""
+
+    def __init__(self, record):
+        super().__init__(
+            "scheduler_facts：证据已被并发观察落账（幂等返回，目标不被"
+            "触碰）")
+        self.record = record
 
 
 def _update_session_facts(repo_root, updater, *,

@@ -244,7 +244,7 @@ v2.2 起多个合法进程（前台主会话 + 常驻 quota watcher 等）写共
 | `runtime/provenance.py` | receipts | single-writer（runtime CLI 由主会话调用） | 固定 `.tmp` 保留 |
 | `runtime/resume_manifest.py` | `tasks/*/manifest.json` | single-writer（主会话事务刷新） | 固定 `.tmp` 保留 |
 | `runtime/journal.py`（及 task_manager/control 的 append 路径） | `events.jsonl`（任务级 + 控制面） | append-only | 追加语义，非本原语迁移面（A1 明示） |
-| stop 标志 / 心跳 / scheduler facts merge 的 RMW 路径 | watcher.json/stop 标志 + session_facts.json | multi-RMW | `durable_io.atomic_update_json`（v221-a4 已落地：`<目标>.lock` 独占锁下的读-改-写，临界区只含读+合并+写；RMW 锁毫秒级短临界区，与 watcher.lock 所有权域长期持有相互独立、互不替代） |
+| stop 标志 / 心跳 / scheduler facts merge 的 RMW 路径 | watcher.json/stop 标志 + session_facts.json | multi-RMW | `durable_io.atomic_update_json`（v221-a4（WU-221-A3）已落地：`<目标>.lock` 独占锁下的读-改-写，临界区只含读+合并+写；RMW 锁毫秒级短临界区，与 watcher.lock 所有权域长期持有相互独立、互不替代） |
 
 reviewer 契约（WU-221-A1）：`exclusive_lock` 临界区必须保持短（毫秒级 JSON RMW；不得在锁内做长计算/网络调用），否则超过 `stale_seconds`（300 秒）会被合法接管。
 
