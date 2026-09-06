@@ -219,13 +219,13 @@ reason: every work unit is bounded by a five-part spec with explicit ownership a
 ## 9. 基线记录（ST-00d 填写）
 
 ```text
-日期:
-分支/提交:
-全量套件:   （预期 2113）
-validator:  （预期 15/15）
-CI run:     （分支首推后回填）
-伞任务 ID:
-桥 automation ID:
+日期: 2026-09-06
+分支/提交: v2.2.1-hardening @ 38089ef（基线树；main 同内容合并点 87325ed）
+全量套件: 2113 OK / 99.5s（PYTHONUTF8=1 python3 -m unittest discover -s tests）
+validator: 15/15（python3 scripts/validate_plugin.py）
+CI run: main 87325ed → 34029197451 四路绿；v2.2.1-hardening 建分支首推 → 34029225268 四路绿
+伞任务 ID: v221-hardening-2d7f86（route: full/high/high/flash-implementer/resumable；串行 max_workers=1；policy until_done + max_quota_windows=10，authorization.source=user）
+桥 automation ID: automation-d5a396ef-d30c-4f6b-8bb2-1269dafa1f9b（recurring 60min，armed_at 2026-09-06T11:11:43Z，boundary five_hour:2026-09-06T15:21:43Z）
 ```
 
 ## 10. 开工确认清单（用户逐项确认后启动 ST-00）
