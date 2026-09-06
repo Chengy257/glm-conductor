@@ -115,7 +115,7 @@ stable 等 RG-22-06 活跑通过后升格。
 
 ## 11. Stable 收口补录：RH-06 双窗活跑（2026-09-04/05，PASS 14/14）
 
-（本节为 stable 计划 ST-02b 补录；勾选依据 = stable 收口会话对原始账本的独立重演——events.jsonl 301 事件 + 控制面 quota/events.jsonl 2 事件 + state.json/session_facts.json，不采信执行侧自述。时间戳 UTC。）
+（本节为 stable 计划 ST-02b 补录；勾选依据 = stable 收口会话对原始账本与 watcher 工件的独立重演——events.jsonl 301 事件 + 控制面 quota/events.jsonl 2 事件 + state.json/session_facts.json + watcher 工件（watcher.json/watcher.log，pass-3），不采信执行侧自述。时间戳 UTC。）
 
 **任务与载体**：v22-rh06-be1301 @ D:\BioWorkflows（干净项目会话，v2-dev b8f15aa hooks 面）；载体 = seclip-srna-bs-seq v0.1 计划（三子流程 24 单元，feature/seclip-srna-bs-seq-v0.1 分支仅本地提交）；执行侧证据表 `.glm-conductor/rh06/evidence_table.md`（对账件）。
 
