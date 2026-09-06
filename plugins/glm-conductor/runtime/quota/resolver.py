@@ -45,10 +45,11 @@
     (None, None) 模拟无凭证）。
 
 依赖：
-    仅 Python 3.7 标准库（json / os / datetime），零第三方依赖，
-    `python3 -S` 可运行。provider 装配照抄 runtime/quota/report.py
-    （_PROVIDER_ORDER + 逐个探测、任一成功即用；report.py 本身不改，
-    允许少量重复，见 _PROVIDER_ORDER 处注释）。风格对齐
+    仅 Python 3.7 标准库（json / os / datetime）+ runtime.durable_io
+    （v2.2.1 WU-221-A2 起缓存原子写委托其 atomic_write_json），零第
+    三方依赖，`python3 -S` 可运行。provider 装配照抄 runtime/quota/
+    report.py（_PROVIDER_ORDER + 逐个探测、任一成功即用；report.py
+    本身不改，允许少量重复，见 _PROVIDER_ORDER 处注释）。风格对齐
     runtime/quota/scheduler.py。
 
 来源：
@@ -63,6 +64,7 @@ import json
 import os
 from datetime import datetime, timezone
 
+from runtime import durable_io
 from runtime.quota.bigmodel import BigModelQuotaProvider
 from runtime.quota.credentials import resolve_credential
 from runtime.quota.parser import QUOTA_STATUSES
@@ -188,27 +190,17 @@ def _load_cache(path):
 
 
 def _save_cache(path, payload) -> None:
-    """原子写缓存文件（tmp + os.replace，模式照抄 dispatch_wave.
-    _save_permit_file / lease._save_lease_state）：UTF-8、
-    ensure_ascii=False、缩进 2、sort_keys、固定 \\n 换行；任何失败
-    路径清理 tmp 后向上抛——由调用方统一兜底降级（异常不外泄给
+    """原子写缓存文件（v2.2.1 WU-221-A2 起委托共享原语 runtime.
+    durable_io.atomic_write_json：唯一同目录临时名 + os.replace，
+    UTF-8、ensure_ascii=False、缩进 2、sort_keys、固定 \\n 换行——
+    落盘字节与既有手写实现逐字节一致；父目录缺失由原语自动创建）。
+    多进程写者（主会话 resolve + watcher 强制刷新）经唯一临时名
+    绝不在固定 <path>.tmp 相撞；PermissionError（Windows AV / 目录
+    锁瞬态）按原语默认有界重试（5 次 × 0.1 秒——对本模块原「零重
+    试」是严格改进，WU-221-A1 许可的既有有界重试行为保留），耗尽
+    原样上抛——由调用方统一兜底降级（异常不外泄给
     resolve_quota_status 的调用方）。"""
-    directory = os.path.dirname(path)
-    if directory:
-        os.makedirs(directory, exist_ok=True)
-    tmp_path = path + ".tmp"
-    try:
-        # newline="\n"：固定 \n 换行，避免 Windows 文本模式写出 \r\n
-        with open(tmp_path, "w", encoding="utf-8", newline="\n") as handle:
-            json.dump(payload, handle, ensure_ascii=False, indent=2,
-                      sort_keys=True)
-        os.replace(tmp_path, path)
-    except Exception:
-        if os.path.exists(tmp_path):
-            os.unlink(tmp_path)
-        raise
-    if os.path.exists(tmp_path):  # 防御性兜底，确保 tmp 不残留
-        os.unlink(tmp_path)
+    durable_io.atomic_write_json(path, payload)
 
 
 # —— 主入口：四级层级解析（两个公开入口共享同一份实现路径） ——

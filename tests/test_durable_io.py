@@ -468,5 +468,71 @@ class UpdateJsonTest(DurableIOFixture):
         self.assertEqual(durable_io.atomic_read_json(self.target), {"n": 42})
 
 
+# —— 固定 .tmp 写法禁令（v2.2.1 WU-221-A2 写方迁移回归锚） ——
+
+class FixedTmpBanTest(unittest.TestCase):
+    """多进程 capable 写方迁移回归（WU-221-A2）：纯文本扫描
+    plugins/glm-conductor/runtime/**/*.py（rglob，零 tempdir、零网络、
+    确定性），凡代码行出现固定临时名构造字面量（`.tmp"`——tmp 路径 +
+    双引号收尾）的文件必须属于单写者保留白名单；四个已迁移写方
+    （quota/resolver.py、quota/watcher_store.py、quota/primer.py、
+    scheduler_facts.py）绝不出现，且各自含 durable_io 接线证据。
+    durable_io.py 自身的唯一临时名字面量（TEMP_MARKER 的
+    ".durable-tmp." 前缀 + "%s%d.%s.tmp" 唯一化格式串）合法，按文件名
+    在白名单中显式放行——该文件绝不构造固定 <path>.tmp 名。"""
+
+    FIXED_TMP_LITERAL = '.tmp"'
+    RUNTIME_PARTS = Path("plugins") / "glm-conductor" / "runtime"
+    MIGRATED_WRITERS = (
+        "quota/resolver.py",
+        "quota/watcher_store.py",
+        "quota/primer.py",
+        "scheduler_facts.py",
+    )
+    # 单写者固定 .tmp 保留（记录在案：docs/architecture.md §7.6 分类
+    # 表）+ durable_io.py 唯一临时名常量按文件名显式放行
+    FIXED_TMP_ALLOWLIST = frozenset((
+        "state.py", "dispatch_wave.py", "lease.py",
+        "provenance.py", "resume_manifest.py", "durable_io.py",
+    ))
+
+    def test_no_fixed_tmp_writer_among_migrated_modules(self):
+        runtime_root = (Path(__file__).resolve().parents[1]
+                        / self.RUNTIME_PARTS)
+        offenders = []
+        for path in sorted(runtime_root.rglob("*.py")):
+            rel = path.relative_to(runtime_root).as_posix()
+            text = path.read_text(encoding="utf-8")
+            for lineno, line in enumerate(text.splitlines(), start=1):
+                if self.FIXED_TMP_LITERAL in line:
+                    offenders.append("%s:%d:%s"
+                                     % (rel, lineno, line.strip()))
+        report = "\n".join(offenders) if offenders else "(none)"
+
+        # (a) 四个已迁移写方不得再出现固定 .tmp 临时名构造
+        offender_files = set(entry.split(":", 1)[0] for entry in offenders)
+        for migrated in self.MIGRATED_WRITERS:
+            self.assertNotIn(
+                migrated, offender_files,
+                "fixed .tmp writer must not remain in migrated module "
+                "%s\noffending lines:\n%s" % (migrated, report))
+
+        # (b) 出现该字面量的文件必须全部在单写者白名单内
+        for entry in offenders:
+            basename = entry.split(":", 1)[0].rsplit("/", 1)[-1]
+            self.assertIn(
+                basename, self.FIXED_TMP_ALLOWLIST,
+                "unexpected fixed .tmp writer (allowlist: %s)\n"
+                "offending lines:\n%s"
+                % (", ".join(sorted(self.FIXED_TMP_ALLOWLIST)), report))
+
+        # (c) 接线证据：四个已迁移写方各自含 durable_io 文本
+        for migrated in self.MIGRATED_WRITERS:
+            text = (runtime_root / migrated).read_text(encoding="utf-8")
+            self.assertIn(
+                "durable_io", text,
+                "migrated module %s lost its durable_io wiring" % migrated)
+
+
 if __name__ == "__main__":
     unittest.main()

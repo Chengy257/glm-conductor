@@ -228,6 +228,26 @@ v2.2 把恢复链从 Agent 纪律升级为机械保证。计划：`docs/GLM-Cond
 - **Stop 门第 0 位 continuity health（C8/C8a，`hooks/stop_gate.py`）**：四重检查之前对「触发域内」任务做连续性健康检查——触发域冻结（域外零介入，Stop 每回合都触发、trio 是 dormant 交接要求不是日常要求）：任务活动 且（status ∈ {waiting_quota, waiting_user} 或 quota.execution_phase ∈ {PRESSURE, DRAINING}）且 route.continuity == "resumable" 且 auto_resume ∈ {auto_once, until_done}。域内按依赖序三检查（trio）：handoff durable（checkpoint.md + resume manifest 存在）→ quota subscription（enabled 且已注册当期 epoch）→ transport armed（经 `activation_transport_status`）；未 armed 且 create==forbidden 或 origin==scheduled_task → **降级放行不无限拦截**（INV-22-PB-07），双未知 → block + 复用 gate_exhausted 释放阀防死锁；watcher 缺席/过期只是降级注记，绝不独立 block；obligation==degraded 短路放行。C8a 修复：reason 以 `continuity_` 为前缀的 gate_degraded 是门侧注记（非模型工作），跳过不破 gate_exhausted trailing 链——否则持续降级任务的计数永不达上限、释放阀永不触发（无限 block 取代 3-Stop 耗尽语义）。本检查纯读零写零网络零模型调用
 - **runtime CLI 额度/连续性面**：`quota-resolve` / `quota-observe` / `quota-phase` / `quota-exhausted` / `quota-resume`（退出码 0/1/2/3）/ `wake-record`（legacy）/ `wake-prompt` / `wake-plan` / `wake-status` / `wake-reconcile` / `transport-status` / `quota-watcher start|status|stop|once`
 
+### 7.6 运行时写者持久化分类（v2.2.1 WU-221-A3）
+
+v2.2 起多个合法进程（前台主会话 + 常驻 quota watcher 等）写共享 JSON 状态——既有写方各自使用固定 `<path>.tmp` 临时名，两个进程会在同一临时路径相撞。v2.2.1 hardening 按共享原语层（WU-221-A1 交付 `runtime/durable_io.py`：唯一同目录临时名 + `os.replace` 原子写 + PermissionError 有界重试；WU-221-A2 完成多进程 capable 写方的迁移）对「写者 × 目标文件」逐项分类如下，杜绝相撞面；回归由 `tests/test_durable_io.py::FixedTmpBanTest` 机械锚定（多进程 capable 写者中不得再出现固定 `.tmp` 写法）：
+
+| 写者模块 | 目标文件 | 分类 | 机制 |
+| --- | --- | --- | --- |
+| `runtime/quota/resolver.py` | `.glm-conductor/quota-cache.json` | multi-replace（主会话 + watcher 均可 resolve） | `durable_io.atomic_write_json`（唯一临时名） |
+| `runtime/quota/watcher_store.py` | `.glm-conductor/quota/watcher.json` | multi-replace（watcher 进程 + 主会话 stop 路径） | `durable_io.atomic_write_json` |
+| `runtime/scheduler_facts.py` | `.glm-conductor/scheduler/session_facts.json` | multi-replace（多宿主会话 hook/观察路径可并发） | `durable_io.atomic_write_json` |
+| `runtime/quota/primer.py` | `.glm-conductor/quota/primer.json` | single-writer（primer 仅主会话运行，watcher 永不 prime；按 WU-221-A1 计划枚举统一迁移） | `durable_io.atomic_write_json` |
+| `runtime/state.py` | `tasks/*/state.json` | single-writer（仅主会话/会话内 hook 写） | 固定 `.tmp` 保留（记录在案） |
+| `runtime/dispatch_wave.py` | permits | single-writer（主会话派发事务） | 固定 `.tmp` 保留 |
+| `runtime/lease.py` | leases | single-writer（主会话） | 固定 `.tmp` 保留 |
+| `runtime/provenance.py` | receipts | single-writer（runtime CLI 由主会话调用） | 固定 `.tmp` 保留 |
+| `runtime/resume_manifest.py` | `tasks/*/manifest.json` | single-writer（主会话事务刷新） | 固定 `.tmp` 保留 |
+| `runtime/journal.py`（及 task_manager/control 的 append 路径） | `events.jsonl`（任务级 + 控制面） | append-only | 追加语义，非本原语迁移面（A1 明示） |
+| stop 标志 / 心跳 / scheduler facts merge 的 RMW 路径 | watcher.json/stop 标志 | multi-RMW | 现状无锁 RMW → 计划 v221-a4 接 `exclusive_lock`/`atomic_update_json`（本表先记现状） |
+
+reviewer 契约（WU-221-A1）：`exclusive_lock` 临界区必须保持短（毫秒级 JSON RMW；不得在锁内做长计算/网络调用），否则超过 `stale_seconds`（300 秒）会被合法接管。
+
 ## 8. 任务与工作单元管理（v2 beta2）
 
 Work Unit 是可独立派发的最小有界实施单元（§60-§73，`runtime/work_unit.py` / `dependency.py` / `dispatcher.py` / `reconcile.py`）——不是工作流 DSL：

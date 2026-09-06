@@ -42,8 +42,10 @@
 
       4. primer.json durable 存取——独立文件独立常量（不复用任务
          state / journal / watcher.json），原子写纪律照抄
-         watcher_store（tmp 同目录写 + os.replace + PermissionError
-         有界重试——Windows AV / 目录锁是本机已知现象）。
+         watcher_store（PermissionError 有界重试——Windows AV / 目录
+         锁是本机已知现象；v2.2.1 WU-221-A2 起机制委托
+         runtime.durable_io.atomic_write_json：唯一同目录临时名 +
+         os.replace，绝不占用固定 <path>.tmp 名）。
 
 物化确认红线（§C4，P0-QP-03 粒度告警的落地）：
     - HTTP 200 不是证据（不得因为 prime call 成功返回 HTTP 200 就直接
@@ -114,7 +116,8 @@ runtime/execution_policy.py 的 quota_control.primer_enabled
       短超时 + 限长读取；测试零真实网络零真实模型调用。
 
 依赖：
-    仅 Python 3 标准库 + runtime.execution_policy / runtime.journal /
+    仅 Python 3 标准库 + runtime（durable_io，v2.2.1 WU-221-A2 起）/
+    runtime.execution_policy / runtime.journal /
     runtime.quota.{_http, credentials, epoch, provider, resolver,
     scheduler}；quota/* 包纪律：不 import runtime.state /
     runtime.task_manager。跨模块私有 import（scheduler 的
@@ -139,6 +142,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
+from runtime import durable_io
 from runtime.execution_policy import primer_enabled as _policy_primer_enabled
 from runtime.journal import append_control_plane_event as _append_control_plane_event
 from runtime.quota import resolver
@@ -286,13 +290,16 @@ def _write_primer_state(repo_root, record, *,
                         retry_attempts=PRIMER_PERMISSION_RETRY_ATTEMPTS,
                         retry_interval=PRIMER_PERMISSION_RETRY_INTERVAL_SECONDS,
                         sleep=time.sleep):
-    """原子写 primer.json（tmp 同目录写 + os.replace），返回最终路径。
+    """原子写 primer.json（v2.2.1 WU-221-A2 起委托共享原语
+    runtime.durable_io.atomic_write_json：唯一同目录临时名 +
+    os.replace——落盘字节与既有手写实现逐字节一致；父目录缺失由原
+    语自动创建），返回最终路径。
 
     纪律照抄 watcher_store.write_watcher_state：record 非 dict →
     ValueError（参数校验先于 I/O）；PermissionError → 有界重试（次数 /
     间隔 / sleep 均可注入，测试零真实等待），耗尽仍失败 →
-    PrimerStoreError（__cause__ = 原始 PermissionError）；其余异常清理
-    tmp 后原样上抛。读方永不见撕裂文件。
+    PrimerStoreError（__cause__ = 原始 PermissionError）；其余异常由
+    原语清理临时文件后原样上抛。读方永不见撕裂文件。
     """
     if not isinstance(record, dict):
         raise ValueError(
@@ -304,37 +311,18 @@ def _write_primer_state(repo_root, record, *,
             % (retry_interval,))
     attempts = max(1, int(retry_attempts))
     path = primer_state_path(repo_root)
-    directory = os.path.dirname(path)
-    if directory:
-        os.makedirs(directory, exist_ok=True)
-    tmp_path = path + ".tmp"
-    last_permission_error = None
-    for attempt in range(attempts):
-        try:
-            # newline="\n"：固定 \n 换行，避免 Windows 文本模式写出 \r\n
-            with open(tmp_path, "w", encoding="utf-8", newline="\n") as handle:
-                json.dump(record, handle, ensure_ascii=False, indent=2,
-                          sort_keys=True)
-            os.replace(tmp_path, path)
-            return path
-        except PermissionError as exc:
-            last_permission_error = exc
-            _unlink_quiet(tmp_path)
-            if attempt + 1 < attempts:
-                sleep(retry_interval)
-    raise PrimerStoreError(
-        "primer.json 原子写在 PermissionError 有界重试 %d 次（间隔 %.2f "
-        "秒）后仍失败（Windows AV / 目录锁？）：%s" % (
-            attempts, float(retry_interval), last_permission_error)
-    ) from last_permission_error
-
-
-def _unlink_quiet(path):
-    """尽力删除 tmp；不存在 / 竞态消失 → 静默（清理路径绝不遮蔽主异常）。"""
     try:
-        os.unlink(path)
-    except OSError:
-        pass
+        durable_io.atomic_write_json(path, record,
+                                     retry_attempts=retry_attempts,
+                                     retry_interval=retry_interval,
+                                     sleep=sleep)
+    except PermissionError as last_permission_error:
+        raise PrimerStoreError(
+            "primer.json 原子写在 PermissionError 有界重试 %d 次（间隔 %.2f "
+            "秒）后仍失败（Windows AV / 目录锁？）：%s" % (
+                attempts, float(retry_interval), last_permission_error)
+        ) from last_permission_error
+    return path
 
 
 def _fresh_state():

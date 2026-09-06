@@ -16,7 +16,9 @@ write + lock）：
         并在返回值记录 takeover 事实）；无记录 → 全新 acquire
         （generation=1）。第一阶段冻结语义：**一个 provider identity
         同时最多一个 active watcher process**；
-      - 原子写：tmp 同目录写 + os.replace——读方永不见撕裂文件
+      - 原子写：v2.2.1 WU-221-A2 起委托 runtime.durable_io.
+        atomic_write_json（唯一同目录临时名 + os.replace——多进程
+        写者绝不在固定 tmp 名相撞），读方永不见撕裂文件
         （R3：崩溃时读者要么看不到文件要么看到完整记录）；
       - PermissionError bounded handling（§6.2 P0-WATCH-00 门 4，
         Windows AV / 目录锁是本机已知现象）：写 tmp 或 os.replace 遇
@@ -61,7 +63,8 @@ graceful stop 的表达（冻结字段集内表达，不新增 status 字段）�
 
 依赖：
     仅 Python 3 标准库（json / os / time / ctypes / datetime）+
-    runtime.quota.scheduler；quota/* 包纪律：不 import runtime.state /
+    runtime（durable_io，v2.2.1 WU-221-A2 起）+ runtime.quota.
+    scheduler；quota/* 包纪律：不 import runtime.state /
     runtime.task_manager。
 
 来源：
@@ -77,6 +80,7 @@ import json
 import os
 import time
 
+from runtime import durable_io
 from runtime.quota.scheduler import (
     _format_iso_z,
     _is_number,
@@ -222,7 +226,11 @@ def write_watcher_state(repo_root, record, *,
                         retry_attempts=PERMISSION_RETRY_ATTEMPTS,
                         retry_interval=PERMISSION_RETRY_INTERVAL_SECONDS,
                         sleep=time.sleep):
-    """原子写 watcher.json（tmp 同目录写 + os.replace），返回最终路径。
+    """原子写 watcher.json（v2.2.1 WU-221-A2 起委托共享原语
+    runtime.durable_io.atomic_write_json：唯一同目录临时名 +
+    os.replace——多进程写者（watcher 进程心跳 + 主会话 stop 路径）
+    绝不在固定 <path>.tmp 相撞；落盘字节与既有手写实现逐字节一致；
+    父目录缺失由原语自动创建），返回最终路径。
 
     参数：
       - record：dict（非 dict → ValueError——参数校验先于 I/O）；
@@ -231,11 +239,11 @@ def write_watcher_state(repo_root, record, *,
         0 实现零等待）；
       - sleep：重试间隔的休眠实现（缺省 time.sleep；测试注入 no-op）。
 
-    PermissionError（Windows AV / 目录锁，本机已知现象）→ 有界重试：
-    每次「写 tmp + os.replace」整体重试；耗尽仍失败 → WatcherStoreError
+    PermissionError（Windows AV / 目录锁，本机已知现象）→ 有界重试
+    （原语内按次重试、sleep 注入下发）；耗尽仍失败 → WatcherStoreError
     （__cause__ = 原始 PermissionError）——绝不无限重试、绝不静默吞。
-    其余异常：清理 tmp 后原样上抛（调用方自行兜底）。读方永不见撕裂
-    文件（os.replace 原子性 + 失败路径 tmp 清理）。
+    其余异常：原语清理临时文件后原样上抛（调用方自行兜底）。读方永
+    不见撕裂文件（os.replace 原子性 + 失败路径临时清理）。
     """
     if not isinstance(record, dict):
         raise ValueError(
@@ -247,37 +255,18 @@ def write_watcher_state(repo_root, record, *,
             "write_watcher_state：retry_interval 必须 >= 0，得到 %r"
             % (retry_interval,))
     path = watcher_state_path(repo_root)
-    directory = os.path.dirname(path)
-    if directory:
-        os.makedirs(directory, exist_ok=True)
-    tmp_path = path + ".tmp"
-    last_permission_error = None
-    for attempt in range(attempts):
-        try:
-            # newline="\n"：固定 \n 换行，避免 Windows 文本模式写出 \r\n
-            with open(tmp_path, "w", encoding="utf-8", newline="\n") as handle:
-                json.dump(record, handle, ensure_ascii=False, indent=2,
-                          sort_keys=True)
-            os.replace(tmp_path, path)
-            return path
-        except PermissionError as exc:
-            last_permission_error = exc
-            _unlink_quiet(tmp_path)
-            if attempt + 1 < attempts:
-                sleep(retry_interval)
-    raise WatcherStoreError(
-        "watcher.json 原子写在 PermissionError 有界重试 %d 次（间隔 %.2f "
-        "秒）后仍失败（Windows AV / 目录锁？）：%s" % (
-            attempts, float(retry_interval), last_permission_error)
-    ) from last_permission_error
-
-
-def _unlink_quiet(path):
-    """尽力删除 tmp；不存在 / 竞态消失 → 静默（清理路径绝不遮蔽主异常）。"""
     try:
-        os.unlink(path)
-    except OSError:
-        pass
+        durable_io.atomic_write_json(path, record,
+                                     retry_attempts=retry_attempts,
+                                     retry_interval=retry_interval,
+                                     sleep=sleep)
+    except PermissionError as last_permission_error:
+        raise WatcherStoreError(
+            "watcher.json 原子写在 PermissionError 有界重试 %d 次（间隔 %.2f "
+            "秒）后仍失败（Windows AV / 目录锁？）：%s" % (
+                attempts, float(retry_interval), last_permission_error)
+        ) from last_permission_error
+    return path
 
 
 # —— 单实例锁（§6 冻结：锁即状态文件本身） ——

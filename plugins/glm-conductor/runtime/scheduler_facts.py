@@ -36,7 +36,9 @@
     结论随宿主 / 会话生命周期自然失效，容量闸防止文件无限增长。
 
 写入纪律（复制自 watcher_store 的既有规范，常量独立不共享）：
-    - 原子写：tmp 同目录写 + os.replace——读方永不见撕裂文件；
+    - 原子写：v2.2.1 WU-221-A2 起委托 runtime.durable_io.
+      atomic_write_json（唯一同目录临时名 + os.replace——多宿主会话
+      hook 并发落账绝不在固定 tmp 名相撞），读方永不见撕裂文件；
     - PermissionError（Windows AV / 目录锁，本机已知现象）→ 有界
       重试（默认 3 次、0.2 秒间隔；常量本模块独立声明，与
       watcher_store / primer 数值一致但互不 import），耗尽 → 抛出
@@ -46,7 +48,8 @@
       坏内容绝不炸消费方。
 
 依赖：
-    仅 Python 3 标准库（json / os / time / datetime），零第三方依赖；
+    仅 Python 3 标准库（json / os / time / datetime）+ runtime.
+    durable_io（v2.2.1 WU-221-A2 起原子写委托），零第三方依赖；
     不 import runtime.state / runtime.task_manager / quota 包（会话
     事实缓存是独立 durable 面，与任务账本零耦合）。
 
@@ -61,6 +64,8 @@ import json
 import os
 import time
 from datetime import datetime, timezone
+
+from runtime import durable_io
 
 # —— 词汇表常量（独立声明，不与 watcher_store / primer 共享 import） ——
 
@@ -169,27 +174,22 @@ def read_session_record(repo_root, session_id):
     return record if isinstance(record, dict) else None
 
 
-# —— 原子写（tmp + os.replace + PermissionError 有界重试） ——
-
-def _unlink_quiet(path):
-    """尽力删除 tmp；不存在 / 竞态消失 → 静默（清理路径绝不遮蔽主异常）。"""
-    try:
-        os.unlink(path)
-    except OSError:
-        pass
-
+# —— 原子写（v2.2.1 WU-221-A2 起委托 durable_io + PermissionError 有界重试） ——
 
 def _write_session_facts(repo_root, data, *,
                          retry_attempts=FACT_PERMISSION_RETRY_ATTEMPTS,
                          retry_interval=FACT_PERMISSION_RETRY_INTERVAL_SECONDS,
                          sleep=time.sleep):
-    """原子写 session_facts.json（tmp 同目录写 + os.replace），返回路径。
+    """原子写 session_facts.json（v2.2.1 WU-221-A2 起委托共享原语
+    runtime.durable_io.atomic_write_json：唯一同目录临时名 +
+    os.replace——落盘字节与既有手写实现逐字节一致；父目录缺失由原语
+    自动创建），返回路径。
 
     纪律复制自 watcher_store.write_watcher_state（常量独立）：data 非
     dict → ValueError（参数校验先于 I/O）；PermissionError → 有界重试
     （次数 / 间隔 / sleep 均可注入，测试零真实等待），耗尽仍失败 →
     SchedulerFactsError（__cause__ = 原始 PermissionError）；其余异常
-    清理 tmp 后原样上抛。读方永不见撕裂文件。
+    由原语清理临时文件后原样上抛。读方永不见撕裂文件。
     """
     if not isinstance(data, dict):
         raise ValueError(
@@ -201,29 +201,18 @@ def _write_session_facts(repo_root, data, *,
             % (retry_interval,))
     attempts = max(1, int(retry_attempts))
     path = session_facts_path(repo_root)
-    directory = os.path.dirname(path)
-    if directory:
-        os.makedirs(directory, exist_ok=True)
-    tmp_path = path + ".tmp"
-    last_permission_error = None
-    for attempt in range(attempts):
-        try:
-            # newline="\n"：固定 \n 换行，避免 Windows 文本模式写出 \r\n
-            with open(tmp_path, "w", encoding="utf-8", newline="\n") as handle:
-                json.dump(data, handle, ensure_ascii=False, indent=2,
-                          sort_keys=True)
-            os.replace(tmp_path, path)
-            return path
-        except PermissionError as exc:
-            last_permission_error = exc
-            _unlink_quiet(tmp_path)
-            if attempt + 1 < attempts:
-                sleep(retry_interval)
-    raise SchedulerFactsError(
-        "session_facts.json 原子写在 PermissionError 有界重试 %d 次（间隔 "
-        "%.2f 秒）后仍失败（Windows AV / 目录锁？）：%s" % (
-            attempts, float(retry_interval), last_permission_error)
-    ) from last_permission_error
+    try:
+        durable_io.atomic_write_json(path, data,
+                                     retry_attempts=retry_attempts,
+                                     retry_interval=retry_interval,
+                                     sleep=sleep)
+    except PermissionError as last_permission_error:
+        raise SchedulerFactsError(
+            "session_facts.json 原子写在 PermissionError 有界重试 %d 次（间隔 "
+            "%.2f 秒）后仍失败（Windows AV / 目录锁？）：%s" % (
+                attempts, float(retry_interval), last_permission_error)
+        ) from last_permission_error
+    return path
 
 
 # —— 证据只进不退的 merge 原语（纯函数，供 record_observation 复用） ——
