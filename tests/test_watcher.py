@@ -35,6 +35,9 @@ sys.executable）/ §C3（复用 observer / resolver / epoch，不复制额度
        task_manager.QUOTA_WAIT_TASK_STATUSES 逐值一致（quota 包禁
        import task_manager 的词汇镜像，对齐由本测试锚定；测试侧跨包
        import 读常量断言）
+    8  watcher.lock 集成（v2.2.1 WU-221-A2）：run acquire 建锁 / 第二
+       run 确定型冲突且锁不动 / graceful stop 释放身份删锁 + stopped
+       终态 / max_ticks 退出释放 / heartbeat 刷新使锁保持新鲜（advisory）
 """
 
 import io
@@ -136,6 +139,20 @@ class RepoFixture(unittest.TestCase):
         }
         record.update(overrides)
         return record
+
+    def lock_path(self):
+        return watcher_store.watcher_lock_path(self.repo)
+
+    def write_lock(self, *, pid, generation=1, identity=IDENTITY):
+        """手写 watcher.lock 夹具（v2.2.1 WU-221-A2：互斥凭据在锁文件，
+        构造「活锁」须与观察记录配套落锁；created_at 以真实当前时刻
+        写入——created_at 兜底窗口相对真实时钟判定）。"""
+        os.makedirs(os.path.dirname(self.lock_path()), exist_ok=True)
+        payload = {"pid": pid, "generation": generation,
+                   "provider_identity_hash": identity,
+                   "created_at": _format_iso_z(datetime.now(timezone.utc))}
+        with open(self.lock_path(), "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, ensure_ascii=False, sort_keys=True)
 
     def run_watcher(self, fetch, max_ticks=1, clock=None, **kwargs):
         return watcher.run(
@@ -371,8 +388,11 @@ class RunLoopTest(RepoFixture):
         self.assertIsNone(record["pid"])  # stopped 终态表达
 
     def test_acquire_conflict_returns_without_fetching(self):
-        """锁被活进程新鲜持有（§6）→ run 不抓取、不改写状态文件。"""
+        """锁被活进程新鲜持有（§6）→ run 不抓取、不改写观察状态。
+        v2.2.1 WU-221-A2：互斥凭据在 watcher.lock——夹具配套落锁
+        （语义正当迁移；断言原样）。"""
         self.write_raw_state(self.live_record(generation=3))
+        self.write_lock(pid=os.getpid(), generation=3)
         fetches = {"n": 0}
 
         def counting_fetch(repo_root):
@@ -610,14 +630,18 @@ class QuotaWatcherCliTest(RepoFixture):
 
     def test_serve_conflict_returns_1_without_network(self):
         """--serve 内部隐藏形态：锁冲突 → 退出码 1（冲突发生在抓取前，
-        零网络）；死 pid 记录被接管后 graceful 路径（注入 max_ticks +
-        fetch）→ 退出码 0。"""
+        零网络）；死 pid 陈旧锁被接管后 graceful 路径（注入 max_ticks +
+        fetch）→ 退出码 0。v2.2.1 WU-221-A2：互斥凭据在 watcher.lock——
+        夹具配套落锁（语义正当迁移；断言原样）。"""
         self.write_raw_state(self.live_record())
+        self.write_lock(pid=os.getpid(), generation=1)
         with redirect_stderr(io.StringIO()):  # 冲突详情落 stderr（模拟日志）
             code = cli.main(["quota-watcher", self.repo, "--serve"])
         self.assertEqual(code, 1)
-        # 接管路径：pid=0（死）→ serve acquire 接管 → max_ticks=1 收敛
+        # 接管路径：锁 pid=0（死）→ serve acquire 接管 → max_ticks=1
+        # 收敛（退出按释放身份删锁——新持有者退出不留幽灵锁）
         self.write_raw_state(self.live_record(pid=0))
+        self.write_lock(pid=0, generation=1)
         code = watcher.serve(
             self.repo, fetch=lambda repo: fake_detail("AVAILABLE", []),
             clock=FakeClock(datetime.now(timezone.utc), 1.0),
@@ -642,6 +666,101 @@ class ExecutingFamilyMirrorAnchorTest(unittest.TestCase):
         from runtime import task_manager
         self.assertEqual(watcher.EXECUTING_FAMILY_STATUSES,
                          task_manager.QUOTA_WAIT_TASK_STATUSES)
+
+
+# —— 8：watcher.lock 集成（v2.2.1 WU-221-A2：锁与观察状态分离） ——
+
+class WatcherLockIntegrationTest(RepoFixture):
+    """run 与 watcher.lock 的集成（v2.2.1 WU-221-A2）：run acquire 经
+    O_CREAT|O_EXCL 建锁；第二 run 确定型冲突且锁字节不动；持有者一切
+    退出路径按释放身份纪律删锁；heartbeat 刷新使锁保持新鲜（advisory
+    证据——锁文件自身自 acquire 起零改写）。"""
+
+    def test_run_acquires_lock_and_second_start_conflicts(self):
+        """run acquire 建 O_EXCL 锁（generation 1、pid=持有者）；持有者
+        在循环内时第二 start（fetch 钩子内再入 run——生产「第二个
+        start」的真实时序）见新鲜锁 → 确定型冲突、零抓取、锁不动。
+        （max_ticks 是诊断出口、run 返回前已按释放身份删锁——锁的存在
+        性只能在持有者在场时观测。）"""
+        probe = {}
+
+        def probing_fetch(repo_root):
+            probe["lock_exists"] = os.path.isfile(self.lock_path())
+            with open(self.lock_path(), "r", encoding="utf-8") as handle:
+                probe["lock"] = json.load(handle)
+            # 第二 start：锁被外层持有、记录 heartbeat 新鲜 → 冲突
+            probe["second"] = watcher.run(
+                repo_root, fetch=lambda r: fake_detail("AVAILABLE", []),
+                clock=FakeClock(NOW + timedelta(seconds=2), 1.0),
+                sleep=noop_sleep, max_ticks=1,
+                provider_identity_hash=IDENTITY)
+            return fake_detail("AVAILABLE", [])
+
+        outer = self.run_watcher(probing_fetch, max_ticks=1)
+        self.assertTrue(outer["acquired"])
+        self.assertEqual(outer["fetches"], 1)
+        self.assertTrue(probe["lock_exists"])
+        self.assertEqual(probe["lock"]["generation"], 1)
+        self.assertEqual(probe["lock"]["pid"], os.getpid())
+        second = probe["second"]
+        self.assertFalse(second["acquired"])  # 机械互斥：确定型冲突
+        self.assertEqual(second["conflict"]["pid"], os.getpid())
+        self.assertEqual(second["fetches"], 0)  # 冲突发生在抓取前
+        self.assertEqual(second["conflict"]["lock_generation"], 1)
+        # run 返回（诊断出口）已按释放身份删锁；观察记录保留
+        self.assertFalse(os.path.exists(self.lock_path()))
+        record = watcher_store.read_watcher_state(self.repo)
+        self.assertEqual(record["pid"], os.getpid())
+        self.assertEqual(record["generation"], 1)
+
+    def test_graceful_stop_releases_lock_and_records_terminal_state(self):
+        """graceful stop：持有者写 stopped 终态（pid=None）并按释放身份
+        纪律删 watcher.lock——两文件现实一致收敛。"""
+        def stopper_fetch(repo_root):
+            watcher_store.request_stop(repo_root)
+            return fake_detail("AVAILABLE", [])
+
+        result = self.run_watcher(stopper_fetch, max_ticks=10)
+        self.assertTrue(result["stopped"])
+        self.assertFalse(os.path.exists(self.lock_path()))  # 持有者释放
+        record = watcher_store.read_watcher_state(self.repo)
+        self.assertTrue(record["stop_requested"])
+        self.assertIsNone(record["pid"])  # stopped 终态（观察面）
+
+    def test_max_ticks_exit_releases_lock(self):
+        """诊断性 max_ticks 退出同样收口于持有者释放路径（不留幽灵锁）；
+        观察记录保留（pid 仍在——观察面语义独立于锁所有权）。"""
+        self.run_watcher(lambda repo: fake_detail("AVAILABLE", []),
+                         max_ticks=1)
+        self.assertFalse(os.path.exists(self.lock_path()))
+        record = watcher_store.read_watcher_state(self.repo)
+        self.assertEqual(record["pid"], os.getpid())
+
+    def test_heartbeat_refresh_keeps_lock_fresh_advisory(self):
+        """heartbeat 逐 wake 刷新 watcher.json（锁的 advisory 证据）：
+        外部 acquire（非到期 wake 之后的时刻判定）→ 锁仍新鲜 → 冲突；
+        锁文件自身自 acquire 起零改写（generation 固定——新鲜性证据在
+        观察面，锁本体只承载所有权）。"""
+        probe = {}
+
+        def probing_fetch(repo_root):
+            # 第二次抓取（tick3）时：非到期 wake 已推进 heartbeat
+            with open(self.lock_path(), "r", encoding="utf-8") as handle:
+                probe["lock"] = json.load(handle)
+            probe["record"] = watcher_store.read_watcher_state(repo_root)
+            probe["outside"] = watcher_store.acquire_watcher_lock(
+                repo_root, provider_identity_hash=IDENTITY, mode="PASSIVE",
+                now=NOW + timedelta(seconds=3))
+            return fake_detail("AVAILABLE", [])
+
+        result = self.run_watcher(probing_fetch, max_ticks=3,
+                                  passive_interval_seconds=2)
+        self.assertEqual(result["fetches"], 2)
+        self.assertEqual(probe["lock"]["generation"], 1)  # 锁内容零改写
+        self.assertEqual(probe["record"]["heartbeat_at"],
+                         _format_iso_z(NOW + timedelta(seconds=2)))
+        self.assertFalse(probe["outside"]["acquired"])  # heartbeat 新鲜 → 冲突
+        self.assertEqual(probe["outside"]["conflict"]["pid"], os.getpid())
 
 
 if __name__ == "__main__":

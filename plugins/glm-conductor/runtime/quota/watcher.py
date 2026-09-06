@@ -44,12 +44,19 @@ heartbeat，到期才真正抓取（这是 observer.should_refresh 在生产路�
 
 graceful stop：CLI stop 置 stop_requested（watcher_store.request_stop，
 单次操作不等待）→ 循环下一 wake 检查到旗标 → 写 stopped 终态
-（pid=None + stop_requested=True）并退出。
+（pid=None + stop_requested=True）并退出。v2.2.1 WU-221-A2 起，互斥
+凭据与观察状态分离：单实例锁是独立文件 watcher.lock（O_CREAT|O_EXCL
+机械原子），watcher.json 降级为纯观察面（heartbeat 是锁仲裁的
+advisory 证据）——run 的一切持有者退出路径（graceful stop /
+max_ticks / 状态被外部移除）统一按释放身份纪律删除 watcher.lock
+（仅当锁内容仍是自己的 pid+generation，绝不误删后继接管者的锁）；
+非持有方的 stop 请求（CLI）只置观察旗标，不触碰锁。
 
 once：前台单次抓取（测试 / 诊断用）。**不走锁接管**：现存记录 pid
 活着且 heartbeat 新鲜 → 报冲突退出（ran=False）；stale / 无记录 →
 执行一次 tick 语义的抓取并写记录（generation 不 +1——不是接管，
-once 进程退出后 pid 即死，后续 acquire 自然走接管路径）。
+once 进程退出后 pid 即死，后续 acquire 自然走接管路径）。once 不触碰
+watcher.lock（不创建、不删除——锁域归 acquire / 持有者释放路径）。
 
 第一阶段明确不做（§6.1 冻结）：Window Primer / task subscription /
 ActivationReady→Session 激活 / **model call（零模型调用）** / session
@@ -305,11 +312,14 @@ def _merge_stop_flag(repo_root, record):
     整体覆盖写，会把这枚并发旗标抹掉（测试实录：stop 在 fetch 期间
     置位即被 tick 写回冲掉，watcher 永不退出）。watcher 自身从不置
     True，故写前重读一次文件、OR 合并旗标即可；窗口收窄到「合并读
-    之后」的微秒级（文件即锁、无 CAS 的固有窗口，见模块 docstring）。
+    之后」的微秒级（观察文件无 CAS 的固有窗口；机械互斥自 v2.2.1
+    WU-221-A2 起由 watcher.lock 承担，此处只保旗标不丢）。
     """
     fresh = watcher_store.read_watcher_state(repo_root)
     if fresh is not None and fresh.get("stop_requested"):
         record["stop_requested"] = True
+    # （窗口说明：观察文件无 CAS 的固有窗口——合并读之后的微秒级窗口
+    # 仍在，机械互斥已由 watcher.lock 承担，此处只保旗标不丢。）
 
 
 # —— 主入口：长运行循环 / 单次抓取 ——
@@ -341,7 +351,8 @@ def run(repo_root, *, fetch=None, clock=None, sleep=None,
 
     流程：acquire（冲突即返回）→ 循环{读记录 → stop_requested → 写
     stopped 终态退出；重判 mode → should_refresh 到期则抓取+写观察，
-    未到期仅续 heartbeat → 分片休眠}。
+    未到期仅续 heartbeat → 分片休眠}。一切持有者退出路径统一按释放
+    身份纪律删除 watcher.lock（v2.2.1 WU-221-A2）。
 
     返回（键冻结）：
       {"acquired", "takeover", "generation", "stopped", "wakes",
@@ -382,7 +393,7 @@ def run(repo_root, *, fetch=None, clock=None, sleep=None,
     while max_ticks is None or wakes < max_ticks:
         record = watcher_store.read_watcher_state(repo_root)
         if record is None:
-            break  # 状态被外部移除：不重建锁（锁即文件），退出
+            break  # 状态被外部移除：不重建锁，退出（出口统一释放锁）
         wakes += 1  # 每 wake 计数（含 stop 退出 wake；max_ticks 边界）
         if record.get("stop_requested"):
             # graceful stop：写 stopped 终态（pid=None，冻结字段集内
@@ -421,6 +432,11 @@ def run(repo_root, *, fetch=None, clock=None, sleep=None,
             break
         remaining = _remaining_seconds(now, next_poll_at)
         sleep_fn(max(0.0, min(remaining, float(heartbeat_step_seconds))))
+    # v2.2.1 WU-221-A2：持有者退出路径统一按释放身份纪律删 watcher.lock
+    # ——仅当锁内容仍是本 pid+generation（graceful stop / max_ticks /
+    # 状态被外部移除等一切出口收口于此；绝不误删后继接管者的锁）。
+    watcher_store.release_watcher_lock(repo_root, pid=os.getpid(),
+                                       generation=generation)
     return {"acquired": True, "takeover": lock["takeover"],
             "generation": generation, "stopped": stopped, "wakes": wakes,
             "fetches": fetches, "last_interval": last_interval,
