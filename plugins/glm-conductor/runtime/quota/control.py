@@ -82,6 +82,12 @@ from runtime.quota.scheduler import (
     _is_number,
     _parse_iso_utc,
 )
+# v2.2.1 WU-221-C2（行为保持抽取）：_earliest_reset_plus 的规范定义
+# 已移至 runtime.quota.window_math（probe 边界数学：min(可解析 reset)
+# + grace，2+ 模块共用——本模块与 runtime.quota.epoch）；本行 re-import
+# 保持既有解析点（含 epoch 的 `from runtime.quota.control import
+# _earliest_reset_plus`）零变化。
+from runtime.quota.window_math import _earliest_reset_plus
 
 # —— 词汇表常量 ——
 
@@ -145,22 +151,6 @@ def _merge_quota_control(quota_control):
                 "数值，得到 %r" % (key, value))
         merged[key] = value
     return merged
-
-
-def _earliest_reset_plus(windows, grace_delta):
-    """相关窗中最早可解析 reset_at 加 grace 的 Z 形式 ISO 串；无 → None。
-
-    不可解析 / 缺失的 reset_at 逐窗跳过；全部不可解析 → None
-    （不虚构唤醒时刻，纪律同 scheduler §31）。
-    """
-    moments = []
-    for window in windows:
-        moment = _parse_iso_utc(window.get("reset_at"))
-        if moment is not None:
-            moments.append(moment)
-    if not moments:
-        return None
-    return _format_iso_z(min(moments) + grace_delta)
 
 
 # —— §17.1 核心 API ——

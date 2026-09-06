@@ -32,19 +32,17 @@ from runtime import journal
 from runtime import state
 from runtime.execution_policy import consumed_quota_windows
 from runtime.execution_policy import default_execution_policy
+# v2.2.1 WU-221-C2（行为保持抽取）：_utc_now_iso 的规范定义已移至
+# runtime.quota.time_utils（毫秒精度 Z 形式，语义稳定的时间格式化原语）；
+# 本行 re-import 保持既有解析点（task_manager / continuity.wake_bridge /
+# continuity.resume / continuity.subscription 的
+# `from runtime.quota.accounting import _utc_now_iso` 等）零变化。
+from runtime.quota.time_utils import _utc_now_iso
 
 
 class TaskManagerError(Exception):
     """task_manager 事务边界违背（单元缺失/状态不符/租约丢失/决策未批准
     /RB-1 完成证据缺失或不可判定）。"""
-
-
-def _utc_now_iso() -> str:
-    """当前 UTC 时刻的 ISO-8601 字符串（毫秒精度 Z 形态，与 permit /
-    租约层时间字段同格式）——wave 记录 created_at / closed_at 落盘口径。"""
-    moment = datetime.datetime.now(datetime.timezone.utc)
-    return (moment.strftime("%Y-%m-%dT%H:%M:%S")
-            + ".%03dZ" % (moment.microsecond // 1000))
 
 
 def _require_state(repo_root, task_id, api) -> dict:

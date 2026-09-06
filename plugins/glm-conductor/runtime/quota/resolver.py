@@ -89,6 +89,11 @@ from runtime.quota.credentials import resolve_credential
 from runtime.quota.parser import QUOTA_STATUSES
 from runtime.quota.provider import QuotaProviderError
 from runtime.quota.scheduler import evaluate
+# v2.2.1 WU-221-C2（行为保持抽取）：本地 _parse_iso_utc 副本与
+# runtime.quota.time_utils 的规范实现逐字相同（逐实现比对），改经
+# 共享落点 import；_normalize_now / _format_iso_ms_z 为本模块专属
+# 变体（错误文案锚定 resolve_quota_status / 毫秒精度），原地保留。
+from runtime.quota.time_utils import _parse_iso_utc
 from runtime.quota.zai import ZaiQuotaProvider
 
 # —— 词汇表常量 ——
@@ -127,27 +132,6 @@ def _build_providers(api_key, timeout_seconds=None):
 
 
 # —— 时间助手（对齐 scheduler.py / report.py 的口径） ——
-
-def _parse_iso_utc(text):
-    """ISO8601 时刻文本 → aware datetime（UTC）；非 str / 不可解析 → None。
-
-    统一 Z 形式（本模块缓存 fetched_at 的落盘形式，毫秒精度）；
-    Python 3.7 的 fromisoformat 不认 Z 后缀，先改写为 +00:00；
-    naive 时刻按 UTC 处理。
-    """
-    if not isinstance(text, str) or text == "":
-        return None
-    raw = text.strip()
-    if raw.endswith("Z") or raw.endswith("z"):
-        raw = raw[:-1] + "+00:00"
-    try:
-        moment = datetime.fromisoformat(raw)
-    except ValueError:
-        return None
-    if moment.tzinfo is None:
-        moment = moment.replace(tzinfo=timezone.utc)
-    return moment
-
 
 def _normalize_now(now):
     """归一 now 注入参数：None → 当前 UTC；datetime / ISO 串 → 时刻。
