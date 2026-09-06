@@ -539,10 +539,14 @@ class ResolveQuotaDetailTest(unittest.TestCase):
         self.root = self._tmp.name
 
     def write_cache(self, status, fetched_at=OLD_ISO_MS, snapshot=None):
+        # v2.2.1 WU-221-B1: planted cache now carries the identity hash (same-identity fixture; legacy-reuse assertions superseded by the binding ruling)
         payload = {"provider": "fake", "fetched_at": fetched_at,
                    "snapshot": (GOOD_SNAPSHOT if snapshot is None
                                 else snapshot),
-                   "status": status}
+                   "status": status,
+                   "provider_identity_hash":
+                       quota_resolver._provider_identity_hash(
+                           "test-key-value")}
         import os
         os.makedirs(os.path.dirname(quota_resolver._cache_path(self.root)),
                     exist_ok=True)

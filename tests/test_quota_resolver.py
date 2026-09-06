@@ -115,10 +115,13 @@ class ResolverTestBase(unittest.TestCase):
     # —— 缓存文件助手（真实路径 = resolver._cache_path，不自造路径） ——
 
     def write_cache(self, status, fetched_at=OLD_ISO, snapshot=None):
+        # v2.2.1 WU-221-B1: planted cache now carries the identity hash (same-identity fixture; legacy-reuse assertions superseded by the binding ruling)
         payload = {"provider": "fake", "fetched_at": fetched_at,
                    "snapshot": (GOOD_SNAPSHOT if snapshot is None
                                 else snapshot),
-                   "status": status}
+                   "status": status,
+                   "provider_identity_hash":
+                       resolver._provider_identity_hash("test-key-value")}
         os.makedirs(os.path.dirname(resolver._cache_path(self.root)),
                     exist_ok=True)
         with open(resolver._cache_path(self.root), "w",
@@ -181,8 +184,10 @@ class CacheHierarchyTest(ResolverTestBase):
         self.assertEqual(provider.calls, [True])  # 一轮探测（force 口径）
         self.assertEqual(factory.recorded, [("test-key-value", None)])
         cache = self.read_cache()
+        # v2.2.1 WU-221-B1: planted cache now carries the identity hash (same-identity fixture; legacy-reuse assertions superseded by the binding ruling)
         self.assertEqual(set(cache), {"provider", "fetched_at", "snapshot",
-                                      "status"})  # 缓存形状冻结
+                                      "status",
+                                      "provider_identity_hash"})  # 缓存形状冻结
         self.assertEqual(cache["status"], "AVAILABLE")
         self.assertEqual(cache["fetched_at"], NOW_ISO)  # 刷新为本次时刻
         self.assertEqual(cache["snapshot"], GOOD_SNAPSHOT)

@@ -23,6 +23,21 @@
         4. UNKNOWN        无缓存可用 → status="UNKNOWN"（fail-open，
                           上层按 §12 折预算 1，不阻塞派发）。
 
+    v2.2.1 WU-221-B1（缓存绑定）：本地缓存自本版起绑定 provider
+    身份——每次解析在层级判定前做全流程唯一一次 resolve_credential
+    （解析结果同时喂身份指纹与层级 2 的 provider 构造，绝不二次解
+    析凭证），按 runtime.quota.identity.compute_provider_identity_hash
+    同口径派生 16-hex 非秘密指纹（sha256("来源:凭证") 前缀截断，
+    不含也不可还原凭证材料）；缓存写入记 "provider_identity_hash"
+    （schema 唯一新增键，既有四键逐字不变），fresh / stale 两层复用
+    一律要求缓存指纹 == 当前指纹：
+      - 异身份缓存：既不当新鲜快照，fetch 失败后也绝不充当新身份的
+        权威 stale 回退（降级链直落 UNKNOWN，fail-open 不虚构）；
+      - legacy 无指纹缓存：保守等同异身份（绝不据其免网络，绝不据
+        其回退）；
+      - 同身份：层级时序 / 新鲜窗口（CACHE_TTL_FRESH_SECONDS）与
+        既有 reason 口径逐字不变（快路径零变化）。
+
 纪律（本模块的硬边界）：
     - 绝不重试网络：一次 fetch 失败即降级（quota 是 best-effort 观测
       面，重试只会拖慢派发路径）；provider 探测按 report.py 的装配
@@ -33,6 +48,9 @@
     - credential safety（§37）：返回 dict 与缓存文件绝不含凭证材料
       （key 只在 provider 构造内部用作 Authorization 头，本模块不落
       盘、不拼进任何字符串）；缓存只存 §27 标准化 snapshot（非秘密）；
+    - 身份指纹非秘密（v2.2.1 WU-221-B1）：缓存只落 16-hex 指纹，绝不
+      落凭证材料；凭证解析全流程只进行一次（指纹与 provider 构造共
+      用同一结果），异常只取类型名进 reason；
     - 绝不虚构数据：无缓存且 provider 不可用 → UNKNOWN，宁缺勿造
       （§28/§31/§33 fail-open 语义在解析层的对应）；
     - now 注入（None → 当前 UTC）供测试；timeout_seconds 透传
@@ -45,7 +63,7 @@
     (None, None) 模拟无凭证）。
 
 依赖：
-    仅 Python 3.7 标准库（json / os / datetime）+ runtime.durable_io
+    仅 Python 3.7 标准库（json / os / datetime / hashlib）+ runtime.durable_io
     （v2.2.1 WU-221-A2 起缓存原子写委托其 atomic_write_json），零第
     三方依赖，`python3 -S` 可运行。provider 装配照抄 runtime/quota/
     report.py（_PROVIDER_ORDER + 逐个探测、任一成功即用；report.py
@@ -60,6 +78,7 @@
     的预算语义（UNKNOWN → 预算 1，不挂起）。
 """
 
+import hashlib
 import json
 import os
 from datetime import datetime, timezone
@@ -159,6 +178,26 @@ def _format_iso_ms_z(moment):
                          moment.microsecond // 1000)
 
 
+# —— provider 身份指纹（v2.2.1 WU-221-B1 缓存绑定） ——
+
+def _provider_identity_hash(api_key):
+    """凭证 → provider 身份指纹（16-hex，非秘密，可落盘 / 落日志）。
+
+    派生口径与 runtime.quota.identity.compute_provider_identity_hash
+    逐字一致（sha256("credential:<key>" / 无凭证占位 "none:") 前缀
+    截断 16 位十六进制——哈希不可逆，绝不含凭证材料本体，§37）。
+    此处以受锚定的内联复制而非调用共享函数：共享版入参是 environ
+    （函数体内自带一次 resolve_credential），而 _resolve_quota 在层
+    级判定前已持有同一次解析的 api_key——为指纹发起第二次凭证解析
+    是本单元规格明令避免的。两处口径的漂移由
+    tests/test_credentials_family.py 的锚定测试防守（断言缓存指纹
+    == 共享函数对同一身份 environ 的产出）。
+    """
+    material = "%s:%s" % ("none" if api_key is None else "credential",
+                          api_key or "")
+    return hashlib.sha256(material.encode("utf-8")).hexdigest()[:16]
+
+
 # —— 缓存原语（损坏 / 非法一律视为无缓存，绝不因坏缓存炸调用方） ——
 
 def _cache_path(repo_root) -> str:
@@ -217,6 +256,12 @@ def _resolve_quota(repo_root, *, now, force_refresh, timeout_seconds) -> dict:
     （§27 形状）与 fetched_at（底层数据抓取时刻）供 resolve_quota_detail
     透出（无数据 → None）。层级流程 / reason 口径与本模块 docstring
     逐字一致。
+
+    v2.2.1 WU-221-B1（缓存绑定）：凭证解析上移至层级判定之前（全流
+    程唯一一次，同时供身份指纹与层级 2 provider 构造）；缓存写入记
+    "provider_identity_hash"（唯一新增键），fresh / stale 两层复用均
+    要求指纹一致——legacy 无指纹 / 异身份缓存一律不视为新鲜、不充当
+    stale 回退（fetch 失败直落 UNKNOWN）。
     """
     moment = _normalize_now(now)
     evaluated_at = _format_iso_ms_z(moment)
@@ -225,8 +270,29 @@ def _resolve_quota(repo_root, *, now, force_refresh, timeout_seconds) -> dict:
     cached_status = cache.get("status") if cache else None
     cached_at = _parse_iso_utc(cache.get("fetched_at")) if cache else None
 
+    # —— 凭证与身份指纹（v2.2.1 WU-221-B1 缓存绑定） ——
+    # 全流程唯一一次 resolve_credential：解析结果同时喂身份指纹（缓
+    # 存归属判定）与层级 2 的 provider 构造，绝不二次解析凭证。解析
+    # 上移到层级判定之前：fresh / stale 两层的缓存复用都须先验「缓
+    # 存属于当前身份」（指纹只记哈希，绝不落凭证材料）；
+    # resolve_credential 是纯本地读取（env / 配置文件，零网络），不
+    # 影响层级 1「绝不发网络」的承诺。解析异常绝不外泄：只取类型名
+    # 进降级原因（口径同原层级 2 内联解析）。
+    credential_error = None
+    try:
+        _credential_source, api_key = resolve_credential()
+    except Exception as credential_exc:
+        # OSError 等：类型名进原因，文本绝不透传（可能携带路径，§37）
+        _credential_source, api_key = None, None
+        credential_error = type(credential_exc).__name__
+    identity_hash = _provider_identity_hash(api_key)
+    cache_identity = cache.get("provider_identity_hash") if cache else None
+    same_identity = cache_identity == identity_hash
+
     # —— 层级 1：fresh cache（缓存命中即返回，绝不发网络） ——
-    if cache is not None and not force_refresh:
+    # WU-221-B1：fresh 复用附加身份一致（缓存指纹 == 当前指纹）——
+    # legacy 无指纹 / 异身份缓存一律不视为本身份的新鲜快照。
+    if cache is not None and same_identity and not force_refresh:
         age_seconds = (moment - cached_at).total_seconds()
         if age_seconds <= CACHE_TTL_FRESH_SECONDS:
             return {
@@ -244,8 +310,11 @@ def _resolve_quota(repo_root, *, now, force_refresh, timeout_seconds) -> dict:
     # —— 层级 2：provider fetch（一轮探测，任何异常降级不外泄） ——
     cause = "unknown"
     try:
-        _credential_source, api_key = resolve_credential()
-        if not isinstance(api_key, str) or api_key == "":
+        if credential_error is not None:
+            # 凭证解析已失败（层级判定前上移的那一次）：类型名进降级
+            # 原因，不构造 provider，直接降级（口径同原内联解析异常）
+            cause = credential_error
+        elif not isinstance(api_key, str) or api_key == "":
             cause = "no-credential"  # 无凭证：不构造 provider，直接降级
         else:
             snapshot = None
@@ -272,6 +341,9 @@ def _resolve_quota(repo_root, *, now, force_refresh, timeout_seconds) -> dict:
                     "fetched_at": evaluated_at,
                     "snapshot": snapshot,
                     "status": status,
+                    # v2.2.1 WU-221-B1（缓存绑定）：schema 唯一新增键
+                    # ——非秘密 16-hex 身份指纹（复用须与本身份一致）
+                    "provider_identity_hash": identity_hash,
                 })
                 return {
                     "status": status,
@@ -287,7 +359,11 @@ def _resolve_quota(repo_root, *, now, force_refresh, timeout_seconds) -> dict:
             cause = type(exc).__name__
 
     # —— 层级 3 / 4：stale cache → UNKNOWN（fail-open，绝不虚构） ——
-    if cache is not None:
+    # v2.2.1 WU-221-B1：stale 回退同样要求身份一致——异身份 / legacy
+    # 无指纹缓存绝不充当本身份的权威陈旧快照（fetch 失败直落 UNKNOWN，
+    # 层级 4 fail-open；原层级 3 的其余形态——不论多旧可回退、
+    # force_refresh 跳过新鲜期的 reason 口径——对同身份逐字保留）。
+    if cache is not None and same_identity:
         age_seconds = int((moment - cached_at).total_seconds())
         if age_seconds > CACHE_TTL_FRESH_SECONDS:
             staleness = "数据抓取于 %s，已过期 %d 秒（超过 %d 秒新鲜期）" % (
@@ -340,18 +416,24 @@ def resolve_quota_status(repo_root, *, now=None, force_refresh=False,
     _resolve_quota（签名 / 语义 / reason 逐字零变化，输出仍恰为四键）。
 
     层级流程（顺序即优先级，逐级降级；模块 docstring 有全文）：
-      1. fresh cache：缓存有效且 age ≤ 300 秒且非 force_refresh →
-         ("cache_fresh", 缓存 status)，零网络；
-      2. provider fetch：resolve_credential() → _build_providers 按
-         report.py 装配逐个探测（一轮，绝不重试）→ 成功即
-         scheduler.evaluate(snapshot)["status"] → 原子写缓存
-         {"provider", "fetched_at", "snapshot", "status"} →
-         ("provider", status)；任何异常（无凭证 / QuotaProviderError /
-         OSError / 超时 / 解析失败）不外泄，落到 3/4；
-      3. stale cache：缓存存在（不论多旧）→ ("cache_stale", 缓存
-         status)，reason 注明数据抓取时间与过期秒数；
-      4. none：无缓存 → ("none", "UNKNOWN")，fail-open 不阻塞派发
-         （上层 wu-21-09 预算语义：UNKNOWN → 预算 1）。
+      1. fresh cache：缓存属于当前身份（v2.2.1 WU-221-B1 指纹一致）
+         且 age ≤ 300 秒且非 force_refresh → ("cache_fresh", 缓存
+         status)，零网络；
+      2. provider fetch：凭证已在层级判定前解析（WU-221-B1：全流程
+         唯一一次 resolve_credential，同一次结果供身份指纹）→
+         _build_providers 按 report.py 装配逐个探测（一轮，绝不重试）
+         → 成功即 scheduler.evaluate(snapshot)["status"] → 原子写缓存
+         {"provider", "fetched_at", "snapshot", "status",
+         "provider_identity_hash"}（末键 WU-221-B1 唯一新增，非秘密
+         16-hex）→ ("provider", status)；任何异常（无凭证 /
+         QuotaProviderError / OSError / 超时 / 解析失败）不外泄，
+         落到 3/4；
+      3. stale cache：缓存属于当前身份（WU-221-B1：指纹一致——legacy
+         无指纹 / 异身份缓存一律跳过本层）且不论多旧 → ("cache_stale",
+         缓存 status)，reason 注明数据抓取时间与过期秒数；
+      4. none：无缓存（或缓存不属于当前身份）→ ("none", "UNKNOWN")，
+         fail-open 不阻塞派发（上层 wu-21-09 预算语义：UNKNOWN →
+         预算 1）。
     """
     core = _resolve_quota(repo_root, now=now, force_refresh=force_refresh,
                           timeout_seconds=timeout_seconds)
