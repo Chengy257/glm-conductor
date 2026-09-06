@@ -6,7 +6,11 @@
     把「派发前到底信哪个额度状态」固化为一个纯入口
     resolve_quota_status()，供 task_manager 的 prepare API（v2.1 起
     quota_status 缺省 None 时触发——**绝不默认 AVAILABLE**）与后续
-    恢复链（wu-21-11）消费。四级层级（顺序即优先级，逐级降级）：
+    恢复链（wu-21-11）消费。v2.2 M3（wu-22-03）追加明细入口
+    resolve_quota_detail()（status 之外透出 §27 snapshot 与
+    fetched_at，供 observer 观测面消费）——两入口共享同一份层级
+    实现（_resolve_quota），禁止复制出第二份抓取流程。
+    四级层级（顺序即优先级，逐级降级）：
 
         1. fresh cache    本地缓存存在且距上次抓取 ≤
                           CACHE_TTL_FRESH_SECONDS（300 秒）→ 直接采信
@@ -207,40 +211,17 @@ def _save_cache(path, payload) -> None:
         os.unlink(tmp_path)
 
 
-# —— 主入口：四级层级解析 ——
+# —— 主入口：四级层级解析（两个公开入口共享同一份实现路径） ——
 
-def resolve_quota_status(repo_root, *, now=None, force_refresh=False,
-                         timeout_seconds=None) -> dict:
-    """解析当前额度状态（v2.1 §13 四级层级），返回键冻结的决策 dict。
+def _resolve_quota(repo_root, *, now, force_refresh, timeout_seconds) -> dict:
+    """四级层级核心（v2.2 M3 起为 resolve_quota_status 与
+    resolve_quota_detail 的唯一实现路径——禁止复制出第二份抓取流程）。
 
-    参数：
-      - repo_root：仓库 / 账本根（缓存恒读写
-        <repo_root>/.glm-conductor/quota-cache.json）；
-      - now：参考时刻注入（None → 当前 UTC；datetime / ISO 串），
-        仅供测试；同时决定 evaluated_at 与缓存 fetched_at 的口径；
-      - force_refresh：True 时跳过层级 1（新鲜缓存也强制走 provider，
-        §32 唤醒强制刷新语义的对应入口）；
-      - timeout_seconds：透传 provider 构造（None → provider 默认）。
-
-    返回（键冻结，四键；绝不含凭证材料，§37）：
-      {"status": <QUOTA_STATUSES 四态之一>,
-       "source": <QUOTA_SOURCES 之一>，
-       "evaluated_at": <ISO8601 毫秒精度 Z 形式>,
-       "reason": <中文一句话>}
-
-    层级流程（顺序即优先级，逐级降级；模块 docstring 有全文）：
-      1. fresh cache：缓存有效且 age ≤ 300 秒且非 force_refresh →
-         ("cache_fresh", 缓存 status)，零网络；
-      2. provider fetch：resolve_credential() → _build_providers 按
-         report.py 装配逐个探测（一轮，绝不重试）→ 成功即
-         scheduler.evaluate(snapshot)["status"] → 原子写缓存
-         {"provider", "fetched_at", "snapshot", "status"} →
-         ("provider", status)；任何异常（无凭证 / QuotaProviderError /
-         OSError / 超时 / 解析失败）不外泄，落到 3/4；
-      3. stale cache：缓存存在（不论多旧）→ ("cache_stale", 缓存
-         status)，reason 注明数据抓取时间与过期秒数；
-      4. none：无缓存 → ("none", "UNKNOWN")，fail-open 不阻塞派发
-         （上层 wu-21-09 预算语义：UNKNOWN → 预算 1）。
+    返回六键 {"status", "source", "evaluated_at", "reason", "snapshot",
+    "fetched_at"}：前四键即 resolve_quota_status 的冻结输出；snapshot
+    （§27 形状）与 fetched_at（底层数据抓取时刻）供 resolve_quota_detail
+    透出（无数据 → None）。层级流程 / reason 口径与本模块 docstring
+    逐字一致。
     """
     moment = _normalize_now(now)
     evaluated_at = _format_iso_ms_z(moment)
@@ -261,6 +242,8 @@ def resolve_quota_status(repo_root, *, now=None, force_refresh=False,
                           "新鲜期内，未发起网络查询）"
                           % (cache.get("fetched_at"), int(age_seconds),
                              CACHE_TTL_FRESH_SECONDS),
+                "snapshot": cache.get("snapshot"),
+                "fetched_at": cache.get("fetched_at"),
             }
 
     # —— 层级 2：provider fetch（一轮探测，任何异常降级不外泄） ——
@@ -301,6 +284,8 @@ def resolve_quota_status(repo_root, *, now=None, force_refresh=False,
                     "evaluated_at": evaluated_at,
                     "reason": "provider %s 抓取成功，额度已评估并刷新"
                               "本地缓存" % provider_name,
+                    "snapshot": snapshot,
+                    "fetched_at": evaluated_at,
                 }
     except Exception as exc:  # OSError / 超时 / 写盘失败等一律降级
         if cause is None or cause == "unknown":
@@ -322,6 +307,8 @@ def resolve_quota_status(repo_root, *, now=None, force_refresh=False,
             "evaluated_at": evaluated_at,
             "reason": "provider 额度查询不可用（%s），回退本地缓存：%s"
                       % (cause, staleness),
+            "snapshot": cache.get("snapshot"),
+            "fetched_at": cache.get("fetched_at"),
         }
     return {
         "status": "UNKNOWN",
@@ -330,4 +317,84 @@ def resolve_quota_status(repo_root, *, now=None, force_refresh=False,
         "reason": "无额度缓存且 provider 额度查询不可用（%s），"
                   "按 UNKNOWN fail-open（不阻塞派发，预算按 1 折算）"
                   % cause,
+        "snapshot": None,
+        "fetched_at": None,
+    }
+
+
+def resolve_quota_status(repo_root, *, now=None, force_refresh=False,
+                         timeout_seconds=None) -> dict:
+    """解析当前额度状态（v2.1 §13 四级层级），返回键冻结的决策 dict。
+
+    参数：
+      - repo_root：仓库 / 账本根（缓存恒读写
+        <repo_root>/.glm-conductor/quota-cache.json）；
+      - now：参考时刻注入（None → 当前 UTC；datetime / ISO 串），
+        仅供测试；同时决定 evaluated_at 与缓存 fetched_at 的口径；
+      - force_refresh：True 时跳过层级 1（新鲜缓存也强制走 provider，
+        §32 唤醒强制刷新语义的对应入口）；
+      - timeout_seconds：透传 provider 构造（None → provider 默认）。
+
+    返回（键冻结，四键；绝不含凭证材料，§37）：
+      {"status": <QUOTA_STATUSES 四态之一>,
+       "source": <QUOTA_SOURCES 之一>，
+       "evaluated_at": <ISO8601 毫秒精度 Z 形式>,
+       "reason": <中文一句话>}
+
+    v2.2 M3（wu-22-03）：本函数与 resolve_quota_detail 共享内部实现
+    _resolve_quota（签名 / 语义 / reason 逐字零变化，输出仍恰为四键）。
+
+    层级流程（顺序即优先级，逐级降级；模块 docstring 有全文）：
+      1. fresh cache：缓存有效且 age ≤ 300 秒且非 force_refresh →
+         ("cache_fresh", 缓存 status)，零网络；
+      2. provider fetch：resolve_credential() → _build_providers 按
+         report.py 装配逐个探测（一轮，绝不重试）→ 成功即
+         scheduler.evaluate(snapshot)["status"] → 原子写缓存
+         {"provider", "fetched_at", "snapshot", "status"} →
+         ("provider", status)；任何异常（无凭证 / QuotaProviderError /
+         OSError / 超时 / 解析失败）不外泄，落到 3/4；
+      3. stale cache：缓存存在（不论多旧）→ ("cache_stale", 缓存
+         status)，reason 注明数据抓取时间与过期秒数；
+      4. none：无缓存 → ("none", "UNKNOWN")，fail-open 不阻塞派发
+         （上层 wu-21-09 预算语义：UNKNOWN → 预算 1）。
+    """
+    core = _resolve_quota(repo_root, now=now, force_refresh=force_refresh,
+                          timeout_seconds=timeout_seconds)
+    return {
+        "status": core["status"],
+        "source": core["source"],
+        "evaluated_at": core["evaluated_at"],
+        "reason": core["reason"],
+    }
+
+
+def resolve_quota_detail(repo_root, *, now=None, force_refresh=False) -> dict:
+    """明细入口（v2.2 M3 wu-22-03）：四级层级解析 + §27 snapshot 透出。
+
+    与 resolve_quota_status 共享同一内部实现（_resolve_quota），四级
+    层级语义 / reason 口径逐字一致，仅输出键不同——供观测面（CLI
+    quota-observe / quota-phase → observer.observe）拿 snapshot 的
+    windows 去喂 M2 决策器，避免「状态有了、明细没了」的二次读盘。
+
+    参数：
+      - repo_root / now / force_refresh：同 resolve_quota_status
+        （timeout 不暴露——观测面恒用 provider 默认超时）。
+
+    返回（键冻结，四键；绝不含凭证材料，§37）：
+      {"source": <QUOTA_SOURCES 四值之一>，
+       "status": <QUOTA_STATUSES 四态之一（none 层为 UNKNOWN）>，
+       "snapshot": <§27 形状 snapshot 或 None（none 层）>，
+       "fetched_at": <底层数据抓取时刻，ISO8601 毫秒精度 Z 形式或
+                      None>}
+    fetched_at 语义：provider 层 = 本次抓取时刻（= evaluated_at）；
+    cache 层（fresh / stale）= 缓存记录的原始抓取时刻；none 层 =
+    None（无数据，绝不虚构）。
+    """
+    core = _resolve_quota(repo_root, now=now, force_refresh=force_refresh,
+                          timeout_seconds=None)
+    return {
+        "source": core["source"],
+        "status": core["status"],
+        "snapshot": core["snapshot"],
+        "fetched_at": core["fetched_at"],
     }

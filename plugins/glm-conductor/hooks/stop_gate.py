@@ -38,12 +38,43 @@
     全部不成立 → 跳过（普通会话与合规任务零干预）。gate_passed /
     gate_degraded 的记账对象即参与集合。
 
+第 0 位检查（v2.2 C8 continuity health，修正计划 §C8/§15/§22.5）：
+    四重检查之前先对「触发域内」的任务做 continuity 健康检查
+    （evaluate_continuity_health，纯读零写零网络零模型调用——D2/H-A
+    不变）。触发域冻结：任务活动且（status ∈ {waiting_quota,
+    waiting_user} 或 quota.execution_phase ∈ {PRESSURE, DRAINING}）且
+    route.continuity == "resumable" 且
+    execution_policy.continuity.auto_resume ∈ {auto_once, until_done}
+    ——域外（NORMAL executing 任务的普通回合结束 / manual / notify /
+    terminal 任务）零介入（Stop 每回合都触发，trio 是 dormant 交接
+    要求不是日常要求）。域内按依赖序三检查（trio）：handoff durable
+    （任务 checkpoint.md 存在且 resume manifest 文件存在）→ quota
+    subscription（quota_subscription.enabled 且 registered_epoch_id
+    非空）→ activation transport armed
+    （runtime.activation_transport.activation_transport_status().armed，
+    只认 armed/fired 活桥族）。缺前两者、或「未 armed 且
+    （scheduler_create==allowed 或 scheduler_origin==interactive 或
+    双 unknown）」→ block（可行动报文，journal gate_blocked 的 check
+    ∈ {continuity_handoff_missing, continuity_subscription_missing,
+    continuity_transport_not_armed, continuity_transport_unknown}，
+    gate_exhausted 机器原样复用防死锁）；「未 armed 且
+    create==forbidden 或 origin==scheduled_task」与
+    continuation.obligation=="degraded" 短路 → 降级放行
+    （INV-22-PB-07：不无限 block，§22.5 missing transport 由当前
+    session capability 裁决）。降级 reason 结构化词汇（gate_degraded
+    的 reason 字段，精确可断言，见 CONTINUITY_DEGRADE_REASONS）；
+    quota watcher 健康（180s 心跳阈值复用 watcher_store 常量）只做
+    降级注记（§26-14 watcher failure 有 degraded/fallback），永不
+    独立 block。检查自身任何异常 → 该任务降级放行（reason=
+    continuity_evaluation_error），绝不崩门、绝不比四重检查拦得更狠。
+
 与 Layer A 单检版（B2.1）的差异：
       - violation 三元组从 (task_id, out_of_scope, patterns) 改为
         (task_id, check, detail)：check ∈ {"ownership",
         "verification_missing", "verification_stale", "review_missing",
         "review_rejected", "review_stale", "visual_stale",
-        "corrupt_state"}，detail 为逐 check 的结构化字段 dict；
+        "corrupt_state"} ∪ 第 0 位 continuity check 四词汇（见上），
+        detail 为逐 check 的结构化字段 dict；
       - block 报文按 check 分发（英文、可行动、逐行列出），其余违规
         任务以 "Also failing in task <id>: <check>" 附带列出；
       - 消费证据指纹层（runtime.fingerprint）：指纹每任务至多计算一次，
@@ -166,6 +197,28 @@ sys.path.insert(0, str(PLUGIN_ROOT))
 # 续行上限：journal 尾部连续 gate_blocked 达到该条数即不再 block
 # （第 1、2 次 block，第 3 次 Stop 放行——对齐运行时 3 次续行内建上限）
 GATE_BLOCK_LIMIT = 2
+
+# —— v2.2 C8 continuity health（修正计划 §C8）触发域冻结词汇 ——
+# 域 = 活动任务 且（status 命中 或 execution_phase 命中）且 route
+# resumable 且 auto_resume 属 auto 家族。四组均为既有冻结词汇的子集
+# （runtime.state.TASK_STATUSES / runtime.quota.control.EXECUTION_
+# PHASES / route CONTINUITY_MODES / execution_policy.AUTO_RESUME_
+# MODES），独立字面量声明避免钩子侧 import 面膨胀——对齐由
+# tests.test_stop_gate_continuation 锚定。
+CONTINUITY_TRIGGER_STATUSES = ("waiting_quota", "waiting_user")
+CONTINUITY_TRIGGER_PHASES = ("PRESSURE", "DRAINING")
+CONTINUITY_TRIGGER_AUTO_RESUMES = ("auto_once", "until_done")
+
+# continuity health 降级 reason 结构化词汇（journal gate_degraded 的
+# reason 字段，精确可断言）。INV-22-PB-07：scheduled-owned /
+# create-forbidden / obligation=degraded 一律降级放行，不无限 block。
+CONTINUITY_DEGRADE_REASONS = (
+    "continuity_obligation_degraded",
+    "continuity_scheduler_create_forbidden",
+    "continuity_watcher_stale",
+    "continuity_watcher_absent",
+    "continuity_evaluation_error",
+)
 
 
 def ledger_root():
@@ -301,6 +354,15 @@ def count_trailing_gate_blocks(repo, task_id):
     无关（参数名保留 repo 仅为签名兼容）。
     连续 = 逐条向前直到遇到任一非 gate_blocked 事件或耗尽。模型在两次
     block 之间完成真实工作（journal 出现其他事件）→ 链断 → 重新计数。
+    唯一 carve-out（wu-22-C8a）：reason 为 "continuity_" 前缀字符串的
+    gate_degraded 事件**跳过不破链**——那是 continuity health 检查在
+    每次 Stop 求值时无条件写的 gate 侧注记（降级放行方向的可见记账），
+    不是模型在两次 block 之间做的真实工作；若让它破链，域内降级 +
+    持续违规任务的 trailing 链恒为 [gate_degraded(continuity_*),
+    gate_blocked]，计数永不达 GATE_BLOCK_LIMIT，gate_exhausted 释放阀
+    失效 → 无限 block。其余 gate_degraded（orphaned_task /
+    corrupt_state / evaluation_error 等模型侧或既有降级语义）及
+    gate_passed 等其他事件照旧破链。
     read_events 的容错语义（坏行跳过）天然适配部分写入场景。
     """
     from runtime import journal
@@ -309,6 +371,11 @@ def count_trailing_gate_blocks(repo, task_id):
     for item in reversed(journal.read_events(repo, task_id)):
         if item.get("event") == "gate_blocked":
             count += 1
+        elif (item.get("event") == "gate_degraded"
+                and isinstance(item.get("reason"), str)
+                and item["reason"].startswith("continuity_")):
+            # gate 侧 continuity 注记 ≠ 模型工作：跳过不破链
+            continue
         else:
             break
     return count
@@ -462,8 +529,75 @@ def build_block_reason(violation, other_violations):
             "- or archive the task directory (rename or remove) once the"
             " user confirms it is obsolete.",
         ]
+    elif check == "continuity_handoff_missing":
+        # v2.2 C8 第 0 位检查（§15 机械协议）：交接不 durable ——
+        # 报文点名缺失工件与具体动作（先写 checkpoint 刷 manifest 再停）
+        lines = [
+            "Completion blocked: continuity handoff is not durable"
+            " (task %s)." % task_id,
+            "Missing handoff artifacts:",
+        ]
+        if "checkpoint.md" in detail.get("missing", []):
+            lines.append("- checkpoint.md (write the CONTINUITY CHECKPOINT"
+                         " into the task directory)")
+        if "manifest.json" in detail.get("missing", []):
+            lines.append("- manifest.json (refresh the resume manifest)")
+        lines.append("")
+        lines.append("Write the checkpoint and refresh the resume manifest,")
+        lines.append("then Stop again to hand the task over durably.")
+    elif check == "continuity_subscription_missing":
+        # quota subscription 缺失（C5b 转态点应已自动注册；缺=legacy /
+        # 折算失败）：行动 = 手动 register 或显式降级
+        lines = [
+            "Completion blocked: quota subscription is not registered"
+            " (task %s)." % task_id,
+            "- enabled: %s" % (detail.get("enabled"),),
+            "- registered_epoch_id: %s" % (
+                detail.get("registered_epoch_id") or "none"),
+            "",
+            "Register the quota subscription for the current quota epoch,",
+            "or explicitly degrade continuity (continuation.obligation =", 
+            "degraded) to release the auto-resume requirement.",
+            "Then Stop again.",
+        ]
+    elif check == "continuity_transport_not_armed":
+        # 未 armed 且（create==allowed 或 origin==interactive）：本会话
+        # 有能力武装，先 arm bridge 再停（§22.5 对账后的重 arm 路径）
+        lines = [
+            "Completion blocked: activation transport is not armed"
+            " (task %s)." % task_id,
+            "- wake_bridge status: %s" % (detail.get("bridge_status"),),
+            "- scheduler origin: %s, create capability: %s" % (
+                detail.get("scheduler_origin"),
+                detail.get("scheduler_create")),
+            "",
+            "Arm the wake bridge first (persistent recurring automation",
+            "via arm_wake_bridge / transport.arm), then Stop again.",
+        ]
+    elif check == "continuity_transport_unknown":
+        # 未 armed 且双 unknown：能力未验证——先尝试一次 CronCreate
+        # 探测记录能力 / 跑 wake-plan，再记账 + arm（gate_exhausted
+        # 机器复用保证连续 block 后降级放行，不死锁）
+        lines = [
+            "Completion blocked: activation transport is not armed and the",
+            "scheduler capability is unverified (task %s)." % task_id,
+            "- wake_bridge status: %s" % (detail.get("bridge_status"),),
+            "- scheduler origin: %s, create capability: %s" % (
+                detail.get("scheduler_origin"),
+                detail.get("scheduler_create")),
+            "",
+            "Probe the host scheduler capability once (attempt one",
+            "CronCreate to record the observation) or run the wake-plan,",
+            "record the continuation.scheduler_context facts, arm the",
+            "wake bridge, then Stop again.",
+        ]
     else:  # 防御：词汇表外的新 check 落到通用报文（词汇封闭后不可达）
         lines = ["Completion blocked: %s (task %s)." % (check, task_id)]
+    if isinstance(detail, dict) and detail.get("watcher"):
+        # v2.2 C8 watcher 健康注记（§26-14）：只随报文附注，永不改变
+        # block / 放行方向
+        lines.append("Note: quota watcher health: %s (degrade-only"
+                     " annotation, never a block)." % detail["watcher"])
     for other_id, other_check, _other_detail in other_violations:
         lines.append("Also failing in task %s: %s" % (other_id, other_check))
     return "\n".join(lines)
@@ -601,12 +735,265 @@ def task_participates(task_state):
     return False
 
 
+# —— v2.2 C8 第 0 位检查：continuity health（修正计划 §C8/§15/§22.5） ——
+
+def _watcher_health_reason(ledger):
+    """quota watcher 健康注记（degrade-only，§26-14）：返回结构化
+    reason 或 None（健康 / 无法评估时也不 block）。
+
+      - watcher.json 缺失 / 损坏（read_watcher_state → None）→
+        "continuity_watcher_absent"；
+      - heartbeat_at 缺失 / 不可解析（age 为 None，不虚构）或年龄超过
+        DEFAULT_HEARTBEAT_STALE_SECONDS（180s，watcher_store 单一真相
+        源，本处不发明新阈值）→ "continuity_watcher_stale"；
+      - 其余（记录存在且心跳新鲜）→ None。
+
+    read_watcher_state 自身绝不抛（fail-open 读方契约）；本函数纯读
+    零写，词汇见 CONTINUITY_DEGRADE_REASONS。
+    """
+    from runtime.quota import watcher_store
+
+    record = watcher_store.read_watcher_state(ledger)
+    if record is None:
+        return "continuity_watcher_absent"
+    age = watcher_store.heartbeat_age_seconds(record)
+    if age is None \
+            or age > float(watcher_store.DEFAULT_HEARTBEAT_STALE_SECONDS):
+        return "continuity_watcher_stale"
+    return None
+
+
+def evaluate_continuity_health(repo, task_id, task_state, ledger=None):
+    """v2.2 C8 Stop 门第 0 位检查：dormant 任务的 continuity 健康三件套
+    （修正计划 §C8：DRAINING 交接不再要求 exact wake_at，改要求
+    handoff durable + quota subscription + at least one valid activation
+    transport）。
+
+    纯读检查：零网络、零模型调用、零宿主 Cron* 调用（D2/H-A 不变），
+    只读任务 state（入参）+ 任务目录 checkpoint.md / resume manifest /
+    watcher.json 存在性 + runtime.activation_transport 状态事实——
+    **不写任何文件**；降级可见性经既有 stderr + gate_degraded journal
+    事件面（由调用方 _journal_continuity_degrade 落账）。
+
+    触发域（冻结，域外返回 None 零介入——Stop 每回合都触发，trio 是
+    dormant 交接要求不是日常要求）：任务活动（terminal 恒零介入）且
+    （status ∈ CONTINUITY_TRIGGER_STATUSES 或 quota.execution_phase ∈
+    CONTINUITY_TRIGGER_PHASES）且 route.continuity == "resumable" 且
+    execution_policy.continuity.auto_resume ∈
+    CONTINUITY_TRIGGER_AUTO_RESUMES。
+
+    三检查矩阵（依赖序，首败即返）：
+      1. handoff durable：任务目录 checkpoint.md 存在 **且** resume
+         manifest 文件存在（resume_manifest.resume_manifest_path 既有
+         路径助手）——缺 → block continuity_handoff_missing（可行动：
+         先写 checkpoint 刷 manifest 再停，§15 机械协议）；
+      2. quota subscription：quota_subscription.enabled 为 True 且
+         registered_epoch_id 非空——缺 → block
+         continuity_subscription_missing（C5b 转态点应已自动注册，缺 =
+         legacy / 折算失败；行动 = 手动 register 或显式降级）；
+      3. activation transport armed：activation_transport_status().armed
+         为 True → ok；未 armed 时按 §22.5 由当前 session capability
+         裁决——scheduler_create == "allowed" 或 scheduler_origin ==
+         "interactive" → block continuity_transport_not_armed（先 arm
+         bridge）；create == "forbidden" 或 origin == "scheduled_task"
+         → 降级放行（reason=continuity_scheduler_create_forbidden，
+         INV-22-PB-07 不无限 block）；双 unknown → block
+         continuity_transport_unknown（尝试一次 CronCreate 记录能力 /
+         跑 wake-plan；gate_exhausted 机器复用保证连续 block 后降级
+         放行，不死锁）。
+
+    obligation 短路（先于 trio）：continuation.obligation == "degraded"
+    → 直接降级放行（reason=continuity_obligation_degraded；既有 C1b
+    裁决不重审）；obligation == "armed" 不短路——仍经第 3 检查验证
+    bridge 实际 armed（armed 记账遇 cancelled / stale 桥 = §22.5 对账
+    后状态 → 按未 armed 矩阵走）。
+
+    watcher 健康（degrade-only 注记，永不独立 block，§26-14）：trio
+    评估时读一次 watcher_store 状态，结果以 "watcher" 键随返回值携带，
+    由调用方附注进报文 / journal（trio 全绿而 watcher 不健康时注记
+    即成为该次降级的 reason）。
+
+    返回：
+      - None：触发域外（零介入，不产生任何 I/O）；
+      - dict：{"outcome": "ok"|"block"|"degraded",
+               "check": block check 名或 None,
+               "detail": block 结构化字段或 None,
+               "reason": 降级 reason（continuity_*）或 None,
+               "watcher": watcher 注记 reason 或 None}。
+
+    parent_automation_id 消费警示（C6 review P3-3 落地，⑥）：
+    continuation.scheduler_context.parent_automation_id 是**观测镜像**
+    （latest-wins 的会话启动 / automation 创建事实注记，会被后续观察
+    覆盖），**不是权威**——桥身份的唯一权威恒在
+    continuation.wake_bridge.automation_id。本检查从不读取
+    parent_automation_id 做任何裁决；armed 判定只消费
+    activation_transport_status 的 armed 事实（其本身只认
+    wake_bridge.status ∈ armed/fired 活桥族）。
+
+    参数 repo / ledger 的语义与 evaluate_task 一致（RB-2）：ledger 是
+    任务账本根（state.json / checkpoint / manifest / watcher.json 的
+    求值位，activation_transport_status 亦按账本根加载 state）；ledger
+    缺省（None）时回退 repo（单仓 legacy 等价形态）。task_id 仅供
+    路径定位。
+
+    fail-open：本函数内部任何异常（import 失败 / 状态形状异常 /
+    activation_transport 求值错误等）→ 该任务降级放行
+    （reason=continuity_evaluation_error），绝不向上抛——新检查绝不
+    崩门、绝不比四重检查拦得更狠。
+    """
+    root = ledger if ledger is not None else repo
+    try:
+        st = task_state if isinstance(task_state, dict) else {}
+        from runtime import state as state_mod
+
+        # —— 触发域（冻结；域外零介入，先于任何 I/O） ——
+        status = st.get("status")
+        if status in state_mod.TERMINAL_STATUSES:
+            return None  # terminal 任务（completed/cancelled/failed）零介入
+        quota = st.get("quota")
+        phase = quota.get("execution_phase") \
+            if isinstance(quota, dict) else None
+        if status not in CONTINUITY_TRIGGER_STATUSES \
+                and phase not in CONTINUITY_TRIGGER_PHASES:
+            return None
+        route = st.get("route")
+        if not isinstance(route, dict) \
+                or route.get("continuity") != "resumable":
+            return None
+        policy = st.get("execution_policy")
+        continuity_block = policy.get("continuity") \
+            if isinstance(policy, dict) else None
+        auto_resume = continuity_block.get("auto_resume") \
+            if isinstance(continuity_block, dict) else None
+        if auto_resume not in CONTINUITY_TRIGGER_AUTO_RESUMES:
+            return None
+
+        # watcher 健康（degrade-only 注记；先取好，随任意结果携带）
+        watcher = _watcher_health_reason(root)
+
+        # —— obligation 短路：既有 C1b 降级裁决不重审 ——
+        continuation = st.get("continuation")
+        continuation = continuation if isinstance(continuation, dict) else {}
+        if continuation.get("obligation") == "degraded":
+            return {"outcome": "degraded",
+                    "check": None, "detail": None,
+                    "reason": "continuity_obligation_degraded",
+                    "watcher": watcher}
+
+        # —— trio 1：handoff durable（checkpoint.md + manifest.json） ——
+        from runtime import resume_manifest
+        checkpoint = state_mod.task_dir(root, task_id) / "checkpoint.md"
+        missing = []
+        if not checkpoint.is_file():
+            missing.append("checkpoint.md")
+        if not resume_manifest.resume_manifest_path(root, task_id).is_file():
+            missing.append("manifest.json")
+        if missing:
+            return {"outcome": "block",
+                    "check": "continuity_handoff_missing",
+                    "detail": {"missing": missing},
+                    "reason": None,
+                    "watcher": watcher}
+
+        # —— trio 2：quota subscription（enabled + registered 非空） ——
+        subscription = st.get("quota_subscription")
+        subscription = subscription if isinstance(subscription, dict) else {}
+        enabled = subscription.get("enabled")
+        registered = subscription.get("registered_epoch_id")
+        if enabled is not True or not isinstance(registered, str) \
+                or registered == "":
+            return {"outcome": "block",
+                    "check": "continuity_subscription_missing",
+                    "detail": {"enabled": enabled,
+                               "registered_epoch_id": registered},
+                    "reason": None,
+                    "watcher": watcher}
+
+        # —— trio 3：activation transport armed（§22.5 capability 裁决） ——
+        from runtime.activation_transport import activation_transport_status
+        transport = activation_transport_status(root, task_id)
+        if transport.get("armed") is True:
+            # armed / fired 活桥族：ok（obligation=="armed" 的记账也在
+            # 此处经宿主对账后的事实面复核——cancelled / stale 桥到不了
+            # 这个分支，自然落入下方未 armed 矩阵）
+            return {"outcome": "ok",
+                    "check": None, "detail": None, "reason": None,
+                    "watcher": watcher}
+        facts = {"bridge_status": transport.get("bridge_status"),
+                 "scheduler_origin": transport.get("scheduler_origin"),
+                 "scheduler_create": transport.get("scheduler_create")}
+        if facts["scheduler_create"] == "allowed" \
+                or facts["scheduler_origin"] == "interactive":
+            return {"outcome": "block",
+                    "check": "continuity_transport_not_armed",
+                    "detail": facts,
+                    "reason": None,
+                    "watcher": watcher}
+        if facts["scheduler_create"] == "forbidden" \
+                or facts["scheduler_origin"] == "scheduled_task":
+            # §22.5：scheduled-owned / 不可用 → degraded / fallback
+            # （INV-22-PB-07：降级放行，绝不无限 block）
+            return {"outcome": "degraded",
+                    "check": None, "detail": None,
+                    "reason": "continuity_scheduler_create_forbidden",
+                    "watcher": watcher}
+        # 双 unknown：能力未验证 → block（尝试一次 CronCreate 记录能力 /
+        # 跑 wake-plan；gate_exhausted 复用防死锁）
+        return {"outcome": "block",
+                "check": "continuity_transport_unknown",
+                "detail": facts,
+                "reason": None,
+                "watcher": watcher}
+    except Exception:
+        # fail-open：检查自身任何异常 → 该任务降级放行（词汇见
+        # CONTINUITY_DEGRADE_REASONS），绝不崩门
+        return {"outcome": "degraded",
+                "check": None, "detail": None,
+                "reason": "continuity_evaluation_error",
+                "watcher": None}
+
+
+def _journal_continuity_degrade(ledger, task_id, reason, watcher=None):
+    """continuity health 降级的可见记账：stderr 报警 + 账本 journal 追加
+    既有 gate_degraded 事件（reason 为 continuity_* 结构化词汇，精确
+    可断言；watcher 注记存在且不同于主 reason 时以 "watcher" 键随事件
+    落账——单一 reason 字段保持词汇精确性）。
+
+    首参语义：任务账本根（journal 恒在账本根）。记账 / 报警异常一律
+    吞掉（fail-open：可见性损失绝不反过来让门崩溃）。
+    """
+    from runtime import journal
+
+    event = {"event": "gate_degraded", "reason": reason}
+    if watcher and watcher != reason:
+        event["watcher"] = watcher
+    try:
+        journal.append_event(ledger, task_id, event)
+    except Exception:
+        pass
+    warn_stderr(
+        "ENFORCEMENT DEGRADED: continuity health degraded for task %s "
+        "(reason=%s); the task is allowed past the continuity check"
+        % (task_id, reason))
+
+
 def evaluate_task(task_id, task_state, repo, touched, base, ledger=None):
-    """对单个参与任务按 §15 顺序做四重检查，首个失败即返回。
+    """对单个参与任务按顺序做检查：第 0 位 continuity health（v2.2 C8，
+    仅触发域内任务，见 evaluate_continuity_health）→ §15 四重检查，
+    首个失败即返回。
 
     返回 None（全部通过，或四项声明全空不参与）或 (check, detail)；
     task_id 仅供调用方关联（violation 组装与报错上下文），本函数不在
     返回值中重复携带。
+
+    第 0 位 continuity 检查（wu-22-C8）：触发域内任务先做交接三件套
+    检查——block 方向以 continuity_* check 并入既有违规机器（报文 /
+    journal gate_blocked / exhaustion 全复用）；degraded 方向经
+    _journal_continuity_degrade 落 stderr + 账本 journal gate_degraded
+    （reason=continuity_* 结构化词汇）后**继续**四重检查——降级是
+    放行方向，绝不因新检查把任务拦得更狠；检查自身任何异常已在
+    evaluate_continuity_health 内部 fail-open 为
+    continuity_evaluation_error 降级。既有四重检查行为逐字不变。
 
     证据指纹惰性求值：current 在 verification 指纹比对或 review 指纹
     比对首次需要时才算，每任务至多一次，两处共用——ownership / 命令
@@ -635,6 +1022,30 @@ def evaluate_task(task_id, task_state, repo, touched, base, ledger=None):
     方并入降级路径（不静默放宽）。
     """
     from runtime import fingerprint, ownership
+
+    # 0) continuity health（v2.2 C8，修正计划 §C8/§15/§22.5）：触发域
+    #    内任务的交接三件套检查，先于四重检查（第 0 位）。域外任务
+    #    零介入（返回 None，域判定先于任何 I/O）；域内 block → 以
+    #    continuity_* check 并入既有违规机器；degraded / watcher 注记
+    #    → stderr + 账本 journal gate_degraded（continuity_* 词汇）后
+    #    继续四重检查——绝不因新检查把任务拦得更狠
+    health = evaluate_continuity_health(
+        repo, task_id, task_state, ledger=ledger)
+    if health is not None:
+        journal_root = ledger if ledger is not None else repo
+        watcher = health.get("watcher")
+        outcome = health.get("outcome")
+        if outcome == "block":
+            detail = dict(health.get("detail") or {})
+            if watcher:
+                detail["watcher"] = watcher
+            return (health["check"], detail)
+        if outcome == "degraded":
+            _journal_continuity_degrade(
+                journal_root, task_id, health.get("reason"), watcher)
+        elif watcher:
+            # trio 全绿但 watcher 不健康：仅降级注记，永不 block（§26-14）
+            _journal_continuity_degrade(journal_root, task_id, watcher)
 
     # 1) ownership：touched ⊆ owned？
     patterns = _nonempty_strs(_section(task_state, "ownership").get("files"))

@@ -29,7 +29,12 @@ TS2 = "2026-08-30T13:30:00Z"
 CLI_PATH = (Path(__file__).resolve().parents[1] / "plugins" /
             "glm-conductor" / "runtime" / "cli.py")
 
-# §3 冻结 schema 原文（逐字段锚定，default_execution_policy 必须等于它）
+# 冻结 schema 原文（逐字段锚定，default_execution_policy 必须等于它）。
+# v2.2 M1（wu-22-01）：§3 四必填子块不变，默认块新增可选子块
+# quota_control（决策记录 D5，pressure/draining 阈值，默认 35/20）；
+# v2.2 M1a（WU-22-01a）：quota_control 增补 bridge_interval_minutes
+# （决策记录 D15-d，Persistent Wake Bridge 固定间隔，保守默认 60——
+# 详细契约锚定见 tests/test_execution_policy_quota_control.py）
 FROZEN_DEFAULT = {
     "worker_execution": {"default_mode": "background"},
     "parallelism": {"mode": "standard", "default_workers": 2,
@@ -38,6 +43,8 @@ FROZEN_DEFAULT = {
                    "max_quota_windows": 0},
     "authorization": {"source": "default", "confirmed_at": None,
                       "scope": "task"},
+    "quota_control": {"pressure_percent": 35.0, "draining_percent": 20.0,
+                      "bridge_interval_minutes": 60},
 }
 
 

@@ -35,6 +35,16 @@
     Stop 完成门 receipt 检查）；无活动任务时零干预（v2.0.1 行为不
     回退）。
 
+职责四（deny，v2.2 C6 scheduler 嵌套创建 fail-fast，wu-22-C6）：
+    tool_name == "CronCreate" 的嵌套创建门。按载荷 session_id 读
+    runtime.scheduler_facts 会话事实缓存（hook PostToolUse Cron* 成功
+    路径与 PostToolUseFailure 嵌套拒绝分类路径写入的**已证事实**）：
+    create==forbidden 或 origin==scheduled_task 任一在案 → deny（可
+    行动英文报文，Phase 0 #13 硬门：被 Scheduled Task 触发 / 拥有的
+    会话禁止再创建 automation）；无证据（无 session_id / 无记录 /
+    记录无禁止事实）→ 静默放行——单探针纪律：第一次尝试必须被允许
+    才能产生证据，门绝不预判。本门只读事实缓存，零写零事件。
+
 与 Layer A 的分工：
     - Layer B（本钩子）：提示级注入，只能「提高合规率」，无法确定性约束
       子代理行为——advisory only，绝不 deny、绝不阻断派发；
@@ -44,10 +54,11 @@
 
 分发与兼容选择：
     按 payload 的 tool_name 分发：tool_name 严格等于 "Bash" → 策略门控
-    路径；其余（Agent / Task，以及 tool_name 缺失 / stdin 空 / 非 JSON
-    的 payload {}）一律走既有注入路径——tool_name 缺失按现状走注入路径
-    是显式兼容选择（B7.2 之前 payload 从未被消费，保持该场景行为逐字节
-    不变）。
+    路径；tool_name 严格等于 "CronCreate" → 嵌套创建 fail-fast 门
+    （v2.2 C6 职责四）；其余（Agent / Task，以及 tool_name 缺失 /
+    stdin 空 / 非 JSON 的 payload {}）一律走既有注入路径——tool_name
+    缺失按现状走注入路径是显式兼容选择（B7.2 之前 payload 从未被消费，
+    保持该场景行为逐字节不变）。
 
 fail-open 契约（两条路径共同遵守）：
     本钩子主体属 advisory / 策略层，全路径 fail-open：任何内部异常（含
@@ -421,10 +432,71 @@ def agent_permit_gate(payload):
     return 0
 
 
+# —— 职责四：CronCreate 嵌套创建 fail-fast 门（v2.2 C6，wu-22-C6） ——
+
+def _deny_cron_nested(evidence):
+    """输出嵌套创建门的 deny 决策（英文可行动报文）并返回 0。
+
+    报文指明：拦截依据（在案证据）+ 硬门语义 + 自救路径（交互会话
+    走 bridge 生命周期记账）——主会话照报文即可调整编排。
+    """
+    text = ("GLM CONDUCTOR: CronCreate blocked: nested automation "
+            "creation is forbidden for this session (recorded scheduler "
+            "evidence: %s). A session owned or previously rejected by "
+            "the host scheduler MUST NOT create further Scheduled Tasks "
+            "(Phase 0 hard gate). Do not retry CronCreate from this "
+            "session; perform bridge lifecycle changes from an "
+            "interactive session and record them with "
+            "task_manager.arm_wake_bridge instead." % evidence)
+    output = {
+        "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": "deny",
+            "permissionDecisionReason": text,
+        }
+    }
+    sys.stdout.write(json.dumps(output) + "\n")
+    return 0
+
+
+def cron_nested_gate(payload):
+    """CronCreate 嵌套创建 fail-fast 路径（v2.2 C6 职责四）。
+
+    只读 runtime.scheduler_facts 会话事实缓存（PostToolUse Cron* /
+    PostToolUseFailure 分类路径写入的已证事实），按载荷 session_id
+    检索：
+      - create == "forbidden" 或 origin == "scheduled_task" 任一在案
+        → deny（单探针纪律：禁止事实已在案，绝不再放行重探测）；
+      - 无 session_id / 无记录 / 记录无禁止事实 → 静默放行（exit 0、
+        stdout 恒空）——无证据不预判，第一次尝试必须被允许才能产生
+        证据。
+    本路径零写零事件；读取按 scheduler_facts 的 fail-open 契约
+    （读失败 = 无证据 = 放行）。
+    """
+    from runtime import scheduler_facts
+
+    session_id = payload.get("session_id")
+    if not isinstance(session_id, str) or session_id == "":
+        return 0  # 无会话身份 = 无证据 → 静默放行
+    facts = scheduler_facts.read_session_record(repo_root(), session_id)
+    if not isinstance(facts, dict):
+        return 0
+    evidence = []
+    if facts.get("origin") == "scheduled_task":
+        evidence.append("origin=scheduled_task")
+    if facts.get("create") == "forbidden":
+        evidence.append("create=forbidden")
+    if not evidence:
+        return 0
+    return _deny_cron_nested(", ".join(evidence))
+
+
 def main():
-    """主流程：读 stdin（容错）→ 按 tool_name 分发三条路径。
+    """主流程：读 stdin（容错）→ 按 tool_name 分发四条路径。
 
     - tool_name == "Bash" → 策略门控路径（bash_policy_gate）；
+    - tool_name == "CronCreate" → 嵌套创建 fail-fast 门
+      （cron_nested_gate，v2.2 C6）；
     - 其余（Agent / Task / tool_name 缺失 / 空 payload）→ permit 门
       路径（agent_permit_gate：无活动任务零干预、非实施者类型走
       advisory 注入、实施者类型按 permit 链 allow/deny）。任何路径
@@ -435,6 +507,8 @@ def main():
     payload = read_payload()
     if payload.get("tool_name") == "Bash":
         return bash_policy_gate(payload)
+    if payload.get("tool_name") == "CronCreate":
+        return cron_nested_gate(payload)
     return agent_permit_gate(payload)
 
 

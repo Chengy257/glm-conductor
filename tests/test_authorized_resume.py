@@ -62,6 +62,7 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "plugins" / "glm-conductor"))
 from runtime import (execution_policy, journal, reconcile as reconcile_mod,
                      recovery, resume_manifest, state, task_manager)
+from runtime.quota import epoch as quota_epoch
 from runtime.quota import resolver as quota_resolver
 
 TID = "authorized-resume-1a2b3c"
@@ -609,6 +610,31 @@ class WakePromptTest(unittest.TestCase):
         self.assertIn("CronUpdate", prompt)
         self.assertIn("maxRuns=1", prompt)                # 一次性语义
         self.assertIn("wu-a", prompt)                     # 等待单元清单
+
+    def test_quota_wake_prompt_no_wake_record_discipline(self):
+        """C1a（wu-22-C1a，D15-g）：prompt 不再携带「arm 后串联
+        wake-record 记账」旧纪律——预算状态行保留前缀，消费语义改为
+        「本唤醒不消耗窗口预算（消费点 = resume commit point）」。"""
+        policy = authorize(save_task(
+            self.repo,
+            units=[make_unit("wu-a", "waiting_quota")],
+            policy=None), "until_done", 2)
+        st = state.load_state(self.repo, TID)
+        st["execution_policy"] = policy
+        st["status"] = "waiting_quota"
+        state.save_state(self.repo, st)
+        task_manager.record_quota_wake(self.repo, TID,
+                                       automation_id="cron-1",
+                                       fires_at="2026-08-31T12:05:00Z")
+
+        prompt = task_manager.quota_wake_prompt(self.repo, TID)
+
+        self.assertIn("已消耗 1 / 共 2 窗", prompt)        # 前缀行保留
+        self.assertIn("剩余 1 窗", prompt)
+        self.assertIn("不消耗窗口预算", prompt)            # D15-g 新语义
+        self.assertNotIn("record_quota_wake", prompt)      # 旧纪律清除
+        self.assertNotIn("wake-record", prompt)
+        self.assertNotIn("本唤醒消耗 1 个窗口预算", prompt)
 
     def test_prompt_missing_task_rejected(self):
         with self.assertRaises(task_manager.TaskManagerError):
@@ -1180,6 +1206,193 @@ class QuotaResumeReconciliationTest(unittest.TestCase):
                          {"wu-r": {"classification":
                                    "redispatch_clean"}})
         self.assertTrue(result["resumed"])
+
+
+class SubscriptionResumeWiringTest(unittest.TestCase):
+    """C5b（wu-22-C5b）订阅接线在授权续跑面的用例（纯增量——本文件
+    既有用例是 legacy 逐字不变的硬门槛，C5b 只追加不修改）：
+
+      1. legacy 任务 resume 返回冻结五键、无 subscription 键（本文件
+         既有全部用例原样绿即同锚）；
+      2. handle_quota_exhausted 转态点注册：缓存在位 → 按当前 epoch
+         注册（幂等同参 / 新 epoch 更新）；缓存缺位 → 不注册零副作用；
+      3. 已注册任务：同 epoch 不恢复（QC-07）；新 epoch + executable
+         → 恢复 + mark 恰一次；running 中断单元与订阅门组合（资格过 +
+         对账过才转态）。
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.repo = self._tmp.name
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    # —— 真实窗口夹具（epoch 身份与 runtime 同源折算） ——
+
+    WINDOWS_A = [{"kind": "five_hour", "status": "EXHAUSTED",
+                  "used_percent": 100.0, "remaining_percent": 0.0,
+                  "reset_at": "2026-09-02T12:00:00Z"}]
+    WINDOWS_B = [{"kind": "five_hour", "status": "AVAILABLE",
+                  "used_percent": 10.0, "remaining_percent": 90.0,
+                  "reset_at": "2026-09-02T17:00:00Z"}]
+    EPOCH_A = quota_epoch.epoch_id(WINDOWS_A)
+    EPOCH_B = quota_epoch.epoch_id(WINDOWS_B)
+
+    def _waiting_task(self, units=None):
+        policy = authorize(save_task(
+            self.repo, status="waiting_quota",
+            units=units if units is not None
+            else [make_unit("wu-a", "waiting_quota")],
+            policy=None), "until_done", 2)
+        st = state.load_state(self.repo, TID)
+        st["execution_policy"] = policy
+        state.save_state(self.repo, st)
+
+    def _subscribe(self, epoch_id):
+        task_manager.register_quota_subscription(self.repo, TID,
+                                                 epoch_id=epoch_id)
+
+    @staticmethod
+    def _resolved(status):
+        return {"status": status, "source": "provider",
+                "evaluated_at": "2026-09-02T12:00:00.000Z",
+                "reason": "fixture"}
+
+    @staticmethod
+    def _detail(status, windows):
+        return {"source": "provider", "status": status,
+                "snapshot": {"provider": "fixture",
+                             "fetched_at": "2026-09-02T12:00:00.000Z",
+                             "status": status, "windows": windows},
+                "fetched_at": "2026-09-02T12:00:00.000Z"}
+
+    def _resume(self, status=None, resolved_status="AVAILABLE",
+                windows=WINDOWS_B):
+        with mock.patch.object(
+                quota_resolver, "resolve_quota_status",
+                return_value=self._resolved(resolved_status)), \
+             mock.patch.object(
+                 quota_resolver, "resolve_quota_detail",
+                 return_value=self._detail(resolved_status, windows)):
+            return task_manager.resume_from_quota(self.repo, TID,
+                                                  status=status)
+
+    def test_legacy_resume_result_keys_frozen_no_subscription_key(self):
+        # 硬门槛锚（C5b 视角复述）：legacy（默认块未注册）任务 resume
+        # 输出恰为冻结五键，无 subscription 键，明细解析零调用
+        self._waiting_task()
+        with mock.patch.object(
+                quota_resolver, "resolve_quota_detail") as detail_mock:
+            result = task_manager.resume_from_quota(self.repo, TID,
+                                                    status="AVAILABLE")
+        detail_mock.assert_not_called()
+        self.assertEqual(sorted(result.keys()),
+                         ["recommended_resume_at", "resumed", "status",
+                          "unit_recovery", "wake_budget_remaining"])
+        self.assertTrue(result["resumed"])
+
+    def _executing_task(self):
+        """转态点注册用例的入口态（executing + ready 单元）。"""
+        save_task(self.repo, status="executing",
+                  units=[make_unit("wu-a", "ready")])
+
+    def _write_exhausted_cache(self):
+        quota_resolver._save_cache(quota_resolver._cache_path(self.repo), {
+            "provider": "fixture",
+            "fetched_at": "2026-09-02T12:00:00.000Z",
+            "status": "EXHAUSTED",
+            "snapshot": {"provider": "fixture",
+                         "fetched_at": "2026-09-02T12:00:00.000Z",
+                         "status": "EXHAUSTED",
+                         "windows": self.WINDOWS_A}})
+
+    def test_exhausted_transition_without_cache_registers_nothing(self):
+        # 折算失败（无缓存）→ 不注册零副作用：legacy 路径逐字不变
+        self._executing_task()
+        task_manager.handle_quota_exhausted(self.repo, TID)
+        st = state.load_state(self.repo, TID)
+        self.assertEqual(st["status"], "waiting_quota")
+        self.assertEqual(st["quota_subscription"],
+                         state.default_quota_subscription())
+        self.assertEqual(
+            [e for e in journal.read_events(self.repo, TID)
+             if e.get("event") == "quota_subscription_registered"], [])
+
+    def test_exhausted_transition_with_cache_registers_then_idempotent(self):
+        # 缓存在位（prepare 刚刷新的常态）→ 转态点按当前 epoch 注册；
+        # 同 epoch 二次转态幂等（零新订阅事件）；返回冻结七键不变
+        self._executing_task()
+        self._write_exhausted_cache()
+        result = task_manager.handle_quota_exhausted(self.repo, TID)
+        self.assertEqual(sorted(result.keys()), [
+            "auto_resume", "reason", "recommended_resume_at",
+            "remaining_quota_windows", "task_status", "waiting_units",
+            "wake"])
+        st = state.load_state(self.repo, TID)
+        self.assertEqual(st["quota_subscription"]["registered_epoch_id"],
+                         self.EPOCH_A)
+        registered = [e for e in journal.read_events(self.repo, TID)
+                      if e.get("event") == "quota_subscription_registered"]
+        self.assertEqual(len(registered), 1)
+        # 同 epoch 二次转态：register 幂等（C5a），不重复写事件
+        st = state.load_state(self.repo, TID)
+        st["status"] = "executing"
+        state.save_state(self.repo, st)
+        task_manager.handle_quota_exhausted(self.repo, TID)
+        registered = [e for e in journal.read_events(self.repo, TID)
+                      if e.get("event") == "quota_subscription_registered"]
+        self.assertEqual(len(registered), 1)
+
+    def test_registered_task_same_epoch_not_resumed(self):
+        # QC-07：last_activation == 当前 epoch → 订阅门拦下，不恢复
+        self._waiting_task()
+        self._subscribe(self.EPOCH_B)
+        task_manager.mark_activation_epoch(self.repo, TID,
+                                           epoch_id=self.EPOCH_B)
+        result = self._resume(windows=self.WINDOWS_B)
+        self.assertFalse(result["resumed"])
+        face = result["subscription"]
+        self.assertFalse(face["eligible"])
+        self.assertEqual(face["epoch_id"], self.EPOCH_B)
+        self.assertTrue(any("已激活" in r for r in face["reasons"]))
+        self.assertEqual(state.load_state(self.repo, TID)["status"],
+                         "waiting_quota")
+        self.assertEqual(state.load_state(self.repo, TID)["work_units"][0]
+                         ["status"], "waiting_quota")
+
+    def test_registered_task_new_epoch_resumes_marks_once_and_recovers(self):
+        # 新 epoch + executable + running 中断单元四分对账干净 → 既有
+        # 恢复照走（单元回 ready）+ mark 恰一次 + 订阅面带激活记账
+        self._waiting_task(units=[make_interrupted_unit("wu-r", "running")])
+        self._subscribe(self.EPOCH_A)
+        task_manager.mark_activation_epoch(self.repo, TID,
+                                           epoch_id=self.EPOCH_A)
+        with mock.patch.object(
+                reconcile_mod, "reconcile_agent_run",
+                return_value={"classification": "redispatch_clean",
+                              "rationale": ["fixture"]}) as rec:
+            result = self._resume(windows=self.WINDOWS_B)
+        rec.assert_called_once_with(self.repo, TID, "wu-r")
+        self.assertTrue(result["resumed"])
+        self.assertEqual(result["unit_recovery"]["wu-r"],
+                         {"classification": "redispatch_clean"})
+        face = result["subscription"]
+        self.assertTrue(face["eligible"])
+        self.assertEqual(face["activated_epoch_id"], self.EPOCH_B)
+        self.assertTrue(face["mark"]["marked"])
+        on_disk = state.load_state(self.repo, TID)
+        self.assertEqual(on_disk["status"], "executing")
+        self.assertEqual(on_disk["work_units"][0]["status"], "ready")
+        self.assertEqual(on_disk["quota_subscription"]
+                         ["last_activation_epoch_id"], self.EPOCH_B)
+        advanced = [e for e in journal.read_control_plane_events(self.repo)
+                    if e.get("event") == "quota_epoch_advanced"]
+        self.assertEqual(len(advanced), 2)  # A 一次 + B 恰一次（QC-07）
+        self.assertEqual(advanced[-1]["epoch_id"], self.EPOCH_B)
+        resumed = [e for e in journal.read_events(self.repo, TID)
+                   if e.get("event") == "quota_resumed"]
+        self.assertEqual(len(resumed), 1)  # quota_resumed 事件键不扩
 
 
 if __name__ == "__main__":

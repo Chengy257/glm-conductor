@@ -1,0 +1,1380 @@
+# GLM-Conductor v2.2 Release Hardening 修复实施计划
+
+> 适用分支：`v2-dev`  
+> 审查基线：`6d2ee2dd30fcc69b4586a5f5e49e388c7a40edc9`  
+> 上一架构基线：`75be3ecc2a17647a590956483706370f4f5536e9`  
+> 文档定位：**v2.2 stable 前的 release-hardening 实施文档**  
+> 优先级：本文件高于当前未完成的扩展性计划；本阶段禁止继续扩展新 transport / 新 agent capability。  
+> 目标：修复副作用幂等、授权边界、账本崩溃一致性与真实跨窗验收问题，并完成 stable release gate。
+
+---
+
+## 1. 当前状态与总体结论
+
+相对 `75be3ec`，当前 `v2-dev` 已推进 21 个提交，C-series 主体已经落地，包括：
+
+- C2 Quota Epoch / 双 boundary；
+- C3 Real-Time Quota Watcher；
+- C4 Window Primer；
+- C5 Quota Subscription；
+- C6 Activation Transport / scheduler facts / Cron hooks；
+- C7 resume-time quota consumption；
+- C8 Stop Gate continuation health；
+- 对应 CLI、journal、state、tests 与 release-face 文档。
+
+当前实现已经从“架构未完成”进入“release hardening”阶段。
+
+### 1.1 本轮不再重新设计的部分
+
+以下结构经审查后继续保留，不作为本轮重构目标：
+
+1. `runtime/quota/observer.py` 保持纯决策层，Watcher 独立承担长运行 I/O；
+2. Quota Epoch 身份基于 `(kind, reset_at)`，不包含 percent/status；
+3. probe boundary 与 executable boundary 分离；
+4. `recurring_bridge` 仍为唯一 stable Activation Transport；
+5. `probe_then_hold` / `self_retiming` / `session_injector` 继续保持 reserved / experimental；
+6. arm / fire / CronCreate 不再消费 quota window；
+7. quota window 仅在 authorized resume commit point 消费；
+8. `new_consumed >= legacy_consumed` 的保守迁移原则保持；
+9. Watcher 当前仍是 skeleton-first，负责 quota truth，不直接唤醒 dormant Session。
+
+### 1.2 当前 release 结论
+
+当前代码可以继续作为：
+
+```text
+v2.2 alpha / beta
+```
+
+但暂不应直接发布：
+
+```text
+v2.2 stable
+```
+
+Stable 前应至少关闭：
+
+- P1-A Primer timeout duplicate-call 风险；
+- P1-B Primer mechanical authorization gap；
+- P2 quota consumption crash-consistency；
+- RG-22-06 新 C-series 双 quota epoch end-to-end dogfood。
+
+---
+
+# 2. 修复范围与实施顺序
+
+本轮冻结实施顺序：
+
+```text
+RH-01 Primer single-attempt hardening
+    ↓
+RH-02 Primer mechanical authorization
+    ↓
+RH-03 Quota consumption crash consistency
+    ↓
+RH-04 Boundary evidence semantic cleanup
+    ↓
+RH-05 CI / release verification hardening
+    ↓
+RH-06 RG-22-06 real multi-epoch dogfood
+    ↓
+RH-07 stable release decision
+```
+
+禁止为了完成本轮修复而引入：
+
+- 新 Activation Transport；
+- Session Injector；
+- Probe-Then-Hold 正式实现；
+- CronUpdate correctness path；
+- 数据库 / 外部服务；
+- 新 daemon/service manager；
+- 大规模 state schema 重构；
+- 与问题无关的代码格式化或目录重组。
+
+## 决策锁定（2026-09-04）
+
+> [修正 2026-09-04] 新增本节：记录本轮已锁定的实施决策，后续 Work Unit 按此执行，不再在 §3–§7 的多方案之间重新选择。
+
+### RH-01 决策
+
+- 移除 retry loop；
+- timeout 类「可能已到达 provider」的网络失败改为 post-refresh 确认：epoch 推进 → `materialized=True`；未确认 → `materialized=False` + error；
+- 明确未到达 provider 的失败（no-credential / URL 配置错 / 本地参数错）零 post-refresh；
+- HTTP 5xx / auth / malformed 不重发、不做歧义确认；
+- primed 语义不变（= 模型调用完成即 error 为 None）；
+- timeout + `materialized=True` 为合法记录组合；
+- `PRIMER_RECORD_FIELDS` 七键零变化。
+
+### RH-02 决策
+
+- 方案 A：`prime_once` 降为 `_prime_once_unchecked`，新增公共 `prime_authorized(repo_root, task_id, ...)` 内嵌三重闸。
+
+### RH-03 决策
+
+- 方案 A：write-ahead pending marker；
+- 迁移同款 pending marker（语义按 §5.4 修正版：先冻结 legacy/verified/attributed 三数再动 state）。
+
+### RH-04 决策
+
+- 方案 A：新事件字段 `representative_boundary_id` + 双键兼容读，不重写旧 journal。
+
+### RH-05 决策
+
+- 按修正一（§7）塌缩：RH-01..05 本地 commit 完成后统一 push 触发新一轮 CI，四路全绿即关闭 §9.2「CI 独立 green」。
+
+---
+
+# 3. RH-01 — P1：Primer 模型调用必须改为 single-attempt
+
+## 3.1 问题
+
+当前 `runtime/quota/primer.py` 同时存在两个互相冲突的语义：
+
+设计语义：
+
+```text
+同一 provider_identity_hash + boundary_id
+最多执行一次具有 provider 副作用的 prime
+```
+
+但实际实现允许：
+
+```text
+MAX_PRIME_ATTEMPTS = 2
+```
+
+并将网络 timeout 判定为 retryable。
+
+可能产生：
+
+```text
+Prime Request #1
+    ↓
+Provider 已执行模型调用并 materialize 新窗口
+    ↓
+Response 在客户端 timeout
+    ↓
+Primer 自动发送 Request #2
+```
+
+该行为与 Primer 的 single-flight / P0-QP-07 设计冲突。
+
+Primer 是具有 provider-side state effect 的调用，不应按普通幂等 GET 请求处理。
+
+---
+
+## 3.2 决策
+
+冻结：
+
+```text
+一个 boundary_id 下，Primer 模型调用最多发出一次。
+```
+
+即：
+
+```python
+MAX_PRIME_ATTEMPTS = 1
+```
+
+或直接移除 retry loop。
+
+### timeout 后的正确处理
+
+不得立即重复模型请求。
+
+应执行：
+
+```text
+prime request
+    ↓ timeout / ambiguous response
+force-refresh quota
+    ↓
+检查 epoch/reset_at 是否已推进
+    ├─ 已推进 → materialized=True
+    └─ 未确认 → materialized=False + INDETERMINATE/NETWORK failure
+```
+
+重点：
+
+> timeout 表示“结果未知”，不是“provider 一定没有执行”。
+
+---
+
+## 3.3 推荐实现
+
+调整 `_prime_call()`：
+
+```python
+def _prime_call(...):
+    return _attempt_once(...)
+```
+
+删除 timeout retry。
+
+如果希望区分语义，可新增内部 error state：
+
+```text
+network_timeout_indeterminate
+```
+
+但不强制增加 public enum；也可保留：
+
+```json
+{
+  "kind": "network",
+  "detail": "socket.timeout"
+}
+```
+
+前提是后续仍执行 post-refresh confirmation。
+
+### 关键变化
+
+当前逻辑：
+
+```text
+call failure
+→ _fail()
+→ 不做 post-refresh
+```
+
+应调整为：
+
+```text
+call attempted
+→ 无论 success / timeout（仅对可能已到达 provider 的网络失败）
+→ post-refresh
+→ 判定是否 materialized
+```
+
+对于明确未到达 provider 的错误：
+
+- no credential；
+- URL/config validation failure；
+- local parameter failure；
+
+可继续零 post-refresh。
+
+---
+
+## 3.4 必须修改的测试
+
+更新：
+
+```text
+tests/test_primer.py
+```
+
+移除或改写：
+
+```text
+test_timeout_retry_then_success
+```
+
+新增至少：
+
+### PRIMER-RH-01
+
+```text
+timeout → transport calls == 1
+```
+
+### PRIMER-RH-02
+
+```text
+timeout + post-refresh epoch advanced
+→ materialized=True
+→ no second model call
+```
+
+### PRIMER-RH-03
+
+```text
+timeout + post-refresh same epoch
+→ materialized=False
+→ no second model call
+```
+
+### PRIMER-RH-04
+
+```text
+replay same provider_identity_hash + boundary_id
+→ zero transport
+→ zero quota refresh
+→ idempotent=True
+```
+
+### PRIMER-RH-05
+
+```text
+HTTP 5xx / auth / malformed
+→ no model-call retry
+```
+
+---
+
+## 3.5 验收
+
+必须满足：
+
+```text
+同一个 idempotency key 下，任何代码路径 transport call count <= 1
+```
+
+并通过静态测试确保不存在：
+
+```text
+retryable timeout → second model request
+```
+
+---
+
+# 4. RH-02 — P1：Primer 授权必须在真正发模型请求的 public API 内机械强制
+
+## 4.1 问题
+
+当前代码已有：
+
+```python
+authorize_prime(policy_view)
+```
+
+但真正发模型调用的：
+
+```python
+prime_once(...)
+```
+
+本身不读取 task/policy，也不验证授权。
+
+当前模式实质是：
+
+```text
+caller discipline
+    ↓
+authorize_prime()
+    ↓
+prime_once()
+```
+
+而不是：
+
+```text
+runtime public API
+    ↓
+mechanical authorization
+    ↓
+model call
+```
+
+这违背项目一贯原则：
+
+> 关键安全 / quota / authorization 条件不能只依赖 Agent prompt discipline。
+
+---
+
+## 4.2 决策
+
+将“是否允许发 Primer 模型调用”的授权闸收口至**唯一 public execution API**。
+
+推荐结构：
+
+```python
+prime_authorized(repo_root, task_id, *, ...)
+```
+
+流程：
+
+```text
+load task state
+    ↓
+read execution_policy
+    ↓
+authorize_prime(policy)
+    ↓
+derive/check provider identity + boundary
+    ↓
+_prime_once_unchecked(...)
+```
+
+当前：
+
+```python
+prime_once(...)
+```
+
+建议：
+
+### 方案 A（推荐）
+
+重命名为：
+
+```python
+_prime_once_unchecked(...)
+```
+
+仅供：
+
+- 单元测试；
+- 内部已授权 wrapper。
+
+对外只暴露：
+
+```python
+prime_authorized(...)
+```
+
+### 方案 B
+
+保留 `prime_once` 名称，但增加：
+
+```text
+task_id
+policy/state lookup
+authorization gate
+```
+
+不允许调用者绕过。
+
+---
+
+## 4.3 授权条件冻结
+
+必须同时满足：
+
+```text
+primer_enabled == True
+AND
+auto_resume ∈ {auto_once, until_done}
+AND
+authorization.source == "user"
+```
+
+以下必须机械拒绝：
+
+```text
+manual
+notify
+authorization.source != user
+primer_enabled == false
+policy missing / malformed
+```
+
+拒绝路径：
+
+```text
+zero model call
+zero provider mutation
+zero primer record
+zero window consumption
+```
+
+是否记录“authorization denied”审计事件可选，但不得制造 `window_primed`。
+
+---
+
+## 4.4 Public API 返回建议
+
+授权失败建议返回结构化结果，或抛专门异常：
+
+```python
+PrimerAuthorizationError
+```
+
+不建议使用裸 `ValueError` 表达未授权。
+
+例如：
+
+```json
+{
+  "authorized": false,
+  "primed": false,
+  "materialized": false,
+  "executable": false,
+  "reason": "primer_disabled"
+}
+```
+
+具体 surface 可由实施者保持现有兼容风格，但必须保证：
+
+> 未授权调用无法进入 transport。
+
+---
+
+## 4.5 测试
+
+新增：
+
+### PRIMER-AUTH-01
+
+```text
+primer_enabled=false
+→ transport calls == 0
+```
+
+### PRIMER-AUTH-02
+
+```text
+manual
+→ transport calls == 0
+```
+
+### PRIMER-AUTH-03
+
+```text
+notify
+→ transport calls == 0
+```
+
+### PRIMER-AUTH-04
+
+```text
+auto_once + source=default
+→ transport calls == 0
+```
+
+### PRIMER-AUTH-05
+
+```text
+until_done + source=user + primer_enabled=true
+→ exactly one authorized attempt
+```
+
+### PRIMER-AUTH-06
+
+直接调用对外 public API，不能绕过 authorize。
+
+---
+
+# 5. RH-03 — P2：quota consumption 的 state/journal 崩溃一致性
+
+## 5.1 问题
+
+当前：
+
+```python
+record_quota_boundary_consumed(...)
+```
+
+大致顺序：
+
+```text
+state.consumed += 1
+    ↓
+save_state()
+    ↓
+journal quota_boundary_consumed
+```
+
+若发生：
+
+```text
+save_state success
+journal append failure
+```
+
+会形成：
+
+```text
+state says consumed
+journal lacks epoch idempotence evidence
+```
+
+如果同 epoch 再调用 record API，有潜在二次 +1 风险。
+
+现有 resume subscription / activation mark 对主路径提供部分保护，但 API 自身宣称的：
+
+```text
+same epoch replay idempotent
+```
+
+目前尚非完整 crash-safe 契约。
+
+---
+
+## 5.2 本轮目标
+
+不要求引入数据库事务。
+
+目标是确保：
+
+```text
+同 task_id + epoch_id
+无论在 state write / journal write 的哪个位置崩溃
+最多只形成一次 quota consumption
+```
+
+---
+
+## 5.3 推荐实现方案
+
+### 方案 A：write-ahead pending marker（推荐）
+
+增加任务 journal 事件：
+
+```text
+quota_consumption_pending
+```
+
+字段至少：
+
+```json
+{
+  "event": "quota_consumption_pending",
+  "epoch_id": "...",
+  "executable_boundary_id": "...",
+  "target_consumed": 2,
+  "resume_started_at": "..."
+}
+```
+
+事务：
+
+```text
+1. scan committed + pending evidence
+2. if same epoch already committed → idempotent return
+3. if pending exists → reconcile instead of increment
+4. append pending
+5. update state projection
+6. append quota_boundary_consumed committed event
+7. optional append quota_consumption_reconciled / resolved
+```
+
+恢复时：
+
+```text
+pending exists + state already target_consumed
+→ only finish committed journal
+```
+
+```text
+pending exists + state not updated
+→ apply state projection once
+→ finish committed journal
+```
+
+核心原则：
+
+```text
+epoch identity exists before mutable projection is increased
+```
+
+### 方案 B：journal authoritative
+
+长期可考虑：
+
+```text
+journal consumption events = truth
+state.consumed = cached projection
+```
+
+但本轮不建议扩大为全局账本架构重构。
+
+---
+
+## 5.4 `migrate_quota_window_accounting` 同类问题
+
+> [修正 2026-09-04] 本节重写。原文以「同类问题」暗示迁移与消费记账一样存在「二次上调」风险，该表述不精确。
+
+事实：
+
+`new_consumed = max(legacy_consumed, verified_consumed)` 在结构上防止二次上调——崩溃重跑时 `legacy_consumed` 已是新值，`max` 不会再次抬高。
+
+真实风险是：
+
+1. migration marker 缺失导致幂等闸失效后重跑；
+2. 崩溃后重跑时 `legacy_consumed` 从已更新 state 误读，迁移事件记录的 `legacy_consumed` / `attributed_consumed` / `legacy_unattributed_consumed` 归属拆分失真。
+
+修法（与消费记账同款 pending marker）：
+
+```text
+quota_accounting_migration_pending
+```
+
+在动 state 之前先冻结 legacy / verified / attributed 三个数字；重跑时按 pending 记录补齐 migration marker，不依赖可能已被污染的现场 state。
+
+`MIGRATE-TXN-01` 的期望相应修正（见 §5.5 标注）：重跑只按 pending 补齐 marker、不二次上调、迁移记录不失真。
+
+---
+
+## 5.5 必须增加 fault-injection 测试
+
+### CONSUME-TXN-01
+
+模拟：
+
+```text
+pending journal success
+state save failure
+```
+
+重跑不得多消费。
+
+### CONSUME-TXN-02
+
+模拟：
+
+```text
+state save success
+committed journal failure
+```
+
+重跑不得多消费。
+
+### CONSUME-TXN-03
+
+```text
+same epoch normal replay
+→ consumed unchanged
+```
+
+### CONSUME-TXN-04
+
+```text
+different epoch
+→ consumed +1
+```
+
+### CONSUME-TXN-05
+
+```text
+pending event survives process restart
+→ reconciliation closes transaction
+```
+
+### MIGRATE-TXN-01
+
+> [修正 2026-09-04] 期望按 §5.4 修正版改为：重跑只按 pending 补齐 marker、不二次上调、迁移记录（legacy_consumed / attributed_consumed / legacy_unattributed_consumed 拆分）不失真。原文仅覆盖「不二次上调」，未覆盖归属拆分不失真。
+
+```text
+migration state save success
+migration event failure
+→ rerun only completes marker
+→ no second upward projection
+```
+
+---
+
+# 6. RH-04 — P3：`executable_boundary_id` 命名与来源清理
+
+## 6.1 问题
+
+当前 C7 辅助证据：
+
+```text
+executable_boundary_id
+```
+
+由：
+
+```python
+_bridge_boundary(windows, 0)
+```
+
+生成。
+
+该 helper 是：
+
+```text
+earliest parseable reset
+```
+
+而 C2 真正冻结的 executable boundary 是：
+
+```text
+max(blocking EXHAUSTED reset_at) + grace
+```
+
+因此当前字段名与实际来源并不严格一致。
+
+核心幂等性不受影响，因为真正权威键已经是：
+
+```text
+task_id + epoch_id
+```
+
+所以本项为 P3 semantic cleanup，不是 correctness blocker。
+
+---
+
+## 6.2 决策
+
+二选一。
+
+### 推荐 A：重命名辅助证据
+
+若当前字段表达的是“epoch 中用于人类审计的代表窗口”：
+
+```text
+representative_boundary_id
+```
+
+比 `executable_boundary_id` 更准确。
+
+### 或 B：真正按 C2 executable boundary 派生
+
+使用：
+
+```python
+quota.epoch.executable_boundary_at(...)
+```
+
+并构造与 blocking latest window 对应的 id。
+
+---
+
+## 6.3 兼容要求
+
+如果已有 journal 中包含：
+
+```text
+executable_boundary_id
+```
+
+不要破坏历史读取。
+
+允许：
+
+```text
+legacy executable_boundary_id
++
+new representative_boundary_id
+```
+
+迁移读取兼容。
+
+不要为了改名重写旧 journal。
+
+---
+
+# 7. RH-05 — CI / Release Engineering Hardening
+
+## 7.1 当前事实
+
+> [修正 2026-09-04] 本节重写。原文前提「GitHub 当前 Head 没有对应 combined CI status」已失效：`.github/workflows/validate.yml` 早已存在，独立 CI 证据链已经建立。
+
+事实：
+
+`.github/workflows/validate.yml` 早已存在：
+
+- 由 `1103e15` 引入（feat: add lightweight static validator and CI workflow）；
+- `61518b4` 增加全量单测步骤；
+- `2a18785` 增加平台矩阵。
+
+当前工作流形态：
+
+- 触发：push + pull_request；
+- Matrix：Linux + Windows × Python 3.8 / 3.13，共四路；
+- 每路执行：
+
+```text
+python scripts/validate_plugin.py
+python -m unittest discover -s tests -v
+```
+
+其中 `unittest discover` 为全量套件（约 2076 项）。
+
+审查基线 `6d2ee2d` 对应的 run `33769790818` 已于 `2026-09-03T14:56:31Z` 四路全绿（4m6s）。
+
+### RH-05 范围塌缩
+
+RH-05 范围塌缩为：
+
+```text
+RH-01..05 本地 commit 完成后统一 push
+    ↓ 触发新一轮 CI
+四路全绿
+    ↓ 即关闭 §9.2「CI 独立 green」
+```
+
+push 前无法预先验证远端 CI 结果——这是既定 push 纪律（实施期只本地 commit、末次统一 push）的时序后果，而非缺口。
+
+默认不加 branch protection（个人仓库现状）。
+
+---
+
+## 7.2 最低要求
+
+> [修正 2026-09-04] 本节既有要求视为已被现有工作流满足：全量 Python test suite + validate_plugin 已在每路 matrix 执行，matrix 已覆盖最低（3.8）与最新（3.13）Python。以下原文保留备查。
+
+GitHub Actions 至少执行：
+
+```text
+full Python test suite
+validate_plugin
+```
+
+推荐 matrix：
+
+```text
+Python 3.8+
+当前项目声明支持的主要版本
+```
+
+如果成本过高，可至少保留：
+
+```text
+one stable Python
++
+one minimum supported Python
+```
+
+---
+
+## 7.3 必须检查
+
+> [修正 2026-09-04] 本节既有要求视为已被现有工作流满足：现有 CI 仅运行 validate_plugin 与 unittest，零真实模型调用、零真实凭证、无永久 watcher、无 Scheduled Task。以下原文保留备查。
+
+CI 不应：
+
+- 发真实 Primer model call；
+- 使用真实 Coding Plan credential；
+- 启动永久 Watcher；
+- 创建 Scheduled Task。
+
+所有这些必须依靠 injected transport/fake provider。
+
+---
+
+# 8. RH-06 — RG-22-06：真正的 C-series 双 quota epoch dogfood
+
+这是 stable release 的关键硬门。
+
+## 8.0 执行环境注记
+
+> [修正 2026-09-04] 新增本小节：记录 RH-06 执行环境的用户裁决方向与备选，最终在 RH-06 开跑时确定。
+
+- **裁决方向（用户 2026-09-04）**：在其它项目的干净会话中，用本仓库 checkout 的代码直跑（`ledger_root` 指向该项目）；不动已安装插件（当前 marketplace 快照 2.1.0），版本 bump 议题保持延后。
+- **备选**：本仓库直跑（同 wu-22-12 dogfood 路径）。
+- 最终方案在 RH-06 开跑时确定。
+- 届时需要用户：开新会话；确认该会话 CronCreate 可用（宿主工具注入逐会话可变）；白名单桥 prompt 步骤。
+
+## 8.1 当前缺口
+
+已有真实证据包括：
+
+- 多个 provider quota boundary；
+- Watcher resident observation；
+- historical recurring bridge 多次 fire；
+- DRAINING/PRESSURE gate；
+- Session handoff；
+- scheduler capability evidence。
+
+但当前新架构尚缺：
+
+```text
+C-series corrected accounting
++
+persistent recurring bridge
++
+quota subscription
++
+new epoch resume
++
+至少连续跨两个新 quota epoch
+```
+
+的一条完整真实链。
+
+---
+
+## 8.2 Dogfood 场景
+
+建立一个真实 `until_done` 长任务：
+
+```text
+max_quota_windows >= 2
+authorization.source=user
+recurring_bridge armed
+quota_subscription enabled
+```
+
+必须真实经历：
+
+```text
+Epoch N
+ACTIVE work
+↓
+DRAINING
+↓
+mechanical handoff
+↓
+EXHAUSTED
+↓
+waiting_quota
+↓
+Watcher observes boundary
+↓
+recurring bridge fire
+↓
+new executable epoch N+1
+↓
+quota-resume
+↓
+subscription eligibility
+↓
+activation mark
+↓
+quota consumption +1
+↓
+work continues
+↓
+再次进入 next boundary
+↓
+Epoch N+2
+↓
+same bridge identity
+↓
+resume again
+```
+
+---
+
+## 8.3 必须收集的证据
+
+### Bridge
+
+```text
+same automation_id
+runCount increases
+no nested CronCreate
+```
+
+### Quota Epoch
+
+至少：
+
+```text
+epoch_N
+epoch_N+1
+epoch_N+2
+```
+
+三者 identity 不同。
+
+### Accounting
+
+必须证明：
+
+```text
+bridge fire count != consumed_quota_windows
+```
+
+例如：
+
+```text
+bridge fires: 8
+successful cross-epoch resumes: 2
+consumed_quota_windows delta: 2
+```
+
+### Idempotence
+
+同 epoch 重复 fire：
+
+```text
+no second consumption
+no second activation
+```
+
+### Resume
+
+每次：
+
+```text
+waiting_quota → executing
+```
+
+都必须有：
+
+- reconcile evidence；
+- activation epoch mark；
+- quota boundary consumption；
+- manifest refresh。
+
+---
+
+# 9. Stable Release Gate
+
+只有以下全部满足，才能把 v2.2 标记 stable。
+
+## 9.1 Code correctness
+
+> [勾选 2026-09-05] 依据 = RH-01..05 五单元 ship 收据链（指纹 a57868f8 / a7e62763 / 19251c2f / be6f4617 / 8dd36ff9）+ 全量 2113 绿 + validator 15/15 + CI run 33828629148 四路复核 + RH-06 活跑（§9.3）。
+
+- [x] Primer same-boundary transport call max 1 —— RH-01（PRIMER-RH-01..05：timeout 恰 1 次 transport、record replay 零 transport）；
+- [x] timeout 不自动重复 model request —— RH-01（重试循环删除；ambiguous timeout 走 post-refresh 不重发）；
+- [x] timeout 后可执行 post-refresh confirmation —— RH-01（timeout + epoch advanced → materialized=True，零第二次 model call）；
+- [x] Primer public model-call API 机械授权 —— RH-02（prime_authorized 三重闸；PRIMER-AUTH-01..06）；
+- [x] manual/notify 永远无法触发 Primer —— RH-02（未授权形态零副作用拒绝，四重断言）；
+- [x] quota consumption crash replay 不重复 +1 —— RH-03（CONSUME-TXN-01..05 write-ahead pending）；
+- [x] migration crash replay 不重复上调 —— RH-03（MIGRATE-TXN-01 冻结五数恢复）；
+- [x] bridge arm/fire/create 仍保持 zero consumption —— C 系测试 + RH-06 活跑（10 fires / 2 resumes / consumed=2 解耦）；
+- [x] observer 仍保持 pure —— M2 测试面（2113 全量内）；
+- [x] Watcher 仍保持 model-call-free —— C3 测试 + RH-06 §5.10（stop/absence 双变体零状态破坏）；
+- [x] reserved transports 仍不半实现 —— C6（arm 一律 TransportReservedError）。
+
+## 9.2 Tests
+
+> [修正 2026-09-04] 各项按下述注记如实处理：本地证据已落（五工作单元 receipts 链），远端 CI 复核尚未发生——统一 push 后复核四路全绿才允许勾选，不得把未跑的 push 后 CI 写成已绿。
+>
+> [复核 2026-09-04] 统一 push 已执行（`6d2ee2d..3d38985` → origin/v2-dev，2026-09-04T02:11Z），远端 CI run `33828629148` 于 `3d38985` 四路 matrix 全绿（ubuntu/windows × Python 3.8/3.13 各 success，3m12s，2026-09-04T02:12Z 触发）。以下各项据此勾选。
+
+- [x] 新 RH-01 / RH-02 / RH-03 测试全部通过 —— 本地 receipts 链全绿 + 远端 run `33828629148` 四路全量 unittest 复核；
+- [x] full suite green —— 本地全绿（2113 tests，五工作单元 receipts 链）+ 远端 run `33828629148` 四路复核；
+- [x] `validate_plugin` 15/15 —— 本地全绿（15/15）+ 远端 run `33828629148` 四路复核；
+- [x] CI 独立 green —— run `33828629148`（`3d38985`，push 触发）四路全绿；
+- [x] no real external model calls in CI —— 既有工作流注入纪律（零真实模型调用 / 零凭证），run `33828629148` 四路通过即证。
+
+## 9.3 Real dogfood
+
+> [勾选 2026-09-05] 依据 = RH-06 双窗活跑（任务 v22-rh06-be1301 @ BioWorkflows，载体 seclip-srna-bs-seq v0.1）；勾选证据 = stable 收口会话对原始账本（events.jsonl 301 事件 + 控制面 2 事件 + state.json）与 watcher 工件的独立重演 14/14（清单 14 项：N+1/N+2 转态与 dup-fire 零激活/零消费各两项；watcher 条款经工件重演、受控 stop 输出为执行侧观察工件佐证），不采信执行侧自述；时间戳 UTC。
+
+- [x] RG-22-06 跨至少两个新 executable epoch —— glm:61ff…、glm:5335… 两跨（Epoch N 584f 为 DRAINING 注册期，零激活零消费）；
+- [x] same persistent bridge identity —— automation-2d2c80aa…（armed 09-04T19:39:54Z → deleted 09-05T21:48:07Z 全程同一）；
+- [x] no nested Scheduled Task creation —— journal 零创建事件 + batch 注记 "zero nested create" + session_facts 单 automation；
+- [x] accounting delta == successful cross-epoch resumes —— 2 == 2（fires=10 ≠ resumes=2 ≠ consumed=2，解耦成立）；
+- [x] repeated fire in same epoch zero duplicate consumption —— fire#2（09-04T21:41:03Z，同 epoch 61ff）至下一 epoch 事件间 journal 零消费/零注册/零激活；
+- [x] watcher failure/absence does not corrupt task state —— 工件重演：watcher.json 原子 stop_requested=true 且观测/心跳/世代字段保全、watcher.log 单实例锁冲突干净退出、任务账本零破坏；absent 变体 "nothing to stop" 与重启接管为执行侧 §5.10 受控观察（工件佐证）；
+- [x] completion cleanup remains best-effort only —— 单次 CronDelete（成功，first and only attempt, no retry）；
+- [x] correctness does not depend on CronDelete/CronUpdate success —— completed（21:38:27Z）先于 delete（21:48:07Z）+ tombstone（21:47:49Z）双保险在位（成功分支）。
+
+---
+
+# 10. Agent 实施纪律
+
+实施 Agent 必须遵守以下规则。
+
+## 10.1 禁止扩需求
+
+本轮是 release-hardening，不是 v2.3。
+
+不得新增：
+
+```text
+Session Injector
+Probe-Then-Hold production path
+Self-Retiming production path
+automatic CronUpdate
+new provider abstraction
+database backend
+OS service manager
+```
+
+## 10.2 不得修改已冻结核心语义
+
+不得重新改回：
+
+```text
+arm-time quota consumption
+automation_id-based window accounting
+fixed +5h quota clock
+earliest reset as executable resume boundary
+Watcher directly managing task dispatch
+Primer default-on
+```
+
+## 10.3 每个 Work Unit 必须
+
+```text
+implementation
+→ targeted tests
+→ full tests
+→ independent review
+→ journal / receipt
+→ commit
+```
+
+不要把 RH-01~RH-06 合成一个超大提交。
+
+---
+
+# 11. 推荐 Work Unit 拆分
+
+## `wu-22-RH01-primer-single-attempt`
+
+范围：
+
+- remove Primer model retry；
+- timeout post-refresh confirmation；
+- tests。
+
+完成门：
+
+```text
+same idempotency key transport calls <= 1
+```
+
+---
+
+## `wu-22-RH02-primer-authorization`
+
+范围：
+
+- public authorized Primer API；
+- unchecked internal primitive；
+- mechanical three-gate authorization；
+- tests。
+
+完成门：
+
+```text
+unauthorized → zero transport
+```
+
+---
+
+## `wu-22-RH03-consumption-crash-consistency`
+
+范围：
+
+- consumption pending/reconcile；
+- migration crash consistency；
+- fault injection。
+
+完成门：
+
+```text
+same task_id + epoch_id across any injected crash → max one consumption
+```
+
+---
+
+## `wu-22-RH04-boundary-evidence-cleanup`
+
+范围：
+
+- auxiliary boundary naming/source；
+- backward-compatible journal reader；
+- tests/docs。
+
+非 stable blocker，可与 RH03 后并行。
+
+---
+
+## `wu-22-RH05-ci`
+
+> [修正 2026-09-04] 本小节范围已按 §7.1 塌缩收窄为：**统一 push 后确认既有 `validate.yml` 四路 matrix 全绿**。下列原始范围四项（GitHub Actions / full suite / validator / zero external side effects）所对应的工作流已存在且满足全部原始要求（见 §7.1、§7.2、§7.3 修正注记），无需搭建任何 CI。以下原范围保留备查。
+
+范围：
+
+- GitHub Actions；
+- full suite；
+- validator；
+- zero external side effects。
+
+---
+
+## `wu-22-RH06-dogfood`
+
+范围：
+
+- real until_done task；
+- >= 2 executable epoch crossings；
+- recurring bridge reuse；
+- corrected accounting evidence；
+- release evidence record。
+
+---
+
+# 12. 最终 release 定位
+
+当前 v2.2 的核心架构已经成立：
+
+```text
+Quota Control Plane
+    =
+Watcher + Epoch + optional Primer
+
+Execution Plane
+    =
+Task/WorkUnit + Subscription + Resume + Reconcile + Permit/Lease
+
+Activation Transport
+    =
+Persistent Recurring Bridge [STABLE]
+```
+
+但目前应继续准确表述为：
+
+```text
+real-time quota observation
++
+bounded-latency same-session activation
+```
+
+暂不应宣传为：
+
+```text
+real-time quota event immediately wakes dormant session
+```
+
+因为 Watcher 当前只维护 quota truth，真正让 dormant Session 获得 execution opportunity 的 stable 路径仍然是 recurring Scheduled Task。
+
+---
+
+# 13. 本轮完成后的预期状态
+
+完成 RH-01 ~ RH-06 后，v2.2 应达到：
+
+```text
+Architecture: closed
+Mechanics: closed
+Authorization: mechanical
+Side-effect idempotence: hardened
+Consumption accounting: crash-safe
+Activation: bounded-latency recurring bridge
+Quota truth: resident watcher
+Real multi-epoch dogfood: proven
+CI: independently green
+```
+
+届时再执行：
+
+```text
+RH-07 stable release review
+```
+
+若 reviewer 无新的 P0/P1 问题，可进入：
+
+```text
+v2.2.0 stable
+```
+
+在此之前，不建议继续增加新的 Continuity/Transport 功能。
+
+---
+
+# 14. RH-01~05 实施收口记录（2026-09-04）
+
+> [修正 2026-09-04] 新增本节：记录 wu-rh00..rh04 五个本地工作单元的落地事实与 RH-05 塌缩后的收口状态。全部提交仅本地 commit、**全程未 push**（既定 push 纪律：实施期只本地 commit，全部完成后统一 push 一次）；本节与 §11 `wu-22-RH05-ci` 修正注记、§9.2 修正注记共同构成 RH-05 的收口注记（docs-only，零代码/零工作流改动）。
+
+## 14.1 工作单元 commit 清单与 receipt 指纹
+
+| 工作单元 | 内容 | 本地 commit | ship 审查 | receipt 指纹 |
+| --- | --- | --- | --- | --- |
+| wu-rh00 | 计划文档迁入 docs/ + 四处修正区（§7.1 塌缩重写、§5.4 迁移语义、§8.0 环境注记、决策锁定节） | `eeeffea` | ship | `sha256:a57868f8` |
+| wu-rh01 | Primer single-attempt hardening（timeout 不重发 + post-refresh 确认） | `6567e11` | ship | `sha256:a7e62763` |
+| wu-rh02 | Primer 机械授权（公共 `prime_authorized` 唯一执行入口） | `b454a2f` | ship | `sha256:19251c2f` |
+| wu-rh03 | quota consumption write-ahead pending marker（消费 + 迁移双路径） | `703fba7` | ship | `sha256:be6f4617` |
+| wu-rh04 | boundary 证据命名清理（`representative_boundary_id` + 双键兼容读） | `44f9b9e` | ship | `sha256:8dd36ff9` |
+
+每个工作单元均经独立审查 ship 通过，并留下四条验证 receipt（定向测试 + 全量 discover + validator 等，详见各 commit message），指纹绑定上表；validator 全程 15/15。
+
+## 14.2 测试基线演进
+
+```text
+2076（起点）→ 2079（rh01）→ 2090（rh02）→ 2107（rh03）→ 2113（rh04）
+```
+
+## 14.3 ownership 追认
+
+- RH-02：`tests/test_quota_subscription.py:766` 单行机械更名（`prime_once` → `_prime_once_unchecked`，全仓唯一其他调用点），已披露并追认纳入对应单元 ownership；
+- RH-03：`plugins/glm-conductor/skills/continuity/SKILL.md` 事件表新增 `quota_consumption_pending / quota_accounting_migration_pending` 一行（披露后追认）。
+
+## 14.4 剩余待办
+
+1. ~~**统一 push 后确认 CI**~~ **已完成（2026-09-04T02:11-02:15Z）**：统一 push 执行（`6d2ee2d..3d38985` → origin/v2-dev），远端 CI run `33828629148` 于 `3d38985` 四路 matrix 全绿（ubuntu/windows × Python 3.8/3.13 各 success，3m12s）——§9.2 Tests 五项已全部勾选关闭（含本条收口记录在内的后续 docs 提交按常规再触发一轮 CI，属正常流水，不改变本项结论）。
+2. ~~RH-06（RG-22-06 真实双 epoch dogfood）~~ **已完成（2026-09-05）**：双窗活跑任务 v22-rh06-be1301（BioWorkflows，载体 feature/seclip-srna-bs-seq-v0.1）§5.13 十四项全过，含完成清理链（completed 21:38:27Z → tombstone 21:47:49Z → 单次 CronDelete 成功 21:48:07Z）；stable 收口会话独立复核 14/14（raw-journal + watcher 工件重演）；证据补录 `docs/GLM-Conductor-v2.2-Dogfood-Records.md` §11。RH-07（stable 终审）仍待——按 stable 计划 ST-04 执行。

@@ -7,6 +7,10 @@
     append-only 追加、容错读取、尾部查询。用途是本地执行溯源
     （调试 / 恢复 / 审计），不是遥测
     （docs/glm-conductor-v2-upgrade-guide-final.md §54-§56）。
+    v2.2 C5a（wu-22-C5a）起增设控制面 journal
+    `.glm-conductor/quota/events.jsonl`（与 watcher.json / primer.json
+    同层）：无任务上下文的控制面事件（quota_epoch_advanced、
+    window_primed 等）统一落此处，不再借用伪任务目录。
 
 约束（§56）：
     - append-only：append_event 是本模块唯一写入口，只以追加模式（"a"）
@@ -62,6 +66,46 @@ RECOMMENDED_EVENTS = (
     "completed",
     "cancelled",
     "failed",
+    # —— v2.2 M1 控制回路事件（quota 阈值 / continuation obligation /
+    # wake bridge / resume controller；词汇仍开放式，本常量只作文档性
+    # 推荐，append_event 不强制成员资格）——
+    "quota_heartbeat",        # quota 心跳（仅状态/阶段/阈值穿越时记，降噪）
+    "quota_phase_changed",    # execution phase 变化（NORMAL/PRESSURE/DRAINING/BLOCKED）
+    "continuation_obligation_changed",  # continuation obligation 推进
+    "wake_bridge_requested",  # wake bridge 请求创建（DRAINING 探得 boundary）
+    "wake_bridge_armed",      # wake bridge 武化（定时唤醒已建立）
+    "wake_bridge_failed",     # wake bridge 建置失败
+    "wake_bridge_fired",      # wake bridge 触发（唤醒已注入）
+    "wake_bridge_cancelled",  # wake bridge 取消
+    "wake_bridge_stale",      # wake bridge 过期失效
+    "warm_only_completed",    # warm-only 恢复完成（零转态不派发）
+    "resume_controller_started",  # resume controller 启动
+    "resume_controller_completed",  # resume controller 完成
+    "continuity_degraded",    # 连续性降级记账（如 gate_exhausted 放行仍无 bridge）
+    # —— v2.2 M1a Persistent Wake Bridge 事件（D15-e：scheduler 能力
+    # 观察 / bridge retarget / 暂停 / 降级 / quota 边界消费 / 嵌套创建
+    # 拒绝——Phase 0 #13 会话级 cron 创建禁令的记账；词汇仍开放式，
+    # 本常量只作文档性推荐，append_event 不强制成员资格）——
+    "scheduler_capability_observed",      # scheduler 四能力探针结论记账（create/update/pause/delete）
+    "wake_bridge_retargeted",             # wake bridge 重定目标（boundary 变更 / 自改期 / 间隔重排）
+    "wake_bridge_pause_requested",        # wake bridge 暂停请求（进入暂停意愿态）
+    "wake_bridge_paused",                 # wake bridge 已暂停（automation 置 disabled）
+    "wake_bridge_degraded",               # wake bridge 降级（自动化不可用，回退人工唤醒）
+    "quota_boundary_consumed",            # quota 边界已消费（§15.1 resume commit point：新 executable epoch 确认且授权恢复实际开始才 +1；v2.2 C1b 起消费语义冻结，arm/fire/create 一律不消费）
+    "scheduled_nested_create_rejected",   # 被 Scheduled Task 触发的会话嵌套创建 automation 被拒（SCHED-04 硬门）
+    # —— v2.2 C1b resume-time consumption 事件（修正计划 §C1b / §22.5 /
+    # §22.6；词汇仍开放式，本常量只作文档性推荐，append_event 不强制
+    # 成员资格）——
+    "quota_accounting_migrated",  # §22.6 存量窗口记账保守迁移一次性事件（max 语义，不退款）
+    "wake_bridge_reconciled",     # §22.5 手动/历史桥对账（纯账本；host_status 由调用方显式提供，绝不制造 armed）
+    # —— v2.2 C4 Window Primer 事件（修正计划 §8.1 物化语义 / §8.3 三重
+    # 授权 / §C4 红线；词汇仍开放式，本常量只作文档性推荐，append_event
+    # 不强制成员资格）——
+    "window_primed",  # Window Primer 单飞执行落账（§8.1：一次最小模型调用使新窗口 materialize + 强制 quota refresh 二次确认；materialized 只看 reset_at/epoch 变化——HTTP 200 与百分比下降都不是证据，§C4 红线；executable=False 时无 ActivationReady 概念，归 C5）
+    # —— v2.2 C5a 控制面事件（修正计划 §13 事件词汇 / §QC-07；本常量
+    # 只作文档性推荐，append_event / append_control_plane_event 均不
+    # 强制成员资格）——
+    "quota_epoch_advanced",  # quota epoch 推进记账（§QC-07：epoch 推进 → 恰一条；落在控制面 journal 而非任务 journal——epoch 推进无任务上下文也可发生，落点见 append_control_plane_event）
 )
 
 
@@ -163,3 +207,93 @@ def tail_events(repo_root, task_id, n=20, *, event=None):
     if event is not None:
         events = [item for item in events if item.get("event") == event]
     return events[-n:]
+
+
+# —— 控制面 journal（v2.2 C5a，wu-22-C5a） ——
+
+# 控制面 journal 相对布局：<repo_root>/.glm-conductor/quota/events.jsonl
+# （与 watcher.json / primer.json 同层不同文件，互不越界）。控制面事件
+# 无任务上下文（quota epoch 推进先于任何具体任务存在），落在 quota
+# 目录而非 tasks/<伪任务>/——伪任务目录会被 discover_tasks 判为
+# orphaned 噪声、污染任务枚举（C4 reviewer P2 的正解落点）。
+CONTROL_PLANE_DIR_PARTS = (".glm-conductor", "quota")
+
+
+def control_plane_journal_path(repo_root):
+    """返回控制面 journal 路径 <repo_root>/.glm-conductor/quota/events.jsonl。"""
+    return (Path(repo_root) / CONTROL_PLANE_DIR_PARTS[0]
+            / CONTROL_PLANE_DIR_PARTS[1] / JOURNAL_FILENAME)
+
+
+def append_control_plane_event(repo_root, event, *, ts=None):
+    """向控制面 journal 追加一条事件，返回写入的完整事件 dict（含 ts）。
+
+    与 append_event 逐字同构（同一校验、同一单行 JSON 落盘格式、同一
+    ts 管理纪律），只是落点不同——本函数写
+    `.glm-conductor/quota/events.jsonl`，不触碰任何任务 journal；
+    append_event 的既有行为与签名零改动（两函数并存，互不委托）。
+    quota_epoch_advanced 等 §13 控制面事件经本函数落盘（QC-07：每
+    epoch 恰一条，落点 = 控制面）。
+
+    校验（结构性错误抛 JournalError，且在任何 I/O 之前完成）：
+      - event 必须是 dict 且含非空 str 的 "event" 键；
+      - event 不得含 "ts" 键（时间戳由本函数管理，调用方不得伪造）。
+
+    ts：缺省时自动生成 datetime.now(timezone.utc).isoformat(
+        timespec="milliseconds")；也可显式传入 ISO8601 字符串
+        （测试 / 回放用）。
+
+    写入：单行 JSON（UTF-8、ensure_ascii=False、键序保持插入序，
+    ts 为首键）+ "\\n"，目录不存在自动创建（parents=True）。
+    I/O 异常（OSError 等）自然向上抛，不吞。
+    """
+    if not isinstance(event, dict):
+        raise JournalError("event 必须是 dict，得到 %s" % type(event).__name__)
+    name = event.get("event")
+    if not isinstance(name, str) or not name:
+        raise JournalError('event 必须含非空 str 的 "event" 键')
+    if "ts" in event:
+        raise JournalError('event 不得自带 "ts" 键（时间戳由 append_control_plane_event 管理）')
+
+    if ts is None:
+        ts = datetime.now(timezone.utc).isoformat(timespec="milliseconds")
+
+    # 不改动调用方传入的 dict；ts 置首，其余键保持插入序
+    record = {"ts": ts}
+    record.update(event)
+
+    path = control_plane_journal_path(repo_root)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    # newline="\n"：Windows 下也不做换行翻译，保证文件恒为 "\n" 分隔的 jsonl
+    with path.open("a", encoding="utf-8", newline="\n") as fh:
+        fh.write(json.dumps(record, ensure_ascii=False) + "\n")
+    return record
+
+
+def read_control_plane_events(repo_root):
+    """按文件顺序读取控制面 journal 的全部事件，返回 dict 列表。
+
+    容错契约（**内容层**，与 read_events 的默认容错同风格）：文件不
+    存在返回 []；空白行跳过；坏行（JSON 解析失败或解析结果非 dict）
+    跳过——截断尾行常见于写入中断，不能让整个日志不可读。按 "\\n"
+    切分行（理由同 read_events：事件值中的 U+0085 / U+2028 / U+2029
+    是合法 JSON 单行内容，splitlines 会在这些字符处错误断行）；
+    errors="replace" 容忍尾部撕裂的多字节字符。坏内容不构成错误
+    （上述规则吞掉），但 **I/O 层异常不在容错面内**：OSError（权限
+    被拒 / 路径是目录 / 目录锁等）自然上抛——调用方自行兜底。
+    """
+    path = control_plane_journal_path(repo_root)
+    if not path.is_file():
+        return []
+    text = path.read_text(encoding="utf-8", errors="replace")
+    events = []
+    for line in text.split("\n"):
+        if not line.strip():
+            continue
+        try:
+            item = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(item, dict):
+            events.append(item)
+    return events

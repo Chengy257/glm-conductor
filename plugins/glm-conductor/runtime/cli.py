@@ -78,6 +78,20 @@
         {status, source, evaluated_at, reason}（绝不含凭证材料）。
         --force-refresh 跳过层级 1 强制走 provider（§32 唤醒强制刷新
         语义）。观测面：provider 成功时写额度缓存，零任务转态。
+    quota-observe <repo_root> [task_id]
+        自适应额度观测（v2.2 M3 wu-22-03，runtime.quota.observer.
+        observe 薄壳）：resolver.resolve_quota_detail（四级层级，
+        lazy heartbeat 的「进 runtime 先刷新」入口）+ state.json
+        只读装配 task 侧输入 → §16.1 观测 dict 八键
+        {provider_status, execution_phase, remaining_percent,
+        reset_at, next_check_at, reason, wake_recommended,
+        wake_required}。task_id 缺省按无任务保守默认（task_active=
+        True、bridge=none、阈值/预算全默认）；给定 task_id 时任务
+        缺失 → 退出码 1。零 state 写、零 automation。
+    quota-phase <repo_root> <task_id>
+        执行相决策（v2.2 M3 wu-22-03，runtime.quota.control.
+        evaluate_task_quota_phase 薄壳）：与 quota-observe 同源输入
+        → §17.1 冻结 8 键决策 dict 原样直出；任务缺失 → 退出码 1。
     verify-unit <repo_root> <task_id> <uid> [command]
         受限执行单元已声明验证命令并产出溯源凭证（v2.1 M6 wu-21-12，
         runtime.provenance.verify_unit 薄壳）：command 缺省执行该单元
@@ -119,12 +133,19 @@
         四级层级解析（四级来源记入 journal quota_resolved）；显式四态
         （QUOTA_STATUSES）直通（source="explicit"，零解析零网络）。
         输出 {resumed, status, recommended_resume_at,
-        wake_budget_remaining}。status 非法 → 退出码 2；任务缺失 →
-        退出码 1；EXHAUSTED / UNKNOWN 保守等待（resumed=false，零转态）
-        是合法结果——退出码仍 0。
+        wake_budget_remaining}；已注册且启用订阅的任务另含 additive 键
+        "subscription"（资格面，v2.2 C5b）与转态恢复时的 "consumption"
+        （消费记账面，v2.2 C7 §15.1 消费事务点——consumed=False 附中文
+        reason / error 降级形态）。status 非法 → 退出码 2；任务缺失 →
+        退出码 1；恢复链 OSError（证据写失败）→ 退出码 3 + {error,
+        guidance}（durable 转态可能已落，幂等重跑安全）；EXHAUSTED /
+        UNKNOWN 保守等待（resumed=false，零转态）是合法结果——退出码
+        仍 0。
     wake-record <repo_root> <task_id> <automation_id> <fires_at>
         唤醒窗口扣减记账（v2.1 M5 §14.4，task_manager.
-        record_quota_wake 薄壳；主会话 CronCreate 成功后调用）：
+        record_quota_wake 薄壳；v2.1 legacy 兼容入口——v2.2 persistent
+        path 禁止调用，C1a：arm/fire/create 不消费窗口预算，消费点 =
+        resume commit point，C1b 落地）：
         consumed_quota_windows += 1 + journal quota_wake_recorded。输出
         {consumed_quota_windows, remaining_quota_windows,
         max_quota_windows, automation_id, fires_at}。automation_id /
@@ -135,18 +156,76 @@
         主会话直接复制进 automation 的 prompt 字段——本 CLI 唯一不裹
         JSON 的子命令；显式 UTF-8 落 stdout）。纯读零写副作用；任务
         缺失（TaskManagerError）→ 错误 JSON + 退出码 1。
+    wake-plan <repo_root> <task_id>
+        Persistent Wake Bridge 的 arm 裁决（v2.2 M5 wu-22-05，§22.2，
+        task_manager.plan_wake_bridge 薄壳）：纯计算不创建 automation。
+        额度输入与 M4 闸同源——只读本地 quota-cache.json（缺失 / 损坏
+        → provider_status=None / windows=None，plan 内按 UNKNOWN 保守
+        fail-open，绝不触发 provider 抓取）。输出 §22.2 冻结九键
+        {required, mode, boundary_id, current_boundary_id, wake_at,
+        bridge_interval_minutes, eager, prompt, reason}（ensure_ascii=
+        False——中文 reason/prompt 面向主会话直接阅读）。任务缺失 →
+        退出码 1。
+    wake-status <repo_root> <task_id>
+        wake bridge 状态只读查询（v2.2 M5 wu-22-05，§22.3）：展示
+        wake_bridge.status 十值词汇 + scheduler_context（origin +
+        capability 缓存）+ mode/generation 及墓碑。零写副作用；任务
+        缺失 → 退出码 1。
+    wake-reconcile <repo_root> <task_id> <host_status> [observed_at]
+        手动 / 历史 bridge 宿主事实对账（v2.2 C6 面，C1 裁决 #9：
+        宿主事实由会话侧显式供给，runtime 零 CronList；
+        task_manager.reconcile_wake_bridge_from_host 薄壳）：
+        host_status ∈ {active, deleted, completed, unknown}（§22.5——
+        对账只能降级 / 确认，绝不制造 armed）；observed_at 可选
+        ISO8601。输出 {task_id, host_status, bridge_status_before,
+        bridge_status, automation_id, activation_transport, reconciled,
+        observed_at}。host_status 词汇外（ValueError）→ 退出码 2；
+        任务缺失 → 退出码 1。
+    transport-status <repo_root> <task_id>
+        Activation Transport 事实面只读查询（v2.2 C6 wu-22-C6，修正
+        计划 §16/§C6；C8 Stop 门 armed 检查与 dogfood 的接口面，
+        runtime.activation_transport 薄壳）：输出冻结十二键
+        {task_id, transport, stable, armed, bridge_status, next_wake_at,
+        current_boundary_id, automation_id, bridge_interval_minutes,
+        scheduler_origin, scheduler_create, reasons}（ensure_ascii=
+        False——中文 reasons 面向主会话直接阅读）。零写副作用；任务
+        缺失 → 退出码 1。
+    quota-watcher <repo_root> start|status|stop|once
+        Real-Time Quota Watcher 操作面（v2.2 修正计划 C3 wu-22-C3，
+        §6/§6.1，runtime.quota.watcher / watcher_store 薄壳）：
+        start 以 **sys.executable** 分离派生子进程运行本 CLI 的内部
+        serve 形态 `quota-watcher <repo_root> --serve`（隐藏形态，仅
+        由 start 派生使用；stdout/stderr 落
+        .glm-conductor/quota/watcher.log），派生成功即返回 pid（子
+        进程内的单实例锁冲突只落日志，不在 start 同步上报）；status
+        读 watcher.json 输出摘要（mode/pid/generation/heartbeat/
+        staleness/last_observation）；stop 置 stop_requested 旗标
+        （原子写回，单次操作绝不轮询等待退出）；once 前台单次抓取
+        （测试/诊断用；锁被活进程新鲜持有时报冲突退出码 1）。watcher
+        只写自身状态文件 .glm-conductor/quota/watcher.json，绝不写
+        任务 state/journal；第一阶段零模型调用、不 prime、不发
+        activation（§6.1 skeleton-first）。
 
 输出与退出码契约：
     stdout 恒为单行 JSON（json.dumps(..., ensure_ascii=True)，中文以
-    \\uXXXX 转义——管道 / Windows 控制台零编码依赖；唯一例外是
-    wake-prompt 的成功路径：纯文本 prompt，显式 UTF-8 落 stdout）；
-    stderr 不承载结构化输出。退出码：
+    \\uXXXX 转义——管道 / Windows 控制台零编码依赖；例外：wake-prompt
+    的成功路径为纯文本 prompt；v2.2 M3 起 quota-observe / quota-phase
+    为 ensure_ascii=False（wu-22-03 规格冻结：中文 reason 面向主会话
+    直接阅读，显式 UTF-8 落 stdout）；v2.2 M5 起 wake-plan / wake-
+    status 同走 ensure_ascii=False（§22.2/§22.3 中文 reason / prompt
+    面向主会话直接阅读，同一观测面口径））；stderr 不承载结构化输出。
+    退出码：
       0 = 成功；
       2 = 校验拒绝（用法错误 / 参数值非法 / setter 抛 ValueError /
           save_state 校验闸或状态转换门拒绝——含盘上 state.json 损坏
           的解析拒绝）；
       1 = 异常（任务不存在 / 溯源执行被拒 / 事务被拒 / 意外错误；
-          错误 JSON 只含异常类型名与消息，供操作者排查）。
+          错误 JSON 只含异常类型名与消息，供操作者排查）；
+      3 = durable-but-degraded（v2.2 C7，仅 quota-resume：恢复链
+          OSError——state 落盘 / journal / mark / consumption 证据写
+          失败；错误 JSON 面 {error, guidance}：durable 转态可能已落
+          盘、quota-resume 幂等重跑安全、检查任务 journal 核对 mark /
+          consumption 记账）。
 
 依赖方向：
     本模块是薄壳：校验与变换都在 runtime.execution_policy /
@@ -187,6 +266,8 @@ USAGE = (
     "wave-prepare <repo_root> <task_id> [quota_status] [max_workers] | "
     "wave-show <repo_root> <task_id> [wave_id] | "
     "quota-resolve <repo_root> [--force-refresh] | "
+    "quota-observe <repo_root> [task_id] | "
+    "quota-phase <repo_root> <task_id> | "
     "verify-unit <repo_root> <task_id> <uid> [command] | "
     "verify-task <repo_root> <task_id> [command] | "
     "review-record <repo_root> <task_id> <reviewer> <verdict> "
@@ -194,7 +275,12 @@ USAGE = (
     "quota-exhausted <repo_root> <task_id> | "
     "quota-resume <repo_root> <task_id> [status] | "
     "wake-record <repo_root> <task_id> <automation_id> <fires_at> | "
-    "wake-prompt <repo_root> <task_id>")
+    "wake-prompt <repo_root> <task_id> | "
+    "wake-plan <repo_root> <task_id> | "
+    "wake-status <repo_root> <task_id> | "
+    "wake-reconcile <repo_root> <task_id> <host_status> [observed_at] | "
+    "transport-status <repo_root> <task_id> | "
+    "quota-watcher <repo_root> start|status|stop|once")
 
 # policy-set-resume 的 max_quota_windows 缺省推导表（§5.4 耦合的
 # 最小合法值：until_done 取下界 1，保守不放大）
@@ -231,10 +317,22 @@ class _QuotaFlowRejected(Exception):
     wake-prompt 共用）——运行期拒绝，退出码 1。"""
 
 
+class _QuotaFlowDegraded(Exception):
+    """quota-resume 恢复链遭遇 I/O 失败（OSError：state 落盘 / journal
+    / mark / consumption 证据写；v2.2 C7 wu-22-C7 ②）——durable-but-
+    degraded，退出码 3：durable 转态可能已落盘、quota-resume 幂等重跑
+    安全（区别于 1 拒绝 / 2 参数；错误 JSON 面 {error, guidance}）。"""
+
+
 class _VerifyRejected(Exception):
     """溯源执行 / 审查申报被 provenance 拒绝（任务或单元缺失、白名单
     闸 / policy 闸、ProvenanceError；verify-unit / verify-task /
     review-record 共用）——运行期拒绝，退出码 1。"""
+
+
+class _QuotaWatcherConflict(Exception):
+    """quota-watcher 单实例锁冲突（§6 冻结：现存记录 pid 活着且
+    heartbeat 新鲜时，once / serve 拒绝执行）——运行期拒绝，退出码 1。"""
 
 
 def _emit(payload):
@@ -256,6 +354,15 @@ def _emit_text(text):
     / 控制台零乱码）。"""
     _force_utf8_stdout()
     sys.stdout.write(text + "\n")
+
+
+def _emit_utf8(payload):
+    """向 stdout 写单行 JSON（ensure_ascii=False；v2.2 M3 观测面
+    quota-observe / quota-phase 专用——wu-22-03 规格冻结中文 reason
+    不转义、面向主会话直接阅读；显式 UTF-8 落 stdout，Windows 管道
+    / 控制台零乱码）。"""
+    _force_utf8_stdout()
+    sys.stdout.write(json.dumps(payload, ensure_ascii=False) + "\n")
 
 
 def _now_iso8601() -> str:
@@ -556,6 +663,108 @@ def _quota_resolve(repo_root, force_refresh=False) -> int:
     return 0
 
 
+def _quota_task_inputs(repo_root, task_id) -> dict:
+    """quota-observe / quota-phase 共用的 task 侧输入装配（全部只读）。
+
+    task_id 为 None（quota-observe 无任务形态）→ 保守默认：
+    task_active=True、wake_bridge_status="none"、quota_control=None
+    （决策层全默认阈值）、max_workers=None（决策层按 1 保守）。
+
+    给定 task_id → state.json 只读装配：任务缺失 → _TaskMissing
+    （退出码 1）；JSON 损坏由 load_state 抛 ValueError（退出码 2）；
+    continuation 缺块按 default_continuation 兜底（obligation 消费
+    口径，§23.1 legacy 兼容）；parallelism.max_workers 形状非法 →
+    None（决策层按 1 保守，观测面不被半块 state 炸掉）。task_active
+    取任务是否在执行态族（task_manager.QUOTA_WAIT_TASK_STATUSES：
+    executing / joining / verifying / reviewing）。
+    """
+    from runtime import task_manager
+    if task_id is None:
+        return {"task_active": True, "wake_bridge_status": "none",
+                "quota_control": None, "max_workers": None}
+    st = state.load_state(repo_root, task_id)
+    if st is None:
+        raise _TaskMissing(
+            "任务 %s 不存在（%s 下无 state.json），无法观测额度相位"
+            % (task_id, repo_root))
+    policy = st.get("execution_policy")
+    quota_control = execution_policy.default_quota_control(policy)
+    parallelism = (policy.get("parallelism")
+                   if isinstance(policy, dict) else None)
+    workers = (parallelism.get("max_workers")
+               if isinstance(parallelism, dict) else None)
+    if isinstance(workers, bool) or not isinstance(workers, int) \
+            or workers < 1:
+        workers = None  # 形状非法 → 决策层按 1 保守（观测面 fail-open）
+    continuation = st.get("continuation")
+    bridge = (continuation.get("wake_bridge")
+              if isinstance(continuation, dict) else None)
+    wake_bridge_status = (bridge.get("status")
+                          if isinstance(bridge, dict)
+                          and isinstance(bridge.get("status"), str)
+                          and bridge.get("status") != ""
+                          else "none")  # 缺块 / 空串按默认块兜底
+    return {
+        "task_active": (st.get("status")
+                        in task_manager.QUOTA_WAIT_TASK_STATUSES),
+        "wake_bridge_status": wake_bridge_status,
+        "quota_control": quota_control,
+        "max_workers": workers,
+    }
+
+
+def _snapshot_windows(detail) -> "list | None":
+    """从 resolve_quota_detail 的明细 dict 容错取 §27 windows
+    （snapshot 缺失 / 形状异常 → None，决策层按空窗口 fail-open）。"""
+    snapshot = detail.get("snapshot") if isinstance(detail, dict) else None
+    windows = (snapshot.get("windows")
+               if isinstance(snapshot, dict) else None)
+    return windows if isinstance(windows, list) else None
+
+
+def _quota_observe(repo_root, task_id=None) -> int:
+    """quota-observe：§16.1 观测 dict（v2.2 M3 wu-22-03，observer.
+    observe 薄壳）。I/O 全在本层：resolve_quota_detail 读 quota-cache
+    （四级层级，缓存过期即走 provider——§6.4 lazy heartbeat 的「进入
+    runtime 先判是否刷新」入口）+ state.json 只读装配 task 侧输入 →
+    纯决策 → 单行 JSON（ensure_ascii=False）。零 state 写、零
+    automation、零 journal 事件；now 由本层注入当前 UTC（observer
+    层自身无墙钟依赖）。"""
+    from runtime.quota import observer, resolver  # 函数内 import：monkeypatch 友好
+    inputs = _quota_task_inputs(repo_root, task_id)
+    detail = resolver.resolve_quota_detail(repo_root)
+    result = observer.observe(
+        provider_status=detail["status"],
+        windows=_snapshot_windows(detail),
+        quota_control=inputs["quota_control"],
+        max_workers=inputs["max_workers"],
+        task_active=inputs["task_active"],
+        wake_bridge_status=inputs["wake_bridge_status"],
+        now=datetime.datetime.now(datetime.timezone.utc))
+    _emit_utf8(result)
+    return 0
+
+
+def _quota_phase(repo_root, task_id) -> int:
+    """quota-phase：执行相决策 JSON 原样直出（v2.2 M3 wu-22-03，
+    control.evaluate_task_quota_phase 薄壳）。与 quota-observe 同源
+    输入（resolve_quota_detail + state.json 只读），差异只在输出层
+    （§17.1 决策 dict vs §16.1 观测 dict）——观测编排归 observer，
+    执行相映射归 control，本层只做 I/O。"""
+    from runtime.quota import control, resolver  # 函数内 import：monkeypatch 友好
+    inputs = _quota_task_inputs(repo_root, task_id)
+    detail = resolver.resolve_quota_detail(repo_root)
+    decision = control.evaluate_task_quota_phase(
+        provider_status=detail["status"],
+        windows=_snapshot_windows(detail),
+        quota_control=inputs["quota_control"],
+        max_workers=inputs["max_workers"],
+        task_active=inputs["task_active"],
+        wake_bridge_status=inputs["wake_bridge_status"])
+    _emit_utf8(decision)
+    return 0
+
+
 def _quota_exhausted(repo_root, task_id) -> int:
     """quota-exhausted：EXHAUSTED 转态链 + 授权矩阵裁决（task_manager.
     handle_quota_exhausted 薄壳；evaluation 不经 CLI 传——None 不虚构
@@ -575,7 +784,15 @@ def _quota_resume(repo_root, task_id, raw_status=None) -> int:
     resume_from_quota 薄壳）。status 缺省 None → API 内经 resolver 四级
     层级解析；显式四态直通（CLI 侧词汇闸，非法 → 退出码 2）。EXHAUSTED
     / UNKNOWN 保守等待（resumed=false）是合法结果——退出码 0；任务
-    缺失（TaskManagerError）→ _QuotaFlowRejected（退出码 1）。"""
+    缺失（TaskManagerError）→ _QuotaFlowRejected（退出码 1）。
+    v2.2 C5b：API 返回 dict 原样直出（零加工）——已注册且启用订阅的
+    任务另含 additive 键 "subscription"（资格面），legacy 任务输出零
+    变化；既有键与退出码契约不动。
+    v2.2 C7：订阅路径转态恢复另含 additive 键 "consumption"（消费记账
+    面，含 reason / error 降级形态）；恢复链 OSError（state 落盘 /
+    journal / mark / consumption 证据写失败）→ _QuotaFlowDegraded
+    （退出码 3 + {error, guidance} JSON 面——durable 转态可能已落、
+    幂等重跑安全，QC-07 证据丢失必须可见）。"""
     from runtime import task_manager
     if raw_status is not None and raw_status not in QUOTA_STATUSES:
         raise ValueError(
@@ -586,15 +803,18 @@ def _quota_resume(repo_root, task_id, raw_status=None) -> int:
                                                 status=raw_status)
     except task_manager.TaskManagerError as exc:
         raise _QuotaFlowRejected(str(exc)) from exc
+    except OSError as exc:  # C7：durable-but-degraded → 退出码 3
+        raise _QuotaFlowDegraded(str(exc)) from exc
     _emit(result)
     return 0
 
 
 def _wake_record(repo_root, task_id, automation_id, fires_at) -> int:
     """wake-record：唤醒窗口扣减记账（task_manager.record_quota_wake
-    薄壳）。automation_id / fires_at 空串由 API 的 ValueError 闸拒绝
-    （退出码 2）；任务缺失（TaskManagerError）→ _QuotaFlowRejected
-    （退出码 1）。"""
+    薄壳；v2.1 legacy 兼容入口——v2.2 persistent path 禁止调用，C1a：
+    arm/fire/create 不消费窗口预算）。automation_id / fires_at 空串由
+    API 的 ValueError 闸拒绝（退出码 2）；任务缺失（TaskManagerError）
+    → _QuotaFlowRejected（退出码 1）。"""
     from runtime import task_manager
     try:
         result = task_manager.record_quota_wake(
@@ -618,6 +838,243 @@ def _wake_prompt(repo_root, task_id) -> int:
         raise _QuotaFlowRejected(str(exc)) from exc
     _emit_text(prompt)
     return 0
+
+
+def _wake_plan(repo_root, task_id) -> int:
+    """wake-plan：Persistent Wake Bridge 的 arm 裁决（§22.2，v2.2 M5
+    wu-22-05，task_manager.plan_wake_bridge 薄壳）。纯计算不创建
+    automation；额度输入与 M4 闸同源——只读本地 quota-cache.json
+    （resolver._load_cache / _cache_path 容错原语：缺失 / 坏 JSON /
+    status 词汇陈旧 / fetched_at 不可解析一律视为无缓存 → 传 None，
+    plan 内按 UNKNOWN 保守 fail-open），绝不触发 provider 抓取、绝不
+    重试网络。任务缺失（TaskManagerError）→ _QuotaFlowRejected（退出
+    码 1）。输出 §22.2 冻结九键（ensure_ascii=False，同 M3 观测面）。"""
+    from runtime import task_manager
+    from runtime.quota import resolver  # 函数内 import：monkeypatch 友好
+    provider_status = None
+    windows = None
+    cache = resolver._load_cache(resolver._cache_path(repo_root))
+    if isinstance(cache, dict):
+        provider_status = cache.get("status")
+        snapshot = cache.get("snapshot")
+        if isinstance(snapshot, dict) \
+                and isinstance(snapshot.get("windows"), list):
+            windows = snapshot["windows"]
+    try:
+        plan = task_manager.plan_wake_bridge(
+            repo_root, task_id, provider_status=provider_status,
+            windows=windows)
+    except task_manager.TaskManagerError as exc:
+        raise _QuotaFlowRejected(str(exc)) from exc
+    _emit_utf8(plan)
+    return 0
+
+
+def _wake_status(repo_root, task_id) -> int:
+    """wake-status：wake bridge 状态只读查询（§22.3，v2.2 M5
+    wu-22-05）。展示 wake_bridge.status 十值词汇 + scheduler_context
+    （origin + capability 缓存）+ mode/generation 与墓碑。continuation
+    缺块按 default_continuation 兜底（§23.1 legacy 兼容，不写盘）；
+    零写副作用。任务缺失 → _TaskMissing（退出码 1）。"""
+    st = state.load_state(repo_root, task_id)
+    if st is None:
+        raise _TaskMissing(
+            "任务 %s 不存在（%s 下无 state.json），无法查询 wake bridge "
+            "状态" % (task_id, repo_root))
+    continuation = st.get("continuation")
+    block = (continuation if isinstance(continuation, dict)
+             else state.default_continuation())
+    bridge = block.get("wake_bridge")
+    bridge = (bridge if isinstance(bridge, dict)
+              else state.default_continuation()["wake_bridge"])
+    scheduler_context = block.get("scheduler_context")
+    scheduler_context = (scheduler_context
+                         if isinstance(scheduler_context, dict) else
+                         state.default_continuation()["scheduler_context"])
+    _emit_utf8({
+        "task_id": st.get("task_id", task_id),
+        "status": bridge.get("status", "none"),
+        "obligation": block.get("obligation", "none"),
+        "mode": bridge.get("mode", "recurring"),
+        "generation": bridge.get("generation", 0),
+        "automation_id": bridge.get("automation_id"),
+        "boundary_id": bridge.get("boundary_id"),
+        "current_boundary_id": bridge.get("current_boundary_id"),
+        "next_wake_at": bridge.get("next_wake_at"),
+        "bridge_interval_minutes": bridge.get("bridge_interval_minutes"),
+        "scheduler_context": scheduler_context,
+        "wake_bridge": bridge,
+        "tombstone": block.get("tombstone"),
+    })
+    return 0
+
+
+# —— v2.2 修正计划 C6（wu-22-C6）：wake-reconcile / transport-status ——
+
+def _wake_reconcile(repo_root, task_id, host_status, observed_at=None) -> int:
+    """wake-reconcile：宿主事实会话侧对账（task_manager.
+    reconcile_wake_bridge_from_host 薄壳，v2.2 C1 裁决 #9）。
+
+    C6 面向：宿主事实由调用方（主会话 / dogfood 操作者）显式供给
+    （CronList 观测结论），runtime 零宿主探针——本子命令是 C1b 纯账本
+    对账 helper 的显式输入口。host_status 词汇闸在 API 内（先于 I/O，
+    中文 ValueError → 退出码 2）；任务缺失（TaskManagerError）→
+    _QuotaFlowRejected（退出码 1）。§22.5：对账只能降级 / 确认，
+    绝不制造 armed。"""
+    from runtime import task_manager
+    try:
+        result = task_manager.reconcile_wake_bridge_from_host(
+            repo_root, task_id, host_status=host_status,
+            observed_at=observed_at)
+    except task_manager.TaskManagerError as exc:
+        raise _QuotaFlowRejected(str(exc)) from exc
+    _emit(result)
+    return 0
+
+
+def _transport_status(repo_root, task_id) -> int:
+    """transport-status：Activation Transport 事实面只读查询
+    （runtime.activation_transport.activation_transport_status 薄壳，
+    v2.2 C6 / C8 / dogfood 面）。
+
+    输出冻结十二键（transport / stable / armed / bridge_status /
+    reasons ...；ensure_ascii=False——中文 reasons 面向主会话直接阅读，
+    同 wake-plan / wake-status 观测面口径）。零写副作用；任务缺失
+    （TaskManagerError）→ _QuotaFlowRejected（退出码 1）。"""
+    from runtime import activation_transport, task_manager
+    try:
+        result = activation_transport.activation_transport_status(
+            repo_root, task_id)
+    except task_manager.TaskManagerError as exc:
+        raise _QuotaFlowRejected(str(exc)) from exc
+    _emit_utf8(result)
+    return 0
+
+
+# —— v2.2 修正计划 C3（wu-22-C3）：Real-Time Quota Watcher ——
+
+def _quota_watcher_start(repo_root) -> int:
+    """quota-watcher start：以 sys.executable 分离派生 serve 子进程
+    （§6.2 工程约束：subprocess 一律 sys.executable；用户文档仍写
+    python3）。子进程运行本 CLI 的内部隐藏形态
+    `quota-watcher <repo_root> --serve`，stdout/stderr 落
+    .glm-conductor/quota/watcher.log；派生成功即返回 pid（子进程内的
+    单实例锁冲突只落日志——start 是 fire-and-forget，状态由 status
+    观测）。Windows 用 DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP，
+    POSIX 用 start_new_session；不引入 Windows service / autostart
+    （§6.1 冻结不做项）。"""
+    import os
+    import subprocess
+    from runtime.quota import watcher_store
+    cli_path = str(pathlib.Path(__file__).resolve())
+    log_path = watcher_store.watcher_log_path(repo_root)
+    state_path = watcher_store.watcher_state_path(repo_root)
+    os.makedirs(os.path.dirname(log_path), exist_ok=True)
+    argv = [sys.executable, cli_path, "quota-watcher", str(repo_root),
+            "--serve"]
+    with open(log_path, "ab") as log_handle:
+        kwargs = {}
+        if os.name == "nt":
+            kwargs["creationflags"] = (subprocess.DETACHED_PROCESS
+                                       | subprocess.CREATE_NEW_PROCESS_GROUP)
+        else:
+            kwargs["start_new_session"] = True
+        process = subprocess.Popen(
+            argv, stdin=subprocess.DEVNULL, stdout=log_handle,
+            stderr=log_handle, close_fds=True, **kwargs)
+    _emit({"started": True, "pid": process.pid, "log": log_path,
+           "state": state_path,
+           "serve": "quota-watcher <repo_root> --serve（内部隐藏形态，"
+                    "由 start 派生；单实例锁冲突详情落 watcher.log）"})
+    return 0
+
+
+def _quota_watcher_status(repo_root) -> int:
+    """quota-watcher status：读 watcher.json 输出摘要（零写副作用；
+    无记录不是错误——active=false，退出码 0）。staleness =
+    heartbeat_age_seconds 相对 watcher_store 默认新鲜阈值（180 秒）
+    的新鲜性二标注。"""
+    from runtime.quota import watcher_store
+    record = watcher_store.read_watcher_state(repo_root)
+    state_path = watcher_store.watcher_state_path(repo_root)
+    if record is None:
+        _emit_utf8({"active": False, "record": None, "state": state_path})
+        return 0
+    stale_seconds = watcher_store.DEFAULT_HEARTBEAT_STALE_SECONDS
+    age = watcher_store.heartbeat_age_seconds(record)
+    _emit_utf8({
+        "active": record.get("pid") is not None,
+        "mode": record.get("mode"),
+        "pid": record.get("pid"),
+        "generation": record.get("generation"),
+        "provider_identity_hash": record.get("provider_identity_hash"),
+        "started_at": record.get("started_at"),
+        "heartbeat_at": record.get("heartbeat_at"),
+        "heartbeat_age_seconds": age,
+        "heartbeat_stale": (None if age is None
+                            else age > stale_seconds),
+        "stop_requested": record.get("stop_requested"),
+        "next_poll_at": record.get("next_poll_at"),
+        "last_observation": record.get("last_observation"),
+        "state": state_path,
+    })
+    return 0
+
+
+def _quota_watcher_stop(repo_root) -> int:
+    """quota-watcher stop：置 stop_requested 旗标（原子写回）；单次
+    操作，绝不轮询等待退出（消费由 watcher 循环在下一 wake 完成）。
+    无记录 → stop_requested=false 幂等成功（退出码 0，非错误）。"""
+    from runtime.quota import watcher_store
+    record = watcher_store.request_stop(repo_root)
+    if record is None:
+        _emit_utf8({"stop_requested": False,
+                    "reason": "无 watcher 状态记录（watcher.json 不存在），"
+                              "无可停止对象",
+                    "state": watcher_store.watcher_state_path(repo_root)})
+        return 0
+    _emit_utf8({"stop_requested": True, "pid": record.get("pid"),
+                "generation": record.get("generation"),
+                "note": "旗标已原子置位；watcher 将在下一 wake 优雅退出"
+                        "（本命令不等待）",
+                "state": watcher_store.watcher_state_path(repo_root)})
+    return 0
+
+
+def _quota_watcher_once(repo_root) -> int:
+    """quota-watcher once：前台单次抓取（watcher.run_once 薄壳，测试/
+    诊断用）。锁被活进程新鲜持有（§6）→ _QuotaWatcherConflict（退出
+    码 1）；否则输出一次观察摘要（epoch_id / probe_boundary_at 来自
+    epoch.evaluate_epoch 对 §27 windows 的折算）。"""
+    from runtime.quota import watcher, watcher_store  # 函数内 import：monkeypatch 友好
+    result = watcher.run_once(repo_root)
+    if not result["ran"]:
+        raise _QuotaWatcherConflict(
+            "quota-watcher once：单实例锁被活进程持有（pid=%r，"
+            "heartbeat_at=%r 仍新鲜），未执行抓取" % (
+                (result["conflict"] or {}).get("pid"),
+                (result["conflict"] or {}).get("heartbeat_at")))
+    record = result["record"] or {}
+    observation = record.get("last_observation") or {}
+    _emit_utf8({"ran": True, "mode": record.get("mode"),
+                "generation": record.get("generation"),
+                "status": observation.get("status"),
+                "source": observation.get("source"),
+                "epoch_id": observation.get("epoch_id"),
+                "probe_boundary_at": observation.get("probe_boundary_at"),
+                "executable": observation.get("executable"),
+                "observed_at": observation.get("observed_at"),
+                "error": observation.get("error"),
+                "state": watcher_store.watcher_state_path(repo_root)})
+    return 0
+
+
+def _quota_watcher_serve(repo_root) -> int:
+    """quota-watcher <repo_root> --serve：内部隐藏形态，仅由 start 派生
+    使用（文档注明；不由操作者直接调用）。acquire 冲突 → 退出码 1
+    （详情落 stderr → watcher.log）；graceful stop → 退出码 0。"""
+    from runtime.quota import watcher
+    return watcher.serve(repo_root)
 
 
 def _manifest_show(repo_root, task_id) -> int:
@@ -715,6 +1172,17 @@ def _dispatch(args) -> int:
                     + USAGE)
             force_refresh = True
         return _quota_resolve(rest[0], force_refresh=force_refresh)
+    if cmd == "quota-observe":
+        if len(rest) not in (1, 2):
+            raise _UsageError(
+                "quota-observe 需要 <repo_root> [task_id] 一或两个参数。"
+                + USAGE)
+        return _quota_observe(rest[0], rest[1] if len(rest) == 2 else None)
+    if cmd == "quota-phase":
+        if len(rest) != 2:
+            raise _UsageError(
+                "quota-phase 需要 <repo_root> <task_id> 两个参数。" + USAGE)
+        return _quota_phase(rest[0], rest[1])
     if cmd == "verify-unit":
         if len(rest) not in (3, 4):
             raise _UsageError(
@@ -763,19 +1231,69 @@ def _dispatch(args) -> int:
             raise _UsageError(
                 "wake-prompt 需要 <repo_root> <task_id> 两个参数。" + USAGE)
         return _wake_prompt(rest[0], rest[1])
+    if cmd == "wake-plan":
+        if len(rest) != 2:
+            raise _UsageError(
+                "wake-plan 需要 <repo_root> <task_id> 两个参数。" + USAGE)
+        return _wake_plan(rest[0], rest[1])
+    if cmd == "wake-status":
+        if len(rest) != 2:
+            raise _UsageError(
+                "wake-status 需要 <repo_root> <task_id> 两个参数。" + USAGE)
+        return _wake_status(rest[0], rest[1])
+    if cmd == "wake-reconcile":
+        if len(rest) not in (3, 4):
+            raise _UsageError(
+                "wake-reconcile 需要 <repo_root> <task_id> <host_status> "
+                "[observed_at] 三或四个参数。" + USAGE)
+        return _wake_reconcile(
+            rest[0], rest[1], rest[2],
+            rest[3] if len(rest) == 4 else None)
+    if cmd == "transport-status":
+        if len(rest) != 2:
+            raise _UsageError(
+                "transport-status 需要 <repo_root> <task_id> 两个参数。"
+                + USAGE)
+        return _transport_status(rest[0], rest[1])
+    if cmd == "quota-watcher":
+        if len(rest) != 2:
+            raise _UsageError(
+                "quota-watcher 需要 <repo_root> start|status|stop|once"
+                " 两个参数（--serve 为 start 派生的内部隐藏形态）。"
+                + USAGE)
+        action = rest[1]
+        if action == "start":
+            return _quota_watcher_start(rest[0])
+        if action == "status":
+            return _quota_watcher_status(rest[0])
+        if action == "stop":
+            return _quota_watcher_stop(rest[0])
+        if action == "once":
+            return _quota_watcher_once(rest[0])
+        if action == "--serve":  # 内部隐藏形态：仅由 start 派生使用
+            return _quota_watcher_serve(rest[0])
+        raise _UsageError(
+            "quota-watcher 的动作只接受 start / status / stop / once"
+            "（--serve 为内部隐藏形态），得到 %r。" % action + USAGE)
     raise _UsageError("未知子命令 %r。" % cmd + USAGE)
 
 
 def main(argv=None) -> int:
-    """CLI 入口：返回退出码（0 成功 / 2 校验拒绝 / 1 异常）。
+    """CLI 入口：返回退出码（0 成功 / 2 校验拒绝 / 1 异常 / 3 durable-
+    but-degraded）。
 
     argv 缺省取 sys.argv[1:]；测试可直接传列表调用。异常映射：
     ValueError（用法 / 参数值 / setter / save_state 校验栈）→ 2；
     _TaskMissing（任务不存在）/ _PermitMissing（permit 不存在或已
     消费 / 已失效）/ _WaveMissing（wave 记录不存在）/ _WaveRejected
     （wave 准备被派发事务层拒绝）/ _QuotaFlowRejected（quota 连续性
-    事务被拒）/ _VerifyRejected（溯源执行或审查申报被拒）→ 1；其余
-    意外异常 → 1（错误 JSON 含异常类型名，stdout 契约不破）。
+    事务被拒）/ _VerifyRejected（溯源执行或审查申报被拒）/
+    _QuotaWatcherConflict（quota-watcher 单实例锁冲突）→ 1；
+    _QuotaFlowDegraded（quota-resume 恢复链 OSError，v2.2 C7）→ 3
+    （错误 JSON 面 {error, guidance}：durable 转态可能已落盘、
+    quota-resume 幂等重跑安全、检查任务 journal 核对 mark /
+    consumption 记账）；其余意外异常 → 1（错误 JSON 含异常类型名，
+    stdout 契约不破）。
     """
     args = list(sys.argv[1:]) if argv is None else list(argv)
     try:
@@ -784,9 +1302,17 @@ def main(argv=None) -> int:
         _emit({"error": str(exc)})
         return 2
     except (_TaskMissing, _PermitMissing, _WaveMissing, _WaveRejected,
-            _QuotaFlowRejected, _VerifyRejected) as exc:
+            _QuotaFlowRejected, _VerifyRejected,
+            _QuotaWatcherConflict) as exc:
         _emit({"error": str(exc)})
         return 1
+    except _QuotaFlowDegraded as exc:  # C7：durable-but-degraded → 3
+        _emit({"error": str(exc),
+               "guidance": ("durable 转态可能已落盘（任务状态机可能已推"
+                            "进）；quota-resume 幂等，可安全重跑；请检查"
+                            "任务 journal 核对 mark / consumption 记账是"
+                            "否在案")})
+        return 3
     except Exception as exc:  # 意外异常兜底：stdout 契约不破
         _emit({"error": "%s: %s" % (type(exc).__name__, exc)})
         return 1

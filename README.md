@@ -2,14 +2,14 @@
 
 [English](./README.en.md) | **简体中文**
 
-![Version](https://img.shields.io/badge/version-2.1.0-blue.svg)
+![Version](https://img.shields.io/badge/version-2.2.0-blue.svg)
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
 ![ZCode Plugin](https://img.shields.io/badge/ZCode-plugin-green.svg)
 ![Models](https://img.shields.io/badge/models-GLM--5.3%20%2F%20GLM--5.3--Flash-orange.svg)
 ![CI](https://github.com/Chengy257/glm-conductor/actions/workflows/validate.yml/badge.svg)
 
-> **Selective orchestration for GLM coding agents in ZCode.**
-> GLM-5.3 指挥，GLM-5.3-Flash 实施，独立只读终审——关键契约由运行时钩子确定性强制，而非依赖模型自觉。
+> **Selective orchestration and durable quota-aware continuity for GLM coding agents in ZCode.**
+> GLM-5.3 指挥，GLM-5.3-Flash 实施，独立只读终审——关键契约由运行时钩子确定性强制，而非依赖模型自觉；长任务跨额度窗口安全续跑。
 
 ## 简介
 
@@ -17,7 +17,7 @@ GLM Conductor 是一个 ZCode 编排插件，为使用 GLM Coding Plan 的编码
 
 设计动机很直接：GLM-5.3 与 GLM-5.3-Flash 智力差距很小，但 API 价格相差 10-20 倍、Coding Plan 额度消耗约为旗舰的 1/3。与其所有工作都用旗舰，不如按两个独立维度分级路由——**剩余实施是否足够有界可委派**（Delegability）与**完成后是否需要独立终审**（Assurance）。
 
-v2 起，插件把原本写在提示词里的关键契约升级为**运行时强制**：越界改动无法静默通过完成门、无证据的完成声明会被拦截、过期的验证/审查证据自动失效、额度耗尽时按精确 reset 时间规划唤醒。这些由随插件分发的钩子与纯标准库运行时模块确定性执行。
+v2 起，插件把原本写在提示词里的关键契约升级为**运行时强制**：越界改动无法静默通过完成门、无证据的完成声明会被拦截、过期的验证/审查证据自动失效、额度耗尽时经持久循环唤醒桥在有界延迟内同会话再激活（宿主不可用时由下次 SessionStart 持久恢复兜底）。这些由随插件分发的钩子与纯标准库运行时模块确定性执行。
 
 ## 核心特性
 
@@ -42,14 +42,24 @@ v2 起，插件把原本写在提示词里的关键契约升级为**运行时强
 - **验证 / 审查溯源（v2.1 M6）**——`verify-unit` / `verify-task` 由 runtime 受限主动执行验证命令（白名单 + 策略双闸、零 TOCTOU 同刻指纹）并落 durable receipt；审查裁决经 `review-record` 绑定终指纹落 fresh ship receipt——完成门审查检查只认 receipt，state 手写字段不再作为通过依据
 - **降级可见**——强制层故障永不阻断会话（fail-open），stderr 报 `ENFORCEMENT DEGRADED`
 
-**长任务与额度**
+**长任务与额度（v2.2 额度连续性控制环）**
 
 - **任务与工作单元管理**——Work Unit 依赖图（十状态生命周期、环校验、确定性拓扑序）、五道闸派发准入、证据对账式中断恢复（completed 不重跑）、显式 Join 强制任务级全局验证
 - **文件租约与有界并行**（experimental）——全有或全无获取、异 owner 冲突拒绝；**默认并发 2、上限 4**（v2.1 起），额度预算折算（AVAILABLE→策略值、PRESSURE/UNKNOWN→1、EXHAUSTED→0）；`prepare_dispatch_wave` 批量派发一次签发整批许可与 marker，wave 成员须同一回合并发派出
 - **runtime 额度解析（v2.1 M5）**——派发前额度状态由四级层级解析（新鲜缓存 → provider → 陈旧缓存 → UNKNOWN），**绝不默认 AVAILABLE**；UNKNOWN fail-open 折算预算 1 不阻塞派发
-- **额度感知连续性**——查询 Coding Plan 用量（凭证零落盘），四态评估，EXHAUSTED 按最晚窗口 reset 精确规划唤醒；不可用时 fail-open 回退周期性探针；`/glm-conductor:quota` 随时诊断
-- **授权续跑（v2.1 M5）**——额度 EXHAUSTED 走确定性转态链：四态授权（manual / notify / auto_once / until_done，升档须用户授权落盘）+ 窗口预算（`consumed_quota_windows`）+ 自足一次性 wake prompt（宿主实锚：wake=同会话续行）；预算耗尽转 `waiting_user` 不再建自动化，恢复首步 `quota-resume`
+- **双层额度模型（v2.2）**——provider 四态（AVAILABLE / PRESSURE / EXHAUSTED / UNKNOWN）与 execution phase 四态（NORMAL / PRESSURE / DRAINING / BLOCKED）是两个维度：最小编余 ≤20% 即判 DRAINING（即使 provider 报 AVAILABLE——v2.1 的 24% 误判被结构性封堵）；DRAINING 禁开新实施波次只许收尾，BLOCKED 新波次与收尾一并冻结；连续性义务（armed / wake_required / waiting_quota / degraded）由同一纯决策器机械折算
+- **Quota Epoch 与窗口物化机制（v2.2）**——有意义的不再是"定时器触发了"，而是"新的可执行额度 epoch 出现了"：epoch 身份 = 窗口多重集 `(kind, reset_at)` 的确定性指纹（不含 status/百分比——provider 状态翻转不推进 epoch），`epoch_id = "glm:"+指纹前 16 位`；probe / executable 双 boundary 分离（观察收紧与恢复资格绝不混用）。**窗口机制实测口径**：reset_at 时刻窗口恢复 100%（周窗优先）；下一个 reset_at 只在新窗口内发生模型调用时才物化——纯查询绝不推进它；reset_at 锚定物化时刻 +5h00m01s；会话空闲会推迟窗口起点（证据见 `docs/GLM-Conductor-v2.2-Phase0-Primer-Experiments.md`）
+- **额度 Watcher（v2.2，可选常驻）**——`quota-watcher start|status|stop|once` 启动本地常驻观察进程（poll-only、零模型调用、单实例锁即状态文件）：Session 休眠时独立维护真实 provider 额度时钟；ACTIVE/PASSIVE 逐 tick 重判（有 waiting_quota 或自动续跑任务才 ACTIVE；manual/notify 恒 PASSIVE——可观察但绝不 prime、绝不发激活）；观察间隔按 execution phase 自适应（NORMAL 1800s → DRAINING/BLOCKED 300s）
+- **Window Primer（v2.2，默认关闭）**——新窗口需一次最小模型调用才物化：primer 是 runtime 唯一的 control-plane 模型调用面，三重授权闸 fail-closed（`primer_enabled` 默认 **false** + 自动续跑族 + 授权来源必须是用户——manual/notify 永不 prime）；单飞幂等（同 boundary 至多一次，失败尝试同样落账）；物化证据只有"两次强制刷新之间的窗口身份变化"——HTTP 200 与百分比都不是证据
+- **额度订阅与恢复链（v2.2）**——任务订阅 quota 而非拥有额度时钟：state 的 `quota_subscription` 块记录注册 epoch；激活记账每 epoch 恰一次（QC-07，控制面 `quota_epoch_advanced` 事件落 `.glm-conductor/quota/events.jsonl`）；恢复门顺序冻结为 evaluate → 转态 → mark（崩溃窗口宁可少记账不卡死恢复）；**窗口预算只在 §15.1 resume commit point 消费一次**（`record_quota_boundary_consumed`，同 epoch 幂等；manual/notify 永不消费；arm/fire/create 一律不消费）；`quota-resume` 退出码 0/1/2/3——3 = durable-but-degraded（转态可能已落盘，幂等重跑安全）
+- **授权续跑（v2.1 M5 起，v2.2 收口）**——额度 EXHAUSTED 走确定性转态链：四态授权（manual / notify / auto_once / until_done，升档须用户授权落盘）+ 自足 wake prompt（宿主实锚：wake=同会话续行）；Persistent Wake Bridge（`wake-plan` 裁决 → 主会话宿主 CronCreate → `arm` 记账）是 stable 主路径；预算耗尽转 `waiting_user`，恢复首步恒为 `quota-resume`
+- **Activation Transport（v2.2）**——"额度可用"与"休眠会话拿到新回合"是两件事，后者单独抽象：`recurring_bridge` 是唯一 stable 传输（一个任务 ↔ 一个常驻循环 automation）；`probe_then_hold` / `self_retiming` / `session_injector` 为预留（`arm` 一律 `TransportReservedError` 拒绝，绝不半实现）；`transport-status` 输出冻结 12 键事实面
+- **Stop 门 continuity health（v2.2）**——完成门第 0 位检查（只约束休眠交接域：waiting_quota/waiting_user 或 PRESSURE/DRAINING + resumable + 自动续跑）：三件套按依赖序核查——handoff durable（checkpoint + resume manifest）、当期 epoch 已注册订阅、激活传输已 armed；`create=forbidden` 或 scheduled-origin 一律降级放行不无限拦截（watcher 缺席/过期只是降级注记）
+- **能力边界（stable 口径）**——watcher 只做常驻额度观察，**不直接向休眠会话注入回合**；同会话激活依赖宿主 Scheduled Task（host 关闭/休眠时自动唤醒可能漏发，durable SessionStart 恢复兜底）；`recurring_bridge` 是唯一 stable activation transport；`CronUpdate`/`CronDelete` 成功与否不属于 correctness 依赖；单控制器（单编排主会话）模型不变，worker 上限 4
+- **额度感知连续性**——查询 Coding Plan 用量（凭证零落盘），四态评估；不可用时 fail-open 回退周期性探针；`/glm-conductor:quota` 随时诊断
 - **跨会话恢复**——任务专属 checkpoint + 八步恢复检查，仓库真实状态始终优先于记录
+
+runtime 额度/连续性 CLI 面（`python3 plugins/glm-conductor/runtime/cli.py <子命令>`）：`quota-resolve` / `quota-observe` / `quota-phase` / `quota-exhausted` / `quota-resume`（退出码 0/1/2/3）/ `wake-record`（v2.1 legacy，deprecated）/ `wake-prompt` / `wake-plan` / `wake-status` / `wake-reconcile` / `transport-status` / `quota-watcher start|status|stop|once`。宿主事实由会话侧供给（如 `wake-reconcile` 显式传入 CronList 观测结论）——runtime 自身零宿主 `Cron*` 调用；完成时桥接清理是会话侧单次尝试动作（绝不重试）。
 
 **v2.0.1 运行时完整性加固**——依据 v2.0.0 全面审查的 H1-H8 收口：完成生命周期门控（`finalizing` + 状态转换表，`completed` 仅完成门可提交）、路由跨字段不变量与任务发现四分类 fail-closed（损坏的 state.json 不再被当成"无任务"）。`task_manager` 事务边界四 API 固化派发生命周期（决策 → 租约 → 状态转换 → 记账 → 落盘 → 事件），崩溃窗口有确定性恢复路径。租约获得 TTL/generation/心跳续约，`recover_leases` 自动清理 stale 租约——崩溃后无需人工删 leases.json。验证证据显式绑定 work unit id（无 `unit` 字段的旧事件不再被恢复对账采信，属有意的破坏性变更；主会话需重新验证）。发布加固（RB-1/RB-2）补齐最后两块：Work Unit 完成（`completed`）前置单元绑定的新鲜验证证据门（all-match，拒绝零副作用，git/指纹读取失败 fail-closed）；任务可经 state 的 `repository.root` 绑定专属 Git 仓库根，Stop 完成门按任务逐个求值（同根快照缓存、单任务仓库故障只降级该任务），多仓工作区不再整体降级。CI 覆盖 ubuntu + windows × Python 3.8/3.13。
 
@@ -58,6 +68,8 @@ v2 起，插件把原本写在提示词里的关键契约升级为**运行时强
 **v2.1-alpha2 第二批收口（M4-M6）**——把有界并行、额度决策与证据溯源收进 runtime 确定性事实：dispatch wave 批量事务（`prepare_dispatch_wave` 一次签发整批许可与 marker，wave 成员同一回合并发派出——禁止"等第一个返回再派下一个"，默认并发 2 / 上限 4、额度预算折算，wave permit 成员资格环防旧许可重放）；运行时额度解析（`quota-resolve` 四级层级，绝不默认 AVAILABLE）与授权续跑链（`quota-exhausted` 四态授权 + 窗口预算 + 自足一次性 wake，预算耗尽转 `waiting_user`）；验证 / 审查溯源 receipts（`verify-unit` / `verify-task` runtime 亲测 + durable receipt，`review-record` 落 fresh ship receipt——完成门审查检查只认 receipt）。详见 CHANGELOG 2.1.0-alpha2。
 
 **v2.1-alpha3 Runtime Integrity Closure**——依据审查 findings 逐条加固第二批机制：quota resume 控制面闭合（`quota-resume` 恢复时强制 provider 刷新、绝不采信睡眠期的新鲜缓存，EXHAUSTED 唤醒统一交 `scheduler.plan_resume` 按最晚 reset 规划，逐单元保留中断来源 `quota_interrupted_from`，reconcile 前置于重派——running-interrupted 单元不再被盲目置回 ready）；review 溯源绑定真实 reviewer invocation（PostToolUse marker 记账 `reviewer_invoked` 账本事实，回验链锚定 reviewer 白名单与 replay 幂等，完成门 receipt 来源闸只认追溯到真实调用的 ship receipt）；wave 事务补偿（permits 先于 wave 记录落盘，permit 签发或落盘失败全额回滚，wave 记录永不携带残缺租约）；permit 完整性 fail-closed（`validate_permit` 强制校验 id/mode/reason/时间戳/consumed 全链，含 `expires_at <= now` 过期边界）；multi-repo reconcile 双根分离（`reconcile_agent_run` 账本事实读 ledger 根、git 证据按任务绑定根求值）；另含 SH 三项加固——`wake-record` 幂等 + 写前授权复验、发布元数据纪律成文、Python 版本一致性核验。dogfood R1-R5 五场景实测（多窗口额度耗尽、worker 中途额度崩溃恢复、wave 残缺 permit 故障注入、伪 review 拒绝 + 真实 reviewer 链、账本根≠git 根 reconcile），全量 1328 测试绿、`validate_plugin` 15/15。详见 CHANGELOG 2.1.0-alpha3。
+
+**v2.2 Quota Continuity Control Loop（当前开发线）**——把恢复链从 Agent 纪律升级为机械保证：双层额度模型（provider 四态 × execution phase，`quota-phase` 可查）+ Quota Epoch 身份与双 boundary（窗口滚动而非定时器触发构成新 epoch）+ 可选常驻额度 Watcher（`quota-watcher`，Session 休眠时独立维护真实额度时钟）+ Window Primer（新窗口物化用一次最小模型调用，默认结构性关闭）+ 额度订阅与每 epoch 恰一次的激活记账（QC-07）+ §15.1 resume commit point 唯一消费点 + Activation Transport 抽象（`recurring_bridge` stable）+ 完成门第 0 位 continuity health 三件套。窗口机制实测口径（2026-09-03 用户裁决，证据文档 `docs/GLM-Conductor-v2.2-Phase0-Primer-Experiments.md`）：reset_at 时刻窗口恢复 100%（周窗优先）；下一个 reset_at 只在新窗口内发生模型调用时才物化，纯查询绝不推进它；会话空闲推迟窗口起点。全量 2113 测试绿（RH-01..05 后基线）、`validate_plugin` 15/15。详见 CHANGELOG 2.2.0。
 
 ## 路由矩阵
 
@@ -179,7 +191,7 @@ GLM Conductor 基于 ZCode 原生的本地会话生命周期机制，不是云�
 - **保守误拒（登记取舍）**：引用破坏性文本的字符串与 `git rm -r --cached` 会被 Bash 策略保守拒绝
 - **有界并行 experimental**：上限 4；租约以主会话单编排者为前提，多会话并行操作同一任务目录不在支持面内
 - **多仓工作区边界**：任务级 `repository.root` 绑定已支持（完成门按任务仓库求值）；同一 Git 仓库内多个 top-level active task 并存时的 diff attribution 仍非正式支持——保持"一仓一 active top-level task"（任务内多 Work Unit 有界并行照旧）
-- **额度感知**：走已验证的 provider-api 监控端点（凭证零落盘）；不虚构原生 quota 接口、不硬编码 5 小时重置；端点失败时回退周期性探针
+- **额度感知**：走已验证的 provider-api 监控端点（凭证零落盘）；不虚构原生 quota 接口、不硬编码 5 小时重置；端点失败时回退周期性探针。额度 Watcher 是手动启动的本地进程（`quota-watcher start`，不随机自启、不联网监听）；Window Primer 默认结构性关闭（`primer_enabled=false` + 三重授权闸，manual/notify 永不触发模型调用）
 - **视觉拓扑**：Browser/Computer Use 为主会话专用——截图由主会话采集、Flash 系角色读图判定
 - **子智能体**：不能再派生子智能体；只能看到会话启动时已连接的 MCP 服务
 - **定时/闲时任务**：受 ZCode automation 机制与账号能力约束
