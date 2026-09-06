@@ -193,7 +193,10 @@ def _save_cache(path, payload) -> None:
     """原子写缓存文件（v2.2.1 WU-221-A2 起委托共享原语 runtime.
     durable_io.atomic_write_json：唯一同目录临时名 + os.replace，
     UTF-8、ensure_ascii=False、缩进 2、sort_keys、固定 \\n 换行——
-    落盘字节与既有手写实现逐字节一致；父目录缺失由原语自动创建）。
+    落盘字节与既有手写实现逐字节一致；POSIX 注记：最终文件现继承原
+    语唯一临时文件的 0o600 权限位（先前 umask 缺省约 0644——JSON 字
+    节一致，仅文件权限位更收紧，对状态文件更安全）；父目录缺失由原
+    语自动创建）。
     多进程写者（主会话 resolve + watcher 强制刷新）经唯一临时名
     绝不在固定 <path>.tmp 相撞；PermissionError（Windows AV / 目录
     锁瞬态）按原语默认有界重试（5 次 × 0.1 秒——对本模块原「零重

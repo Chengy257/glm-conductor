@@ -22,11 +22,12 @@ sys.executable）/ §C3（复用 observer / resolver / epoch，不复制额度
        不崩（error 只记类型名）/ heartbeat 逐 wake 推进 + should_refresh
        到期再抓 / ACTIVE 间隔复用自适应表 / stop_requested 优雅退出
        （写 stopped 终态 pid=None）/ acquire 冲突零抓取 / 非到期 wake
-       写回前 OR 合并并发 stop 旗标（读→写窗口竞争回归）
+       独占锁 RMW 写回不丢并发 stop 旗标（读→写窗口竞争回归，A3 收口）
     4  run_once：无记录 → ran=True generation=1 / 活锁新鲜 → 冲突
        ran=False 零写盘 / stale（过期 heartbeat）→ 放行且 generation
-       不 +1（不走锁接管）/ 写回前同形 _merge_stop_flag——读→写窗口
-       内落下的并发 stop 旗标不被整体覆盖写抹掉（v2.2 C6 吸收）
+       不 +1（不走锁接管）/ 写回为独占锁 RMW（v2.2.1 WU-221-A3，与
+       run 同形）——读→写窗口内落下的并发 stop 旗标不被写回抹掉
+       （v2.2 C6 吸收，A3 收口）
     5  provider identity hash：同凭证稳定 / 异凭证不同 / 16 位十六进制
        （只落哈希不落凭证 §37）
     6  CLI quota-watcher：status / stop / once / 用法错 / start 派生
@@ -354,16 +355,18 @@ class RunLoopTest(RepoFixture):
 
     def test_nondue_wake_writeback_preserves_concurrent_stop_flag(self):
         """非到期 wake 的「读记录→写回」窗口内落下的并发 stop 不被覆盖
-        写抹掉（P2 竞争回归；与 fetch 分支的写前 OR 合并同构）。
+        写抹掉（P2 竞争回归；与 fetch 分支的独占锁 RMW 写回同构，
+        v2.2.1 WU-221-A3 收口）。
 
         确定性复现（非到期分支无 fetch 可注入）：run 每 tick 恰好
         在读记录之后、写回之前调用 mode_reader 注入钩子——钩子在
         非到期 wake（盘上已有 next_poll_at，即首抓取完成后的下一
         wake）对同一 repo 真实调用 watcher_store.request_stop（真
-        文件读改写，零 mock），即把 CLI stop 确定性地放进该 wake 的
-        「读→写」竞争窗口。修复前该分支用唤醒时的旧内存副本整体覆
-        盖写，旗标被抹（单次 stop 静默失效，watcher 永不退出）；
-        修复后写前重读 OR 合并——断言旗标存活且下一 wake 优雅退出。
+        文件锁内读改写，零 mock），即把 CLI stop 确定性地放进该 wake
+        的「读→写」竞争窗口。最初实现该分支用唤醒时的旧内存副本整
+        体覆盖写，旗标被抹（单次 stop 静默失效，watcher 永不退出）；
+        收口后写回以锁内最新盘上底版合并——断言旗标存活且下一 wake
+        优雅退出。
         """
         stop_injected = {"done": False}
 
@@ -466,15 +469,15 @@ class RunOnceTest(RepoFixture):
         self.assertEqual(result["record"]["pid"], os.getpid())
 
     def test_once_writeback_preserves_concurrent_stop_flag(self):
-        """once 写回前同形 _merge_stop_flag（v2.2 C6 reviewer 留账吸收）：
-        「读记录 → 写回」窗口内落下的并发 CLI stop 旗标不被 once 的整体
-        覆盖写抹掉（与 run 两个分支的写前 OR 合并同构）。
+        """once 写回为独占锁 RMW（v2.2 C6 reviewer 留账吸收，v2.2.1
+        WU-221-A3 收口）：「读记录 → 写回」窗口内落下的并发 CLI stop
+        旗标不被 once 的写回抹掉（与 run 两个分支的锁内合并同构）。
 
         确定性复现：stale 记录放行 once；fetch 注入钩子在「读记录之后、
         写回之前」对同一 repo 真实调用 watcher_store.request_stop（真文
-        件读改写，零 mock）。修复前 once 用唤醒时的旧内存副本整体覆盖
-        写，旗标被抹（CLI stop 静默失效，watcher 永不退出）；修复后写
-        前重读 OR 合并——断言旗标存活。
+        件锁内读改写，零 mock）。最初实现 once 用唤醒时的旧内存副本整
+        体覆盖写，旗标被抹（CLI stop 静默失效，watcher 永不退出）；收
+        口后写回以锁内最新盘上底版合并——断言旗标存活。
         """
         self.write_raw_state(self.live_record(
             generation=4, pid=os.getpid(),

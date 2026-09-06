@@ -24,6 +24,12 @@ WatcherLockOwnershipTest：互斥凭据 = .glm-conductor/quota/watcher.lock
 heartbeat 证据）；门 1 / 门 5 的既有用例夹具同步落锁文件（语义正当地
 由「锁即状态文件」迁移为两文件现实），其余断言原样保留。
 
+v2.2.1 WU-221-A3（RMW 收口）→ 新增 ConcurrentStopVsHeartbeatRmwTest：
+stop 旗标合并（request_stop）与心跳写回（update_watcher_state）收口
+为 <watcher.json>.lock 独占锁下的读-改-写（durable_io.
+atomic_update_json）——并发丢失更新回归（stop 绝不被心跳写回静默抹
+掉）+ RMW 锁忙 / PermissionError 降级与既有写失败同族的锚定。
+
 全部离线：状态文件落在 tempfile.TemporaryDirectory 的 scratch 仓库
 （绝不触碰仓库内 .glm-conductor/ 真实账本）；重试间隔注入 0 +
 sleep 注入计数桩（零真实等待）；凭证零依赖（identity_hash 直接注入
@@ -43,6 +49,7 @@ from pathlib import Path
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "plugins" / "glm-conductor"))
+from runtime import durable_io
 from runtime.quota import watcher_store
 from runtime.quota.scheduler import _format_iso_z
 
@@ -714,6 +721,148 @@ class WatcherLockOwnershipTest(StoreFixture):
                     mode="PASSIVE", now=NOW, **kwargs)
         self.assertFalse(os.path.exists(self.lock_path))
         self.assertFalse(os.path.exists(self.state_path))
+
+
+# —— v2.2.1 WU-221-A3：stop 旗标 / 心跳写回的独占锁 RMW ——
+
+def _hb_value(thread_index, iteration):
+    """心跳线程 (thread_index, iteration) 的确定性 heartbeat_at 值
+    （ISO 形态、两两互异——「最终值必属写过值集合」断言的值域）。"""
+    return "2026-09-02T12:%02d:%02d.%dZ" % (
+        10 + iteration // 60, iteration % 60, thread_index)
+
+
+class ConcurrentStopVsHeartbeatRmwTest(StoreFixture):
+    """WU-221-A3 收口回归（验收主轴）：并发 stop 旗标合并 vs 心跳写回。
+
+    旧实现（无锁 RMW：读 → 内存改 → 整体写回）下，心跳写回若以陈旧
+    读取整体覆盖写回，stop 旗标即被静默抹掉（丢更新——CLI stop 失效，
+    watcher 永不退出）。现两条路径同处 <watcher.json>.lock 独占锁下的
+    读-改-写（durable_io.atomic_update_json）：谁后写都建立在对方落盘
+    结果之上。多线程（进程内线程；多进程归 a5）交错 M 轮后终态必须：
+    stop_requested 闩锁为 True（绝不静默丢失）、heartbeat_at 恰为心跳
+    方写过的某个值（心跳写回同样不丢）、文件全程合法 JSON 且冻结字段
+    齐备、RMW 锁/临时文件零残留。"""
+
+    STOPPERS = 2
+    BEATERS = 2
+    ROUNDS = 20
+
+    def test_concurrent_stop_and_heartbeat_merges_never_lose_update(self):
+        """N 线程交错 M 轮 stop 合并 vs 心跳合并：stop 旗标不丢、
+        heartbeat_at ∈ 写过值集合、文件全程合法、零锁残留。"""
+        watcher_store.write_watcher_state(
+            self.repo, base_record(generation=2))
+        barrier = threading.Barrier(self.STOPPERS + self.BEATERS + 1)
+        errors = []
+
+        def stopper():
+            barrier.wait()
+            for _round in range(self.ROUNDS):
+                try:
+                    watcher_store.request_stop(self.repo)
+                except Exception as exc:  # noqa: BLE001 —— 捕获即 FAIL 证据
+                    errors.append(exc)
+                    return
+
+        def beater(thread_index):
+            barrier.wait()
+            for iteration in range(self.ROUNDS):
+                try:
+                    watcher_store.update_watcher_state(
+                        self.repo,
+                        lambda payload, value=_hb_value(thread_index,
+                                                        iteration):
+                        {**payload, "heartbeat_at": value})
+                except Exception as exc:  # noqa: BLE001
+                    errors.append(exc)
+                    return
+
+        def observer():
+            # 全程并发读者：任何一次成功读入都必须是冻结字段齐备的
+            # 完整记录（撕裂 / 半份 JSON 在 json.load 即炸）
+            barrier.wait()
+            for _round in range(self.ROUNDS * 4):
+                try:
+                    record = watcher_store.read_watcher_state(self.repo)
+                    if record is None:
+                        continue  # 极端瞬态（读重试耗尽）不算撕裂
+                    for field in watcher_store.WATCHER_STATE_FIELDS:
+                        if field not in record:
+                            raise AssertionError("缺冻结字段 %s" % field)
+                except Exception as exc:  # noqa: BLE001
+                    errors.append(exc)
+                    return
+                time.sleep(0.001)
+
+        threads = ([threading.Thread(target=stopper)
+                    for _ in range(self.STOPPERS)]
+                   + [threading.Thread(target=beater, args=(index,))
+                      for index in range(self.BEATERS)]
+                   + [threading.Thread(target=observer)])
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=120)
+        self.assertEqual(errors, [])
+        final = self.raw_state()  # json.load 即「文件合法 JSON」断言
+        self.assertTrue(final["stop_requested"])  # 修复前：可被心跳写回抹掉
+        written = {_hb_value(t, i)
+                   for t in range(self.BEATERS)
+                   for i in range(self.ROUNDS)}
+        self.assertIn(final["heartbeat_at"], written)  # 心跳不丢、不被编造
+        self.assertEqual(final["generation"], 2)  # RMW 两方都不触碰代次
+        self.assertEqual(sorted(final), sorted(base_record()))
+        # RMW 锁（<watcher.json>.lock）与临时文件零残留
+        self.assertEqual(os.listdir(os.path.dirname(self.state_path)),
+                         ["watcher.json"])
+
+    def test_rmw_lock_busy_degrades_to_watcher_store_error(self):
+        """RMW 锁忙等超时（LockBusyError）→ 折算 WatcherStoreError
+        （__cause__ = LockBusyError）——与 write_watcher_state 的写失败
+        降级同族同向，绝不静默吞。夹具：手写新鲜 RMW 锁（pid=本进程
+        存活、created_at=当前）→ 有界忙等耗尽。"""
+        watcher_store.write_watcher_state(
+            self.repo, base_record(generation=2))
+        lock_path = self.state_path + ".lock"
+        with open(lock_path, "w", encoding="utf-8") as handle:
+            handle.write(json.dumps(
+                {"pid": os.getpid(), "generation": 1,
+                 "created_at": _format_iso_z(datetime.now(timezone.utc)),
+                 "owner": "fixture"}, sort_keys=True))
+        with self.assertRaises(watcher_store.WatcherStoreError) as ctx:
+            watcher_store.update_watcher_state(
+                self.repo, lambda payload: payload,
+                timeout_seconds=0.05, poll_interval=0.0,
+                sleep=lambda _seconds: None)
+        self.assertIsInstance(ctx.exception.__cause__,
+                              durable_io.LockBusyError)
+        self.assertEqual(self.raw_state()["generation"], 2)  # 目标未动
+
+    def test_request_stop_permission_error_degrades_to_watcher_store_error(
+            self):
+        """request_stop 写侧 PermissionError 有界重试耗尽 →
+        WatcherStoreError（__cause__ = PermissionError）——与迁移前
+        write_watcher_state 的降级逐形一致（约束：LockBusyError /
+        PermissionError 降级绝不偏离既有写失败行为）。"""
+        watcher_store.write_watcher_state(
+            self.repo, base_record(generation=2))
+        calls = {"n": 0}
+
+        def always_denied(src, dst):
+            calls["n"] += 1
+            raise PermissionError("[WinError 5] 模拟目录锁")
+
+        with mock.patch("os.replace", side_effect=always_denied):
+            with self.assertRaises(watcher_store.WatcherStoreError) as ctx:
+                watcher_store.request_stop(self.repo, retry_attempts=3,
+                                           retry_interval=0.0,
+                                           sleep=lambda _s: None)
+        self.assertEqual(calls["n"], 3)  # 有界：恰好 3 次
+        self.assertIsInstance(ctx.exception.__cause__, PermissionError)
+        self.assertEqual(self.raw_state()["generation"], 2)  # 旧值未破坏
+        self.assertEqual(os.listdir(os.path.dirname(self.state_path)),
+                         ["watcher.json"])  # RMW 锁与 tmp 零残留
 
 
 if __name__ == "__main__":

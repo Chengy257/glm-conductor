@@ -50,7 +50,13 @@ graceful stop：CLI stop 置 stop_requested（watcher_store.request_stop，
 advisory 证据）——run 的一切持有者退出路径（graceful stop /
 max_ticks / 状态被外部移除）统一按释放身份纪律删除 watcher.lock
 （仅当锁内容仍是自己的 pid+generation，绝不误删后继接管者的锁）；
-非持有方的 stop 请求（CLI）只置观察旗标，不触碰锁。
+非持有方的 stop 请求（CLI）只置观察旗标，不触碰锁。v2.2.1 WU-221-A3
+起，循环内的观察写回（抓取分支 + 未到期 heartbeat 分支）为独占锁
+RMW（watcher_store.update_watcher_state，<watcher.json>.lock）：与
+CLI stop 旗标合并在同一把 RMW 锁下串行，并发的 stop 绝不被心跳写回
+的陈旧整体覆盖抹掉（旧 _merge_stop_flag「写前重读 OR 合并」的微秒
+级残余窗口就此关死）；RMW 临界区刻意短（读+合并+写，抓取一律在锁
+外），且与 watcher.lock 所有权域相互独立。
 
 once：前台单次抓取（测试 / 诊断用）。**不走锁接管**：现存记录 pid
 活着且 heartbeat 新鲜 → 报冲突退出（ran=False）；stale / 无记录 →
@@ -304,22 +310,34 @@ def _remaining_seconds(now, next_poll_at):
     return max(0.0, (due - now).total_seconds())
 
 
-def _merge_stop_flag(repo_root, record):
-    """写前合并并发的 stop_requested（防丢旗标竞争）。
+def _rmw_writeback(repo_root, fallback_record, updates, **store_kwargs):
+    """独占锁 RMW 写回（v2.2.1 WU-221-A3 收口，取代旧 _merge_stop_flag
+    的「写前重读 OR 合并」收窄式补救）。
 
-    tick 开头读的 record 与 tick 末尾的写之间，CLI stop 可能已原子置位
-    旗标（request_stop 读-改-写当前文件）；若直接用唤醒时的旧内存副本
-    整体覆盖写，会把这枚并发旗标抹掉（测试实录：stop 在 fetch 期间
-    置位即被 tick 写回冲掉，watcher 永不退出）。watcher 自身从不置
-    True，故写前重读一次文件、OR 合并旗标即可；窗口收窄到「合并读
-    之后」的微秒级（观察文件无 CAS 的固有窗口；机械互斥自 v2.2.1
-    WU-221-A2 起由 watcher.lock 承担，此处只保旗标不丢）。
+    经 watcher_store.update_watcher_state（durable_io.atomic_update_json，
+    <watcher.json>.lock 独占锁）在本 tick 的更新落盘：updater 以锁内
+    最新盘上 payload 为合并底版应用 updates 字段——并发 CLI stop 置位
+    的旗标等他方字段不在 updates 内，绝不被唤醒时的陈旧内存副本覆盖
+    （旧实现「合并读之后落下的 stop」仍有微秒级丢更新窗口；现读-改-
+    写在锁内一次完成，stop 与心跳两写方串行，谁后写都建立在对方结果
+    之上，旗标绝不丢）。RMW 临界区刻意短：只做读 + 字段合并 + 写，
+    绝无网络 / 抓取（fetch 一律在锁外完成——a1 reviewer 契约）。
+
+    盘上 payload 在唤醒读之后被外部移除的窄窗（updater 收到空 dict）
+    → 回退唤醒时快照整体重建（与既有「状态被外部移除不重建锁、写回
+    照常」语义一致）。store_kwargs 透传 update_watcher_state（测试零
+    等待注入）；其 WatcherStoreError 降级与旧 write_watcher_state 的
+    写失败同族同向。返回合并后的最终记录 dict。
     """
-    fresh = watcher_store.read_watcher_state(repo_root)
-    if fresh is not None and fresh.get("stop_requested"):
-        record["stop_requested"] = True
-    # （窗口说明：观察文件无 CAS 的固有窗口——合并读之后的微秒级窗口
-    # 仍在，机械互斥已由 watcher.lock 承担，此处只保旗标不丢。）
+
+    def _apply_tick(payload):
+        base = payload if isinstance(payload, dict) and payload \
+            else fallback_record
+        base.update(updates)
+        return base
+
+    return watcher_store.update_watcher_state(repo_root, _apply_tick,
+                                              **store_kwargs)
 
 
 # —— 主入口：长运行循环 / 单次抓取 ——
@@ -412,22 +430,25 @@ def run(repo_root, *, fetch=None, clock=None, sleep=None,
             interval = next_poll_interval(
                 mode=mode, execution_phase=phase, reset_at=reset_at,
                 now=now, passive_interval_seconds=passive_interval_seconds)
-            record["mode"] = mode
-            record["pid"] = os.getpid()
-            record["heartbeat_at"] = _format_iso_z(now)
-            record["last_observation"] = observation
-            record["next_poll_at"] = _format_iso_z(
-                now + timedelta(seconds=int(interval)))
-            _merge_stop_flag(repo_root, record)  # 并发 stop 不被覆盖写抹掉
-            watcher_store.write_watcher_state(repo_root, record)
+            updates = {
+                "mode": mode,
+                "pid": os.getpid(),
+                "heartbeat_at": _format_iso_z(now),
+                "last_observation": observation,
+                "next_poll_at": _format_iso_z(
+                    now + timedelta(seconds=int(interval))),
+            }
+            # 抓取在锁外、合并落盘在锁内：并发 stop 绝不被覆盖写抹掉
+            # （v2.2.1 WU-221-A3 独占锁 RMW）
+            _rmw_writeback(repo_root, record, updates)
             fetches += 1
             last_interval = interval
-            next_poll_at = record["next_poll_at"]
+            next_poll_at = updates["next_poll_at"]
         else:
-            # 未到期：仅续 heartbeat，绝不空转打 provider
-            record["heartbeat_at"] = _format_iso_z(now)
-            _merge_stop_flag(repo_root, record)  # 并发 stop 不被覆盖写抹掉
-            watcher_store.write_watcher_state(repo_root, record)
+            # 未到期：仅续 heartbeat，绝不空转打 provider（锁内 RMW，
+            # 并发 stop 旗标不被覆盖写抹掉）
+            _rmw_writeback(repo_root, record,
+                           {"heartbeat_at": _format_iso_z(now)})
         if max_ticks is not None and wakes >= max_ticks:
             break
         remaining = _remaining_seconds(now, next_poll_at)
@@ -452,11 +473,12 @@ def run_once(repo_root, *, fetch=None, clock=None,
 
     **不走锁接管**：现存记录 pid 活着且 heartbeat 新鲜 → 冲突退出
     （ran=False，零写盘）；无记录 / stale → 抓取一次并写记录
-    （generation 不 +1——不是接管；pid 写为本次进程，退出即死，后续
-    acquire 自然走接管路径）。写回前与 run 的两个分支同形调用
-    _merge_stop_flag（v2.2 C6 reviewer 留账吸收）：once 自身不消费
-    停止请求，但「读记录 → 写回」窗口内落下的并发 CLI stop 旗标经
-    OR 合并保留——once 的整体覆盖写绝不抹掉旗标。
+    （generation 不 +1——不是接管，once 进程退出后 pid 即死，后续
+    acquire 自然走接管路径）。once 不触碰 watcher.lock（不创建、不删
+    除——锁域归 acquire / 持有者释放路径）。写回为独占锁 RMW
+    （v2.2.1 WU-221-A3，v2.2 C6 reviewer 留账的收口形态）：once 自身
+    不消费停止请求，但「读记录 → 写回」窗口内落下的并发 CLI stop 旗
+    标以锁内最新盘上底版合并保留——once 的写回绝不抹掉旗标。
 
     返回（键冻结）：
       {"ran": bool, "record": dict|None,
@@ -483,7 +505,7 @@ def run_once(repo_root, *, fetch=None, clock=None,
     detail, error = _safe_fetch(fetch_fn, repo_root)
     observation = _build_observation(detail, error, now)
     mode = mode_reader(repo_root)
-    record = dict(existing) if existing is not None else {
+    fallback = dict(existing) if existing is not None else {
         "schema_version": 1,
         "provider_identity_hash": identity,
         "generation": 1,
@@ -491,12 +513,16 @@ def run_once(repo_root, *, fetch=None, clock=None,
         "stop_requested": False,
         "last_observation": None,
     }
-    record["mode"] = mode
-    record["pid"] = os.getpid()
-    record["heartbeat_at"] = _format_iso_z(now)
-    record["last_observation"] = observation
-    _merge_stop_flag(repo_root, record)  # 并发 stop 不被覆盖写抹掉（与 run 同形）
-    watcher_store.write_watcher_state(repo_root, record)
+    updates = {
+        "mode": mode,
+        "pid": os.getpid(),
+        "heartbeat_at": _format_iso_z(now),
+        "last_observation": observation,
+    }
+    # 写回为独占锁 RMW（v2.2.1 WU-221-A3，与 run 两分支同形）：once
+    # 自身不消费停止请求，但「读记录 → 写回」窗口内落下的并发 CLI
+    # stop 旗标经锁内最新底版合并保留——once 的写回绝不抹掉旗标。
+    record = _rmw_writeback(repo_root, fallback, updates)
     return {"ran": True, "record": record, "conflict": None}
 
 

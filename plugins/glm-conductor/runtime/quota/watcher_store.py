@@ -36,6 +36,13 @@ write + lock）：
         atomic_write_json（唯一同目录临时名 + os.replace——多进程
         写者绝不在固定 tmp 名相撞），读方永不见撕裂文件
         （R3：崩溃时读者要么看不到文件要么看到完整记录）；
+      - 读-改-写（v2.2.1 WU-221-A3 收口）：stop 旗标合并等 RMW 路径
+        委托 runtime.durable_io.atomic_update_json——<watcher.json>.lock
+        独占锁保护下的读-改-写，与心跳写回在同一把 RMW 锁下串行，
+        并发的 stop 请求绝不再被心跳写回的陈旧整体覆盖抹掉；RMW 锁
+        临界区刻意短（毫秒级：读 + 合并 + 写，锁内零网络零抓取），
+        且与 watcher.lock 所有权域（长期持有的单实例凭据）相互独立、
+        互不替代；
       - PermissionError bounded handling（§6.2 P0-WATCH-00 门 4，
         Windows AV / 目录锁是本机已知现象）：写 tmp 或 os.replace 遇
         PermissionError → 有界重试（默认 3 次、0.2 秒间隔，常量可配），
@@ -552,7 +559,9 @@ def write_watcher_state(repo_root, record, *,
     runtime.durable_io.atomic_write_json：唯一同目录临时名 +
     os.replace——多进程写者（watcher 进程心跳 + 主会话 stop 路径）
     绝不在固定 <path>.tmp 相撞；落盘字节与既有手写实现逐字节一致；
-    父目录缺失由原语自动创建），返回最终路径。
+    POSIX 注记：最终文件现继承原语唯一临时文件的 0o600 权限位（先前
+    umask 缺省约 0644——JSON 字节一致，仅文件权限位更收紧，对状态
+    文件更安全）；父目录缺失由原语自动创建），返回最终路径。
 
     参数：
       - record：dict（非 dict → ValueError——参数校验先于 I/O）；
@@ -589,6 +598,75 @@ def write_watcher_state(repo_root, record, *,
                 attempts, float(retry_interval), last_permission_error)
         ) from last_permission_error
     return path
+
+
+# —— 读-改-写（v2.2.1 WU-221-A3 收口：独占锁 RMW，与心跳写回串行） ——
+
+class _StopRecordVanished(RuntimeError):
+    """内部哨兵：RMW 锁内发现 watcher.json 已无合法记录（pre-check 之后
+    被外部移除 / 顶层非 dict）——request_stop 据此幂等返回 None，绝不
+    凭空创建空记录；异常沿 atomic_update_json 原样传播时目标不被触碰
+    （锁经 finally 必释放）。"""
+
+
+def update_watcher_state(repo_root, updater, *,
+                         timeout_seconds=durable_io.DEFAULT_TIMEOUT_SECONDS,
+                         poll_interval=durable_io.DEFAULT_POLL_INTERVAL_SECONDS,
+                         retry_attempts=PERMISSION_RETRY_ATTEMPTS,
+                         retry_interval=PERMISSION_RETRY_INTERVAL_SECONDS,
+                         sleep=time.sleep):
+    """独占锁（<watcher.json>.lock，与目标同目录）保护下的读-改-写
+    （v2.2.1 WU-221-A3 收口），返回 updater 产出的新 payload。
+
+    委托 runtime.durable_io.atomic_update_json：锁内序 = 读当前值
+    （缺失 → 空 dict）→ updater(payload) → 新 payload 原子写回；updater
+    抛错 → 目标不被触碰、异常原样传播（锁经 finally 必释放）。RMW 锁
+    是毫秒级短临界区（读 + 合并 + 写——锁内零网络零抓取，a1 reviewer
+    契约），与 watcher.lock 所有权域（长期持有的单实例凭据）刻意分离：
+    RMW 锁只串行化「观察面的并发写方」（watcher 心跳写回 + 主会话
+    stop 旗标合并），绝不承载单实例互斥语义。stale_seconds=300 默认仅
+    作用于 RMW 锁文件本身（崩溃持有者经接管可恢复，不构成永久卡死）。
+
+    参数：
+      - updater：可调用 updater(payload) → 新 payload（payload 恒为
+        dict；非可调用 → ValueError，参数校验先于 I/O）；
+      - timeout_seconds / poll_interval：RMW 锁忙等上界与轮询小步
+        （透传 exclusive_lock；LockBusyError 降级见下）；
+      - retry_attempts / retry_interval：写侧 PermissionError 有界重试
+        （默认 PERMISSION_RETRY_*；测试可注入 0 实现零等待）；
+      - sleep：锁轮询与写重试的休眠注入（测试零真实等待）。
+
+    降级（与 write_watcher_state 的写失败同族同向，绝不静默吞）：
+    PermissionError 有界重试耗尽或 LockBusyError（RMW 锁忙等超时 /
+    仲裁落败）→ 一律折算为 WatcherStoreError（__cause__ 保留原始异
+    常）；其余异常原样上抛（调用方自行兜底）。
+    """
+    if not callable(updater):
+        raise ValueError(
+            "update_watcher_state：updater 必须是可调用对象，得到 %r"
+            % (type(updater).__name__,))
+    if retry_interval < 0:
+        raise ValueError(
+            "update_watcher_state：retry_interval 必须 >= 0，得到 %r"
+            % (retry_interval,))
+    attempts = max(1, int(retry_attempts))
+    try:
+        return durable_io.atomic_update_json(
+            watcher_state_path(repo_root), updater,
+            timeout_seconds=timeout_seconds, poll_interval=poll_interval,
+            retry_attempts=retry_attempts, retry_interval=retry_interval,
+            sleep=sleep)
+    except durable_io.LockBusyError as lock_busy:
+        raise WatcherStoreError(
+            "watcher.json 读-改-写在独占锁有界等待 %.2f 秒后仍无法获取"
+            "（锁忙 / 仲裁落败，绝不无限等待）：%s"
+            % (float(timeout_seconds), lock_busy)) from lock_busy
+    except PermissionError as last_permission_error:
+        raise WatcherStoreError(
+            "watcher.json 原子写在 PermissionError 有界重试 %d 次（间隔 %.2f "
+            "秒）后仍失败（Windows AV / 目录锁？）：%s" % (
+                attempts, float(retry_interval), last_permission_error)
+        ) from last_permission_error
 
 
 # —— 单实例锁（v2.2.1 WU-221-A2：锁本体 = watcher.lock，O_EXCL 机械
@@ -802,16 +880,47 @@ def request_stop(repo_root, *,
                  retry_attempts=PERMISSION_RETRY_ATTEMPTS,
                  retry_interval=PERMISSION_RETRY_INTERVAL_SECONDS,
                  sleep=time.sleep):
-    """置 stop_requested 旗标（原子写回）；单次操作，绝不轮询等待退出。
+    """置 stop_requested 旗标（v2.2.1 WU-221-A3 起为独占锁 RMW）；单次
+    操作，绝不轮询等待退出。
 
-    无记录 → None（无可停止对象，幂等非错误）；有记录 → 写回
-    stop_requested=True 并返回更新后的记录 dict。其余字段原样保留
-    （是否已被 watcher 消费由 watcher 循环在下一 wake 判定）。
+    无记录 → None（无可停止对象，幂等非错误）；有记录 → 在
+    <watcher.json>.lock 独占锁保护下读-改-写 stop_requested=True（闩
+    锁：once True stays True）并返回更新后的记录 dict，其余字段原样
+    保留（是否已被 watcher 消费由 watcher 循环在下一 wake 判定）。
+
+    锁化根据（WU-221-A3 关账）：先前「读 → 内存改 → 整体写回」的无锁
+    RMW 与 watcher 心跳写回互不串行——stop 合并落盘前，心跳写回若以
+    陈旧读取整体覆盖写回，stop 旗标即被静默抹掉（丢更新）。现两条路
+    径在同一把 RMW 锁下串行，后写者必以前写者的落盘结果为底版，旗标
+    绝不丢。pre-check（无记录 → None）在锁外先行：无记录路径零锁、
+    零落盘（连目录都不建），与既有行为逐字节一致；「pre-check 后记录
+    被外部移除」的窄窗由锁内哨兵兜底（目标不被触碰 → 仍返回 None）。
+
+    降级：PermissionError 有界重试耗尽 / RMW 锁 LockBusyError →
+    WatcherStoreError（与 write_watcher_state 的写失败降级同族，
+    __cause__ 保留原始异常——绝不静默吞、绝不无限等待）。
     """
-    record = read_watcher_state(repo_root)
-    if record is None:
+    if read_watcher_state(repo_root) is None:
         return None
-    record["stop_requested"] = True
-    write_watcher_state(repo_root, record, retry_attempts=retry_attempts,
-                        retry_interval=retry_interval, sleep=sleep)
-    return record
+    path = watcher_state_path(repo_root)
+
+    def _latch_stop(payload):
+        # 缺失（读原语的 default 空 dict）或顶层非 dict（与
+        # read_watcher_state 的「顶层非 dict → None」同口径）→ 视同
+        # 无记录：哨兵上抛，目标不被触碰；既有空 dict 记录照旧原位
+        # 置旗标（与旧实现逐键一致）
+        if not isinstance(payload, dict) \
+                or (payload == {} and not os.path.exists(path)):
+            raise _StopRecordVanished(
+                "request_stop：watcher.json 在 pre-check 后已无记录"
+                "（幂等返回 None，目标不被触碰）")
+        payload["stop_requested"] = True
+        return payload
+
+    try:
+        return update_watcher_state(repo_root, _latch_stop,
+                                    retry_attempts=retry_attempts,
+                                    retry_interval=retry_interval,
+                                    sleep=sleep)
+    except _StopRecordVanished:
+        return None

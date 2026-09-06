@@ -292,8 +292,10 @@ def _write_primer_state(repo_root, record, *,
                         sleep=time.sleep):
     """原子写 primer.json（v2.2.1 WU-221-A2 起委托共享原语
     runtime.durable_io.atomic_write_json：唯一同目录临时名 +
-    os.replace——落盘字节与既有手写实现逐字节一致；父目录缺失由原
-    语自动创建），返回最终路径。
+    os.replace——落盘字节与既有手写实现逐字节一致；POSIX 注记：最终
+    文件现继承原语唯一临时文件的 0o600 权限位（先前 umask 缺省约
+    0644——JSON 字节一致，仅文件权限位更收紧，对状态文件更安全）；
+    父目录缺失由原语自动创建），返回最终路径。
 
     纪律照抄 watcher_store.write_watcher_state：record 非 dict →
     ValueError（参数校验先于 I/O）；PermissionError → 有界重试（次数 /
