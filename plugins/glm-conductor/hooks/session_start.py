@@ -37,7 +37,7 @@ repo_root 口径：
     目录——与 pre_tool_use 同口径。
 
 来源：
-    docs/GLM-Conductor-v2.1-Architecture-Agent-Implementation-Plan.md
+    docs/history/v2.1/GLM-Conductor-v2.1-Architecture-Agent-Implementation-Plan.md
     §8（SessionStart Recovery，全部）+ §2.3-H2。
 """
 

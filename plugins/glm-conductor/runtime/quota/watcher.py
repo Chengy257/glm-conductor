@@ -44,12 +44,25 @@ heartbeat，到期才真正抓取（这是 observer.should_refresh 在生产路�
 
 graceful stop：CLI stop 置 stop_requested（watcher_store.request_stop，
 单次操作不等待）→ 循环下一 wake 检查到旗标 → 写 stopped 终态
-（pid=None + stop_requested=True）并退出。
+（pid=None + stop_requested=True）并退出。v2.2.1 WU-221-A2 起，互斥
+凭据与观察状态分离：单实例锁是独立文件 watcher.lock（O_CREAT|O_EXCL
+机械原子），watcher.json 降级为纯观察面（heartbeat 是锁仲裁的
+advisory 证据）——run 的一切持有者退出路径（graceful stop /
+max_ticks / 状态被外部移除）统一按释放身份纪律删除 watcher.lock
+（仅当锁内容仍是自己的 pid+generation，绝不误删后继接管者的锁）；
+非持有方的 stop 请求（CLI）只置观察旗标，不触碰锁。v2.2.1 WU-221-A3
+起，循环内的观察写回（抓取分支 + 未到期 heartbeat 分支）为独占锁
+RMW（watcher_store.update_watcher_state，<watcher.json>.lock）：与
+CLI stop 旗标合并在同一把 RMW 锁下串行，并发的 stop 绝不被心跳写回
+的陈旧整体覆盖抹掉（旧 _merge_stop_flag「写前重读 OR 合并」的微秒
+级残余窗口就此关死）；RMW 临界区刻意短（读+合并+写，抓取一律在锁
+外），且与 watcher.lock 所有权域相互独立。
 
 once：前台单次抓取（测试 / 诊断用）。**不走锁接管**：现存记录 pid
 活着且 heartbeat 新鲜 → 报冲突退出（ran=False）；stale / 无记录 →
 执行一次 tick 语义的抓取并写记录（generation 不 +1——不是接管，
-once 进程退出后 pid 即死，后续 acquire 自然走接管路径）。
+once 进程退出后 pid 即死，后续 acquire 自然走接管路径）。once 不触碰
+watcher.lock（不创建、不删除——锁域归 acquire / 持有者释放路径）。
 
 第一阶段明确不做（§6.1 冻结）：Window Primer / task subscription /
 ActivationReady→Session 激活 / **model call（零模型调用）** / session
@@ -63,24 +76,26 @@ journal（task 面接线归 C5+）。
       （绝不透传异常文本，resolver 同纪律），循环继续；
     - provider identity hash = sha256("来源:凭证")[:16]——只落哈希
       不落凭证材料（runtime/quota/_http.py §37 安全条款 / 升级指南
-      §36-§38；不可逆指纹，用于 §6 单实例锁身份）；
+      §36-§38；不可逆指纹，用于 §6 单实例锁身份）；v2.2.1
+      WU-221-B1 起派生落点 runtime/quota/identity.py（本模块
+      re-export，语义零变化）；
     - quota/* 包纪律：不 import runtime.state / runtime.task_manager；
       executing 族词汇以本地冻结常量镜像（tests 与
       task_manager.QUOTA_WAIT_TASK_STATUSES 对齐锚定）。
 
 依赖：
     仅 Python 3 标准库 + runtime.quota.scheduler / observer / epoch /
-    resolver / credentials / watcher_store；observer 纯决策层零改动。
+    identity / resolver / credentials / watcher_store；observer 纯决策
+    层零改动。
 
 来源：
-    docs/GLM-Conductor-v2.2-Quota-Control-Plane-Architecture-Correction-
+    docs/history/v2.2/GLM-Conductor-v2.2-Quota-Control-Plane-Architecture-Correction-
     and-Agent-Implementation-Plan.md §5（runtime/quota 布局）/ §6
     （Watcher 运行模式）/ §6.1（第一阶段范围）/ §7（ACTIVE / PASSIVE）
     / §10（epoch）/ §11（状态模型）/ §6.2（P0-WATCH-00）+ 工作单元
     wu-22-C3。
 """
 
-import hashlib
 import json
 import os
 import sys
@@ -90,6 +105,7 @@ from datetime import datetime, timedelta, timezone
 from runtime.quota import epoch as quota_epoch
 from runtime.quota import observer, resolver
 from runtime.quota import watcher_store
+from runtime.quota.identity import compute_provider_identity_hash
 from runtime.quota.observer import should_refresh as _should_refresh
 from runtime.quota.scheduler import (
     _format_iso_z,
@@ -139,20 +155,10 @@ def _safe_fetch(fetch_fn, repo_root):
         return None, type(exc).__name__
 
 
-def compute_provider_identity_hash(environ=None):
-    """provider identity 指纹（§6 单实例锁身份字段）：sha256("来源:凭证")
-    十六进制前 16 位。
-
-    只落哈希绝不落凭证材料（runtime/quota/_http.py §37 安全条款 /
-    升级指南 §36-§38——哈希不可逆，不含 key 本体）；无凭证
-    → ("none" 来源的确定性占位哈希)——watcher 仍可 PASSIVE 运行，
-    acquire 语义不受影响。
-    """
-    from runtime.quota.credentials import resolve_credential
-    _source, api_key = resolve_credential(environ=environ)
-    material = "%s:%s" % ("none" if api_key is None else "credential",
-                          api_key or "")
-    return hashlib.sha256(material.encode("utf-8")).hexdigest()[:16]
+# compute_provider_identity_hash 自 v2.2.1 WU-221-B1 起落点
+# runtime/quota/identity.py（watcher / primer 共用派生口径）——本模块
+# 经顶部 import re-export，既有调用面 watcher.compute_provider_identity_hash
+# 保持可用（签名 / env 处理 / 16-hex 输出语义零变化）。
 
 
 # —— §7 模式判定（冻结；只读任务 state，绝不写） ——
@@ -246,7 +252,7 @@ def _phase_and_reset(detail):
     return observation["execution_phase"], observation["reset_at"]
 
 
-def _build_observation(detail, error, now):
+def _build_observation(detail, error, now, provider_identity_hash=None):
     """抓取结果 → last_observation dict（含 §27 窗口的 per-window
     reset_at 摘要 + epoch 折算；fetch 失败 → error 字段记类型名，
     其余观察键 None 不虚构）。
@@ -255,6 +261,13 @@ def _build_observation(detail, error, now):
     probe_boundary_at / executable / canonical windows）；status 词汇外
     （evaluate_epoch ValueError，理论不可达——resolver 恒出四态）→
     epoch 键全部 None 不虚构。
+
+    v2.2.1 WU-221-B2（QuotaIdentity）：观察记录持久化了 epoch 事实，
+    新记录可选携带 provider_identity_hash（观察者身份可得才写——
+    run / run_once 调用点持有单实例锁身份，直传透出；无身份上下文的
+    直调传 None = 缺省，按 legacy 形态省略该键，绝不虚构占位值）。
+    指纹为非秘密 16-hex（runtime.quota.identity 共享派生口径），落
+    watcher.json 不含也不可还原凭证材料（§37）。
     """
     observation = {
         "observed_at": _format_iso_z(now),
@@ -266,6 +279,8 @@ def _build_observation(detail, error, now):
         "windows": [],
         "error": error,
     }
+    if provider_identity_hash is not None:
+        observation["provider_identity_hash"] = provider_identity_hash
     if error is not None or not isinstance(detail, dict):
         return observation
     status = detail.get("status")
@@ -297,19 +312,34 @@ def _remaining_seconds(now, next_poll_at):
     return max(0.0, (due - now).total_seconds())
 
 
-def _merge_stop_flag(repo_root, record):
-    """写前合并并发的 stop_requested（防丢旗标竞争）。
+def _rmw_writeback(repo_root, fallback_record, updates, **store_kwargs):
+    """独占锁 RMW 写回（v2.2.1 WU-221-A3 收口，取代旧 _merge_stop_flag
+    的「写前重读 OR 合并」收窄式补救）。
 
-    tick 开头读的 record 与 tick 末尾的写之间，CLI stop 可能已原子置位
-    旗标（request_stop 读-改-写当前文件）；若直接用唤醒时的旧内存副本
-    整体覆盖写，会把这枚并发旗标抹掉（测试实录：stop 在 fetch 期间
-    置位即被 tick 写回冲掉，watcher 永不退出）。watcher 自身从不置
-    True，故写前重读一次文件、OR 合并旗标即可；窗口收窄到「合并读
-    之后」的微秒级（文件即锁、无 CAS 的固有窗口，见模块 docstring）。
+    经 watcher_store.update_watcher_state（durable_io.atomic_update_json，
+    <watcher.json>.lock 独占锁）在本 tick 的更新落盘：updater 以锁内
+    最新盘上 payload 为合并底版应用 updates 字段——并发 CLI stop 置位
+    的旗标等他方字段不在 updates 内，绝不被唤醒时的陈旧内存副本覆盖
+    （旧实现「合并读之后落下的 stop」仍有微秒级丢更新窗口；现读-改-
+    写在锁内一次完成，stop 与心跳两写方串行，谁后写都建立在对方结果
+    之上，旗标绝不丢）。RMW 临界区刻意短：只做读 + 字段合并 + 写，
+    绝无网络 / 抓取（fetch 一律在锁外完成——a1 reviewer 契约）。
+
+    盘上 payload 在唤醒读之后被外部移除的窄窗（updater 收到空 dict）
+    → 回退唤醒时快照整体重建（与既有「状态被外部移除不重建锁、写回
+    照常」语义一致）。store_kwargs 透传 update_watcher_state（测试零
+    等待注入）；其 WatcherStoreError 降级与旧 write_watcher_state 的
+    写失败同族同向。返回合并后的最终记录 dict。
     """
-    fresh = watcher_store.read_watcher_state(repo_root)
-    if fresh is not None and fresh.get("stop_requested"):
-        record["stop_requested"] = True
+
+    def _apply_tick(payload):
+        base = payload if isinstance(payload, dict) and payload \
+            else fallback_record
+        base.update(updates)
+        return base
+
+    return watcher_store.update_watcher_state(repo_root, _apply_tick,
+                                              **store_kwargs)
 
 
 # —— 主入口：长运行循环 / 单次抓取 ——
@@ -341,7 +371,8 @@ def run(repo_root, *, fetch=None, clock=None, sleep=None,
 
     流程：acquire（冲突即返回）→ 循环{读记录 → stop_requested → 写
     stopped 终态退出；重判 mode → should_refresh 到期则抓取+写观察，
-    未到期仅续 heartbeat → 分片休眠}。
+    未到期仅续 heartbeat → 分片休眠}。一切持有者退出路径统一按释放
+    身份纪律删除 watcher.lock（v2.2.1 WU-221-A2）。
 
     返回（键冻结）：
       {"acquired", "takeover", "generation", "stopped", "wakes",
@@ -382,7 +413,7 @@ def run(repo_root, *, fetch=None, clock=None, sleep=None,
     while max_ticks is None or wakes < max_ticks:
         record = watcher_store.read_watcher_state(repo_root)
         if record is None:
-            break  # 状态被外部移除：不重建锁（锁即文件），退出
+            break  # 状态被外部移除：不重建锁，退出（出口统一释放锁）
         wakes += 1  # 每 wake 计数（含 stop 退出 wake；max_ticks 边界）
         if record.get("stop_requested"):
             # graceful stop：写 stopped 终态（pid=None，冻结字段集内
@@ -396,31 +427,40 @@ def run(repo_root, *, fetch=None, clock=None, sleep=None,
         mode = mode_reader(repo_root)  # 每 tick 重判（demand-coupled）
         if _should_refresh(now=now, next_check_at=next_poll_at):
             detail, error = _safe_fetch(fetch_fn, repo_root)
-            observation = _build_observation(detail, error, now)
+            observation = _build_observation(detail, error, now,
+                                             provider_identity_hash=identity)
             phase, reset_at = _phase_and_reset(detail)
             interval = next_poll_interval(
                 mode=mode, execution_phase=phase, reset_at=reset_at,
                 now=now, passive_interval_seconds=passive_interval_seconds)
-            record["mode"] = mode
-            record["pid"] = os.getpid()
-            record["heartbeat_at"] = _format_iso_z(now)
-            record["last_observation"] = observation
-            record["next_poll_at"] = _format_iso_z(
-                now + timedelta(seconds=int(interval)))
-            _merge_stop_flag(repo_root, record)  # 并发 stop 不被覆盖写抹掉
-            watcher_store.write_watcher_state(repo_root, record)
+            updates = {
+                "mode": mode,
+                "pid": os.getpid(),
+                "heartbeat_at": _format_iso_z(now),
+                "last_observation": observation,
+                "next_poll_at": _format_iso_z(
+                    now + timedelta(seconds=int(interval))),
+            }
+            # 抓取在锁外、合并落盘在锁内：并发 stop 绝不被覆盖写抹掉
+            # （v2.2.1 WU-221-A3 独占锁 RMW）
+            _rmw_writeback(repo_root, record, updates)
             fetches += 1
             last_interval = interval
-            next_poll_at = record["next_poll_at"]
+            next_poll_at = updates["next_poll_at"]
         else:
-            # 未到期：仅续 heartbeat，绝不空转打 provider
-            record["heartbeat_at"] = _format_iso_z(now)
-            _merge_stop_flag(repo_root, record)  # 并发 stop 不被覆盖写抹掉
-            watcher_store.write_watcher_state(repo_root, record)
+            # 未到期：仅续 heartbeat，绝不空转打 provider（锁内 RMW，
+            # 并发 stop 旗标不被覆盖写抹掉）
+            _rmw_writeback(repo_root, record,
+                           {"heartbeat_at": _format_iso_z(now)})
         if max_ticks is not None and wakes >= max_ticks:
             break
         remaining = _remaining_seconds(now, next_poll_at)
         sleep_fn(max(0.0, min(remaining, float(heartbeat_step_seconds))))
+    # v2.2.1 WU-221-A2：持有者退出路径统一按释放身份纪律删 watcher.lock
+    # ——仅当锁内容仍是本 pid+generation（graceful stop / max_ticks /
+    # 状态被外部移除等一切出口收口于此；绝不误删后继接管者的锁）。
+    watcher_store.release_watcher_lock(repo_root, pid=os.getpid(),
+                                       generation=generation)
     return {"acquired": True, "takeover": lock["takeover"],
             "generation": generation, "stopped": stopped, "wakes": wakes,
             "fetches": fetches, "last_interval": last_interval,
@@ -436,11 +476,12 @@ def run_once(repo_root, *, fetch=None, clock=None,
 
     **不走锁接管**：现存记录 pid 活着且 heartbeat 新鲜 → 冲突退出
     （ran=False，零写盘）；无记录 / stale → 抓取一次并写记录
-    （generation 不 +1——不是接管；pid 写为本次进程，退出即死，后续
-    acquire 自然走接管路径）。写回前与 run 的两个分支同形调用
-    _merge_stop_flag（v2.2 C6 reviewer 留账吸收）：once 自身不消费
-    停止请求，但「读记录 → 写回」窗口内落下的并发 CLI stop 旗标经
-    OR 合并保留——once 的整体覆盖写绝不抹掉旗标。
+    （generation 不 +1——不是接管，once 进程退出后 pid 即死，后续
+    acquire 自然走接管路径）。once 不触碰 watcher.lock（不创建、不删
+    除——锁域归 acquire / 持有者释放路径）。写回为独占锁 RMW
+    （v2.2.1 WU-221-A3，v2.2 C6 reviewer 留账的收口形态）：once 自身
+    不消费停止请求，但「读记录 → 写回」窗口内落下的并发 CLI stop 旗
+    标以锁内最新盘上底版合并保留——once 的写回绝不抹掉旗标。
 
     返回（键冻结）：
       {"ran": bool, "record": dict|None,
@@ -465,9 +506,10 @@ def run_once(repo_root, *, fetch=None, clock=None,
                     existing.get("provider_identity_hash"),
             }}
     detail, error = _safe_fetch(fetch_fn, repo_root)
-    observation = _build_observation(detail, error, now)
+    observation = _build_observation(detail, error, now,
+                                     provider_identity_hash=identity)
     mode = mode_reader(repo_root)
-    record = dict(existing) if existing is not None else {
+    fallback = dict(existing) if existing is not None else {
         "schema_version": 1,
         "provider_identity_hash": identity,
         "generation": 1,
@@ -475,12 +517,16 @@ def run_once(repo_root, *, fetch=None, clock=None,
         "stop_requested": False,
         "last_observation": None,
     }
-    record["mode"] = mode
-    record["pid"] = os.getpid()
-    record["heartbeat_at"] = _format_iso_z(now)
-    record["last_observation"] = observation
-    _merge_stop_flag(repo_root, record)  # 并发 stop 不被覆盖写抹掉（与 run 同形）
-    watcher_store.write_watcher_state(repo_root, record)
+    updates = {
+        "mode": mode,
+        "pid": os.getpid(),
+        "heartbeat_at": _format_iso_z(now),
+        "last_observation": observation,
+    }
+    # 写回为独占锁 RMW（v2.2.1 WU-221-A3，与 run 两分支同形）：once
+    # 自身不消费停止请求，但「读记录 → 写回」窗口内落下的并发 CLI
+    # stop 旗标经锁内最新底版合并保留——once 的写回绝不抹掉旗标。
+    record = _rmw_writeback(repo_root, fallback, updates)
     return {"ran": True, "record": record, "conflict": None}
 
 

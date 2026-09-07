@@ -1,5 +1,7 @@
 # GLM Conductor 插件静态校验（整改规范 §25/§26）。
-# 唯一实质步骤是运行本地静态校验脚本：无 benchmark、无模型调用、无外部 API。
+# 实质步骤：ruff 静态检查（最小规则集 F+E9，配置见 .ruff.toml，版本固定
+# 保证可复现）→ 插件静态校验脚本 → 插件装载冒烟 → 单元测试。
+# 无 benchmark、无模型调用、无外部 API（pip 安装 ruff 是唯一联网步骤）。
 # 矩阵覆盖 Linux+Windows × Python 最低(3.8)/最新。
 name: validate-plugin
 
@@ -21,5 +23,15 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
-      - run: python scripts/validate_plugin.py
-      - run: python -m unittest discover -s tests -v
+      - name: ruff lint（F+E9 最小规则集，全矩阵统一固定版本 0.4.4——
+          支持 py37 target 且可安装于 3.8 与 3.13）
+        run: |
+          python -m pip install ruff==0.4.4
+          python -m ruff check plugins/ scripts/ tests/
+      - name: 插件静态校验（validate_plugin.py 15 项）
+        run: python scripts/validate_plugin.py
+      - name: 插件装载冒烟（清单/结构/runtime import，零网络零模型调用）
+        run: python scripts/smoke_plugin_load.py
+      - env:
+          PYTHONUTF8: "1" # 仓库运行约定：中文诊断输出按 UTF-8（Windows 裸控制台为 cp1252）
+        run: python -m unittest discover -s tests -v

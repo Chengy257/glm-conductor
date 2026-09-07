@@ -8,6 +8,10 @@
     C3（Quota Watcher / 控制面）消费：
       - epoch 身份：canonical_windows / epoch_fingerprint / epoch_id /
         same_epoch——窗口多重集的确定性指纹；
+      - QuotaIdentity 双形态比较：quota_identity_matches（v2.2.1
+        WU-221-B2）——(provider_identity_hash, epoch_id) 复合身份的
+        统一判定（记录侧指纹缺席 = legacy = 信任），供六个记账面
+        （订阅 / 激活 / 消费 / primer / 观察者 / 恢复对账）共用；
       - probe_boundary_at(windows)：probe / observation boundary——
         Watcher 何时收紧 polling、何时提前进入 boundary surveillance；
       - executable_boundary_at(windows)：executable boundary——是否
@@ -70,10 +74,10 @@ epoch 身份（冻结口径）：
     / runtime.quota.control / runtime.quota.parser；导入方向
     epoch → control → execution_policy → parser（均不反向依赖，
     无循环导入）。跨模块私有 import 是 quota 包既定惯例
-    （control 亦 import scheduler 的 _format_iso_z/_parse_iso_utc）。
+    （control 亦 import window_math 的 _earliest_reset_plus）。
 
 来源：
-    docs/GLM-Conductor-v2.2-Quota-Control-Plane-Architecture-Correction-
+    docs/history/v2.2/GLM-Conductor-v2.2-Quota-Control-Plane-Architecture-Correction-
     and-Agent-Implementation-Plan.md §10（Quota Epoch 替代 automation
     fire）/ §10.1（epoch_id 形状）/ §10.2（probe vs executable 双
     boundary，2026-09-02 冻结）/ §30（max(reset)+grace）/ §31（绝不
@@ -225,6 +229,46 @@ def epoch_id(windows):
 def same_epoch(windows_a, windows_b):
     """两份窗口快照是否属于同一 quota epoch（epoch_id 相等）。"""
     return epoch_id(windows_a) == epoch_id(windows_b)
+
+
+# —— QuotaIdentity（v2.2.1 WU-221-B2） ——
+
+def quota_identity_matches(record_epoch_id, record_identity_hash,
+                           current_epoch_id, current_identity_hash):
+    """QuotaIdentity = (provider_identity_hash, epoch_id) 的双形态比较
+    （v2.2.1 WU-221-B2 的共享判定落点；纯函数零 I/O）。
+
+    记账面（订阅注册 / 激活 / 消费 / primer）把「某 epoch 的既有记录
+    是否属于当前 provider 身份」的比较统一为本判定——epoch_id 等值
+    AND（记录侧指纹缺席 OR 指纹相等）：
+
+      - record_epoch_id != current_epoch_id → False（epoch 不同，与
+        身份无关——epoch_id 格式与推导零变化，仍是 §10.1 冻结口径）；
+      - epoch_id 等值且 record_identity_hash 为 None（记录未携带指纹
+        ——v2.2 legacy 记录的统一形态）→ True（缺席 = legacy = 保守
+        信任——v2.2 记录保持可读可用，这是本单元的兼容性裁决）；
+      - epoch_id 等值且指纹相等（同一 provider 身份）→ True；
+      - epoch_id 等值但指纹不同（异身份同名 epoch）→ False（异身份
+        记录按各消费面既有的「无先前记录」路径处理——不授权、不幂等
+        拦截、不消费）。
+
+    指纹口径即 runtime.quota.identity.compute_provider_identity_hash
+    的非秘密 16 位十六进制（sha256("来源:凭证") 前缀截断，不含也
+    不可还原凭证材料，§37）；本函数只做字符串比较，绝不接触凭证。
+
+    参数：
+      - record_epoch_id：既有记录的 epoch_id（§10.1 形状；None = 无
+        先前记录，与任何 current_epoch_id 不等 → False）；
+      - record_identity_hash：既有记录的可选 provider_identity_hash
+        （None = legacy 缺席形态）；
+      - current_epoch_id：当前 epoch_id（§10.1 形状）；
+      - current_identity_hash：当前 provider 身份指纹（16-hex）。
+    """
+    if record_epoch_id != current_epoch_id:
+        return False
+    if record_identity_hash is None:
+        return True  # legacy 缺席形态：保守信任（v2.2 兼容性裁决）
+    return record_identity_hash == current_identity_hash
 
 
 # —— 双 boundary（§10.2） ——

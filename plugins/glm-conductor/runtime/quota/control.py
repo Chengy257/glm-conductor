@@ -49,9 +49,11 @@ continuation_obligation（§8.3，只产出 runtime.state 词汇子集）：
       收敛到 PRESSURE 且 wake_at=None，不阻塞、不虚构；
     - 阈值默认值单一真相源：从 runtime.execution_policy 导入
       DEFAULT_QUOTA_CONTROL（D5），不复制数值字面量；宽限秒数默认从
-      runtime.quota.scheduler 导入 DEFAULT_GRACE_SECONDS，数值/时间
-      工具复用其私有实现（_is_number / _parse_iso_utc / _format_iso_z
-      / _fmt_number），不改 scheduler.py；
+      runtime.quota.scheduler 导入 DEFAULT_GRACE_SECONDS，数值工具
+      复用其私有实现（_is_number / _fmt_number），不改 scheduler.py；
+      ISO 时间数学经 runtime.quota.window_math._earliest_reset_plus
+      （本模块 re-import 保持 epoch 解析点，内部落 time_utils 规范
+      实现）；
     - wake_bridge 词汇按 quota 包既有纪律不 import runtime.state，
       以字面量声明并在注释指向 runtime.state.WAKE_BRIDGE_STATUSES
       （§8.2 冻结十值），词汇一致性由 tests.test_quota_control 的
@@ -63,11 +65,11 @@ continuation_obligation（§8.3，只产出 runtime.state 词汇子集）：
     runtime.quota.parser（parser 不反向依赖，无循环导入）。
 
 来源：
-    docs/GLM-Conductor-v2.2-Quota-Continuity-Control-Loop-Implementation-
+    docs/history/v2.2/GLM-Conductor-v2.2-Quota-Continuity-Control-Loop-Implementation-
     Plan.md §4.2（execution phase 四态）/ §5.1（固定阈值）/ §8.3
     （obligation 规则）/ §17.1（返回 dict 形状）/ §18/§18.1（预算与
     白名单）/ WU-22-02；
-    docs/GLM-Conductor-v2.2-实施前缺口探查与设计决策记录.md D5
+    docs/history/v2.2/GLM-Conductor-v2.2-实施前缺口探查与设计决策记录.md D5
     （阈值配置落点）/ D7（双层映射冻结）。
 """
 
@@ -78,10 +80,14 @@ from runtime.quota.parser import QUOTA_STATUSES
 from runtime.quota.scheduler import (
     DEFAULT_GRACE_SECONDS,
     _fmt_number,
-    _format_iso_z,
     _is_number,
-    _parse_iso_utc,
 )
+# v2.2.1 WU-221-C2（行为保持抽取）：_earliest_reset_plus 的规范定义
+# 已移至 runtime.quota.window_math（probe 边界数学：min(可解析 reset)
+# + grace，2+ 模块共用——本模块与 runtime.quota.epoch）；本行 re-import
+# 保持既有解析点（含 epoch 的 `from runtime.quota.control import
+# _earliest_reset_plus`）零变化。
+from runtime.quota.window_math import _earliest_reset_plus
 
 # —— 词汇表常量 ——
 
@@ -145,22 +151,6 @@ def _merge_quota_control(quota_control):
                 "数值，得到 %r" % (key, value))
         merged[key] = value
     return merged
-
-
-def _earliest_reset_plus(windows, grace_delta):
-    """相关窗中最早可解析 reset_at 加 grace 的 Z 形式 ISO 串；无 → None。
-
-    不可解析 / 缺失的 reset_at 逐窗跳过；全部不可解析 → None
-    （不虚构唤醒时刻，纪律同 scheduler §31）。
-    """
-    moments = []
-    for window in windows:
-        moment = _parse_iso_utc(window.get("reset_at"))
-        if moment is not None:
-            moments.append(moment)
-    if not moments:
-        return None
-    return _format_iso_z(min(moments) + grace_delta)
 
 
 # —— §17.1 核心 API ——

@@ -453,7 +453,6 @@ class WaveTransactionCompensationTest(unittest.TestCase):
     def test_wave_state_save_failure_rolls_back_permits(self):
         # save_state 原子写失败：两张 permit 已创建 → 全部作废、租约
         # 全释放；wave 未落盘（tmp+os.replace 失败即未写）
-        real_save = task_manager.state.save_state
 
         def broken_save(repo, st, **kwargs):
             raise OSError("注入：state 落盘失败")

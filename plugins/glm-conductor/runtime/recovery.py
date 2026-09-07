@@ -30,7 +30,13 @@
       本模块只呈现「需要 reconcile 的信号」（interrupted + 僵尸标注）；
     - resume context 的自动 checkpoint 压缩归 wu-21-07（resume_manifest）；
     - corrupt 任务的 fail-closed 处置归后续单元 / 模型——本模块只在
-      summary["corrupt"] 列出 + render 末尾单行警告（不展开）。
+      summary["corrupt"] 列出 + render 末尾单行警告（不展开）；
+    - v2.2.1 WU-221-B2（QuotaIdentity）注记：本模块是纯呈现层，不
+      消费 / 不比较任何 epoch 记账事实（epoch 身份不在摘要十个字段
+      内）——quota/epoch 记录的跨身份（A 注册 B 恢复）裁决在消费面
+      完成（task_manager 的订阅资格门 / 崩溃对账 / 消费幂等按
+      quota_identity_matches 双形态判定），恢复摘要照实呈现、不重复
+      裁决，也不因身份切换新增或隐藏任何条目。
 
 v2.2 M9 增补（wu-22-09，SessionStart 桥接对账展示——只增块不删行）：
     恢复面此前看不到 v2.2 控制回路的关键状态（execution phase / wake

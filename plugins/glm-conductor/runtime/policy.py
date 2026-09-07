@@ -29,7 +29,7 @@ deny / ask 语义：
       保障任务不升级（allow，reason 注明）。
 
 来源：
-    docs/glm-conductor-v2-upgrade-guide-final.md §57-§59
+    docs/history/v2.0/glm-conductor-v2-upgrade-guide-final.md §57-§59
     （Route-aware Permission Policy）+ 实施计划工作块 B7.1/B7.2。
 
 依赖：

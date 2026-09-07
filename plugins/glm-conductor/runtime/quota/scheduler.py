@@ -45,7 +45,7 @@
     runtime.state，无循环导入）。风格对齐 runtime/quota/parser.py。
 
 来源：
-    docs/glm-conductor-v2-upgrade-guide-final.md §27（snapshot）、
+    docs/history/v2.0/glm-conductor-v2-upgrade-guide-final.md §27（snapshot）、
     §28（四态评估）、§29（PRESSURE→checkpoint）、§30
     （max(reset)+grace）、§31（绝不虚构 reset）、§32（唤醒强制
     刷新）、§33（UNKNOWN 周期存活探针回退）、§45（冒烟场景）
@@ -53,9 +53,19 @@
 """
 
 import math
-from datetime import datetime, timedelta, timezone
+from datetime import timedelta
 
 from runtime.quota.parser import QUOTA_STATUSES
+# v2.2.1 WU-221-C2（行为保持抽取）：ISO-8601 UTC 时间原语的规范定义
+# 已移至 runtime.quota.time_utils（本模块经 re-import 保持
+# scheduler._parse_iso_utc / _format_iso_z / _normalize_now 及全部
+# 下游 import 方（epoch / control / observer / watcher / watcher_store
+# / primer / continuity.wake_bridge）解析点零变化）。
+from runtime.quota.time_utils import (
+    _format_iso_z,
+    _normalize_now,
+    _parse_iso_utc,
+)
 
 # —— 词汇表常量 ——
 
@@ -87,54 +97,6 @@ def _fmt_number(value):
     if value == int(value):
         return str(int(value))
     return str(value)
-
-
-def _parse_iso_utc(text):
-    """把 ISO8601 时刻文本解析为 aware datetime（UTC）；失败 → None。
-
-    统一 Z 形式（"2026-08-28T06:45:02Z"，§27 reset_at 的输出形式）；
-    Python 3.7 的 fromisoformat 不认 Z 后缀，先改写为 +00:00。
-    非 str / 空 / 不可解析 → None（调用方一律按「未知」fail-open）。
-    """
-    if not isinstance(text, str) or text == "":
-        return None
-    raw = text.strip()
-    if raw.endswith("Z") or raw.endswith("z"):
-        raw = raw[:-1] + "+00:00"
-    try:
-        moment = datetime.fromisoformat(raw)
-    except ValueError:
-        return None
-    if moment.tzinfo is None:
-        moment = moment.replace(tzinfo=timezone.utc)
-    return moment
-
-
-def _format_iso_z(moment):
-    """aware datetime → UTC ISO8601 秒精度 Z 形式字符串（§27 输出纪律）。"""
-    return moment.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-
-def _normalize_now(now):
-    """归一 now 注入参数：None → 当前 UTC 时刻；datetime / ISO 串 → 时刻。
-
-    now 仅供测试注入当前时刻（或调用方传入参考时刻）使用；§30 规定
-    resume_at 只由 reset + grace 决定，本函数的返回值不参与任何
-    action / resume_at 的计算（避免测试与运行环境时钟耦合）。
-    非法输入 → ValueError（中文）。
-    """
-    if now is None:
-        return datetime.now(timezone.utc)
-    if isinstance(now, datetime):
-        if now.tzinfo is None:
-            return now.replace(tzinfo=timezone.utc)
-        return now
-    moment = _parse_iso_utc(now)
-    if moment is None:
-        raise ValueError(
-            "plan_resume：now 必须是 datetime 或 ISO8601 字符串，得到 %r"
-            % (now,))
-    return moment
 
 
 def _kind_names(windows):

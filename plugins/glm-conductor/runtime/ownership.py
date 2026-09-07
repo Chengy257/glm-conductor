@@ -11,7 +11,7 @@
       - touched 清单：git_touched_files() 列出当前 git 工作区全部改动
         文件（仓库相对路径、正斜杠），作为「实际改动文件」的来源。
 
-三种声明形式（docs/glm-conductor-v2-upgrade-guide-final.md §11）：
+三种声明形式（docs/history/v2.0/glm-conductor-v2-upgrade-guide-final.md §11）：
       - exact file:       "src/auth.ts"    只匹配该文件自身；
       - directory prefix: "src/auth/**"    匹配目录自身与全部后代
                           （零段语义使 "src/auth" 自身也命中，目录前缀
@@ -35,7 +35,7 @@
     `python3 -S` 可运行。风格对齐 runtime/state.py / runtime/journal.py。
 
 来源：
-    docs/glm-conductor-v2-upgrade-guide-final.md §11（ownership path rules）
+    docs/history/v2.0/glm-conductor-v2-upgrade-guide-final.md §11（ownership path rules）
     + v2 升级计划工作块 B2.1。
 """
 

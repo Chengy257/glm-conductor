@@ -80,10 +80,10 @@ TTL / 崩溃恢复：
     `python3 -S` 可运行。
 
 来源：
-    docs/GLM-Conductor-v2.1-Architecture-Agent-Implementation-Plan.md
+    docs/history/v2.1/GLM-Conductor-v2.1-Architecture-Agent-Implementation-Plan.md
     §6.3（Dispatch Permit + ※DR R3 存储锁定）/ §6.4（marker 绑定）/
     §6.6（foreground override + reason 词汇）/ §20.2（回归清单数据层
-    全集）+ docs/GLM-Conductor-v2.1-实施前缺口探查与设计决策记录.md
+    全集）+ docs/history/v2.1/GLM-Conductor-v2.1-实施前缺口探查与设计决策记录.md
     D1 / D6 / R3。
 """
 

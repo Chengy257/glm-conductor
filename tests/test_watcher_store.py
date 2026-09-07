@@ -18,6 +18,18 @@ subprocess 派生并 wait 后的已退出进程）：
     门 4 PermissionError bounded → PermissionErrorBoundedTest
     门 5 stale lock recovery    → StaleLockRecoveryTest
 
+v2.2.1 WU-221-A2（锁所有权与观察状态分离）→ 新增
+WatcherLockOwnershipTest：互斥凭据 = .glm-conductor/quota/watcher.lock
+（O_CREAT|O_EXCL 机械原子）；watcher.json 降级为纯观察面（advisory
+heartbeat 证据）；门 1 / 门 5 的既有用例夹具同步落锁文件（语义正当地
+由「锁即状态文件」迁移为两文件现实），其余断言原样保留。
+
+v2.2.1 WU-221-A3（RMW 收口）→ 新增 ConcurrentStopVsHeartbeatRmwTest：
+stop 旗标合并（request_stop）与心跳写回（update_watcher_state）收口
+为 <watcher.json>.lock 独占锁下的读-改-写（durable_io.
+atomic_update_json）——并发丢失更新回归（stop 绝不被心跳写回静默抹
+掉）+ RMW 锁忙 / PermissionError 降级与既有写失败同族的锚定。
+
 全部离线：状态文件落在 tempfile.TemporaryDirectory 的 scratch 仓库
 （绝不触碰仓库内 .glm-conductor/ 真实账本）；重试间隔注入 0 +
 sleep 注入计数桩（零真实等待）；凭证零依赖（identity_hash 直接注入
@@ -37,6 +49,7 @@ from pathlib import Path
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "plugins" / "glm-conductor"))
+from runtime import durable_io
 from runtime.quota import watcher_store
 from runtime.quota.scheduler import _format_iso_z
 
@@ -70,18 +83,70 @@ class StoreFixture(unittest.TestCase):
         self.addCleanup(self._tmp.cleanup)
         self.repo = self._tmp.name
         self.state_path = watcher_store.watcher_state_path(self.repo)
+        self.lock_path = watcher_store.watcher_lock_path(self.repo)
 
     def raw_state(self):
         """绕过读 API 直读磁盘原文（断言落盘形状用）。"""
         with open(self.state_path, "r", encoding="utf-8") as handle:
             return json.load(handle)
 
+    def raw_lock(self):
+        """绕过内容约定直读 watcher.lock JSON（断言锁形状用）。"""
+        with open(self.lock_path, "r", encoding="utf-8") as handle:
+            return json.load(handle)
+
+    def raw_lock_bytes(self):
+        """读 watcher.lock 原始字节（零写盘断言用）。"""
+        with open(self.lock_path, "rb") as handle:
+            return handle.read()
+
+    def write_lock(self, *, pid, generation=1, created_at=NOW_ISO,
+                   identity=IDENTITY):
+        """手写 watcher.lock 夹具（构造「活锁 / 陈旧锁」仲裁输入）。"""
+        os.makedirs(os.path.dirname(self.lock_path), exist_ok=True)
+        payload = {"pid": pid, "generation": generation,
+                   "provider_identity_hash": identity,
+                   "created_at": created_at}
+        with open(self.lock_path, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, ensure_ascii=False, sort_keys=True)
+        return self.lock_path
+
+    def corrupt_lock(self, text='{"pid": '):
+        """手写损坏（半份 JSON）的 watcher.lock 夹具。"""
+        os.makedirs(os.path.dirname(self.lock_path), exist_ok=True)
+        with open(self.lock_path, "w", encoding="utf-8") as handle:
+            handle.write(text)
+
+    def backdate(self, path, seconds=3600.0):
+        """把文件 mtime 回拨 seconds 秒（跨平台；损坏锁宽限闸 / 孤儿认
+        领标记 TTL 用真实墙钟判定，经 os.utime 控制）。"""
+        stamp = time.time() - seconds
+        os.utime(path, (stamp, stamp))
+
+    def dead_pid(self):
+        """真实派生一个立即退出的子进程并 wait → 返回保证已死的 pid。"""
+        helper = Path(self._tmp.name) / "dead_pid_helper.py"
+        helper.write_text("pass\n", encoding="utf-8")
+        process = subprocess.Popen([sys.executable, str(helper)],
+                                   stdout=subprocess.DEVNULL,
+                                   stderr=subprocess.DEVNULL)
+        process.wait(timeout=30)
+        return process.pid
+
+    def claim_residue(self):
+        """目录内现存的认领标记文件名列表（零残留断言用）。"""
+        return [name for name in
+                os.listdir(os.path.dirname(self.lock_path))
+                if name.startswith(os.path.basename(self.lock_path)
+                                   + watcher_store.LOCK_CLAIM_MARKER)]
+
 
 # —— 门 1：single-instance lock（活锁拒绝第二 acquire） ——
 
 class SingleInstanceLockTest(StoreFixture):
-    """§6 冻结：一个 provider identity 同时最多一个 active watcher；
-    锁即状态文件本身。"""
+    """§6 冻结：一个 provider identity 同时最多一个 active watcher
+    （v2.2.1 WU-221-A2 起锁本体 = watcher.lock；watcher.json 为观察面，
+    本类断言的冲突形状与零改写行为保持不变）。"""
 
     def test_second_acquire_rejected_while_live_and_fresh(self):
         """活 pid + 新鲜 heartbeat：第二 acquire 被拒并带冲突信息，
@@ -373,22 +438,16 @@ class PermissionErrorBoundedTest(StoreFixture):
 class StaleLockRecoveryTest(StoreFixture):
     """pid 已死或 heartbeat 过期 → 接管（generation+1，takeover 事实
     入返回值）；死 pid 用真实 subprocess 派生并 wait 后的已退出进程
-    （Windows 原语零 mock）。"""
-
-    def _dead_pid(self):
-        """真实派生一个立即退出的子进程并 wait → 返回保证已死的 pid。"""
-        helper = Path(self._tmp.name) / "dead_pid_helper.py"
-        helper.write_text("pass\n", encoding="utf-8")
-        process = subprocess.Popen([sys.executable, str(helper)],
-                                   stdout=subprocess.DEVNULL,
-                                   stderr=subprocess.DEVNULL)
-        process.wait(timeout=30)
-        return process.pid
+    （Windows 原语零 mock）。v2.2.1 WU-221-A2：锁本体是 watcher.lock，
+    夹具同步落陈旧锁 + 观察记录（语义正当迁移——仲裁凭据从 watcher.json
+    换为锁文件，断言本身原样保留）。"""
 
     def test_takeover_when_pid_dead(self):
-        """伪造记录 pid = 已退出子进程 → _pid_alive False → 接管：
-        takeover=True、generation=2、started_at 推进到接管时刻。"""
-        dead_pid = self._dead_pid()
+        """陈旧锁 pid = 已退出子进程 → _pid_alive False → 接管：
+        takeover=True、generation=2、started_at 推进到接管时刻；锁本体
+        同步换手（generation+1、pid=接管者）。"""
+        dead_pid = self.dead_pid()
+        self.write_lock(pid=dead_pid, generation=1)
         watcher_store.write_watcher_state(
             self.repo, base_record(pid=dead_pid, mode="ACTIVE",
                                    generation=1, started_at=NOW_ISO))
@@ -404,10 +463,15 @@ class StaleLockRecoveryTest(StoreFixture):
         self.assertEqual(record["started_at"], _format_iso_z(later))
         self.assertEqual(record["heartbeat_at"], _format_iso_z(later))
         self.assertFalse(record["stop_requested"])  # 接管复位停止旗标
+        lock = self.raw_lock()  # 锁本体同步换手（WU-221-A2）
+        self.assertEqual(lock["generation"], 2)
+        self.assertEqual(lock["pid"], os.getpid())
+        self.assertEqual(lock["provider_identity_hash"], IDENTITY)
 
     def test_takeover_when_heartbeat_expired(self):
         """pid 活着（测试进程自身）但 heartbeat 过期（> 阈值）→ 接管
         generation+1（过期即 stale lock，活 pid 不构成永久占用）。"""
+        self.write_lock(pid=os.getpid(), generation=4)
         watcher_store.write_watcher_state(
             self.repo, base_record(pid=os.getpid(), generation=4,
                                    heartbeat_at=NOW_ISO))
@@ -418,10 +482,13 @@ class StaleLockRecoveryTest(StoreFixture):
         self.assertTrue(result["acquired"])
         self.assertTrue(result["takeover"])
         self.assertEqual(result["generation"], 5)
+        self.assertEqual(self.raw_lock()["generation"], 5)
 
     def test_takeover_preserves_last_observation(self):
-        """接管保留现存 last_observation（观察连续性参考），corrupted
-        generation（非整数）→ 回退 generation=1 不炸。"""
+        """接管保留现存 last_observation（观察连续性参考）；锁 generation
+        不可解析（非整数）→ 按 1 兜底再 +1 不炸（WU-221-A2：代次权威
+        在锁，垃圾值不放大）。"""
+        self.write_lock(pid=0, generation="not-an-int")
         watcher_store.write_watcher_state(
             self.repo, base_record(pid=0, generation="not-an-int",
                                    last_observation={"epoch_id": "glm:x"}))
@@ -430,7 +497,7 @@ class StaleLockRecoveryTest(StoreFixture):
             now=NOW)
         self.assertTrue(result["acquired"])
         self.assertTrue(result["takeover"])
-        self.assertEqual(result["generation"], 1)  # 非法 generation 不放大
+        self.assertEqual(result["generation"], 2)  # 兜底 1 + 1（不放大）
         self.assertEqual(self.raw_state()["last_observation"],
                          {"epoch_id": "glm:x"})
 
@@ -446,6 +513,356 @@ class StaleLockRecoveryTest(StoreFixture):
         self.assertEqual(raw["generation"], 2)  # 其余字段不被 stop 触碰
         self.assertIsNone(watcher_store.request_stop(
             str(Path(self._tmp.name) / "empty-repo")))
+
+
+# —— v2.2.1 WU-221-A2：watcher.lock 机械原子单实例锁 ——
+
+class WatcherLockOwnershipTest(StoreFixture):
+    """锁所有权与观察状态分离（v2.2.1 WU-221-A2）：互斥凭据 =
+    .glm-conductor/quota/watcher.lock（O_CREAT|O_EXCL 机械原子创建）；
+    watcher.json 降级为纯观察面。锚定：全新 acquire 落锁、新鲜锁冲突
+    零写盘且有界（bounded single check）、损坏锁宽限闸两翼、created_at
+    兜底窗口、释放身份纪律、孤儿认领标记、双线程认领仲裁恰一胜出。"""
+
+    def test_fresh_acquire_creates_lock_file_with_generation_1(self):
+        """全新仓库 acquire：watcher.lock 被创建，内容键恰为冻结四键，
+        generation=1、pid=持有者、created_at=参考时刻（注入一致）。"""
+        result = watcher_store.acquire_watcher_lock(
+            self.repo, provider_identity_hash=IDENTITY, mode="PASSIVE",
+            now=NOW)
+        self.assertTrue(result["acquired"])
+        self.assertEqual(result["lock_generation"], 1)
+        self.assertTrue(os.path.isfile(self.lock_path))
+        lock = self.raw_lock()
+        self.assertEqual(sorted(lock),
+                         ["created_at", "generation", "pid",
+                          "provider_identity_hash"])
+        self.assertEqual(lock["generation"], 1)
+        self.assertEqual(lock["pid"], os.getpid())
+        self.assertEqual(lock["provider_identity_hash"], IDENTITY)
+        self.assertEqual(lock["created_at"], NOW_ISO)
+
+    def test_second_acquire_conflict_writes_nothing_and_bounded(self):
+        """新鲜锁在位：第二 acquire → 确定型冲突；锁字节与观察记录逐
+        字节不变（零写盘）；冲突路径零 sleep 注入调用（bounded single
+        check，无等待循环——sleep 计数桩机械锚定）。"""
+        first = watcher_store.acquire_watcher_lock(
+            self.repo, provider_identity_hash=IDENTITY, mode="ACTIVE",
+            now=NOW)
+        self.assertTrue(first["acquired"])
+        lock_before = self.raw_lock_bytes()
+        with open(self.state_path, "rb") as handle:
+            record_before = handle.read()
+        sleeps = []
+        second = watcher_store.acquire_watcher_lock(
+            self.repo, provider_identity_hash=IDENTITY, mode="ACTIVE",
+            now=NOW + timedelta(seconds=1), sleep=sleeps.append)
+        self.assertFalse(second["acquired"])
+        self.assertFalse(second["takeover"])
+        self.assertIsNone(second["generation"])
+        self.assertEqual(second["conflict"]["pid"], os.getpid())
+        self.assertEqual(second["conflict"]["created_at"], NOW_ISO)
+        self.assertEqual(second["conflict"]["lock_generation"], 1)
+        self.assertEqual(sleeps, [])  # 判定即返回：零等待
+        self.assertEqual(self.raw_lock_bytes(), lock_before)
+        with open(self.state_path, "rb") as handle:
+            self.assertEqual(handle.read(), record_before)
+
+    def test_conflict_shape_keeps_legacy_keys(self):
+        """冲突形状向后兼容：既有键（pid / heartbeat_at /
+        heartbeat_age_seconds / provider_identity_hash）逐一在位——
+        CLI（runtime/cli.py）消费面零改动的前提。"""
+        watcher_store.acquire_watcher_lock(
+            self.repo, provider_identity_hash=IDENTITY, mode="PASSIVE",
+            now=NOW)
+        second = watcher_store.acquire_watcher_lock(
+            self.repo, provider_identity_hash=IDENTITY, mode="PASSIVE",
+            now=NOW + timedelta(seconds=2))
+        for key in ("pid", "heartbeat_at", "heartbeat_age_seconds",
+                    "provider_identity_hash"):
+            self.assertIn(key, second["conflict"])
+        self.assertEqual(second["conflict"]["heartbeat_at"], NOW_ISO)
+
+    def test_corrupt_lock_within_grace_conflicts_without_writes(self):
+        """锁内容损坏但 mtime 龄期未超宽限（持有者写一半的微秒级窗口）
+        → 视同持有中：确定型冲突（证据不可得 → None 不虚构），零写盘
+        （观察记录不落、锁字节不动）。"""
+        self.corrupt_lock()
+        lock_before = self.raw_lock_bytes()
+        result = watcher_store.acquire_watcher_lock(
+            self.repo, provider_identity_hash=IDENTITY, mode="PASSIVE",
+            now=NOW)
+        self.assertFalse(result["acquired"])
+        self.assertIsNone(result["conflict"]["pid"])
+        self.assertFalse(os.path.exists(self.state_path))  # 零写盘
+        self.assertEqual(self.raw_lock_bytes(), lock_before)
+
+    def test_corrupt_lock_beyond_grace_takeover(self):
+        """锁内容损坏且 mtime 龄期超宽限（崩溃遗留）→ 接管：generation
+        不可解析按 1 兜底 +1 = 2，锁内容重写为合法 JSON、pid=接管者。"""
+        self.corrupt_lock()
+        self.backdate(self.lock_path, seconds=3600.0)
+        result = watcher_store.acquire_watcher_lock(
+            self.repo, provider_identity_hash=IDENTITY, mode="PASSIVE",
+            now=NOW)
+        self.assertTrue(result["acquired"])
+        self.assertTrue(result["takeover"])
+        self.assertEqual(result["generation"], 2)
+        self.assertEqual(self.raw_lock()["generation"], 2)
+        self.assertEqual(self.raw_lock()["pid"], os.getpid())
+        self.assertEqual(self.claim_residue(), [])  # 自己的认领标记已清
+
+    def test_heartbeat_evidence_unavailable_falls_back_to_created_at(self):
+        """heartbeat 证据不可得（无观察记录）→ 锁 created_at 兜底：
+        距今 ≤ lock_stale_seconds（默认 300）→ 冲突（覆盖「锁刚创建、
+        观察记录尚未落盘」的启动窗口不被误接管）；超龄 → 接管。"""
+        self.write_lock(pid=os.getpid(), generation=1)
+        early = watcher_store.acquire_watcher_lock(
+            self.repo, provider_identity_hash=IDENTITY, mode="PASSIVE",
+            now=NOW + timedelta(seconds=1))
+        self.assertFalse(early["acquired"])
+        self.assertIsNone(early["conflict"]["heartbeat_at"])  # 证据缺失不虚构
+        self.assertEqual(early["conflict"]["pid"], os.getpid())
+        late = watcher_store.acquire_watcher_lock(
+            self.repo, provider_identity_hash=IDENTITY, mode="PASSIVE",
+            now=NOW + timedelta(seconds=301))
+        self.assertTrue(late["acquired"])
+        self.assertTrue(late["takeover"])
+        self.assertEqual(late["generation"], 2)
+
+    def test_release_identity_discipline(self):
+        """释放身份纪律：仅当锁内容仍是 (pid, generation) 自己才删；
+        generation 或 pid 不匹配（后继已接管 / 他者锁）→ 保留并返回
+        False——绝不误删后继接管者的锁。"""
+        self.write_lock(pid=os.getpid(), generation=1)
+        self.assertFalse(watcher_store.release_watcher_lock(
+            self.repo, pid=os.getpid(), generation=2))  # 代次不符不删
+        self.assertTrue(os.path.isfile(self.lock_path))
+        self.assertTrue(watcher_store.release_watcher_lock(
+            self.repo, pid=os.getpid(), generation=1))  # 身份相符才删
+        self.assertFalse(os.path.exists(self.lock_path))
+        # 后继锁（generation 2）不被前任 (pid, generation 1) 删除
+        self.write_lock(pid=os.getpid(), generation=2)
+        self.assertFalse(watcher_store.release_watcher_lock(
+            self.repo, pid=os.getpid(), generation=1))
+        self.assertTrue(os.path.isfile(self.lock_path))
+        # 锁内容 pid 不符（他者持有）→ 不删
+        self.assertFalse(watcher_store.release_watcher_lock(
+            self.repo, pid=0, generation=2))
+        self.assertTrue(os.path.isfile(self.lock_path))
+
+    def test_orphan_claim_marker_ignored_not_deleted(self):
+        """孤儿认领标记（龄期超 TTL）：只忽略、绝不代删——接管照常
+        进行，事后目录里恰好只剩孤儿标记（自己的认领标记已清理）。
+        孤儿名取全零 hex（字典序最小）：若被当作存活会冤枉赢仲裁，
+        本用例恰证明 TTL 闸生效。"""
+        dead = self.dead_pid()
+        self.write_lock(pid=dead, generation=1)
+        orphan = self.lock_path + watcher_store.LOCK_CLAIM_MARKER + "0000"
+        with open(orphan, "w", encoding="utf-8") as handle:
+            handle.write("{}")
+        self.backdate(orphan, seconds=3600.0)  # 超 LOCK_CLAIM_TTL_SECONDS
+        result = watcher_store.acquire_watcher_lock(
+            self.repo, provider_identity_hash=IDENTITY, mode="PASSIVE",
+            now=NOW)
+        self.assertTrue(result["acquired"])
+        self.assertTrue(result["takeover"])
+        self.assertEqual(self.claim_residue(),
+                         [os.path.basename(orphan)])  # 孤儿保留、自己的已清
+
+    def test_claim_race_two_threads_exactly_one_winner(self):
+        """两线程同抢同一陈旧锁（死 pid，真实 subprocess）：claim-marker
+        仲裁恰一方接管成功（generation=2），另一方确定型冲突；零认领
+        标记残留（各自 finally 清理自己的标记）。settle / 重试全部注入
+        零等待。"""
+        dead = self.dead_pid()
+        self.write_lock(pid=dead, generation=1)
+        watcher_store.write_watcher_state(self.repo,
+                                          base_record(pid=dead))
+        results = []
+        barrier = threading.Barrier(2)
+
+        def contender():
+            barrier.wait()
+            results.append(watcher_store.acquire_watcher_lock(
+                self.repo, provider_identity_hash=IDENTITY, mode="PASSIVE",
+                now=NOW, settle_poll_seconds=0.0, sleep=lambda _s: None))
+
+        threads = [threading.Thread(target=contender) for _ in range(2)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=60)
+        self.assertEqual(len(results), 2)
+        winners = [r for r in results if r["acquired"]]
+        losers = [r for r in results if not r["acquired"]]
+        self.assertEqual(len(winners), 1)  # 恰一胜出：机械互斥成立
+        self.assertEqual(len(losers), 1)
+        self.assertTrue(winners[0]["takeover"])
+        self.assertEqual(winners[0]["generation"], 2)
+        self.assertFalse(losers[0]["takeover"])
+        self.assertIsNone(losers[0]["generation"])
+        self.assertEqual(self.raw_lock()["generation"], 2)
+        self.assertEqual(self.raw_lock()["pid"], os.getpid())
+        self.assertEqual(self.claim_residue(), [])  # 零认领标记残留
+
+    def test_acquire_parameter_validation_covers_new_thresholds(self):
+        """新增阈值参数校验先于 I/O：lock_stale_seconds /
+        claim_ttl_seconds / settle_poll_seconds 非数值或负 → ValueError
+        且零落盘（无锁、无观察记录）。"""
+        for kwargs in (
+                {"lock_stale_seconds": -1},
+                {"lock_stale_seconds": "300"},
+                {"claim_ttl_seconds": -0.5},
+                {"settle_poll_seconds": -1}):
+            with self.assertRaises(ValueError):
+                watcher_store.acquire_watcher_lock(
+                    self.repo, provider_identity_hash=IDENTITY,
+                    mode="PASSIVE", now=NOW, **kwargs)
+        self.assertFalse(os.path.exists(self.lock_path))
+        self.assertFalse(os.path.exists(self.state_path))
+
+
+# —— v2.2.1 WU-221-A3：stop 旗标 / 心跳写回的独占锁 RMW ——
+
+def _hb_value(thread_index, iteration):
+    """心跳线程 (thread_index, iteration) 的确定性 heartbeat_at 值
+    （ISO 形态、两两互异——「最终值必属写过值集合」断言的值域）。"""
+    return "2026-09-02T12:%02d:%02d.%dZ" % (
+        10 + iteration // 60, iteration % 60, thread_index)
+
+
+class ConcurrentStopVsHeartbeatRmwTest(StoreFixture):
+    """WU-221-A3 收口回归（验收主轴）：并发 stop 旗标合并 vs 心跳写回。
+
+    旧实现（无锁 RMW：读 → 内存改 → 整体写回）下，心跳写回若以陈旧
+    读取整体覆盖写回，stop 旗标即被静默抹掉（丢更新——CLI stop 失效，
+    watcher 永不退出）。现两条路径同处 <watcher.json>.lock 独占锁下的
+    读-改-写（durable_io.atomic_update_json）：谁后写都建立在对方落盘
+    结果之上。多线程（进程内线程；多进程归 a5）交错 M 轮后终态必须：
+    stop_requested 闩锁为 True（绝不静默丢失）、heartbeat_at 恰为心跳
+    方写过的某个值（心跳写回同样不丢）、文件全程合法 JSON 且冻结字段
+    齐备、RMW 锁/临时文件零残留。"""
+
+    STOPPERS = 2
+    BEATERS = 2
+    ROUNDS = 20
+
+    def test_concurrent_stop_and_heartbeat_merges_never_lose_update(self):
+        """N 线程交错 M 轮 stop 合并 vs 心跳合并：stop 旗标不丢、
+        heartbeat_at ∈ 写过值集合、文件全程合法、零锁残留。"""
+        watcher_store.write_watcher_state(
+            self.repo, base_record(generation=2))
+        barrier = threading.Barrier(self.STOPPERS + self.BEATERS + 1)
+        errors = []
+
+        def stopper():
+            barrier.wait()
+            for _round in range(self.ROUNDS):
+                try:
+                    watcher_store.request_stop(self.repo)
+                except Exception as exc:  # noqa: BLE001 —— 捕获即 FAIL 证据
+                    errors.append(exc)
+                    return
+
+        def beater(thread_index):
+            barrier.wait()
+            for iteration in range(self.ROUNDS):
+                try:
+                    watcher_store.update_watcher_state(
+                        self.repo,
+                        lambda payload, value=_hb_value(thread_index,
+                                                        iteration):
+                        {**payload, "heartbeat_at": value})
+                except Exception as exc:  # noqa: BLE001
+                    errors.append(exc)
+                    return
+
+        def observer():
+            # 全程并发读者：任何一次成功读入都必须是冻结字段齐备的
+            # 完整记录（撕裂 / 半份 JSON 在 json.load 即炸）
+            barrier.wait()
+            for _round in range(self.ROUNDS * 4):
+                try:
+                    record = watcher_store.read_watcher_state(self.repo)
+                    if record is None:
+                        continue  # 极端瞬态（读重试耗尽）不算撕裂
+                    for field in watcher_store.WATCHER_STATE_FIELDS:
+                        if field not in record:
+                            raise AssertionError("缺冻结字段 %s" % field)
+                except Exception as exc:  # noqa: BLE001
+                    errors.append(exc)
+                    return
+                time.sleep(0.001)
+
+        threads = ([threading.Thread(target=stopper)
+                    for _ in range(self.STOPPERS)]
+                   + [threading.Thread(target=beater, args=(index,))
+                      for index in range(self.BEATERS)]
+                   + [threading.Thread(target=observer)])
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=120)
+        self.assertEqual(errors, [])
+        final = self.raw_state()  # json.load 即「文件合法 JSON」断言
+        self.assertTrue(final["stop_requested"])  # 修复前：可被心跳写回抹掉
+        written = {_hb_value(t, i)
+                   for t in range(self.BEATERS)
+                   for i in range(self.ROUNDS)}
+        self.assertIn(final["heartbeat_at"], written)  # 心跳不丢、不被编造
+        self.assertEqual(final["generation"], 2)  # RMW 两方都不触碰代次
+        self.assertEqual(sorted(final), sorted(base_record()))
+        # RMW 锁（<watcher.json>.lock）与临时文件零残留
+        self.assertEqual(os.listdir(os.path.dirname(self.state_path)),
+                         ["watcher.json"])
+
+    def test_rmw_lock_busy_degrades_to_watcher_store_error(self):
+        """RMW 锁忙等超时（LockBusyError）→ 折算 WatcherStoreError
+        （__cause__ = LockBusyError）——与 write_watcher_state 的写失败
+        降级同族同向，绝不静默吞。夹具：手写新鲜 RMW 锁（pid=本进程
+        存活、created_at=当前）→ 有界忙等耗尽。"""
+        watcher_store.write_watcher_state(
+            self.repo, base_record(generation=2))
+        lock_path = self.state_path + ".lock"
+        with open(lock_path, "w", encoding="utf-8") as handle:
+            handle.write(json.dumps(
+                {"pid": os.getpid(), "generation": 1,
+                 "created_at": _format_iso_z(datetime.now(timezone.utc)),
+                 "owner": "fixture"}, sort_keys=True))
+        with self.assertRaises(watcher_store.WatcherStoreError) as ctx:
+            watcher_store.update_watcher_state(
+                self.repo, lambda payload: payload,
+                timeout_seconds=0.05, poll_interval=0.0,
+                sleep=lambda _seconds: None)
+        self.assertIsInstance(ctx.exception.__cause__,
+                              durable_io.LockBusyError)
+        self.assertEqual(self.raw_state()["generation"], 2)  # 目标未动
+
+    def test_request_stop_permission_error_degrades_to_watcher_store_error(
+            self):
+        """request_stop 写侧 PermissionError 有界重试耗尽 →
+        WatcherStoreError（__cause__ = PermissionError）——与迁移前
+        write_watcher_state 的降级逐形一致（约束：LockBusyError /
+        PermissionError 降级绝不偏离既有写失败行为）。"""
+        watcher_store.write_watcher_state(
+            self.repo, base_record(generation=2))
+        calls = {"n": 0}
+
+        def always_denied(src, dst):
+            calls["n"] += 1
+            raise PermissionError("[WinError 5] 模拟目录锁")
+
+        with mock.patch("os.replace", side_effect=always_denied):
+            with self.assertRaises(watcher_store.WatcherStoreError) as ctx:
+                watcher_store.request_stop(self.repo, retry_attempts=3,
+                                           retry_interval=0.0,
+                                           sleep=lambda _s: None)
+        self.assertEqual(calls["n"], 3)  # 有界：恰好 3 次
+        self.assertIsInstance(ctx.exception.__cause__, PermissionError)
+        self.assertEqual(self.raw_state()["generation"], 2)  # 旧值未破坏
+        self.assertEqual(os.listdir(os.path.dirname(self.state_path)),
+                         ["watcher.json"])  # RMW 锁与 tmp 零残留
 
 
 if __name__ == "__main__":

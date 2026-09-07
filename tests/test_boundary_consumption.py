@@ -519,8 +519,9 @@ class ConsumptionCrashConsistencyTest(ConsumptionTestBase):
     def test_pending_event_frozen_fields_and_write_ahead_order(self):
         """pending 五字段逐字 {event, epoch_id, representative_boundary_id,
         target_consumed, resume_started_at}（RH-04 起辅助证据字段面改记
-        新键）；write-ahead 排序：pending 先于 save_state、committed
-        最后闭合。"""
+        新键）+ additive 身份键 provider_identity_hash（v2.2.1 WU-221-B2
+        QuotaIdentity：消费事件按当前身份携带非秘密指纹）；write-ahead
+        排序：pending 先于 save_state、committed 最后闭合。"""
         self.save_task(max_quota_windows=2)
         self._consume()
         pendings = self.events("quota_consumption_pending")
@@ -528,7 +529,8 @@ class ConsumptionCrashConsistencyTest(ConsumptionTestBase):
         self.assertEqual(
             set(pendings[0]) - {"ts"},
             {"event", "epoch_id", "representative_boundary_id",
-             "target_consumed", "resume_started_at"})
+             "target_consumed", "resume_started_at",
+             "provider_identity_hash"})
         self.assertEqual(pendings[0]["epoch_id"], EPOCH_A)
         self.assertEqual(pendings[0]["representative_boundary_id"],
                          BOUNDARY_A)
@@ -1110,6 +1112,106 @@ class ReconcileWakeBridgeFromHostTest(ConsumptionTestBase):
         code_body = source.split('"""', 2)[2]  # 剥离 docstring（注释可提及）
         for forbidden in ("CronList", "cron_list", "subprocess"):
             self.assertNotIn(forbidden, code_body)
+
+
+# —— v2.2.1 WU-221-B2（QuotaIdentity）：跨账号消费回归 ——
+
+HASH_A = "a1b2c3d4e5f60718"
+HASH_B = "b2c3d4e5f6071882"
+
+
+class CrossIdentityConsumptionTest(ConsumptionTestBase):
+    """B2 面 3（消费）：幂等 / 归属升为 QuotaIdentity 双形态——A 对
+    epoch E 的消费既不满足也不幂等拦截 B 的 E，B 按其自身身份记账；
+    legacy 无指纹事件保守信任（v2.2 记录保持在案可读）。"""
+
+    def consume(self, epoch_id=EPOCH_A, identity=None):
+        return task_manager.record_quota_boundary_consumed(
+            self.repo, TID, epoch_id=epoch_id,
+            executable_boundary_id=BOUNDARY_A, resume_started_at=RESUME_AT,
+            provider_identity_hash=identity)
+
+    def test_a_consumption_does_not_satisfy_or_block_b_same_epoch(self):
+        # 规格原文：A's consumption of E does not idempotently-block B's;
+        # B consuming E after A counts per its own identity
+        self.save_task(max_quota_windows=3)
+        first = self.consume(EPOCH_A, identity=HASH_A)
+        self.assertEqual(first["consumed_quota_windows"], 1)
+        second = self.consume(EPOCH_A, identity=HASH_B)
+        self.assertEqual(second["consumed_quota_windows"], 2)  # 各记各账
+        self.assertNotIn("idempotent", second)
+        self.assertEqual(len(self.events("quota_boundary_consumed")), 2)
+        self.assertEqual(self.consumed(), 2)
+
+    def test_same_identity_replay_idempotent_unchanged(self):
+        # 同身份同 epoch 重放：幂等命中（无双消费）——语义逐字不变
+        self.save_task(max_quota_windows=2)
+        self.consume(EPOCH_A, identity=HASH_A)
+        before = self.state_bytes()
+        replay = self.consume(EPOCH_A, identity=HASH_A)
+        self.assertTrue(replay["idempotent"])
+        self.assertEqual(replay["consumed_quota_windows"], 1)
+        self.assertEqual(len(self.events("quota_boundary_consumed")), 1)
+        self.assertEqual(self.consumed(), 1)
+        self.assertEqual(self.state_bytes(), before)
+
+    def test_new_events_carry_writer_identity(self):
+        # 新写 pending / committed 携带当前指纹（非秘密 16-hex）
+        self.save_task(max_quota_windows=2)
+        self.consume(EPOCH_A, identity=HASH_A)
+        for name in ("quota_consumption_pending",
+                     "quota_boundary_consumed"):
+            records = self.events(name)
+            self.assertEqual(len(records), 1)
+            self.assertEqual(records[0]["provider_identity_hash"], HASH_A)
+
+    def test_legacy_prior_event_without_hash_trusted(self):
+        # v2.2 legacy 事件（无指纹）= 保守信任：任何当前身份下幂等命中
+        self.save_task(max_quota_windows=2)
+        self.append_consumed_event(epoch_id=EPOCH_A)
+        replay = self.consume(EPOCH_A, identity=HASH_B)
+        self.assertTrue(replay["idempotent"])
+        self.assertEqual(self.consumed(), 0)  # 零新增记账
+        self.assertEqual(len(self.events("quota_boundary_consumed")), 1)
+
+    def test_a_pending_does_not_close_b_transaction(self):
+        # RH-03 pending 双形态：A 的 pending（异身份）对 B 不是恢复闭合
+        # 证据——B 正常走三查后按自身身份记账（新 pending + committed）
+        self.save_task(max_quota_windows=2)
+        journal.append_event(self.repo, TID, {
+            "event": "quota_consumption_pending", "epoch_id": EPOCH_A,
+            "representative_boundary_id": BOUNDARY_A, "target_consumed": 1,
+            "resume_started_at": RESUME_AT,
+            "provider_identity_hash": HASH_A})
+        result = self.consume(EPOCH_A, identity=HASH_B)
+        self.assertEqual(result["consumed_quota_windows"], 1)
+        pendings = self.events("quota_consumption_pending")
+        self.assertEqual(len(pendings), 2)
+        self.assertEqual(pendings[-1]["provider_identity_hash"], HASH_B)
+        committed = self.events("quota_boundary_consumed")
+        self.assertEqual(len(committed), 1)
+        self.assertEqual(committed[0]["provider_identity_hash"], HASH_B)
+
+    def test_legacy_pending_trusted_closes_without_new_consumption(self):
+        # legacy pending（无指纹）按缺席信任：恢复闭合语义逐字不变
+        # （按冻结 target 闭合，不重查预算、绝不二次 +1）
+        self.save_task(max_quota_windows=2)
+        journal.append_event(self.repo, TID, {
+            "event": "quota_consumption_pending", "epoch_id": EPOCH_A,
+            "representative_boundary_id": BOUNDARY_A, "target_consumed": 1,
+            "resume_started_at": RESUME_AT})
+        result = self.consume(EPOCH_A, identity=HASH_B)
+        self.assertEqual(result["consumed_quota_windows"], 1)
+        self.assertEqual(len(self.events("quota_consumption_pending")), 1)
+        self.assertEqual(len(self.events("quota_boundary_consumed")), 1)
+        self.assertEqual(self.consumed(), 1)  # 恰 +1，无双消费
+
+    def test_identity_hash_validation_before_io(self):
+        self.save_task(max_quota_windows=2)
+        for bad in ("", 17, b"a1b2"):
+            with self.assertRaises(ValueError):
+                self.consume(EPOCH_A, identity=bad)
+        self.assertEqual(self.events("quota_boundary_consumed"), [])
 
 
 if __name__ == "__main__":

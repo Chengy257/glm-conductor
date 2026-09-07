@@ -3,7 +3,7 @@
 """GLM Conductor v2.2 Window Primer（修正计划 C4，wu-22-C4，分支 B 全量）。
 
 职责（修正计划 §8.1 / §8.2 / §8.3 / §C4，P0-QP 实验门已由用户机制裁决
-关闭——见 docs/GLM-Conductor-v2.2-Phase0-Primer-Experiments.md 门总览）：
+关闭——见 docs/history/v2.2/GLM-Conductor-v2.2-Phase0-Primer-Experiments.md 门总览）：
     用一次最小、独立、可审计的模型调用使新 quota window materialize，
     并随后强制 quota refresh 二次确认。本模块是 v2.2 运行时里唯一的
     control-plane 模型调用面（P0-QP-08 结构审计的落点），由三部分构成：
@@ -42,8 +42,10 @@
 
       4. primer.json durable 存取——独立文件独立常量（不复用任务
          state / journal / watcher.json），原子写纪律照抄
-         watcher_store（tmp 同目录写 + os.replace + PermissionError
-         有界重试——Windows AV / 目录锁是本机已知现象）。
+         watcher_store（PermissionError 有界重试——Windows AV / 目录
+         锁是本机已知现象；v2.2.1 WU-221-A2 起机制委托
+         runtime.durable_io.atomic_write_json：唯一同目录临时名 +
+         os.replace，绝不占用固定 <path>.tmp 名）。
 
 物化确认红线（§C4，P0-QP-03 粒度告警的落地）：
     - HTTP 200 不是证据（不得因为 prime call 成功返回 HTTP 200 就直接
@@ -67,8 +69,18 @@ fail-closed 不对称的理由（本模块与 quota 观察面的方向差异，�
 
 幂等语义（P0-QP-07，本实现随代码取证关闭该设计门）：
     - 幂等键 = (provider_identity_hash, boundary_id)（identity 为来源+
-      凭证 sha256 前 16 位，同 watcher.compute_provider_identity_hash
-      的派生口径；boundary_id 为 prime 时点的旧 boundary / epoch_id）；
+      凭证 sha256 前 16 位，派生口径即 runtime.quota.identity 的
+      compute_provider_identity_hash（v2.2.1 WU-221-B1 起自 watcher
+      抽取的共享落点）；boundary_id 为 prime 时点的旧 boundary /
+      epoch_id）；
+    - v2.2.1 WU-221-B2（QuotaIdentity）注记：本面自诞生起即按复合
+      身份 (provider_identity_hash, epoch/boundary) 记账——幂等键的
+      第一维就是身份指纹，A 身份的 primed 记录在结构上不可能拦截
+      B 身份的同 boundary prime（各按自身身份记账，cross-account
+      回归天然成立）；window_primed 事件同样携带
+      provider_identity_hash。本单元零行为变化，仅确认口径同源
+      （quota_identity_matches 双形态判定的 trusted/foreign 语义与
+      本面「异身份 = 键不命中」语义一致）；
     - 键命中 → 直接返回既有 durable 结果（idempotent=True），零模型
       调用、零 quota 网络、零 journal 事件（同键重入零网络零事件）；
     - 失败尝试同样落账（error_kind 非空）——超时表示「结果未知」而非
@@ -114,19 +126,20 @@ runtime/execution_policy.py 的 quota_control.primer_enabled
       短超时 + 限长读取；测试零真实网络零真实模型调用。
 
 依赖：
-    仅 Python 3 标准库 + runtime.execution_policy / runtime.journal /
+    仅 Python 3 标准库 + runtime（durable_io，v2.2.1 WU-221-A2 起）/
+    runtime.execution_policy / runtime.journal /
     runtime.quota.{_http, credentials, epoch, provider, resolver,
     scheduler}；quota/* 包纪律：不 import runtime.state /
     runtime.task_manager。跨模块私有 import（scheduler 的
     _format_iso_z / _normalize_now）是 quota 包既定惯例。
 
 来源：
-    docs/GLM-Conductor-v2.2-Quota-Control-Plane-Architecture-Correction-
+    docs/history/v2.2/GLM-Conductor-v2.2-Quota-Control-Plane-Architecture-Correction-
     and-Agent-Implementation-Plan.md §8（Window Primer 严格隔离）/
     §8.1（物化语义）/ §8.2（control-plane call 不属 Task Resume）/
     §8.3（Feature-Gate + 三重授权）/ §9 / §C4（红线：200 与百分比都不
     是证据，必须 refresh 二次确认）/ §QC-04..QC-06、QC-12
-    + docs/GLM-Conductor-v2.2-Phase0-Primer-Experiments.md（P0-QP-00
+    + docs/history/v2.2/GLM-Conductor-v2.2-Phase0-Primer-Experiments.md（P0-QP-00
     实测端点形态 / P0-QP-04 成本 / P0-QP-05 anchor 行为 / P0-QP-07
     幂等设计门）+ 修正计划工作单元 wu-22-C4。
 """
@@ -139,6 +152,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
+from runtime import durable_io
 from runtime.execution_policy import primer_enabled as _policy_primer_enabled
 from runtime.journal import append_control_plane_event as _append_control_plane_event
 from runtime.quota import resolver
@@ -286,13 +300,18 @@ def _write_primer_state(repo_root, record, *,
                         retry_attempts=PRIMER_PERMISSION_RETRY_ATTEMPTS,
                         retry_interval=PRIMER_PERMISSION_RETRY_INTERVAL_SECONDS,
                         sleep=time.sleep):
-    """原子写 primer.json（tmp 同目录写 + os.replace），返回最终路径。
+    """原子写 primer.json（v2.2.1 WU-221-A2 起委托共享原语
+    runtime.durable_io.atomic_write_json：唯一同目录临时名 +
+    os.replace——落盘字节与既有手写实现逐字节一致；POSIX 注记：最终
+    文件现继承原语唯一临时文件的 0o600 权限位（先前 umask 缺省约
+    0644——JSON 字节一致，仅文件权限位更收紧，对状态文件更安全）；
+    父目录缺失由原语自动创建），返回最终路径。
 
     纪律照抄 watcher_store.write_watcher_state：record 非 dict →
     ValueError（参数校验先于 I/O）；PermissionError → 有界重试（次数 /
     间隔 / sleep 均可注入，测试零真实等待），耗尽仍失败 →
-    PrimerStoreError（__cause__ = 原始 PermissionError）；其余异常清理
-    tmp 后原样上抛。读方永不见撕裂文件。
+    PrimerStoreError（__cause__ = 原始 PermissionError）；其余异常由
+    原语清理临时文件后原样上抛。读方永不见撕裂文件。
     """
     if not isinstance(record, dict):
         raise ValueError(
@@ -304,37 +323,18 @@ def _write_primer_state(repo_root, record, *,
             % (retry_interval,))
     attempts = max(1, int(retry_attempts))
     path = primer_state_path(repo_root)
-    directory = os.path.dirname(path)
-    if directory:
-        os.makedirs(directory, exist_ok=True)
-    tmp_path = path + ".tmp"
-    last_permission_error = None
-    for attempt in range(attempts):
-        try:
-            # newline="\n"：固定 \n 换行，避免 Windows 文本模式写出 \r\n
-            with open(tmp_path, "w", encoding="utf-8", newline="\n") as handle:
-                json.dump(record, handle, ensure_ascii=False, indent=2,
-                          sort_keys=True)
-            os.replace(tmp_path, path)
-            return path
-        except PermissionError as exc:
-            last_permission_error = exc
-            _unlink_quiet(tmp_path)
-            if attempt + 1 < attempts:
-                sleep(retry_interval)
-    raise PrimerStoreError(
-        "primer.json 原子写在 PermissionError 有界重试 %d 次（间隔 %.2f "
-        "秒）后仍失败（Windows AV / 目录锁？）：%s" % (
-            attempts, float(retry_interval), last_permission_error)
-    ) from last_permission_error
-
-
-def _unlink_quiet(path):
-    """尽力删除 tmp；不存在 / 竞态消失 → 静默（清理路径绝不遮蔽主异常）。"""
     try:
-        os.unlink(path)
-    except OSError:
-        pass
+        durable_io.atomic_write_json(path, record,
+                                     retry_attempts=retry_attempts,
+                                     retry_interval=retry_interval,
+                                     sleep=sleep)
+    except PermissionError as last_permission_error:
+        raise PrimerStoreError(
+            "primer.json 原子写在 PermissionError 有界重试 %d 次（间隔 %.2f "
+            "秒）后仍失败（Windows AV / 目录锁？）：%s" % (
+                attempts, float(retry_interval), last_permission_error)
+        ) from last_permission_error
+    return path
 
 
 def _fresh_state():
@@ -870,8 +870,8 @@ def _prime_once_unchecked(repo_root, *, boundary_id,
       - boundary_id：prime 时点的旧 boundary / epoch_id（幂等键之一；
         非空 str，否则 ValueError）；
       - provider_identity_hash：provider identity 指纹（幂等键之二；
-        派生口径同 watcher.compute_provider_identity_hash——来源+凭证
-        sha256 前 16 位；非空 str，否则 ValueError）；
+        派生口径同 runtime.quota.identity.compute_provider_identity_hash
+        ——来源+凭证 sha256 前 16 位；非空 str，否则 ValueError）；
       - transport：注入传输层 transport(url, body, headers, timeout) ->
         (status:int, body:bytes)；None → make_default_transport()（测试
         必注入——零真实网络零真实模型调用）；

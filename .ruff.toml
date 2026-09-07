@@ -1,0 +1,15 @@
+# Ruff 配置（v2.2.1 CI 加固，决策 D4：最小规则集）。
+# 只选 F（pyflakes：未用导入/未用变量/未定义名）+ E9（语法错误）——
+# 零风格规则、零风格 churn；line-length 仅作配置卫生，不强制。
+# 本文件与 .github/workflows/validate.yml 中固定的 ruff 版本配套维护。
+target-version = "py37" # 仓库下限（runtime 契约：Python 3.7 兼容语法）
+line-length = 100
+
+extend-exclude = [
+    ".glm-conductor", # 运行时状态目录（含临时脚本，非交付代码）
+    "docs",           # 文档（非 Python）
+    "tests/fixtures", # 测试夹具：故意畸形/临时的样例数据，不参与规则判定
+]
+
+[lint]
+select = ["F", "E9"]

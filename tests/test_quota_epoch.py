@@ -480,5 +480,65 @@ class PartiallyParseableResetTest(unittest.TestCase):
                          [RESET_FIVE, None])
 
 
+# —— QuotaIdentity 双形态比较（v2.2.1 WU-221-B2） ——
+
+class QuotaIdentityMatchesTest(unittest.TestCase):
+    """quota_identity_matches：QuotaIdentity = (provider_identity_hash,
+    epoch_id) 复合身份的统一判定（纯函数，六个记账面共用）。
+
+    冻结语义：epoch_id 等值 AND（记录侧指纹缺席 OR 指纹相等）——
+    缺席 = v2.2 legacy = 保守信任（兼容性裁决）；指纹不同 = 异身份 =
+    False（各面按「无先前记录」路径处理）；epoch_id 不同恒 False
+    （epoch_id 格式与推导零变化，仍是 §10.1 口径）。
+    """
+
+    EPOCH_A = "glm:0123456789abcdef"
+    EPOCH_B = "glm:fedcba9875432101"
+    HASH_A = "a1b2c3d4e5f60718"
+    HASH_B = "b2c3d4e5f6071807"
+
+    def matches(self, record_epoch, record_hash, current_epoch, current_hash):
+        return epoch.quota_identity_matches(
+            record_epoch, record_hash, current_epoch, current_hash)
+
+    def test_same_epoch_same_identity_true(self):
+        # 同 epoch 同身份 → True（幂等 / 归属命中）
+        self.assertTrue(self.matches(
+            self.EPOCH_A, self.HASH_A, self.EPOCH_A, self.HASH_A))
+
+    def test_same_epoch_legacy_absent_hash_trusted(self):
+        # 同 epoch + 记录无指纹（v2.2 legacy 形态）→ True（保守信任，
+        # 与当前身份无关——兼容性裁决）
+        self.assertTrue(self.matches(
+            self.EPOCH_A, None, self.EPOCH_A, self.HASH_A))
+        self.assertTrue(self.matches(
+            self.EPOCH_A, None, self.EPOCH_A, self.HASH_B))
+
+    def test_same_epoch_foreign_identity_false(self):
+        # 同 epoch 异身份（同名 epoch 换账号）→ False：不授权、不幂等
+        # 拦截、不消费——QuotaIdentity 的核心回归
+        self.assertFalse(self.matches(
+            self.EPOCH_A, self.HASH_A, self.EPOCH_A, self.HASH_B))
+
+    def test_different_epoch_false_regardless_of_identity(self):
+        # epoch 不同恒 False（身份相等也不越 epoch 认账）
+        self.assertFalse(self.matches(
+            self.EPOCH_A, self.HASH_A, self.EPOCH_B, self.HASH_A))
+        self.assertFalse(self.matches(
+            self.EPOCH_A, None, self.EPOCH_B, self.HASH_A))
+
+    def test_no_prior_record_false(self):
+        # 无先前记录（registered / last_activation 为 null）不匹配任何
+        # 当前 epoch——「从无记录」与「异身份记录」同样走 absent 路径
+        self.assertFalse(self.matches(
+            None, None, self.EPOCH_A, self.HASH_A))
+
+    def test_pure_function_no_io(self):
+        # 纯函数纪律：字符串比较零 I/O（指纹口径与派生归
+        # runtime.quota.identity，本函数绝不接触凭证）
+        self.assertIsInstance(self.matches(
+            self.EPOCH_A, self.HASH_A, self.EPOCH_A, self.HASH_A), bool)
+
+
 if __name__ == "__main__":
     unittest.main()

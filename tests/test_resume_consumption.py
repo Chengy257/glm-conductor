@@ -60,6 +60,7 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "plugins" / "glm-conductor"))
 from runtime import cli, execution_policy, journal, state, task_manager
 from runtime.quota import epoch as quota_epoch
+from runtime.quota import identity as quota_identity
 from runtime.quota import resolver as quota_resolver
 
 TID = "resume-consume-1a2b3c"
@@ -615,6 +616,214 @@ class CliExitContractTest(ConsumptionWiringCase):
         self.assertEqual(sorted(payload.keys()),
                          sorted(RESUME_FROZEN_KEYS
                                 + ["subscription", "consumption"]))
+
+
+# —— v2.2.1 WU-221-B2（QuotaIdentity）：跨账号恢复 + 直接读者身份闸 ——
+
+HASH_A = "a1b2c3d4e5f60718"
+HASH_B = "b2c3d4e5f6071882"
+
+
+def write_identity_cache(repo, *, status="AVAILABLE", windows=None,
+                         provider_identity_hash=None):
+    """按 resolver 缓存布局落盘 quota-cache.json（可携带身份指纹；
+    provider_identity_hash=None 模拟 v2.2 legacy 无指纹缓存）。"""
+    payload = {
+        "provider": "fixture",
+        "fetched_at": "2026-09-01T12:00:00.000Z",
+        "status": status,
+        "snapshot": {"provider": "fixture",
+                     "fetched_at": "2026-09-01T12:00:00.000Z",
+                     "status": status, "windows": windows},
+    }
+    if provider_identity_hash is not None:
+        payload["provider_identity_hash"] = provider_identity_hash
+    quota_resolver._save_cache(quota_resolver._cache_path(repo), payload)
+
+
+class DirectReaderIdentityGateTest(ConsumptionWiringCase):
+    """B2 面 6（b2-review carryover 收口）：绕过 resolver 层级的
+    _load_cache 直接读者补上身份闸——异身份缓存视同无缓存（各走既有
+    no-cache 路径），legacy 无指纹缓存保守信任（行为逐字不变）。"""
+
+    def under_identity(self, identity):
+        return mock.patch.object(quota_identity,
+                                 "compute_provider_identity_hash",
+                                 return_value=identity)
+
+    def run_cli(self, *args):
+        buffer = io.StringIO()
+        with redirect_stdout(buffer):
+            code = cli.main(list(args))
+        return code, json.loads(buffer.getvalue())
+
+    def _state(self):
+        st = make_state(status="waiting_quota")
+        st["work_units"] = [make_unit("wu-a")]
+        return st
+
+    def test_execution_phase_gate_foreign_cache_fails_open(self):
+        write_identity_cache(self.repo, status="PRESSURE",
+                             windows=WINDOWS_B,
+                             provider_identity_hash=HASH_A)
+        with self.under_identity(HASH_B):
+            decision = task_manager._execution_phase_decision(
+                self.repo, self._state(), 2)
+        self.assertIsNone(decision)  # 视同无缓存：闸不激活（fail-open）
+
+    def test_execution_phase_gate_legacy_cache_unchanged(self):
+        write_identity_cache(self.repo, status="PRESSURE",
+                             windows=WINDOWS_B,
+                             provider_identity_hash=None)
+        with self.under_identity(HASH_B):
+            decision = task_manager._execution_phase_decision(
+                self.repo, self._state(), 2)
+        self.assertIsNotNone(decision)  # legacy 无指纹：保守信任照旧
+        self.assertEqual(decision["provider_status"], "PRESSURE")
+
+    def test_execution_phase_gate_same_identity_active(self):
+        write_identity_cache(self.repo, status="PRESSURE",
+                             windows=WINDOWS_B,
+                             provider_identity_hash=HASH_A)
+        with self.under_identity(HASH_A):
+            decision = task_manager._execution_phase_decision(
+                self.repo, self._state(), 2)
+        self.assertIsNotNone(decision)  # 同身份：缓存正常进决策器
+        self.assertEqual(decision["provider_status"], "PRESSURE")
+
+    def test_recommended_resume_foreign_cache_none(self):
+        # resume 的 recommended_resume_at 直接读者：异身份缓存 → None
+        # 不虚构建议时刻；legacy 缓存照常折算
+        write_identity_cache(self.repo, status="EXHAUSTED",
+                             windows=WINDOWS_A,
+                             provider_identity_hash=HASH_A)
+        with self.under_identity(HASH_B):
+            self.assertIsNone(
+                task_manager._evaluation_from_refreshed_cache(self.repo))
+        with self.under_identity(HASH_A):
+            evaluation = task_manager._evaluation_from_refreshed_cache(
+                self.repo)
+        self.assertIsNotNone(evaluation)
+        self.assertEqual(evaluation["status"], "EXHAUSTED")
+
+    def test_transition_epoch_context_foreign_cache_none(self):
+        # 转态点订阅折算直接读者：异身份缓存 → None → 不注册零副作用
+        write_identity_cache(self.repo, status="EXHAUSTED",
+                             windows=WINDOWS_A,
+                             provider_identity_hash=HASH_A)
+        with self.under_identity(HASH_B):
+            self.assertIsNone(
+                task_manager._epoch_context_at_transition(self.repo))
+
+    def test_transition_epoch_context_carries_same_identity(self):
+        write_identity_cache(self.repo, status="EXHAUSTED",
+                             windows=WINDOWS_A,
+                             provider_identity_hash=HASH_A)
+        with self.under_identity(HASH_A):
+            context = task_manager._epoch_context_at_transition(self.repo)
+        self.assertIsNotNone(context)
+        self.assertEqual(context["epoch_id"], EPOCH_OF_A)
+        self.assertEqual(context["provider_identity_hash"], HASH_A)
+
+    def test_transition_epoch_context_legacy_cache_no_identity_key(self):
+        write_identity_cache(self.repo, status="EXHAUSTED",
+                             windows=WINDOWS_A,
+                             provider_identity_hash=None)
+        with self.under_identity(HASH_A):
+            context = task_manager._epoch_context_at_transition(self.repo)
+        self.assertIsNotNone(context)
+        self.assertNotIn("provider_identity_hash", context)
+
+    def _waiting_task(self):
+        self.put_task(self._state())
+
+    def test_wake_plan_foreign_cache_behaves_as_no_cache(self):
+        # CLI wake-plan 直接读者：异身份缓存 → 视同无缓存（plan 按
+        # UNKNOWN fail-open：boundary_id=None）；legacy 缓存 → 行为不变
+        self._waiting_task()
+        write_identity_cache(self.repo, status="AVAILABLE",
+                             windows=WINDOWS_B,
+                             provider_identity_hash=HASH_A)
+        with self.under_identity(HASH_B):
+            code, payload = self.run_cli("wake-plan", self.repo, TID)
+        self.assertEqual(code, 0)
+        self.assertIsNone(payload["boundary_id"])
+
+    def test_wake_plan_legacy_cache_unchanged(self):
+        self._waiting_task()
+        write_identity_cache(self.repo, status="AVAILABLE",
+                             windows=WINDOWS_B,
+                             provider_identity_hash=None)
+        with self.under_identity(HASH_B):
+            code, payload = self.run_cli("wake-plan", self.repo, TID)
+        self.assertEqual(code, 0)
+        self.assertEqual(payload["boundary_id"], BOUNDARY_OF_B)
+
+    def test_wake_plan_same_identity_uses_cache(self):
+        self._waiting_task()
+        write_identity_cache(self.repo, status="AVAILABLE",
+                             windows=WINDOWS_B,
+                             provider_identity_hash=HASH_A)
+        with self.under_identity(HASH_A):
+            code, payload = self.run_cli("wake-plan", self.repo, TID)
+        self.assertEqual(code, 0)
+        self.assertEqual(payload["boundary_id"], BOUNDARY_OF_B)
+
+
+class ResumeAccountSwitchTest(ConsumptionWiringCase):
+    """B2 面 5/6 集成（恢复对账）：waiting_quota 任务在 A 名下中断、
+    B 的会话恢复——A 的 epoch 记录按 not-ours 处理（保守等待），绝不
+    盲目复用；消费事件与激活记账随当前身份落指纹。"""
+
+    def resume_under_identity(self, identity, **kwargs):
+        kwargs.setdefault("resolved_status", "AVAILABLE")
+        kwargs.setdefault("windows", WINDOWS_B)
+        with mock.patch.object(
+                quota_resolver, "resolve_quota_status",
+                return_value=fake_resolved(kwargs["resolved_status"])), \
+             mock.patch.object(
+                 quota_resolver, "resolve_quota_detail",
+                 return_value=fake_detail(kwargs["resolved_status"],
+                                          kwargs["windows"])), \
+             mock.patch.object(quota_identity,
+                               "compute_provider_identity_hash",
+                               return_value=identity):
+            return task_manager.resume_from_quota(self.repo, TID)
+
+    def test_interrupted_under_a_not_reused_under_b(self):
+        # A 名下注册 + 激活 + 中断；B 恢复：订阅门按异身份拦截（A 的
+        # epoch 记录不是 B 的），任务保持 waiting_quota 零转态
+        self.put_task(self.authorized_state())
+        self.subscribe(EPOCH_OF_A, provider_identity_hash=HASH_A)
+        task_manager.mark_activation_epoch(
+            self.repo, TID, epoch_id=EPOCH_OF_A,
+            provider_identity_hash=HASH_A)
+        result = self.resume_under_identity(HASH_B)
+        self.assertFalse(result["resumed"])
+        face = result["subscription"]
+        self.assertFalse(face["eligible"])
+        self.assertTrue(any("其他 provider 身份" in r
+                            for r in face["reasons"]))
+        self.assertEqual(self.on_disk()["status"], "waiting_quota")
+        self.assertNotIn("consumption", result)
+        self.assertEqual(self.consumed_events(), [])
+
+    def test_legacy_records_resume_normally_under_any_identity(self):
+        # v2.2 legacy 记录（无指纹）在新身份下照常恢复——兼容性裁决
+        self.put_task(self.authorized_state())
+        self.subscribe(EPOCH_OF_A)
+        st = self.on_disk()
+        st["quota_subscription"]["last_activation_epoch_id"] = EPOCH_OF_A
+        state.save_state(self.repo, st)
+        result = self.resume_under_identity(HASH_B)
+        self.assertTrue(result["resumed"])
+        self.assertTrue(result["subscription"]["eligible"])
+        self.assertTrue(result["consumption"]["consumed"])
+        # 新记账事件携带 B 的当前身份（derive-and-emit）
+        self.assertEqual(self.consumed_events()[-1]
+                         ["provider_identity_hash"], HASH_B)
+        self.assertEqual(self.advanced_events()[-1]
+                         ["provider_identity_hash"], HASH_B)
 
 
 if __name__ == "__main__":

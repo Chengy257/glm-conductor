@@ -36,7 +36,15 @@
     结论随宿主 / 会话生命周期自然失效，容量闸防止文件无限增长。
 
 写入纪律（复制自 watcher_store 的既有规范，常量独立不共享）：
-    - 原子写：tmp 同目录写 + os.replace——读方永不见撕裂文件；
+    - 原子写：v2.2.1 WU-221-A2 起委托 runtime.durable_io.
+      atomic_write_json（唯一同目录临时名 + os.replace——多宿主会话
+      hook 并发落账绝不在固定 tmp 名相撞），读方永不见撕裂文件；
+    - 读-改-写（v2.2.1 WU-221-A3 收口）：有新证据的落账走
+      runtime.durable_io.atomic_update_json——<session_facts.json>.lock
+      独占锁保护下的读-改-写，锁内以最新账本重做同一「证据只进不退」
+      合并（_merge_record 纪律原样），并发 hook 的观察不再因「读→写」
+      窗口互相覆盖而丢证据；零新证据的幂等命中零锁零落盘（快道先
+      行）；RMW 锁临界区刻意短（读 + 合并 + 写，锁内零网络零探针）；
     - PermissionError（Windows AV / 目录锁，本机已知现象）→ 有界
       重试（默认 3 次、0.2 秒间隔；常量本模块独立声明，与
       watcher_store / primer 数值一致但互不 import），耗尽 → 抛出
@@ -46,12 +54,13 @@
       坏内容绝不炸消费方。
 
 依赖：
-    仅 Python 3 标准库（json / os / time / datetime），零第三方依赖；
+    仅 Python 3 标准库（json / os / time / datetime）+ runtime.
+    durable_io（v2.2.1 WU-221-A2 起原子写委托），零第三方依赖；
     不 import runtime.state / runtime.task_manager / quota 包（会话
     事实缓存是独立 durable 面，与任务账本零耦合）。
 
 来源：
-    docs/GLM-Conductor-v2.2-Quota-Control-Plane-Architecture-Correction-
+    docs/history/v2.2/GLM-Conductor-v2.2-Quota-Control-Plane-Architecture-Correction-
     and-Agent-Implementation-Plan.md §C6（Activation Transport &
     Scheduler Capability Adapter）/ §22.5（观测不制造 armed）+ 工作单元
     wu-22-C6 ③。
@@ -61,6 +70,8 @@ import json
 import os
 import time
 from datetime import datetime, timezone
+
+from runtime import durable_io
 
 # —— 词汇表常量（独立声明，不与 watcher_store / primer 共享 import） ——
 
@@ -169,61 +180,73 @@ def read_session_record(repo_root, session_id):
     return record if isinstance(record, dict) else None
 
 
-# —— 原子写（tmp + os.replace + PermissionError 有界重试） ——
+# —— 原子写 / 读-改-写（v2.2.1 WU-221-A2 原子写；WU-221-A3 起落账为独占锁 RMW） ——
 
-def _unlink_quiet(path):
-    """尽力删除 tmp；不存在 / 竞态消失 → 静默（清理路径绝不遮蔽主异常）。"""
-    try:
-        os.unlink(path)
-    except OSError:
-        pass
+class _ObservationAlreadyPresent(Exception):
+    """内部哨兵：RMW 锁内对最新账本重做合并时发现零新证据（同一证据
+    已被并发观察落账）——record_observation 据此走幂等返回，目标绝不
+    被触碰（atomic_update_json 对 updater 异常的既有纪律：目标不动、
+    锁经 finally 必释放）。record 属性携带幂等返回的既有记录 dict
+    （v2.2.1 WU-221-A3 fix1：哨兵必须自携载荷——handler 消费
+    .record，绝不依赖 args 位置约定）。"""
+
+    def __init__(self, record):
+        super().__init__(
+            "scheduler_facts：证据已被并发观察落账（幂等返回，目标不被"
+            "触碰）")
+        self.record = record
 
 
-def _write_session_facts(repo_root, data, *,
-                         retry_attempts=FACT_PERMISSION_RETRY_ATTEMPTS,
-                         retry_interval=FACT_PERMISSION_RETRY_INTERVAL_SECONDS,
-                         sleep=time.sleep):
-    """原子写 session_facts.json（tmp 同目录写 + os.replace），返回路径。
+def _update_session_facts(repo_root, updater, *,
+                          timeout_seconds=durable_io.DEFAULT_TIMEOUT_SECONDS,
+                          poll_interval=durable_io.DEFAULT_POLL_INTERVAL_SECONDS,
+                          retry_attempts=FACT_PERMISSION_RETRY_ATTEMPTS,
+                          retry_interval=FACT_PERMISSION_RETRY_INTERVAL_SECONDS,
+                          sleep=time.sleep):
+    """独占锁（session_facts.json.lock，与目标同目录）保护下的读-改-写
+    （v2.2.1 WU-221-A3 收口），返回 updater 产出的新账本 payload。
 
-    纪律复制自 watcher_store.write_watcher_state（常量独立）：data 非
-    dict → ValueError（参数校验先于 I/O）；PermissionError → 有界重试
-    （次数 / 间隔 / sleep 均可注入，测试零真实等待），耗尽仍失败 →
-    SchedulerFactsError（__cause__ = 原始 PermissionError）；其余异常
-    清理 tmp 后原样上抛。读方永不见撕裂文件。
+    委托 runtime.durable_io.atomic_update_json：锁内序 = 读当前账本
+    （缺失 → 空 dict）→ updater(payload) → 新账本原子写回；updater 抛
+    错 → 目标不被触碰、异常原样传播（锁经 finally 必释放）。RMW 锁是
+    毫秒级短临界区（读 + 合并 + 写，锁内零网络零探针），把多宿主会话
+    hook 的并发落账从「读→写窗口互相覆盖」收口为同锁串行——后写者必
+    以前写者的落盘结果为底版（证据只进不退的合并不丢证据）。
+    stale_seconds 默认仅作用于 RMW 锁文件本身（崩溃持有者可接管，不
+    构成永久卡死）。
+
+    纪律沿袭既有写面（常量独立）：retry_interval < 0 → ValueError
+    （参数校验先于 I/O）；PermissionError → 有界重试（原语内按次重试、
+    sleep 注入下发），耗尽仍失败 → SchedulerFactsError（__cause__ =
+    原始 PermissionError）；RMW 锁 LockBusyError（忙等超时 / 仲裁落
+    败，绝不无限等待）→ 同样折算为 SchedulerFactsError——与写失败降
+    级同族同向，绝不静默吞。落盘字节与既有手写实现逐字节一致；
+    POSIX 注记：最终文件现继承原语唯一临时文件的 0o600 权限位（先前
+    umask 缺省约 0644——JSON 字节一致，仅文件权限位更收紧，对状态文
+    件更安全）。读方永不见撕裂文件。
     """
-    if not isinstance(data, dict):
-        raise ValueError(
-            "scheduler_facts 写入失败：data 必须是 dict，得到 %r"
-            % (type(data).__name__,))
     if retry_interval < 0:
         raise ValueError(
             "scheduler_facts 写入失败：retry_interval 必须 >= 0，得到 %r"
             % (retry_interval,))
     attempts = max(1, int(retry_attempts))
-    path = session_facts_path(repo_root)
-    directory = os.path.dirname(path)
-    if directory:
-        os.makedirs(directory, exist_ok=True)
-    tmp_path = path + ".tmp"
-    last_permission_error = None
-    for attempt in range(attempts):
-        try:
-            # newline="\n"：固定 \n 换行，避免 Windows 文本模式写出 \r\n
-            with open(tmp_path, "w", encoding="utf-8", newline="\n") as handle:
-                json.dump(data, handle, ensure_ascii=False, indent=2,
-                          sort_keys=True)
-            os.replace(tmp_path, path)
-            return path
-        except PermissionError as exc:
-            last_permission_error = exc
-            _unlink_quiet(tmp_path)
-            if attempt + 1 < attempts:
-                sleep(retry_interval)
-    raise SchedulerFactsError(
-        "session_facts.json 原子写在 PermissionError 有界重试 %d 次（间隔 "
-        "%.2f 秒）后仍失败（Windows AV / 目录锁？）：%s" % (
-            attempts, float(retry_interval), last_permission_error)
-    ) from last_permission_error
+    try:
+        return durable_io.atomic_update_json(
+            session_facts_path(repo_root), updater,
+            timeout_seconds=timeout_seconds, poll_interval=poll_interval,
+            retry_attempts=retry_attempts, retry_interval=retry_interval,
+            sleep=sleep)
+    except durable_io.LockBusyError as lock_busy:
+        raise SchedulerFactsError(
+            "session_facts.json 读-改-写在独占锁有界等待 %.2f 秒后仍无法"
+            "获取（锁忙 / 仲裁落败，绝不无限等待）：%s"
+            % (float(timeout_seconds), lock_busy)) from lock_busy
+    except PermissionError as last_permission_error:
+        raise SchedulerFactsError(
+            "session_facts.json 原子写在 PermissionError 有界重试 %d 次（间隔 "
+            "%.2f 秒）后仍失败（Windows AV / 目录锁？）：%s" % (
+                attempts, float(retry_interval), last_permission_error)
+        ) from last_permission_error
 
 
 # —— 证据只进不退的 merge 原语（纯函数，供 record_observation 复用） ——
@@ -304,10 +327,12 @@ def record_observation(repo_root, session_id, *, origin=None, create=None,
 
     证据只进不退（见模块 docstring「证据只进不退」节）：None 不覆盖、
     能力值不回退不翻转、origin 单向升级、automation_id 追加去重；
-    全部观察均无新证据 → 零写幂等（updated_at 不空转），返回既有
-    记录 + 记录 dict 增标 "idempotent": True。有新证据 → 单次原子写
-    （tmp + os.replace + PermissionError 有界重试）+ updated_at 刷新
-    （observed_at 显式传入优先，须可解析 ISO8601）+ 容量闸淘汰。
+    全部观察均无新证据 → 零写幂等（updated_at 不空转、零锁零落盘），
+    返回既有记录 + 记录 dict 增标 "idempotent": True。有新证据 →
+    独占锁 RMW 单次落账（v2.2.1 WU-221-A3：<session_facts.json>.lock
+    保护下的读-改-写，锁内以最新账本重做同一合并——并发 hook 的观察
+    绝不因「读→写」窗口互相覆盖而丢证据）+ updated_at 刷新（observed_at
+    显式传入优先，须可解析 ISO8601）+ 容量闸淘汰。
 
     参数校验（先于任何 I/O，中文 ValueError）：
       - session_id 必须是非空 str（载荷缺 session_id 的调用方应跳过
@@ -353,6 +378,8 @@ def record_observation(repo_root, session_id, *, origin=None, create=None,
         existing, origin=origin, create=create, update=update, pause=pause,
         delete=delete, automation_id=automation_id)
     if not changed:
+        # 零新证据：零写幂等（零锁零落盘，updated_at 不空转）——锁外
+        # 快道与既有行为逐字节一致；并发窗口由下方锁内重并兜底
         result = dict(existing) if isinstance(existing, dict) \
             else dict(record)
         if isinstance(existing, dict):
@@ -360,8 +387,38 @@ def record_observation(repo_root, session_id, *, origin=None, create=None,
         return result
     record["updated_at"] = observed_at if observed_at is not None \
         else _utc_now_iso()
-    sessions[session_id] = record
-    _prune_oldest(sessions)
-    _write_session_facts(repo_root, data, retry_attempts=retry_attempts,
-                         retry_interval=retry_interval, sleep=sleep)
-    return record
+
+    # —— v2.2.1 WU-221-A3：独占锁 RMW 落账。锁内对最新账本重做同一
+    #    合并（_merge_record 纪律原样复用）：并发 hook 在本观察读取
+    #    之后落下的证据已在底版里，只进不退合并不覆盖不丢失。
+    holder = {}
+
+    def _merge_into_fresh(payload):
+        fresh_data = payload if (isinstance(payload, dict)
+                                 and isinstance(payload.get("sessions"),
+                                                dict)) \
+            else {"schema_version": FACT_SCHEMA_VERSION, "sessions": {}}
+        fresh_sessions = fresh_data["sessions"]
+        fresh_existing = fresh_sessions.get(session_id)
+        merged, fresh_changed = _merge_record(
+            fresh_existing, origin=origin, create=create, update=update,
+            pause=pause, delete=delete, automation_id=automation_id)
+        if not fresh_changed:
+            # 锁内发现证据已被并发观察落账：零新证据 → 幂等返回，
+            # 目标不被触碰（哨兵沿 atomic_update_json 既有纪律传播）
+            result = dict(fresh_existing)
+            result["idempotent"] = True
+            raise _ObservationAlreadyPresent(result)
+        merged["updated_at"] = record["updated_at"]
+        fresh_sessions[session_id] = merged
+        _prune_oldest(fresh_sessions)
+        holder["record"] = merged
+        return fresh_data
+
+    try:
+        _update_session_facts(repo_root, _merge_into_fresh,
+                              retry_attempts=retry_attempts,
+                              retry_interval=retry_interval, sleep=sleep)
+    except _ObservationAlreadyPresent as already_present:
+        return already_present.record
+    return holder["record"]

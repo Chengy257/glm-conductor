@@ -170,16 +170,16 @@ fail-open 策略（RB-2 起按任务隔离）：
     → 连续链断开 → 重新计数。上限对全部八种 check 一视同仁。
 
 来源：
-    docs/glm-conductor-v2-upgrade-guide-final.md §9（Ownership Gate
+    docs/history/v2.0/glm-conductor-v2-upgrade-guide-final.md §9（Ownership Gate
     Layer A）/ §15（Stop Completion Gate，四重检查 + block 报文可行动）/
     §16（Stop Hook loop safety，有界续行）/ §17-§20（证据指纹与验证 /
-    审查 stale 拦截）/ §22（视觉证据）+ docs/glm-conductor-v2-implementation-
+    审查 stale 拦截）/ §22（视觉证据）+ docs/history/v2.0/glm-conductor-v2-implementation-
     plan.md §3.1（fail-open 降级可见契约）/ §3.5（Layer A 完成门）
     + v2 升级计划工作块 B2.1 / B3.1 / B3.2 / B4.1
-    + docs/GLM-Conductor-v2.0.1-Release-Hardening-Patch-Agent-Implementation-Plan.md
+    + docs/history/v2.0/GLM-Conductor-v2.0.1-Release-Hardening-Patch-Agent-Implementation-Plan.md
     （RB-2 / WU-P3：任务绑定专属仓库根，per-task 仓库求值 + 按任务隔离
     降级，三 + 二个结构化 reason 词汇，歧义不猜）
-    + docs/GLM-Conductor-v2.1-Architecture-Agent-Implementation-Plan.md
+    + docs/history/v2.1/GLM-Conductor-v2.1-Architecture-Agent-Implementation-Plan.md
     §16.5 + wu-21-13 实施规格（主会话锁定 2026-08-31：审查检查升级为
     「只有 fresh ship review receipt 才能通过」——receipt 唯一权威，
     state.review 手写字段不再作为通过依据）。

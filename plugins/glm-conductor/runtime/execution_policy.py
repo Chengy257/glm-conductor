@@ -105,13 +105,13 @@ window 预算记账（v2.1 §14，wu-21-11）：
     零第三方依赖，`python3 -S` 可运行。
 
 来源：
-    docs/GLM-Conductor-v2.1-Architecture-Agent-Implementation-Plan.md
+    docs/history/v2.1/GLM-Conductor-v2.1-Architecture-Agent-Implementation-Plan.md
     §3（schema 冻结）/ §5（M1 API 与不变量）/ §12（有效预算表）；
-    docs/GLM-Conductor-v2.1-实施前缺口探查与设计决策记录.md §四 R7
+    docs/history/v2.1/GLM-Conductor-v2.1-实施前缺口探查与设计决策记录.md §四 R7
     （legacy 兼容：缺键合法）；
-    docs/GLM-Conductor-v2.2-Quota-Continuity-Control-Loop-Implementation-Plan.md
+    docs/history/v2.2/GLM-Conductor-v2.2-Quota-Continuity-Control-Loop-Implementation-Plan.md
     §5.1（quota_control 阈值配置）/ §23（state schema 迁移：缺块合法）；
-    docs/GLM-Conductor-v2.2-实施前缺口探查与设计决策记录.md §四 D5
+    docs/history/v2.2/GLM-Conductor-v2.2-实施前缺口探查与设计决策记录.md §四 D5
     （阈值配置落点：execution_policy.quota_control 子块）。
 """
 

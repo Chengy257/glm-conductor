@@ -35,7 +35,7 @@
     python3 report.py [--json]
 
 来源：
-    docs/glm-conductor-v2-upgrade-guide-final.md §36（凭证三模式）、
+    docs/history/v2.0/glm-conductor-v2-upgrade-guide-final.md §36（凭证三模式）、
     §27（snapshot）、§28-§33（评估与恢复规划）、§37（凭证安全）、
     §43（quota 诊断面）+ v2 升级计划工作块 B5.5。
 """
@@ -56,6 +56,12 @@ from runtime.quota.credentials import (ENV_VAR, describe_modes,
                                        resolve_credential)
 from runtime.quota.provider import QuotaProviderError
 from runtime.quota.scheduler import evaluate, plan_resume
+# v2.2.1 WU-221-C2（行为保持抽取）：本地 _parse_iso_utc 副本与
+# runtime.quota.time_utils 的规范实现逐字相同（逐实现比对），改经
+# 共享落点 import；_normalize_now 为本模块专属变体（错误文案锚定
+# format_duration_delta），原地保留；_is_number 与 scheduler 的实现
+# 逐字相同（真副本，非专属变体），作为接缝外的数值域通用守卫原地保留。
+from runtime.quota.time_utils import _parse_iso_utc
 from runtime.quota.zai import ZaiQuotaProvider
 
 # —— 探测顺序与展示词汇 ——
@@ -108,25 +114,6 @@ def _probe(api_key):
 
 
 # —— 相对时长格式化 ——
-
-def _parse_iso_utc(text):
-    """ISO8601 时刻文本 → aware datetime（UTC）；非 str / 不可解析 → None。
-
-    统一 Z 形式（§27 reset_at 输出形式）；naive 时刻按 UTC 处理。
-    """
-    if not isinstance(text, str) or text == "":
-        return None
-    raw = text.strip()
-    if raw.endswith("Z") or raw.endswith("z"):
-        raw = raw[:-1] + "+00:00"
-    try:
-        moment = datetime.fromisoformat(raw)
-    except ValueError:
-        return None
-    if moment.tzinfo is None:
-        moment = moment.replace(tzinfo=timezone.utc)
-    return moment
-
 
 def _normalize_now(now):
     """归一参考时刻：None → 当前 UTC；datetime / ISO 串 → 时刻。"""

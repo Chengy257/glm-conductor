@@ -32,7 +32,6 @@ prepare / wave 面的 I/O（无 finish 完成门），git 仅作 scratch 目录
 """
 
 import os
-import shutil
 import stat
 import subprocess
 import sys

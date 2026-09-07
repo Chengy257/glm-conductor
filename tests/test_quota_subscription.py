@@ -62,6 +62,7 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "plugins" / "glm-conductor"))
 from runtime import cli, journal, reconcile as reconcile_mod, state, task_manager
 from runtime.quota import epoch as quota_epoch, primer
+from runtime.quota import identity as quota_identity
 from runtime.quota import resolver as quota_resolver
 
 TID = "sub-task-1a2b3c"
@@ -619,19 +620,27 @@ class MarkActivationTest(SubscriptionCase):
 # —— ② 三 API 冻结签名 ——
 
 class SignatureFreezeTest(unittest.TestCase):
-    """wu-22-C5a 规格 INTERFACES 原文（本单元不越界改签名）。"""
+    """wu-22-C5a 规格 INTERFACES 原文（本单元不越界改签名）。
+    v2.2.1 WU-221-B2（QuotaIdentity）：三 API 各追加一个可选
+    keyword-only 尾参 provider_identity_hash / current_provider_
+    identity_hash（缺省 None = legacy 形态省略 / 经共享模块派生）——
+    既有调用面零扰动（向后兼容增量），冻结参数序扩为含尾参。"""
 
     def test_register_signature_frozen(self):
         signature = inspect.signature(
             task_manager.register_quota_subscription)
         self.assertEqual(list(signature.parameters),
                          ["repo_root", "task_id", "epoch_id",
-                          "minimum_state", "continuation_mode"])
+                          "minimum_state", "continuation_mode",
+                          "provider_identity_hash"])
         self.assertEqual(
             signature.parameters["minimum_state"].default, "AVAILABLE")
         self.assertEqual(
             signature.parameters["continuation_mode"].default, None)
-        for name in ("epoch_id", "minimum_state", "continuation_mode"):
+        self.assertEqual(
+            signature.parameters["provider_identity_hash"].default, None)
+        for name in ("epoch_id", "minimum_state", "continuation_mode",
+                     "provider_identity_hash"):
             self.assertEqual(signature.parameters[name].kind,
                              inspect.Parameter.KEYWORD_ONLY)
 
@@ -640,19 +649,30 @@ class SignatureFreezeTest(unittest.TestCase):
             task_manager.evaluate_subscription_eligibility)
         self.assertEqual(list(signature.parameters),
                          ["repo_root", "task_id", "current_epoch_id",
-                          "current_executable", "provider_status"])
+                          "current_executable", "provider_status",
+                          "current_provider_identity_hash"])
         for name in ("current_epoch_id", "current_executable",
-                     "provider_status"):
+                     "provider_status",
+                     "current_provider_identity_hash"):
             self.assertEqual(signature.parameters[name].kind,
                              inspect.Parameter.KEYWORD_ONLY)
+        self.assertEqual(
+            signature.parameters[
+                "current_provider_identity_hash"].default, None)
 
     def test_mark_signature_frozen(self):
         signature = inspect.signature(
             task_manager.mark_activation_epoch)
         self.assertEqual(list(signature.parameters),
-                         ["repo_root", "task_id", "epoch_id"])
+                         ["repo_root", "task_id", "epoch_id",
+                          "provider_identity_hash"])
         self.assertEqual(signature.parameters["epoch_id"].kind,
                          inspect.Parameter.KEYWORD_ONLY)
+        self.assertEqual(
+            signature.parameters["provider_identity_hash"].default, None)
+        self.assertEqual(
+            signature.parameters["provider_identity_hash"].kind,
+            inspect.Parameter.KEYWORD_ONLY)
 
 
 # —— ③ 控制面 journal ——
@@ -1265,10 +1285,12 @@ class TransitionMarkOrderTest(WiringCase):
         observed = []
         original = task_manager.mark_activation_epoch
 
-        def spy(repo_root, task_id, *, epoch_id):
+        def spy(repo_root, task_id, *, epoch_id,
+                provider_identity_hash=None):
             observed.append(
                 state.load_state(repo_root, task_id)["status"])
-            return original(repo_root, task_id, epoch_id=epoch_id)
+            return original(repo_root, task_id, epoch_id=epoch_id,
+                            provider_identity_hash=provider_identity_hash)
 
         with mock.patch.object(
                 quota_resolver, "resolve_quota_status",
@@ -1354,6 +1376,392 @@ class CliSubscriptionFaceTest(WiringCase):
         self.assertEqual(code, 0)
         self.assertFalse(payload["resumed"])
         self.assertFalse(payload["subscription"]["eligible"])
+
+
+# —— v2.2.1 WU-221-B2（QuotaIdentity）：跨账号回归 ——
+
+# 两个不同的非秘密 16-hex 身份指纹（sha256 前缀截断口径的形状夹具）
+HASH_A = "a1b2c3d4e5f60718"
+HASH_B = "b2c3d4e5f6071882"
+
+
+def write_cache_with_identity(repo, status, windows,
+                              provider_identity_hash=None):
+    """按 resolver 缓存布局落盘 quota-cache.json（可携带身份指纹——
+    provider_identity_hash=None 模拟 v2.2 legacy 无指纹缓存）。"""
+    payload = {
+        "provider": "fixture",
+        "fetched_at": "2026-09-01T12:00:00.000Z",
+        "status": status,
+        "snapshot": {"provider": "fixture",
+                     "fetched_at": "2026-09-01T12:00:00.000Z",
+                     "status": status, "windows": windows},
+    }
+    if provider_identity_hash is not None:
+        payload["provider_identity_hash"] = provider_identity_hash
+    quota_resolver._save_cache(quota_resolver._cache_path(repo), payload)
+
+
+class SubscriptionIdentityAnnotationTest(SubscriptionCase):
+    """B2 面 1（注册）：块与事件的可选身份注记 + 幂等比较仍只比五规范
+    键（指纹是 additive 键，绝不放大为「变化」、绝不改写存量记录补写）。"""
+
+    def register(self, **kwargs):
+        kwargs.setdefault("epoch_id", EPOCH_A)
+        return task_manager.register_quota_subscription(self.repo, TID,
+                                                        **kwargs)
+
+    def registered_events(self):
+        return [e for e in self.task_events()
+                if e.get("event") == "quota_subscription_registered"]
+
+    def test_register_with_identity_annotates_block_and_event(self):
+        self.put_task()
+        result = self.register(provider_identity_hash=HASH_A)
+        # 返回仍为冻结六键（指纹只落块与事件，不进返回面）
+        self.assertEqual(sorted(result.keys()), sorted(REGISTER_RESULT_KEYS))
+        block = self.subscription()
+        self.assertEqual(block["provider_identity_hash"], HASH_A)
+        events = self.registered_events()
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]["provider_identity_hash"], HASH_A)
+
+    def test_register_without_identity_keeps_legacy_shape(self):
+        # 无身份上下文的调用点传缺省 None → 块与事件省略该键（绝不虚构
+        # "none" 占位），v2.2 legacy 形态逐字不变
+        self.put_task()
+        self.register()
+        self.assertNotIn("provider_identity_hash", self.subscription())
+        self.assertNotIn("provider_identity_hash",
+                         self.registered_events()[0])
+
+    def test_identity_hash_validation_before_io(self):
+        self.put_task()
+        for bad in ("", 17, b"a1b2"):
+            with self.assertRaises(ValueError):
+                self.register(provider_identity_hash=bad)
+        self.assertEqual(self.registered_events(), [])
+
+    def test_idempotent_comparison_ignores_identity_annotation(self):
+        # 已带指纹的块 + 同参（不带指纹）重注册 → 幂等零写零事件（指纹
+        # 是 additive 注记，不参与幂等比较，也绝不被同参重注册抹掉）
+        self.put_task()
+        self.register(provider_identity_hash=HASH_A)
+        bytes_before = self.state_bytes()
+        events_before = len(self.task_events())
+        again = self.register()
+        self.assertTrue(again["idempotent"])
+        self.assertEqual(self.state_bytes(), bytes_before)
+        self.assertEqual(len(self.task_events()), events_before)
+        self.assertEqual(self.subscription()["provider_identity_hash"],
+                         HASH_A)
+
+
+class EvaluateEligibilityIdentityTest(SubscriptionCase):
+    """B2 面 2（资格）：注册身份异于当前身份 → 不 eligible（A 名下的
+    订阅不授权 B 的同名 epoch）；legacy 无指纹注册保守信任。"""
+
+    def evaluate(self, **kwargs):
+        kwargs.setdefault("current_epoch_id", EPOCH_B)
+        kwargs.setdefault("current_executable", True)
+        kwargs.setdefault("provider_status", "AVAILABLE")
+        return task_manager.evaluate_subscription_eligibility(
+            self.repo, TID, **kwargs)
+
+    def test_subscription_under_a_not_eligible_under_b_same_epoch(self):
+        # 规格原文：subscription registered under identity A + epoch E →
+        # resume under identity B with same textual epoch E → not
+        # eligible as ours
+        self.put_task()
+        task_manager.register_quota_subscription(
+            self.repo, TID, epoch_id=EPOCH_A,
+            provider_identity_hash=HASH_A)
+        result = self.evaluate(current_epoch_id=EPOCH_A,
+                               current_provider_identity_hash=HASH_B)
+        self.assertFalse(result["eligible"])
+        self.assertTrue(any("其他 provider 身份" in r
+                            for r in result["reasons"]))
+
+    def test_subscription_same_identity_eligible(self):
+        self.put_task()
+        task_manager.register_quota_subscription(
+            self.repo, TID, epoch_id=EPOCH_A,
+            provider_identity_hash=HASH_A)
+        result = self.evaluate(current_epoch_id=EPOCH_A,
+                               current_provider_identity_hash=HASH_A)
+        self.assertTrue(result["eligible"])
+        self.assertEqual(result["reasons"], [])
+
+    def test_legacy_subscription_without_hash_trusted_under_any_identity(self):
+        # v2.2 legacy 注册（无指纹）= 保守信任——任何当前身份下资格
+        # 矩阵照旧（兼容性裁决）
+        self.put_task()
+        task_manager.register_quota_subscription(self.repo, TID,
+                                                 epoch_id=EPOCH_A)
+        result = self.evaluate(current_epoch_id=EPOCH_A,
+                               current_provider_identity_hash=HASH_B)
+        self.assertTrue(result["eligible"])
+
+    def test_activation_idempotency_dual_form_in_eligibility(self):
+        # QC-07 双形态：同 epoch 同身份激活 → 已激活拦截；同 epoch 异
+        # 身份激活不构成拦截（但异身份注册的订阅本身已 ineligible）
+        self.put_task()
+        task_manager.register_quota_subscription(
+            self.repo, TID, epoch_id=EPOCH_A,
+            provider_identity_hash=HASH_A)
+        task_manager.mark_activation_epoch(
+            self.repo, TID, epoch_id=EPOCH_B,
+            provider_identity_hash=HASH_A)
+        same = self.evaluate(current_epoch_id=EPOCH_B,
+                             current_provider_identity_hash=HASH_A)
+        self.assertFalse(same["eligible"])
+        self.assertTrue(any("已激活" in r for r in same["reasons"]))
+        other = self.evaluate(current_epoch_id=EPOCH_B,
+                              current_provider_identity_hash=HASH_B)
+        self.assertFalse(other["eligible"])
+        self.assertTrue(all("已激活" not in r for r in other["reasons"]))
+        self.assertTrue(any("其他 provider 身份" in r
+                            for r in other["reasons"]))
+
+
+class MarkActivationIdentityTest(SubscriptionCase):
+    """B2 面 3（激活 QC-07）：同 epoch 同身份恰一次；身份换手重激活
+    （B 的首次激活是新事件）；legacy 无指纹块按缺席信任。"""
+
+    def advanced_events(self):
+        return [e for e in self.control_events()
+                if e.get("event") == "quota_epoch_advanced"]
+
+    def test_mark_emits_identity_in_event_and_block(self):
+        self.put_task()
+        result = task_manager.mark_activation_epoch(
+            self.repo, TID, epoch_id=EPOCH_A,
+            provider_identity_hash=HASH_A)
+        self.assertEqual(sorted(result.keys()), sorted(MARK_RESULT_KEYS))
+        self.assertEqual(
+            self.subscription()["provider_identity_hash"], HASH_A)
+        events = self.advanced_events()
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]["provider_identity_hash"], HASH_A)
+
+    def test_same_epoch_same_identity_remark_idempotent(self):
+        self.put_task()
+        task_manager.mark_activation_epoch(self.repo, TID, epoch_id=EPOCH_A,
+                                           provider_identity_hash=HASH_A)
+        bytes_before = self.state_bytes()
+        events_before = len(self.control_events())
+        again = task_manager.mark_activation_epoch(
+            self.repo, TID, epoch_id=EPOCH_A,
+            provider_identity_hash=HASH_A)
+        self.assertFalse(again["marked"])
+        self.assertTrue(again["idempotent"])
+        self.assertEqual(self.state_bytes(), bytes_before)
+        self.assertEqual(len(self.control_events()), events_before)
+
+    def test_identity_switch_reactivates_same_epoch(self):
+        # 同 epoch 异身份：B 的首次激活是新事件（每身份每 epoch 恰一次
+        # ——B 再标同 epoch 幂等，绝不双事件）
+        self.put_task()
+        task_manager.mark_activation_epoch(self.repo, TID, epoch_id=EPOCH_A,
+                                           provider_identity_hash=HASH_A)
+        switched = task_manager.mark_activation_epoch(
+            self.repo, TID, epoch_id=EPOCH_A,
+            provider_identity_hash=HASH_B)
+        self.assertTrue(switched["marked"])
+        self.assertFalse(switched["idempotent"])
+        events = self.advanced_events()
+        self.assertEqual(len(events), 2)
+        self.assertEqual(events[-1]["provider_identity_hash"], HASH_B)
+        self.assertEqual(
+            self.subscription()["provider_identity_hash"], HASH_B)
+        again = task_manager.mark_activation_epoch(
+            self.repo, TID, epoch_id=EPOCH_A,
+            provider_identity_hash=HASH_B)
+        self.assertTrue(again["idempotent"])
+        self.assertEqual(len(self.advanced_events()), 2)
+
+    def test_legacy_block_without_hash_trusted_across_identities(self):
+        # legacy 块（v2.2 形态：有激活事实但无指纹）：同 epoch 幂等与
+        # 身份无关（缺席 = 信任，v2.2 记录保持在案语义）
+        self.put_task()
+        task_manager.register_quota_subscription(self.repo, TID,
+                                                 epoch_id=EPOCH_A)
+        st = state.load_state(self.repo, TID)
+        # 直接注入 v2.2 legacy 激活形态（无指纹）——不经 mark 的
+        # derive-and-emit 路径
+        st["quota_subscription"]["last_activation_epoch_id"] = EPOCH_A
+        save_task(self.repo, st)
+        again = task_manager.mark_activation_epoch(
+            self.repo, TID, epoch_id=EPOCH_A,
+            provider_identity_hash=HASH_B)
+        self.assertTrue(again["idempotent"])
+        # 幂等闸：异身份重标零新控制面事件（legacy 激活在案即拦截）
+        self.assertEqual(len(self.advanced_events()), 0)
+
+
+class CrashReconciliationIdentityTest(WiringCase):
+    """B2 面 6（恢复对账 / 资格门集成）：A 名下订阅与激活在 B 的恢复
+    流程中不算数——保守不恢复（not-ours），而非盲目复用。"""
+
+    def resume_under_identity(self, identity, **kwargs):
+        """在受控身份下跑 resume_from_quota（monkeypatch 共享派生落点
+        ——模拟账号切换后的新会话）。"""
+        kwargs.setdefault("resolved_status", "AVAILABLE")
+        kwargs.setdefault("windows", WINDOWS_B)
+        with mock.patch.object(
+                quota_resolver, "resolve_quota_status",
+                return_value=fake_resolved(kwargs["resolved_status"])), \
+             mock.patch.object(
+                 quota_resolver, "resolve_quota_detail",
+                 return_value=fake_detail(kwargs["resolved_status"],
+                                          kwargs["windows"])), \
+             mock.patch.object(quota_identity,
+                               "compute_provider_identity_hash",
+                               return_value=identity):
+            return task_manager.resume_from_quota(self.repo, TID)
+
+    def _legacy_activation(self, epoch_id):
+        """把激活记录注入为 v2.2 legacy 形态（无指纹——绝不经 mark 的
+        derive-and-emit 路径，否则块会被注上当前环境身份）。"""
+        st = state.load_state(self.repo, TID)
+        st["quota_subscription"]["last_activation_epoch_id"] = epoch_id
+        save_task(self.repo, st)
+
+    def test_a_subscribed_task_not_resumed_under_b(self):
+        # 恢复后账号切换：A 注册（epoch E_A）+ 激活（epoch E_A），B 在
+        # 同一文本 epoch E_B 下恢复——订阅门按异身份拦截，保守等待
+        self.make_task()
+        self.subscribe(EPOCH_OF_A, provider_identity_hash=HASH_A)
+        task_manager.mark_activation_epoch(
+            self.repo, TID, epoch_id=EPOCH_OF_A,
+            provider_identity_hash=HASH_A)
+        advanced_before = len(self.advanced_events())
+        result = self.resume_under_identity(HASH_B)
+        self.assertFalse(result["resumed"])
+        face = result["subscription"]
+        self.assertTrue(face["registered"])
+        self.assertFalse(face["eligible"])
+        self.assertTrue(any("其他 provider 身份" in r
+                            for r in face["reasons"]))
+        on_disk = state.load_state(self.repo, TID)
+        self.assertEqual(on_disk["status"], "waiting_quota")
+        self.assertEqual(on_disk["work_units"][0]["status"],
+                         "waiting_quota")
+        self.assertEqual(len(self.advanced_events()), advanced_before)
+        self.assertEqual(self.quota_resumed_events(), [])
+
+    def test_a_records_do_not_activate_b_same_epoch(self):
+        # 同一文本 epoch（E_A）下换身份：A 的激活事件不算 B 的 QC-07
+        # 证据，B 的订阅（异身份注册）也不授权——零转态零新事件
+        self.make_task()
+        self.subscribe(EPOCH_OF_A, provider_identity_hash=HASH_A)
+        task_manager.mark_activation_epoch(
+            self.repo, TID, epoch_id=EPOCH_OF_A,
+            provider_identity_hash=HASH_A)
+        result = self.resume_under_identity(HASH_B,
+                                            windows=WINDOWS_A,
+                                            resolved_status="EXHAUSTED")
+        self.assertFalse(result["resumed"])
+        self.assertFalse(result["subscription"]["eligible"])
+        self.assertEqual(len(self.quota_resumed_events()), 0)
+
+    def test_legacy_subscribed_task_unaffected_under_any_identity(self):
+        # legacy 订阅（无指纹的 v2.2 形态注册 + 激活）：换身份后的恢复
+        # 照旧（缺席 = 信任——兼容性裁决的端到端锚）
+        self.make_task()
+        self.subscribe(EPOCH_OF_A)
+        self._legacy_activation(EPOCH_OF_A)
+        result = self.resume_under_identity(HASH_B)
+        self.assertTrue(result["resumed"])
+        self.assertTrue(result["subscription"]["eligible"])
+
+
+class TransitionRegistrationIdentityTest(WiringCase):
+    """B2 面 1 集成（转态点注册）：转态点的身份上下文取自幸存缓存的
+    指纹；异身份缓存视同无缓存 → 不注册零副作用。"""
+
+    def exhausted_transition_with_cache(self, cache_identity,
+                                        ambient_identity=HASH_A):
+        """带受控当前身份的 EXHAUSTED 转态（monkeypatch 共享派生落点，
+        隔离真实凭证；cache_identity=None 模拟 legacy 无指纹缓存）。"""
+        self.make_task(status="executing",
+                       units=[make_unit("wu-a", "ready")])
+        write_cache_with_identity(self.repo, "EXHAUSTED", WINDOWS_A,
+                                  provider_identity_hash=cache_identity)
+        with mock.patch.object(quota_identity,
+                               "compute_provider_identity_hash",
+                               return_value=ambient_identity):
+            return task_manager.handle_quota_exhausted(self.repo, TID)
+
+    def registered_events(self):
+        return [e for e in self.task_events()
+                if e.get("event") == "quota_subscription_registered"]
+
+    def test_transition_annotates_registration_from_cache_identity(self):
+        # 缓存带指纹（WU-221-B1 起 resolver 落盘）且同身份 → 注册块与
+        # 事件随带身份上下文
+        self.exhausted_transition_with_cache(HASH_A, ambient_identity=HASH_A)
+        block = self.subscription()
+        self.assertEqual(block["registered_epoch_id"], EPOCH_OF_A)
+        self.assertEqual(block["provider_identity_hash"], HASH_A)
+        events = self.registered_events()
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]["provider_identity_hash"], HASH_A)
+
+    def test_foreign_identity_cache_treated_as_no_cache_no_registration(self):
+        # 异身份缓存视同无缓存（直接读者身份闸）→ 折算失败 → 不注册
+        # 零副作用（legacy 不变分支）
+        self.exhausted_transition_with_cache(HASH_B, ambient_identity=HASH_A)
+        self.assertEqual(self.subscription(),
+                         FROZEN_DEFAULT_QUOTA_SUBSCRIPTION)
+        self.assertEqual(self.registered_events(), [])
+
+    def test_legacy_cache_registers_without_identity_annotation(self):
+        # legacy 无指纹缓存 → 保守信任 → 注册照常、无身份键（legacy
+        # 形态逐字不变）
+        self.exhausted_transition_with_cache(None, ambient_identity=HASH_A)
+        self.assertEqual(self.subscription()["registered_epoch_id"],
+                         EPOCH_OF_A)
+        self.assertNotIn("provider_identity_hash", self.subscription())
+        self.assertNotIn("provider_identity_hash",
+                         self.registered_events()[0])
+
+
+class PrimerCrossIdentityTest(SubscriptionCase):
+    """B2 面 4（primer）：幂等键第一维即身份指纹——A 的 primed 记录
+    不拦截 B 的同 boundary prime（结构保证，零行为变化）。"""
+
+    def setUp(self):
+        super().setUp()
+        patcher = mock.patch.object(
+            primer, "resolve_credential",
+            return_value=("env", "test-key-abc"))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def prime(self, identity):
+        def transport(url, body, headers, timeout):
+            return 200, json.dumps(
+                {"usage": {"input_tokens": 19, "output_tokens": 38}}
+            ).encode("utf-8")
+
+        return primer._prime_once_unchecked(
+            self.repo, boundary_id=EPOCH_A, provider_identity_hash=identity,
+            transport=transport, fetch_refresh=lambda repo: None)
+
+    def test_primed_under_a_does_not_suppress_b(self):
+        first = self.prime(HASH_A)
+        self.assertTrue(first["primed"])
+        self.assertFalse(first["idempotent"])
+        second = self.prime(HASH_B)
+        # B 同 boundary：幂等键 (identity, boundary) 不命中 → 照常执行
+        self.assertTrue(second["primed"])
+        self.assertFalse(second["idempotent"])
+
+    def test_same_identity_same_boundary_idempotent(self):
+        self.prime(HASH_A)
+        replay = self.prime(HASH_A)
+        self.assertTrue(replay["idempotent"])  # 同身份同键 → 零网络重放
 
 
 if __name__ == "__main__":
