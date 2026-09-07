@@ -61,9 +61,9 @@ fetch 流程（§38）：
     socket / datetime），零第三方依赖，`python3 -S` 可运行。
 
 来源：
-    docs/glm-conductor-v2-upgrade-guide-final.md §24/§25/§27/§34/
+    docs/history/v2.0/glm-conductor-v2-upgrade-guide-final.md §24/§25/§27/§34/
     §37/§38 + v2 升级计划工作块 B5.2；实测知识见
-    docs/glm-conductor-v2-phase0-runtime-verification.md。
+    docs/history/v2.0/glm-conductor-v2-phase0-runtime-verification.md。
 """
 
 import copy

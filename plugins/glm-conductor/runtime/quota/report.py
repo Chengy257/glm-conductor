@@ -35,7 +35,7 @@
     python3 report.py [--json]
 
 来源：
-    docs/glm-conductor-v2-upgrade-guide-final.md §36（凭证三模式）、
+    docs/history/v2.0/glm-conductor-v2-upgrade-guide-final.md §36（凭证三模式）、
     §27（snapshot）、§28-§33（评估与恢复规划）、§37（凭证安全）、
     §43（quota 诊断面）+ v2 升级计划工作块 B5.5。
 """

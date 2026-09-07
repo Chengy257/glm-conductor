@@ -70,7 +70,7 @@ active 容错语义（本工作块锁定）：
     本模块无环）。仅 Python 3 标准库，`python3 -S` 可运行。
 
 来源：
-    docs/glm-conductor-v2-upgrade-guide-final.md §61（contract）/
+    docs/history/v2.0/glm-conductor-v2-upgrade-guide-final.md §61（contract）/
     §64（ready queue）/ §65（主会话唯一编排者）/ §66（并行判定）/
     §67（quota 四态行为）/ §78（文件租约）/ §81（并行安全）/
     §82（并行上限 2-4）+ v2 升级计划工作块 B8.3、B10.1。

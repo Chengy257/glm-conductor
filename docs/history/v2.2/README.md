@@ -15,6 +15,5 @@
 - [GLM-Conductor-v2.2-Release-Hardening-Implementation-Plan.md](GLM-Conductor-v2.2-Release-Hardening-Implementation-Plan.md) — v2.2 stable 前的 Release Hardening 修复实施计划。
 - [GLM-Conductor-v2.2-Dogfood-Records.md](GLM-Conductor-v2.2-Dogfood-Records.md) — v2.2 Dogfood 实录（RG-22-01..08 证据映射）。
 - [GLM-Conductor-v2.2.0-Stable-Release-Implementation-Plan.md](GLM-Conductor-v2.2.0-Stable-Release-Implementation-Plan.md) — v2.2.0 stable 最终收口与实施计划。
+- [CHANGELOG-2.2.0-full.md](CHANGELOG-2.2.0-full.md) — 2.2.0 发布条目全文存档（浓缩版见仓库根 CHANGELOG）。
 
-> **占位注记**：`CHANGELOG-2.2.0-full.md` 将在本目录归档收口（工作单元 v221-e5）加入后，
-> 一并补录到本清单。

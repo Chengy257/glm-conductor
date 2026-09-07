@@ -341,10 +341,10 @@ QuotaIdentity 复合身份（v2.2.1 WU-221-B2，六个记账面的统一升级�
     仅 Python 3 标准库，`python3 -S` 可运行。
 
 来源：
-    docs/GLM-Conductor-v2.0.0-全面审查与v2.0.1加固建议.md §4.1 / P1-3
-    + docs/glm-conductor-v2-upgrade-guide-final.md §62（状态转换表）/
+    docs/history/v2.0/GLM-Conductor-v2.0.0-全面审查与v2.0.1加固建议.md §4.1 / P1-3
+    + docs/history/v2.0/glm-conductor-v2-upgrade-guide-final.md §62（状态转换表）/
     §64-§67（准入）/ §70（父验证）/ §78（租约时点）/ §69（恢复对账）
-    + docs/GLM-Conductor-v2.0.1-Release-Hardening-Patch-Agent-Implementation-Plan.md
+    + docs/history/v2.0/GLM-Conductor-v2.0.1-Release-Hardening-Patch-Agent-Implementation-Plan.md
     （RB-1 / WU-P2：finish_unit 完成证据门，缺证据零副作用拒绝；
     RB-2 / WU-P3：证据门双根分离，git 根按任务绑定解析、events 恒从
     账本根注入）。

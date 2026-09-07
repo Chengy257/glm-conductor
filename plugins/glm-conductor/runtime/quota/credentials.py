@@ -37,7 +37,7 @@
     `python3 -S` 可运行。风格对齐 runtime/quota/parser.py。
 
 来源：
-    docs/glm-conductor-v2-upgrade-guide-final.md §36（三模式与凭证
+    docs/history/v2.0/glm-conductor-v2-upgrade-guide-final.md §36（三模式与凭证
     来源）、§37（凭证安全政策）+ v2 升级计划工作块 B5.4；实测知识：
     ZCode provider 配置路径 ~/.zcode/v2/config.json；
     docs/history/v2.2/GLM-Conductor-v2.2-Quota-Continuity-Control-Loop-Implementation-

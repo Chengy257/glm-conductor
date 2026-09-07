@@ -45,7 +45,7 @@
     runtime.state，无循环导入）。风格对齐 runtime/quota/parser.py。
 
 来源：
-    docs/glm-conductor-v2-upgrade-guide-final.md §27（snapshot）、
+    docs/history/v2.0/glm-conductor-v2-upgrade-guide-final.md §27（snapshot）、
     §28（四态评估）、§29（PRESSURE→checkpoint）、§30
     （max(reset)+grace）、§31（绝不虚构 reset）、§32（唤醒强制
     刷新）、§33（UNKNOWN 周期存活探针回退）、§45（冒烟场景）

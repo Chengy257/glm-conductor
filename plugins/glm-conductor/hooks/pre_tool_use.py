@@ -70,7 +70,7 @@ fail-open 契约（两条路径共同遵守）：
     夹带多余顶层键），其余任何路径（含策略 allow）stdout 恒为空。
 
 来源：
-    docs/glm-conductor-v2-upgrade-guide-final.md §9
+    docs/history/v2.0/glm-conductor-v2-upgrade-guide-final.md §9
     （Ownership Gate —— Layer B: dispatch-time injection）+ 实施计划
     B2.3；§57-§59（Route-aware Permission Policy）+ 实施计划 B7.1/B7.2。
 """

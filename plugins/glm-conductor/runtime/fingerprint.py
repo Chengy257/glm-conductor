@@ -36,7 +36,7 @@
     `python3 -S` 可运行。风格对齐 runtime/ownership.py / runtime/state.py。
 
 来源：
-    docs/glm-conductor-v2-upgrade-guide-final.md §17-§18（证据指纹）、
+    docs/history/v2.0/glm-conductor-v2-upgrade-guide-final.md §17-§18（证据指纹）、
     §19-§20（验证/审查证据指纹与 stale 拦截）、§22（视觉证据）
     + v2 升级计划工作块 B3.1、B3.2。
 """

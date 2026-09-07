@@ -45,7 +45,7 @@
     风格对齐 runtime/state.py / runtime/fingerprint.py。
 
 来源：
-    docs/glm-conductor-v2-upgrade-guide-final.md §24（provider 抽象）、
+    docs/history/v2.0/glm-conductor-v2-upgrade-guide-final.md §24（provider 抽象）、
     §25（端点兼容）、§27（snapshot 形状）、§28（状态词汇）、
     §37（凭证安全政策）+ v2 升级计划工作块 B5.1。
 """
