@@ -51,7 +51,7 @@ wu-22-C6 ①）。
     身份的事实源，容错缺省 recurring_bridge）。
 
 来源：
-    docs/GLM-Conductor-v2.2-Quota-Control-Plane-Architecture-Correction-
+    docs/history/v2.2/GLM-Conductor-v2.2-Quota-Control-Plane-Architecture-Correction-
     and-Agent-Implementation-Plan.md §16（抽象）/ §17（Transport A）/
     §18 / §20 / §21（预留）/ §C6（工作包）+ 工作单元 wu-22-C6 ①。
 """

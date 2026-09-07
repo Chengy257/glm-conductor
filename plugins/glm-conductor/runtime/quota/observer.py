@@ -41,7 +41,7 @@
     quota/* 包纪律：不 import runtime.state / runtime.task_manager。
 
 来源：
-    docs/GLM-Conductor-v2.2-Quota-Continuity-Control-Loop-Implementation-
+    docs/history/v2.2/GLM-Conductor-v2.2-Quota-Continuity-Control-Loop-Implementation-
     Plan.md §6（Adaptive Quota Heartbeat）/ §6.2（推荐心跳周期）/
     §6.3（事件触发刷新——查询侧对应：进 runtime 先判 should_refresh）/
     §6.4（lazy heartbeat：无 daemon、避免多余 truth source）/ §16

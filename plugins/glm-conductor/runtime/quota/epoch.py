@@ -77,7 +77,7 @@ epoch 身份（冻结口径）：
     （control 亦 import scheduler 的 _format_iso_z/_parse_iso_utc）。
 
 来源：
-    docs/GLM-Conductor-v2.2-Quota-Control-Plane-Architecture-Correction-
+    docs/history/v2.2/GLM-Conductor-v2.2-Quota-Control-Plane-Architecture-Correction-
     and-Agent-Implementation-Plan.md §10（Quota Epoch 替代 automation
     fire）/ §10.1（epoch_id 形状）/ §10.2（probe vs executable 双
     boundary，2026-09-02 冻结）/ §30（max(reset)+grace）/ §31（绝不

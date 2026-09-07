@@ -20,13 +20,13 @@
 
 > **[history/](history/) 是存档，不是现行文档。** 其中内容是开发过程与发布证据（历史实施计划、实验与验证记录、架构校正讨论、发布门清单等），仅供追溯；其中的术语可能描述已被后续设计取代的中间方案，**不构成当前实现的依据**。当前真相 = 仓库代码 + [architecture.md](architecture.md) + [core-concepts.md](core-concepts.md)。
 
-归档按版本分类，目标布局如下（部分子目录由进行中的归档整理落位；`v2.2.1/` 在发布收官时填充）：
+归档按版本分类，每个子目录内有独立的中文索引：
 
 | 子目录 | 内容 |
 | --- | --- |
-| `history/v1/` | v1 时代的发布修复与清理记录 |
-| `history/v2.0/` | v2 实施计划、运行时验证、升级指南与 v2.0.x 加固 / 诊断记录 |
-| `history/v2.1/` | v2.1 架构计划、运行完整性收口、实测记录与设计决策记录 |
-| `history/v2.2/` | v2.2 控制环 / 控制面计划与校正、实验与运行验证、发布加固、稳定发布计划，以及 2.2.0 CHANGELOG 全文存档 |
+| [history/v1/](history/v1/) | v1 时代的架构提案（[索引](history/v1/README.md)） |
+| [history/v2.0/](history/v2.0/) | v2 实施计划、运行时验证、升级指南与 v2.0.x 加固 / 诊断记录（[索引](history/v2.0/README.md)） |
+| [history/v2.1/](history/v2.1/) | v2.1 架构计划、运行完整性收口、实测记录与设计决策记录（[索引](history/v2.1/README.md)） |
+| [history/v2.2/](history/v2.2/) | v2.2 控制环 / 控制面计划与校正、实验与运行验证、发布加固、稳定发布计划，以及 2.2.0 CHANGELOG 全文存档（[索引](history/v2.2/README.md)） |
 | `history/v2.2.1/` | v2.2.1 需求计划与执行计划（发布收官时移入） |
-| `history/reference/` | 宿主（ZCode）行为研究等参考资料——非本项目开发史 |
+| [history/reference/](history/reference/) | 宿主（ZCode）行为研究等参考资料——非本项目开发史（[索引](history/reference/README.md)） |
