@@ -17,6 +17,9 @@
     wake-prompt）、M6 溯源三子命令（verify-unit / verify-task /
     review-record）与 manifest 只读查询——全部为对应 runtime API 的
     薄壳，技能层 runtime 调用一律走本 CLI（禁止 python3 -c 内联）。
+    v2.3.0 W3 补齐 wake-arm（persistent arm 生产入口：arm_transport
+    稳定通道记账 + next_run_at=wake_at 锚定，fail-open）与 wake-retime
+    （fire 后「判定 + retime」）——同一薄壳纪律。
 
 子命令：
     policy-show <repo_root> <task_id>
@@ -142,6 +145,7 @@
         UNKNOWN 保守等待（resumed=false，零转态）是合法结果——退出码
         仍 0。
     wake-record <repo_root> <task_id> <automation_id> <fires_at>
+                [--db <path>]
         唤醒窗口扣减记账（v2.1 M5 §14.4，task_manager.
         record_quota_wake 薄壳；v2.1 legacy 兼容入口——v2.2 persistent
         path 禁止调用，C1a：arm/fire/create 不消费窗口预算，消费点 =
@@ -150,6 +154,29 @@
         {consumed_quota_windows, remaining_quota_windows,
         max_quota_windows, automation_id, fires_at}。automation_id /
         fires_at 空串（ValueError）→ 退出码 2；任务缺失 → 退出码 1。
+        v2.3.0 W3（§10 arm 时锚点）：登记成功后立即经 W1 adapter 把该
+        automation 的 next_run_at retime 为记录的 wake 时刻（fires_at；
+        D10 数学 reset+300s 不变，只是落地即锚定），并把解析出的
+        zcode_db_path（--db > discover_zcode_tasks_db(None)）持久化进
+        continuation.wake_bridge（additive 键）供 fire 后 wake-retime
+        复用。一切 retime 失败 fail-open：输出加 "retime_applied":
+        false + "retime_warning"（异常摘要），登记照常成功退出 0
+        （native recurring 网格仍是兜底节拍）；成功 →
+        "retime_applied": true。
+    wake-arm <repo_root> <task_id> <automation_id> [--db <path>]
+        Persistent Wake Bridge 的生产 arm 入口 + arm 时 retime 锚定
+        （v2.3.0 W3 补口；v2.2 既存缺口——arm_wake_bridge 记账步骤此前
+        无 CLI 调用面）。记账走 activation_transport.arm_transport
+        稳定通道（transport 恒 recurring_bridge，内部委托
+        task_manager.arm_wake_bridge 零改写；TransportReservedError
+        原样透传）。boundary / reset_at / wake_at 与 wake-plan 同源
+        同法（只读本地 quota-cache + D10 数学 reset+300s；无可解析
+        边界 → arm 既有参数闸拒绝，绝不虚构）；bridge_interval_minutes
+        取 quota_control 键级合并。arm 失败 → 非零退出
+        （TaskManagerError → 1 / ValueError → 2）且零 retime。arm
+        成功（含幂等命中）→ 与 wake-record 相同的锚定（zcode_db_path
+        持久化 + next_run_at=wake_at，fail-open）。输出 = arm 记账
+        返回字段 + retime_applied[, retime_warning]。
     wake-prompt <repo_root> <task_id>
         一次性额度唤醒 prompt 生成（v2.1 M5 §14.4，task_manager.
         quota_wake_prompt 薄壳）：**stdout 纯文本输出**（自足中文模板，
@@ -163,14 +190,38 @@
         → provider_status=None / windows=None，plan 内按 UNKNOWN 保守
         fail-open，绝不触发 provider 抓取）。输出 §22.2 冻结九键
         {required, mode, boundary_id, current_boundary_id, wake_at,
-        bridge_interval_minutes, eager, prompt, reason}（ensure_ascii=
+        bridge_interval_minutes, eager, prompt, reason} + v2.3.0 W3
+        additive 字符串字段 advisory（arm 前须知：本会话若承载 Global
+        Quota Clock automation 则须另换会话 arm——one-automation-per-
+        session，§10.5 宿主代价）（ensure_ascii=
         False——中文 reason/prompt 面向主会话直接阅读）。任务缺失 →
         退出码 1。
     wake-status <repo_root> <task_id>
         wake bridge 状态只读查询（v2.2 M5 wu-22-05，§22.3）：展示
         wake_bridge.status 十值词汇 + scheduler_context（origin +
         capability 缓存）+ mode/generation 及墓碑。零写副作用；任务
-        缺失 → 退出码 1。
+        缺失 → 退出码 1。v2.3.0 W3 输出增补（additive）：db_next_run_at
+        （经 W1 adapter inspect 读回宿主行）+ wake_at_matches_db
+        （db_next_run_at 与 bridge.wake_at 折算 epoch 毫秒的一致性布尔
+        ——无法判定时为 null）+ db_check_note（读不到行 / 无法判定时
+        明示原因：db_row_missing / db_inspect_failed / no_automation_id
+        / wake_at_unparsable / db_next_run_at_null）。
+    wake-retime <repo_root> <task_id>
+        fire 后锚点「判定 + retime」一步完成（v2.3.0 §10 / W3，unit
+        v23-w3）：wake turn 在 quota-resolve --force-refresh 之后调用。
+        读 bridge 记账（automation_id / zcode_db_path；无 armed bridge
+        → {"status": "no_bridge"} 退出 0）→ force-refresh quota
+        （resolver 同 wake 路径）→ 判定（复用既有语义）：quota 可执行
+        （status ∈ QUOTA_RESUME_STATUSES）→ park 本桥 365 天
+        {"status": "executable_park_bridge"}；不可执行且存在已知未来
+        边界（scheduler.plan_resume 的 max(EXHAUSTED resets)+300s）→
+        retime 该值 {"status": "retime_boundary", "next_target_at"}；
+        不可执行且无已知边界 → retime now+5min {"status":
+        "retime_retry"}。retime/决策任何异常 → {"status":
+        "retime_failed", "warning"} 仍退出 0（fail-open，native
+        recurring watchdog 接管）。零 task state / journal /
+        accounting 写（纯节拍职责；resume 仍归 prompt 既有步骤授权
+        进行）。
     wake-reconcile <repo_root> <task_id> <host_status> [observed_at]
         手动 / 历史 bridge 宿主事实对账（v2.2 C6 面，C1 裁决 #9：
         宿主事实由会话侧显式供给，runtime 零 CronList；
@@ -319,10 +370,13 @@ USAGE = (
     "<tool_use_id> [route] [note] | "
     "quota-exhausted <repo_root> <task_id> | "
     "quota-resume <repo_root> <task_id> [status] | "
-    "wake-record <repo_root> <task_id> <automation_id> <fires_at> | "
+    "wake-record <repo_root> <task_id> <automation_id> <fires_at> "
+    "[--db <path>] | "
+    "wake-arm <repo_root> <task_id> <automation_id> [--db <path>] | "
     "wake-prompt <repo_root> <task_id> | "
     "wake-plan <repo_root> <task_id> | "
     "wake-status <repo_root> <task_id> | "
+    "wake-retime <repo_root> <task_id> | "
     "wake-reconcile <repo_root> <task_id> <host_status> [observed_at] | "
     "transport-status <repo_root> <task_id> | "
     "quota-watcher <repo_root> start|status|stop|once | "
@@ -858,12 +912,81 @@ def _quota_resume(repo_root, task_id, raw_status=None) -> int:
     return 0
 
 
-def _wake_record(repo_root, task_id, automation_id, fires_at) -> int:
+def _persist_bridge_zcode_db_path(repo_root, task_id, db_path) -> None:
+    """把解析出的 zcode_db_path 持久化进 continuation.wake_bridge
+    （v2.3.0 W3 additive 键；validate_state 对 wake_bridge 未知键忽略
+    ——向前兼容）。零 wake_bridge 状态语义变化（status / boundary /
+    automation_id 全不动）；已一致时零写零副作用。"""
+    from runtime import task_manager
+    st = state.load_state(repo_root, task_id)
+    if st is None:
+        raise _TaskMissing(
+            "任务 %s 不存在（%s 下无 state.json），无法持久化 "
+            "wake_bridge.zcode_db_path" % (task_id, repo_root))
+    continuation = task_manager._ensure_continuation(st)
+    bridge = continuation.get("wake_bridge")
+    if not isinstance(bridge, dict):
+        bridge = state.default_continuation()["wake_bridge"]
+        continuation["wake_bridge"] = bridge
+    if bridge.get("zcode_db_path") == db_path:
+        return  # 已一致：零写（幂等）
+    bridge["zcode_db_path"] = db_path
+    state.save_state(repo_root, st)
+
+
+def _anchor_bridge_wake_at(repo_root, task_id, automation_id, fires_at,
+                           db_path=None):
+    """wake-record 落地即 retime（v2.3.0 W3 §10 arm 时锚点；fail-open）。
+
+    流程：解析 DB 路径（--db > discover_zcode_tasks_db(None)）→ 持久化
+    continuation.wake_bridge.zcode_db_path（additive 键，供 fire 后
+    wake-retime 复用）→ fires_at 折算 epoch 毫秒（复用
+    clock._parse_reset_at_ms 的统一 ISO 解析口径；wake 时刻的 D10 数学
+    reset+300s 不变，本层只是把宿主 next_run_at 落地锚定到已定时刻）→
+    retime_automation 单列改写。任何一步失败都不抛：返回 (False, 警告
+    摘要)，登记结果与 task/bridge 状态语义零影响（D4：native recurring
+    网格仍是兜底节拍）；全部成功 → (True, None)。"""
+    from runtime.host import zcode_schedule  # 函数内 import：monkeypatch 友好
+    try:
+        db = zcode_schedule.discover_zcode_tasks_db(db_path)
+    except Exception as exc:  # 纯路径解析——防御保留位
+        return False, ("zcode_db_path 解析失败 %s: %s"
+                       % (type(exc).__name__, exc))
+    warnings = []
+    try:
+        _persist_bridge_zcode_db_path(repo_root, task_id, db)
+    except Exception as exc:
+        warnings.append("zcode_db_path 持久化失败 %s: %s"
+                        % (type(exc).__name__, exc))
+    from runtime.quota import clock  # 函数内 import：monkeypatch 友好
+    target_ms = clock._parse_reset_at_ms(fires_at)
+    if target_ms is None:
+        warnings.append("fires_at %r 不可解析为 ISO8601——未 retime"
+                        % (fires_at,))
+        return False, "; ".join(warnings)
+    try:
+        zcode_schedule.retime_automation(db, automation_id, target_ms)
+    except Exception as exc:
+        warnings.append("retime 失败 %s: %s" % (type(exc).__name__, exc))
+        return False, "; ".join(warnings)
+    return True, ("; ".join(warnings) if warnings else None)
+
+
+def _wake_record(repo_root, task_id, automation_id, fires_at,
+                 db_path=None) -> int:
     """wake-record：唤醒窗口扣减记账（task_manager.record_quota_wake
     薄壳；v2.1 legacy 兼容入口——v2.2 persistent path 禁止调用，C1a：
     arm/fire/create 不消费窗口预算）。automation_id / fires_at 空串由
     API 的 ValueError 闸拒绝（退出码 2）；任务缺失（TaskManagerError）
-    → _QuotaFlowRejected（退出码 1）。"""
+    → _QuotaFlowRejected（退出码 1）。
+
+    v2.3.0 W3（§10 arm 时锚点）：登记成功后立即经 W1 adapter 把该
+    automation 的 next_run_at retime 为记录的 wake 时刻（fires_at），
+    zcode_db_path（--db > discover 缺省解析）随之持久化进 bridge 记账。
+    一切 retime 失败 fail-open：输出加 "retime_applied": false +
+    "retime_warning"（异常摘要），登记照常成功（退出码仍 0，不得因
+    retime 失败改变任何 task/bridge 状态语义）；成功 →
+    "retime_applied": true。"""
     from runtime import task_manager
     try:
         result = task_manager.record_quota_wake(
@@ -871,6 +994,71 @@ def _wake_record(repo_root, task_id, automation_id, fires_at) -> int:
             fires_at=fires_at)
     except task_manager.TaskManagerError as exc:
         raise _QuotaFlowRejected(str(exc)) from exc
+    retime_applied, retime_warning = _anchor_bridge_wake_at(
+        repo_root, task_id, automation_id, fires_at, db_path=db_path)
+    result["retime_applied"] = retime_applied
+    if retime_warning is not None:
+        result["retime_warning"] = retime_warning
+    _emit(result)
+    return 0
+
+
+def _wake_arm(repo_root, task_id, automation_id, db_path=None) -> int:
+    """wake-arm：Persistent Wake Bridge 的生产 arm 入口 + arm 时 retime
+    锚定（v2.3.0 W3 补口；v2.2 既存缺口——SKILL 的 arm_wake_bridge
+    记账步骤此前无 CLI 调用面）。
+
+    记账走稳定通道 runtime.activation_transport.arm_transport
+    （transport 恒 "recurring_bridge"——唯一 STABLE，词汇不扩；内部
+    零改写委托 task_manager.arm_wake_bridge，参数校验顺序 / 冲突语义 /
+    幂等语义 / journal 事件全由其承担；TransportReservedError 语义原样
+    透传——本命令恒传 stable，实验传输的预留闸保持在 adapter 层）。
+    boundary / reset_at / wake_at 与 wake-plan 同源同法：只读本地
+    quota-cache.json（_wake_cached_quota_inputs，身份闸，绝不触发
+    provider 抓取）→ _bridge_boundary 的 D10 数学（多窗取最早可解析
+    reset，wake_at = reset + DEFAULT_GRACE_SECONDS=300，不改数学）；
+    bridge_interval_minutes 取 execution_policy.quota_control 键级合并
+    （legacy 缺块按默认 60）。无可解析窗口 → boundary_id/wake_at 双
+    None → arm_wake_bridge 既有参数闸拒绝（ValueError，退出码 2，
+    绝不虚构边界）。arm 失败（TaskManagerError → _QuotaFlowRejected
+    退出码 1；ValueError → 退出码 2；TransportReservedError 原样透传
+    退出码 1）→ 非零退出且绝不做任何 retime。
+
+    记账成功（含幂等命中）后执行与 wake-record 完全相同的锚定：
+    zcode_db_path（--db > discover_zcode_tasks_db(None)）持久化进
+    bridge 记账（additive 键）+ retime_automation 把宿主 next_run_at
+    锚定到 armed 记录的 wake_at；retime 失败 fail-open（输出
+    "retime_applied": false + "retime_warning"，退出码仍 0，arm 记账
+    不受影响——native recurring 网格仍是兜底节拍，D4 watchdog）。
+
+    输出 = arm 记账返回字段（automation_id / boundary_id /
+    current_boundary_id / reset_at / wake_at / next_wake_at / mode /
+    generation / bridge_interval_minutes / status / armed_at
+    [, idempotent]）+ retime_applied[, retime_warning]。"""
+    from runtime import activation_transport, task_manager
+    from runtime.continuity.wake_bridge import _bridge_boundary
+    from runtime.quota import scheduler  # 函数内 import：monkeypatch 友好
+    _provider_status, windows = _wake_cached_quota_inputs(repo_root)
+    st = state.load_state(repo_root, task_id)
+    policy = st.get("execution_policy") if isinstance(st, dict) else None
+    interval = execution_policy.default_quota_control(policy)[
+        "bridge_interval_minutes"]
+    boundary_id, reset_z, wake_at = _bridge_boundary(
+        windows, scheduler.DEFAULT_GRACE_SECONDS)
+    try:
+        result = activation_transport.arm_transport(
+            repo_root, task_id, transport="recurring_bridge",
+            automation_id=automation_id, boundary_id=boundary_id,
+            reset_at=reset_z, wake_at=wake_at, next_wake_at=None,
+            bridge_interval_minutes=interval, mode="recurring")
+    except task_manager.TaskManagerError as exc:
+        raise _QuotaFlowRejected(str(exc)) from exc
+    retime_applied, retime_warning = _anchor_bridge_wake_at(
+        repo_root, task_id, automation_id, result.get("wake_at"),
+        db_path=db_path)
+    result["retime_applied"] = retime_applied
+    if retime_warning is not None:
+        result["retime_warning"] = retime_warning
     _emit(result)
     return 0
 
@@ -889,21 +1077,26 @@ def _wake_prompt(repo_root, task_id) -> int:
     return 0
 
 
-def _wake_plan(repo_root, task_id) -> int:
-    """wake-plan：Persistent Wake Bridge 的 arm 裁决（§22.2，v2.2 M5
-    wu-22-05，task_manager.plan_wake_bridge 薄壳）。纯计算不创建
-    automation；额度输入与 M4 闸同源——只读本地 quota-cache.json
+# v2.3.0 W3（§10.5 宿主代价）：wake-plan 输出的 arm 前 advisory（一行
+# 字符串字段）——一个宿主会话只能被一条 automation 占用（one-automation-
+# per-session）：承载 Global Quota Clock automation 的会话不得再 arm
+# task bridge，须另换交互会话执行。
+WAKE_PLAN_ARM_ADVISORY = (
+    "本会话若已承载 Global Quota Clock automation（quota-clock-bind "
+    "绑定的 clock 会话），须另换交互会话执行本桥 arm——"
+    "one-automation-per-session（§10.5 宿主代价：clock 占用的宿主会话"
+    "不能再 arm task bridge）")
+
+
+def _wake_cached_quota_inputs(repo_root):
+    """wake-plan / wake-arm 共用的本地额度输入装配（零网络，v2.3 W3
+    抽取自 _wake_plan 原文，行为逐字不变）：只读本地 quota-cache.json
     （resolver._load_cache / _cache_path 容错原语：缺失 / 坏 JSON /
-    status 词汇陈旧 / fetched_at 不可解析一律视为无缓存 → 传 None，
-    plan 内按 UNKNOWN 保守 fail-open），绝不触发 provider 抓取、绝不
-    重试网络。v2.2.1 WU-221-B2（QuotaIdentity）直接读者身份闸：缓存
-    绑定异身份（provider_identity_hash 与当前指纹不一致）→ 视同无
-    缓存（走既有 no-cache 路径，plan 按 UNKNOWN fail-open）；legacy
-    无指纹缓存保守信任（行为逐字不变）；当前指纹经共享模块
-    （runtime.quota.identity）派生恰一次。任务缺失（TaskManagerError）
-    → _QuotaFlowRejected（退出码 1）。输出 §22.2 冻结九键
-    （ensure_ascii=False，同 M3 观测面）。"""
-    from runtime import task_manager
+    status 词汇陈旧 / fetched_at 不可解析一律视为无缓存）+ v2.2.1
+    WU-221-B2（QuotaIdentity）直接读者身份闸（异身份缓存视同无缓存；
+    legacy 无指纹缓存保守信任；当前指纹经 runtime.quota.identity 派生
+    恰一次）→ (provider_status, windows)。无缓存 → (None, None)，
+    上层按 UNKNOWN / 无边界保守 fail-open，绝不触发 provider 抓取。"""
     from runtime.quota import resolver  # 函数内 import：monkeypatch 友好
     from runtime.quota.identity import (  # 函数内 import：monkeypatch 友好
         compute_provider_identity_hash)
@@ -923,12 +1116,33 @@ def _wake_plan(repo_root, task_id) -> int:
         if isinstance(snapshot, dict) \
                 and isinstance(snapshot.get("windows"), list):
             windows = snapshot["windows"]
+    return provider_status, windows
+
+
+def _wake_plan(repo_root, task_id) -> int:
+    """wake-plan：Persistent Wake Bridge 的 arm 裁决（§22.2，v2.2 M5
+    wu-22-05，task_manager.plan_wake_bridge 薄壳）。纯计算不创建
+    automation；额度输入与 M4 闸同源——只读本地 quota-cache.json
+    （resolver._load_cache / _cache_path 容错原语：缺失 / 坏 JSON /
+    status 词汇陈旧 / fetched_at 不可解析一律视为无缓存 → 传 None，
+    plan 内按 UNKNOWN 保守 fail-open），绝不触发 provider 抓取、绝不
+    重试网络。v2.2.1 WU-221-B2（QuotaIdentity）直接读者身份闸：缓存
+    绑定异身份（provider_identity_hash 与当前指纹不一致）→ 视同无
+    缓存（走既有 no-cache 路径，plan 按 UNKNOWN fail-open）；legacy
+    无指纹缓存保守信任（行为逐字不变）；当前指纹经共享模块
+    （runtime.quota.identity）派生恰一次。任务缺失（TaskManagerError）
+    → _QuotaFlowRejected（退出码 1）。输出 §22.2 冻结九键 + v2.3 W3
+    additive 字符串字段 advisory（WAKE_PLAN_ARM_ADVISORY，§10.5 宿主
+    代价）（ensure_ascii=False，同 M3 观测面）。"""
+    from runtime import task_manager
+    provider_status, windows = _wake_cached_quota_inputs(repo_root)
     try:
         plan = task_manager.plan_wake_bridge(
             repo_root, task_id, provider_status=provider_status,
             windows=windows)
     except task_manager.TaskManagerError as exc:
         raise _QuotaFlowRejected(str(exc)) from exc
+    plan["advisory"] = WAKE_PLAN_ARM_ADVISORY  # v2.3 W3 additive 字段
     _emit_utf8(plan)
     return 0
 
@@ -938,7 +1152,18 @@ def _wake_status(repo_root, task_id) -> int:
     wu-22-05）。展示 wake_bridge.status 十值词汇 + scheduler_context
     （origin + capability 缓存）+ mode/generation 与墓碑。continuation
     缺块按 default_continuation 兜底（§23.1 legacy 兼容，不写盘）；
-    零写副作用。任务缺失 → _TaskMissing（退出码 1）。"""
+    零写副作用。任务缺失 → _TaskMissing（退出码 1）。
+
+    v2.3.0 W3 输出增补（additive 三键，全部 fail-open 只读）：
+    db_next_run_at（经 W1 adapter inspect_automation 读回宿主行的
+    next_run_at 原始值；读不到行 / inspect 失败 → None）、
+    wake_at_matches_db（db_next_run_at 与 bridge.wake_at 折算 epoch
+    毫秒的一致性布尔；无法判定 → None）、db_check_note（读不到行 /
+    无法判定时明示原因：db_row_missing / db_inspect_failed: ... /
+    no_automation_id / wake_at_unparsable / db_next_run_at_null）。
+    DB 路径取 bridge 记账持久化的 zcode_db_path（v2.3 W3 wake-record
+    登记时写入），缺失时按 discover_zcode_tasks_db(None) 缺省解析。"""
+    from runtime.host import zcode_schedule  # 函数内 import：monkeypatch 友好
     st = state.load_state(repo_root, task_id)
     if st is None:
         raise _TaskMissing(
@@ -954,6 +1179,40 @@ def _wake_status(repo_root, task_id) -> int:
     scheduler_context = (scheduler_context
                          if isinstance(scheduler_context, dict) else
                          state.default_continuation()["scheduler_context"])
+    # —— v2.3.0 W3：宿主 DB next_run_at 与 bridge wake_at 一致性观测 ——
+    automation_id = bridge.get("automation_id")
+    db_next_run_at = None
+    wake_at_matches_db = None
+    db_check_note = None
+    if isinstance(automation_id, str) and automation_id != "":
+        recorded_db = bridge.get("zcode_db_path")
+        db = (recorded_db if isinstance(recorded_db, str)
+              and recorded_db != ""
+              else zcode_schedule.discover_zcode_tasks_db(None))
+        try:
+            row = zcode_schedule.inspect_automation(db, automation_id)
+        except Exception as exc:
+            row = None
+            db_check_note = "db_inspect_failed: %s: %s" % (
+                type(exc).__name__, exc)
+        if row is None:
+            if db_check_note is None:
+                db_check_note = "db_row_missing"
+        else:
+            db_next_run_at = row.get("next_run_at")
+            if db_next_run_at is None:
+                db_check_note = "db_next_run_at_null"
+    else:
+        db_check_note = "no_automation_id"
+    if db_next_run_at is not None:
+        from runtime.quota import clock  # 函数内 import：monkeypatch 友好
+        wake_at = bridge.get("wake_at")
+        wake_at_ms = (clock._parse_reset_at_ms(wake_at)
+                      if isinstance(wake_at, str) else None)
+        if wake_at_ms is None:
+            db_check_note = "wake_at_unparsable"
+        else:
+            wake_at_matches_db = db_next_run_at == wake_at_ms
     _emit_utf8({
         "task_id": st.get("task_id", task_id),
         "status": bridge.get("status", "none"),
@@ -968,7 +1227,110 @@ def _wake_status(repo_root, task_id) -> int:
         "scheduler_context": scheduler_context,
         "wake_bridge": bridge,
         "tombstone": block.get("tombstone"),
+        "db_next_run_at": db_next_run_at,
+        "wake_at_matches_db": wake_at_matches_db,
+        "db_check_note": db_check_note,
     })
+    return 0
+
+
+# —— v2.3.0（v23-w3）：Task Wake Bridge fire 后锚点（wake-retime） ——
+
+# park 偏移（毫秒）：quota 可执行 → 本桥停摆一年（任务醒了不再等待；
+# 任务下次再睡会走既有 arm 流程重新建置，automation 仍按 native
+# recurring 服役但等价 no-op）
+WAKE_RETIME_PARK_OFFSET_MS = 365 * 86400 * 1000
+# 无已知边界重试偏移（毫秒）：§10.4「保持简单优先」的 5 分钟短重试
+WAKE_RETIME_RETRY_OFFSET_MS = 300 * 1000
+
+
+def _wake_retime(repo_root, task_id) -> int:
+    """wake-retime：fire 后锚点「判定 + retime」一步完成（v2.3.0 §10 /
+    W3，unit v23-w3）。wake turn 在 quota-resolve --force-refresh 之后
+    调用本命令：
+
+      1. 读 task state + bridge 记账（automation_id / zcode_db_path）；
+         无 armed bridge（status ∉ armed/fired 或 automation_id 缺失，
+         任务缺失同口径）→ {"status": "no_bridge"} 退出 0（不算错）；
+      2. force-refresh quota（resolver.resolve_quota_detail——与现有
+         wake 路径同法的四级层级强刷入口）；
+      3. 判定（复用既有语义，不新发明）：
+         - quota 可执行（status ∈ task_manager.QUOTA_RESUME_STATUSES
+           ——resume 面既有恢复四态词汇）→ park 本桥：
+           next_run_at = now + 365 天，
+           {"status": "executable_park_bridge", "next_target_at": ...}
+           ——注意本命令不等于执行 resume：resume 仍由 prompt 既有
+           quota-resume 步骤按授权进行，本命令只管节拍；
+         - 不可执行且存在已知未来边界（scheduler.plan_resume 的
+           max(EXHAUSTED resets)+300s 宽限口径，D10 数学直接复用）→
+           retime 该值，{"status": "retime_boundary",
+           "next_target_at": ...}；
+         - 不可执行且无已知边界（periodic_fallback / reset 不可解析）
+           → retime now + 5 分钟，{"status": "retime_retry",
+           "next_target_at": ...}；
+      4. 决策或 adapter 任何异常 → {"status": "retime_failed",
+         "warning": <异常摘要>} 仍退出 0（fail-open，native recurring
+         watchdog 接管，§4.2 同款）。
+
+    零 task state / journal / accounting 写副作用（纯节拍职责）。
+    zcode_db_path 取 bridge 记账持久化值（wake-record 登记时写入），
+    缺失时按 discover_zcode_tasks_db(None) 缺省解析。next_target_at
+    恒为 epoch 毫秒（与宿主 DB next_run_at 同口径，可直接比对）。"""
+    from runtime import task_manager
+    from runtime.host import zcode_schedule  # 函数内 import：monkeypatch 友好
+    from runtime.quota import clock, resolver, scheduler  # monkeypatch 友好
+    st = state.load_state(repo_root, task_id)
+    if st is None:
+        _emit({"status": "no_bridge", "task_id": task_id,
+               "reason": "任务不存在（无 state.json）——无桥可重定时"})
+        return 0
+    continuation = st.get("continuation")
+    block = (continuation if isinstance(continuation, dict)
+             else state.default_continuation())
+    bridge = block.get("wake_bridge")
+    bridge = (bridge if isinstance(bridge, dict)
+              else state.default_continuation()["wake_bridge"])
+    automation_id = bridge.get("automation_id")
+    if bridge.get("status") not in task_manager.REUSABLE_BRIDGE_STATUSES \
+            or not isinstance(automation_id, str) or automation_id == "":
+        _emit({"status": "no_bridge", "task_id": task_id,
+               "bridge_status": bridge.get("status")})
+        return 0
+    try:
+        detail = resolver.resolve_quota_detail(repo_root,
+                                               force_refresh=True)
+        quota_status = (detail.get("status") if isinstance(detail, dict)
+                        else None)
+        now_ms = _clock_now_ms()
+        if quota_status in task_manager.QUOTA_RESUME_STATUSES:
+            decision = "executable_park_bridge"
+            target_ms = now_ms + WAKE_RETIME_PARK_OFFSET_MS
+        else:
+            evaluation = scheduler.evaluate(
+                detail.get("snapshot") if isinstance(detail, dict)
+                else None)
+            plan = scheduler.plan_resume(evaluation)
+            boundary_ms = (clock._parse_reset_at_ms(plan.get("resume_at"))
+                           if plan.get("action") == "resume_at" else None)
+            if boundary_ms is not None:
+                decision = "retime_boundary"
+                target_ms = boundary_ms
+            else:
+                decision = "retime_retry"
+                target_ms = now_ms + WAKE_RETIME_RETRY_OFFSET_MS
+        recorded_db = bridge.get("zcode_db_path")
+        db = (recorded_db if isinstance(recorded_db, str)
+              and recorded_db != ""
+              else zcode_schedule.discover_zcode_tasks_db(None))
+        zcode_schedule.retime_automation(db, automation_id, int(target_ms))
+    except Exception as exc:
+        _emit({"status": "retime_failed", "task_id": task_id,
+               "automation_id": automation_id,
+               "warning": "%s: %s" % (type(exc).__name__, exc)})
+        return 0
+    _emit({"status": decision, "task_id": task_id,
+           "automation_id": automation_id, "quota_status": quota_status,
+           "next_target_at": int(target_ms)})
     return 0
 
 
@@ -1672,11 +2034,30 @@ def _dispatch(args) -> int:
         return _quota_resume(
             rest[0], rest[1], rest[2] if len(rest) == 3 else None)
     if cmd == "wake-record":
-        if len(rest) != 4:
+        if len(rest) not in (4, 6):
             raise _UsageError(
                 "wake-record 需要 <repo_root> <task_id> <automation_id> "
-                "<fires_at> 四个参数。" + USAGE)
-        return _wake_record(rest[0], rest[1], rest[2], rest[3])
+                "<fires_at> [--db <path>] 四或六个参数。" + USAGE)
+        db_path = None
+        if len(rest) == 6:
+            if rest[4] != "--db":
+                raise _UsageError(
+                    "wake-record 的可选参数只接受 --db <path>。" + USAGE)
+            db_path = rest[5]
+        return _wake_record(rest[0], rest[1], rest[2], rest[3],
+                            db_path=db_path)
+    if cmd == "wake-arm":
+        if len(rest) not in (3, 5):
+            raise _UsageError(
+                "wake-arm 需要 <repo_root> <task_id> <automation_id> "
+                "[--db <path>] 三或五个参数。" + USAGE)
+        db_path = None
+        if len(rest) == 5:
+            if rest[3] != "--db":
+                raise _UsageError(
+                    "wake-arm 的可选参数只接受 --db <path>。" + USAGE)
+            db_path = rest[4]
+        return _wake_arm(rest[0], rest[1], rest[2], db_path=db_path)
     if cmd == "wake-prompt":
         if len(rest) != 2:
             raise _UsageError(
@@ -1692,6 +2073,11 @@ def _dispatch(args) -> int:
             raise _UsageError(
                 "wake-status 需要 <repo_root> <task_id> 两个参数。" + USAGE)
         return _wake_status(rest[0], rest[1])
+    if cmd == "wake-retime":
+        if len(rest) != 2:
+            raise _UsageError(
+                "wake-retime 需要 <repo_root> <task_id> 两个参数。" + USAGE)
+        return _wake_retime(rest[0], rest[1])
     if cmd == "wake-reconcile":
         if len(rest) not in (3, 4):
             raise _UsageError(

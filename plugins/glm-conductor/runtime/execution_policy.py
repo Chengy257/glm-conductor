@@ -43,7 +43,9 @@ primer_enabled——§8.3 Window Primer 特性闸）：
     {"pressure_percent": 35.0, "draining_percent": 20.0,
      "bridge_interval_minutes": 60}——execution phase 阈值配置
     （pressure / draining 触发线，百分比）+ Persistent Wake Bridge 的
-    固定间隔分钟数（D15-d 保守默认 60，overlap 未验证前不收紧到 30）；
+    native recurring watchdog 间隔分钟数（v2.3.0 W3 §10.2 语义重标：
+    fallback 兜底节拍——正常 wake 时刻由动态 next_run_at 决定，本值
+    不再是 normal wake interval；D15-d 保守默认 60 不变，校验不变）；
     另有可选键 primer_enabled（bool；§8.3 的 "primer.enabled" 语义落点
     ——True 才允许 Window Primer 的 control-plane 模型调用，缺省恒
     False 即结构性关闭，消费方经 primer_enabled() 容错读）。注意
@@ -154,7 +156,11 @@ POLICY_SUB_BLOCKS = ("worker_execution", "parallelism", "continuity",
 # 默认值冻结供测试；模块常量只读——DEFAULT_EXECUTION_POLICY 与
 # default_quota_control() 各持全新拷贝，调用方改写互不波及。
 # v2.2 M1a D15-d：bridge_interval_minutes 为 Persistent Wake Bridge 的
-# 固定间隔保守默认——overlap 行为未验证前不收紧到 30）
+# 固定间隔保守默认——overlap 行为未验证前不收紧到 30。
+# v2.3.0 W3（§10.2）语义重标：bridge_interval_minutes 是 native
+# recurring watchdog interval（fallback 兜底节拍）——正常 wake 时刻由
+# 动态 next_run_at（外部 retime 的精确目标时刻）决定，本值不再是
+# normal wake interval；默认仍 60，校验不变）
 DEFAULT_QUOTA_CONTROL = {
     "pressure_percent": 35.0,
     "draining_percent": 20.0,
@@ -423,7 +429,9 @@ def validate_execution_policy(policy) -> "list[str]":
                     errors.append(
                         "quota_control.%s 必须是有限数值（bool 拒绝），"
                         "得到 %r" % (key, qc_block[key]))
-            # bridge_interval_minutes（v2.2 M1a D15-d）：非 bool int 且
+            # bridge_interval_minutes（v2.2 M1a D15-d；v2.3 W3 §10.2
+            # 语义重标为 native recurring watchdog fallback 间隔——
+            # 正常 wake 时刻由动态 next_run_at 决定）：非 bool int 且
             # 5-1440（bool 是 int 子类，True/False 不得充当分钟数；
             # 缺省按默认 60 合法）
             if "bridge_interval_minutes" in qc_block:

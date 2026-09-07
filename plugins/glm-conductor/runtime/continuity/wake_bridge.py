@@ -33,6 +33,7 @@
 """
 
 import datetime
+import os
 
 from runtime import journal
 from runtime import state
@@ -43,6 +44,13 @@ from runtime.quota.accounting import (
     _require_state,
     _utc_now_iso,
 )
+
+# v2.3.0 W3（§10）：Universal Wake prompt 内的 runtime 路径解析——
+# 对齐 cli._CLOCK_RUNTIME_DIR 的 W2b 同款做法
+# （os.path.dirname(os.path.abspath(__file__))，即
+# …/plugins/glm-conductor/runtime），供 fire 后桥重定时步骤的
+# wake-retime 命令行取绝对路径（prompt 纯函数，模块级常量零 I/O）。
+_RUNTIME_DIR = os.path.dirname(os.path.abspath(__file__))
 
 # —— Persistent Wake Bridge（v2.2 M5，wu-22-05；决策记录 D15-a/b/c/d） ——
 
@@ -145,7 +153,10 @@ def universal_wake_prompt(task_id, *, ledger_root, repository_root=None,
     """生成 Universal Wake prompt（§10 统一模板 + 今晚活桥逐字硬红线
     风格；纯函数，零 I/O 零凭证）。
 
-    输入 task_id + 边界参数 → 文本；模板含三分支决策（goal 已达成 →
+    输入 task_id + 边界参数 → 文本；模板含 force-refresh 强刷、v2.3 W3
+    的 fire 后桥重定时步骤（wake-retime，§10.3/§10.4：可执行 → park
+    本桥；不可执行 → 下一边界或 5 分钟重试——本步骤只管节拍，resume
+    仍由下方 quota-resume 步骤按授权进行）、三分支决策（goal 已达成 →
     tombstone + 单次清理；manual/notify → warm-only；auto 家族 →
     quota-resume 续作）、额度不可执行 no-op（不消费窗口预算，D15-g）、
     同桥复用语义（只复用/retarget 本 bridge，绝不新建）与硬红线
@@ -179,20 +190,28 @@ def universal_wake_prompt(task_id, *, ledger_root, repository_root=None,
         "1. cd %s 后执行：" % ledger_root,
         "   python3 plugins/glm-conductor/runtime/cli.py quota-resolve "
         ". --force-refresh",
-        "2. 读 .glm-conductor/tasks/%s/state.json 与 manifest.json；"
+        "2. 紧随强刷、任何分叉之前，立即重定时本桥（一步完成「判定 + "
+        "retime」——v2.3 起正常 wake 时刻由动态 next_run_at 决定，不再"
+        "等 60 分钟 watchdog 网格）：",
+        "   python3 %s/cli.py wake-retime %s %s"
+        % (_RUNTIME_DIR, ledger_root, task_id),
+        "   （额度可执行 → 停摆本桥至一年后，任务下次休眠再走既有 arm "
+        "流程重新建置；仍不可执行 → 重排到下一额度边界，无已知边界则 "
+        "5 分钟后重试）",
+        "3. 读 .glm-conductor/tasks/%s/state.json 与 manifest.json；"
         % task_id,
         "   以仓库为真相源（repository > checkpoint > 记忆）",
-        "3. 任务 goal 已达成（全部单元 completed）？",
+        "4. 任务 goal 已达成（全部单元 completed）？",
         "   → 写 continuation.tombstone（task_id/status=completed/"
         "completed_at/bridge_should_noop=true）",
         "   → 单次尝试 CronDelete 本 automation（绝不重试，失败即容忍）",
         "   → 简短汇报后结束（不实施任何工作）",
-        "4. 额度不可执行（仍耗尽 / weekly 阻塞 / provider 拒绝）？",
+        "5. 额度不可执行（仍耗尽 / weekly 阻塞 / provider 拒绝）？",
         "   → 什么都不做，简短说明后结束本轮（不消费窗口预算——D15-g）",
-        "5. auto_resume=manual/notify（任务活跃且额度可执行）？",
+        "6. auto_resume=manual/notify（任务活跃且额度可执行）？",
         "   → warm-only：刷新额度状态、保持任务可恢复，绝不实施新工作，",
         "     汇报后结束",
-        "6. 额度可执行 且 execution_policy.continuity.auto_resume ∈ "
+        "7. 额度可执行 且 execution_policy.continuity.auto_resume ∈ "
         "{auto_once, until_done} 且 authorization.source=user？",
         "   → python3 plugins/glm-conductor/runtime/cli.py quota-resume "
         ". %s" % task_id,
@@ -201,9 +220,9 @@ def universal_wake_prompt(task_id, *, ledger_root, repository_root=None,
         "勿盲目重派）",
         "   → 按依赖续派下一安全单元（不重放已完成工作）",
         "   → journal 记 wake_bridge_fired",
-        "7. consumed_quota_windows 已达 max_quota_windows？",
+        "8. consumed_quota_windows 已达 max_quota_windows？",
         "   → 转 waiting_user，告知用户后结束",
-        "8. 本轮一切 git 提交遵守：record（验证收据）与 finish_unit "
+        "9. 本轮一切 git 提交遵守：record（验证收据）与 finish_unit "
         "之间零提交",
         "",
         "恒久保护（Always preserve）：ownership / verification / "
