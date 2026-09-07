@@ -2,6 +2,15 @@
 # -*- coding: utf-8 -*-
 """GLM Conductor v2.2 Window Primer（修正计划 C4，wu-22-C4，分支 B 全量）。
 
+v2.3 定位（W4 旧职责收敛，v2.3 计划 §13）：
+    v2.3 起 **Scheduled Clock Tick = production window materialization
+    path**——生产窗口物化由 Global Quota Clock 的 tick automation 承担
+    （runtime/quota/clock.py + clock_store.py）。本模块定位为 default
+    disabled 的 manual / experimental fallback：不接 watcher、不接
+    clock、不接 resume、不扩大授权（本就未接——下方「接线边界」节的
+    C1b unwired 先例继续成立，primer_enabled 默认恒 False）。稳定运行
+    一个版本后，由后续版本决定是否删除。
+
 职责（修正计划 §8.1 / §8.2 / §8.3 / §C4，P0-QP 实验门已由用户机制裁决
 关闭——见 docs/history/v2.2/GLM-Conductor-v2.2-Phase0-Primer-Experiments.md 门总览）：
     用一次最小、独立、可审计的模型调用使新 quota window materialize，
