@@ -27,10 +27,8 @@
 
 #### Known boundaries
 
-- 本条目为草稿（unreleased）：最终措辞于发布时收口。
 - 分解为行为保持重构：迁移代码块与原实现逐字节一致（脚本验证），无语义变更意图；三个留在 `task_manager` 命名空间的编排器因测试 monkeypatch 契约不迁移（已记录，属有意决策）。
 
-- **Testing**: 2113 → 2214 tests green; `validate_plugin` 15/15.
 
 - Testing: full suite 2113 -> **2214** all green (95 new tests: durable I/O 21, multiprocess 7, identity binding + QuotaIdentity 50, public-surface contract 6, writer/watcher/RMW regressions); CI gains ruff (F/E9, pinned 0.4.4) + plugin-load smoke steps; multiprocess suite 5 consecutive local rounds + remote four-way green.
 
