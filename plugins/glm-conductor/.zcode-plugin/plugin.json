@@ -1,6 +1,6 @@
 {
   "name": "glm-conductor",
-  "version": "2.2.0",
+  "version": "2.2.1",
   "description": "Dual-axis selective routing orchestration plugin for GLM coding agents: the GLM-5.3 main session acts as the single architect, declaring solo/delegate/audit/full routes along two independent axes (Delegability × Assurance); GLM-5.3-Flash executors deliver standard and visual implementation while fresh-context read-only reviewers provide independent final audits. Mechanical execution assurance is built in — a four-fold Stop-gate completion check with fingerprint-bound receipts — as is quota-aware continuity (persistent wake bridge plus window consumption ledger), so long tasks can resume across sessions.",
   "license": "MIT",
   "keywords": [
