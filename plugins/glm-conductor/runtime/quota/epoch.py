@@ -74,7 +74,7 @@ epoch 身份（冻结口径）：
     / runtime.quota.control / runtime.quota.parser；导入方向
     epoch → control → execution_policy → parser（均不反向依赖，
     无循环导入）。跨模块私有 import 是 quota 包既定惯例
-    （control 亦 import scheduler 的 _format_iso_z/_parse_iso_utc）。
+    （control 亦 import window_math 的 _earliest_reset_plus）。
 
 来源：
     docs/history/v2.2/GLM-Conductor-v2.2-Quota-Control-Plane-Architecture-Correction-

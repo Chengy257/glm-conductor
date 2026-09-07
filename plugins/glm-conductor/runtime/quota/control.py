@@ -49,9 +49,11 @@ continuation_obligation（§8.3，只产出 runtime.state 词汇子集）：
       收敛到 PRESSURE 且 wake_at=None，不阻塞、不虚构；
     - 阈值默认值单一真相源：从 runtime.execution_policy 导入
       DEFAULT_QUOTA_CONTROL（D5），不复制数值字面量；宽限秒数默认从
-      runtime.quota.scheduler 导入 DEFAULT_GRACE_SECONDS，数值/时间
-      工具复用其私有实现（_is_number / _parse_iso_utc / _format_iso_z
-      / _fmt_number），不改 scheduler.py；
+      runtime.quota.scheduler 导入 DEFAULT_GRACE_SECONDS，数值工具
+      复用其私有实现（_is_number / _fmt_number），不改 scheduler.py；
+      ISO 时间数学经 runtime.quota.window_math._earliest_reset_plus
+      （本模块 re-import 保持 epoch 解析点，内部落 time_utils 规范
+      实现）；
     - wake_bridge 词汇按 quota 包既有纪律不 import runtime.state，
       以字面量声明并在注释指向 runtime.state.WAKE_BRIDGE_STATUSES
       （§8.2 冻结十值），词汇一致性由 tests.test_quota_control 的

@@ -51,6 +51,16 @@ import runtime.continuity.wake_bridge as continuity_wake_bridge
 import runtime.quota.accounting as quota_accounting
 import runtime.task_manager as task_manager
 
+# Windows 裸控制台（无 PYTHONUTF8，stdout 为 cp936/cp1252）下，本模块
+# 成功路径的中文诊断 print 会触发 UnicodeEncodeError（CI 实测红）——
+# 模块导入时即守护式重配 stdout/stderr（3.7+ TextIOWrapper.reconfigure），
+# 保护本文件全部 print 与断言回溯；非 TextIOWrapper 场景静默放过。
+try:
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+except Exception:
+    pass
+
 # 公共表面冻结清单（v2.2.1 WU-221-C2 时点实测，46 名）：
 # (名字, 种类)；种类 ∈ {"callable", "constant"}。
 FROZEN_PUBLIC_SURFACE = (

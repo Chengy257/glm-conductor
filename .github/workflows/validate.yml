@@ -32,4 +32,6 @@ jobs:
         run: python scripts/validate_plugin.py
       - name: 插件装载冒烟（清单/结构/runtime import，零网络零模型调用）
         run: python scripts/smoke_plugin_load.py
-      - run: python -m unittest discover -s tests -v
+      - env:
+          PYTHONUTF8: "1" # 仓库运行约定：中文诊断输出按 UTF-8（Windows 裸控制台为 cp1252）
+        run: python -m unittest discover -s tests -v
