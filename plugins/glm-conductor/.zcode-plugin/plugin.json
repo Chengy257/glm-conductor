@@ -1,7 +1,7 @@
 {
   "name": "glm-conductor",
   "version": "2.2.0",
-  "description": "GLM 双轴选择性路由编排插件：GLM-5.3 主会话任架构师，按 Delegability × Assurance 声明 solo/delegate/audit/full 路由；GLM-5.3-Flash 执行标准与视觉实施，全新上下文只读审查者独立终审；运行时强制层（Stop 完成门四重检查/指纹收据）与额度感知连续性（持久唤醒桥/窗口消费账）内建，continuity 支持长任务跨会话恢复。",
+  "description": "Dual-axis selective routing orchestration plugin for GLM coding agents: the GLM-5.3 main session acts as the single architect, declaring solo/delegate/audit/full routes along two independent axes (Delegability × Assurance); GLM-5.3-Flash executors deliver standard and visual implementation while fresh-context read-only reviewers provide independent final audits. Mechanical execution assurance is built in — a four-fold Stop-gate completion check with fingerprint-bound receipts — as is quota-aware continuity (persistent wake bridge plus window consumption ledger), so long tasks can resume across sessions.",
   "license": "MIT",
   "keywords": [
     "zcode",

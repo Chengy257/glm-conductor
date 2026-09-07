@@ -1,11 +1,11 @@
 {
   "name": "glm-conductor",
-  "description": "GLM 双模型编排插件市场：双轴路由、委派实施、独立审查与长任务连续性",
+  "description": "Marketplace for the GLM dual-model orchestration plugin: dual-axis selective routing, delegated implementation, independent review, and long-task continuity",
   "plugins": [
     {
       "name": "glm-conductor",
       "source": "./plugins/glm-conductor",
-      "description": "GLM-5.3 架构师双轴选择性路由（Delegability × Assurance）：GLM-5.3-Flash 常规/视觉实施 + 全新上下文只读终审 + 长任务连续性"
+      "description": "GLM-5.3 architect with dual-axis selective routing (Delegability × Assurance): GLM-5.3-Flash executors deliver standard and visual implementation, fresh-context read-only reviewers provide independent final audits, with runtime enforcement (four-fold Stop-gate check, fingerprint-bound receipts) and quota-aware continuity for long tasks that resume across sessions"
     }
   ]
 }
