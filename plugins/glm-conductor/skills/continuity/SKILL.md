@@ -223,7 +223,7 @@ continuity 不重新实现 Goal 模式。职责分工：
 
 **Quota Epoch**：epoch 身份 = 窗口多重集 `(kind, reset_at)` 的确定性指纹（不含 status/百分比——provider 状态翻转不推进 epoch），`epoch_id = "glm:"+指纹前 16 位`；有意义的恢复触发是「新的可执行 epoch 出现」，不是「定时器触发」。probe boundary（观察收紧用）与 executable boundary（恢复资格用，取阻塞窗最晚 reset+grace）分离，绝不混用。
 
-**额度 Watcher（可选常驻，默认不运行）**：`quota-watcher start|status|stop|once`——本地常驻 poll-only 进程（零模型调用、单实例锁即状态文件 `.glm-conductor/quota/watcher.json`），Session 休眠时独立维护真实额度时钟；ACTIVE/PASSIVE 逐 tick 重判（有 waiting_quota 或自动续跑任务才 ACTIVE；manual/notify 恒 PASSIVE，可观察但绝不 prime、绝不发激活）。它是加速观察面，不是正确性前提——不运行时既有刷新点查询照常工作。
+**额度 Watcher（可选常驻，默认不运行）**：`quota-watcher start|status|stop|once`——本地常驻 poll-only 进程（零模型调用、单实例所有权凭据是独立锁文件 `.glm-conductor/quota/watcher.lock`——O_EXCL 机械原子、锁含 pid+generation+身份指纹；观察状态 `.glm-conductor/quota/watcher.json` 为纯观察面，heartbeat 仅是锁仲裁的 advisory 证据、陈旧判定锚定其新鲜度，见 docs/architecture.md §7.5），Session 休眠时独立维护真实额度时钟；ACTIVE/PASSIVE 逐 tick 重判（有 waiting_quota 或自动续跑任务才 ACTIVE；manual/notify 恒 PASSIVE，可观察但绝不 prime、绝不发激活）。它是加速观察面，不是正确性前提——不运行时既有刷新点查询照常工作。
 
 **Window Primer（默认结构性关闭）**：新窗口需一次最小模型调用才物化；primer 是 runtime 唯一 control-plane 模型调用面，三重授权闸 fail-closed（`primer_enabled` 默认 **false** + auto_resume ∈ {auto_once, until_done} + 授权来源必须是用户）；物化证据只有「两次强制刷新之间的窗口身份变化」——HTTP 200 与百分比下降都不是证据。不要在授权闸之外自行触发「预调用」——那是一次真实消耗额度的模型调用。
 

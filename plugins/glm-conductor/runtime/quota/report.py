@@ -58,8 +58,9 @@ from runtime.quota.provider import QuotaProviderError
 from runtime.quota.scheduler import evaluate, plan_resume
 # v2.2.1 WU-221-C2（行为保持抽取）：本地 _parse_iso_utc 副本与
 # runtime.quota.time_utils 的规范实现逐字相同（逐实现比对），改经
-# 共享落点 import；_normalize_now / _is_number 为本模块专属变体
-# （错误文案锚定 format_duration_delta / 数值域通用判别），原地保留。
+# 共享落点 import；_normalize_now 为本模块专属变体（错误文案锚定
+# format_duration_delta），原地保留；_is_number 与 scheduler 的实现
+# 逐字相同（真副本，非专属变体），作为接缝外的数值域通用守卫原地保留。
 from runtime.quota.time_utils import _parse_iso_utc
 from runtime.quota.zai import ZaiQuotaProvider
 

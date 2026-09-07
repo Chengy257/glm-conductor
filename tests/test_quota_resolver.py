@@ -43,7 +43,7 @@ import os
 import sys
 import tempfile
 import unittest
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest import mock
 
@@ -51,7 +51,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "plugins" / "glm-co
 from runtime import journal, lease, state, task_manager, work_unit
 from runtime.quota import resolver
 from runtime.quota.provider import QuotaProviderError
-from runtime.quota.scheduler import evaluate
 
 NOW = datetime(2026, 8, 31, 5, 0, 0, tzinfo=timezone.utc)
 NOW_ISO = "2026-08-31T05:00:00.000Z"

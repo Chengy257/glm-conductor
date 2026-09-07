@@ -26,8 +26,6 @@
     前一致。Python 3.7 兼容语法（仓库下限）。
 """
 
-import datetime
-
 from runtime import journal
 from runtime import state
 from runtime.execution_policy import consumed_quota_windows

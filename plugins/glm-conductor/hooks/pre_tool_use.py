@@ -329,7 +329,6 @@ def ownership_injection(repo):
     """既有 ownership advisory 注入路径（v2.0.1 行为原样，供非实施者
     类型与 legacy 场景复用）：发现声明 ownership 的活动任务即注入
     提醒，无则静默。"""
-    from runtime import state
 
     ownership_pairs = declared_ownership_tasks(repo)
     if not ownership_pairs:

@@ -159,7 +159,6 @@ from runtime.quota import resolver
 from runtime.quota._http import build_default_opener
 from runtime.quota.credentials import PROVIDER_KEY, resolve_credential
 from runtime.quota.epoch import evaluate_epoch, same_epoch
-from runtime.quota.identity import compute_provider_identity_hash
 from runtime.quota.provider import ALLOWED_HOSTS, ERROR_KINDS
 from runtime.quota.scheduler import _format_iso_z, _normalize_now
 

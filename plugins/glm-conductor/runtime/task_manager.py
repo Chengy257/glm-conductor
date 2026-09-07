@@ -350,8 +350,6 @@ QuotaIdentity 复合身份（v2.2.1 WU-221-B2，六个记账面的统一升级�
     账本根注入）。
 """
 
-import datetime
-
 from runtime import dependency
 from runtime import dispatch_wave
 from runtime import dispatcher
@@ -362,7 +360,7 @@ from runtime import reconcile
 from runtime import resume_manifest
 from runtime import state
 from runtime import work_unit
-from runtime.execution_policy import consumed_quota_windows
+from runtime.execution_policy import consumed_quota_windows  # noqa: F401 -- re-export（冻结公共表面，导入兼容契约）
 from runtime.execution_policy import default_execution_policy
 from runtime.execution_policy import default_quota_control
 from runtime.execution_policy import effective_worker_budget
@@ -386,23 +384,24 @@ from runtime.quota.accounting import (
 # 的规范定义已移至 runtime.continuity.wake_bridge（依赖方向冻结：
 # task_manager → wake_bridge，绝不反向）；以下 re-import 保证既有
 # task_manager.<名字> 解析点（activation_transport / cli / hooks /
-# tests）零变化。
+# tests）零变化。本模块不逐词消费的名字为兼容性 re-export（冻结解析
+# 面，不裁剪），ruff F401 逐行 noqa 豁免（v2.2.1 CI 加固 D4）。
 from runtime.continuity.wake_bridge import (
-    REUSABLE_BRIDGE_STATUSES,
-    WAKE_BRIDGE_HOST_FACTS,
-    WAKE_PLAN_TASK_STATUSES,
-    _bridge_boundary,
-    _bridge_view,
+    REUSABLE_BRIDGE_STATUSES,  # noqa: F401 -- re-export（解析点兼容）
+    WAKE_BRIDGE_HOST_FACTS,  # noqa: F401 -- re-export（解析点兼容）
+    WAKE_PLAN_TASK_STATUSES,  # noqa: F401 -- re-export（解析点兼容）
+    _bridge_boundary,  # noqa: F401 -- re-export（解析点兼容）
+    _bridge_view,  # noqa: F401 -- re-export（解析点兼容）
     _ensure_continuation,
-    _scheduler_context_view,
-    arm_wake_bridge,
-    degrade_continuity,
-    plan_wake_bridge,
-    reconcile_wake_bridge_from_host,
-    record_bridge_fired,
-    retarget_wake_bridge,
-    universal_wake_prompt,
-    write_completion_tombstone,
+    _scheduler_context_view,  # noqa: F401 -- re-export（解析点兼容）
+    arm_wake_bridge,  # noqa: F401 -- re-export（解析点兼容）
+    degrade_continuity,  # noqa: F401 -- re-export（解析点兼容）
+    plan_wake_bridge,  # noqa: F401 -- re-export（解析点兼容）
+    reconcile_wake_bridge_from_host,  # noqa: F401 -- re-export（解析点兼容）
+    record_bridge_fired,  # noqa: F401 -- re-export（解析点兼容）
+    retarget_wake_bridge,  # noqa: F401 -- re-export（解析点兼容）
+    universal_wake_prompt,  # noqa: F401 -- re-export（解析点兼容）
+    write_completion_tombstone,  # noqa: F401 -- re-export（解析点兼容）
 )
 
 # v2.2.1 WU-221-C1（行为保持抽取）：quota SUBSCRIPTION 订阅域的规范定义
@@ -412,17 +411,17 @@ from runtime.continuity.wake_bridge import (
 # resume_from_quota / _resume_consumption 留守调用点 + cli / hooks /
 # tests）零变化。
 from runtime.continuity.subscription import (
-    QUOTA_SUBSCRIPTION_RESULT_KEYS,
-    _QUOTA_SUBSCRIPTION_STATE_RANK,
+    QUOTA_SUBSCRIPTION_RESULT_KEYS,  # noqa: F401 -- re-export（解析点兼容）
+    _QUOTA_SUBSCRIPTION_STATE_RANK,  # noqa: F401 -- re-export（解析点兼容）
     _cache_identity_usable,
-    _epoch_context_after_refresh,
+    _epoch_context_after_refresh,  # noqa: F401 -- re-export（解析点兼容）
     _epoch_context_at_transition,
-    _epoch_context_from_snapshot,
-    _quota_subscription_view,
-    _reconcile_activation_journal,
+    _epoch_context_from_snapshot,  # noqa: F401 -- re-export（解析点兼容）
+    _quota_subscription_view,  # noqa: F401 -- re-export（解析点兼容）
+    _reconcile_activation_journal,  # noqa: F401 -- re-export（解析点兼容）
     _subscription_active,
-    _subscription_state_satisfied,
-    evaluate_subscription_eligibility,
+    _subscription_state_satisfied,  # noqa: F401 -- re-export（解析点兼容）
+    evaluate_subscription_eligibility,  # noqa: F401 -- re-export（解析点兼容）
     mark_activation_epoch,
     register_quota_subscription,
 )
@@ -433,7 +432,7 @@ from runtime.continuity.subscription import (
 # 事务编排体留守本模块——其内部调用须经本模块名字空间解析，测试
 # monkeypatch 面契约）；以下 re-import 保证全部解析点零变化。
 from runtime.continuity.resume import (
-    QUOTA_RESUME_GRACE_SECONDS,
+    QUOTA_RESUME_GRACE_SECONDS,  # noqa: F401 -- re-export（解析点兼容）
     QUOTA_RESUME_STATUSES,
     QUOTA_WAIT_TASK_STATUSES,
     QUOTA_WAIT_UNIT_STATUSES,
@@ -446,7 +445,7 @@ from runtime.continuity.resume import (
     _resume_subscription_gate,
     _wake_budget_remaining,
     quota_wake_prompt,
-    record_quota_wake,
+    record_quota_wake,  # noqa: F401 -- re-export（解析点兼容）
 )
 
 

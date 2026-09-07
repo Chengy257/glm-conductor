@@ -50,7 +50,7 @@ import datetime
 import json, os, subprocess, tempfile
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "plugins" / "glm-conductor"))
-from runtime import journal, recovery, resume_manifest, state
+from runtime import recovery, resume_manifest, state
 
 # 被测钩子脚本（管道透出验证用）
 SESSION_START = (Path(__file__).resolve().parents[1]

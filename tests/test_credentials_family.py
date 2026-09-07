@@ -44,8 +44,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "plugins" / "glm-conductor"))
 
 from runtime.quota import resolver
-from runtime.quota.credentials import (CREDENTIAL_SOURCES,
-                                       ENV_VAR, FAMILY_MODE_UNAVAILABLE,
+from runtime.quota.credentials import (ENV_VAR, FAMILY_MODE_UNAVAILABLE,
                                        PROVIDER_FAMILIES, describe_modes,
                                        discover_families)
 from runtime.quota.identity import compute_provider_identity_hash
