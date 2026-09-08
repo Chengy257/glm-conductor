@@ -1,5 +1,34 @@
 # Changelog
 
+## 2.3.0
+
+
+Global Quota Clock 与额度连续性简化批次：account 级额度窗口时钟（永久 recurring Scheduled Task + 每轮动态重写 next_run_at，60 分钟 recurring 仅作 watchdog）、任务侧唤醒桥精确化（精确 wake_at 取代 60 分钟轮询）、旧 quota continuity 组件职责收敛。
+
+#### Added
+
+- **ZCode Scheduled Task 宿主适配器（`runtime/host/zcode_schedule.py`）**：宿主内部库 `~/.zcode/v2/tasks-index.sqlite` 的唯一接触面。生产写操作全模块仅一条 `UPDATE automations SET next_run_at`（源码扫描测试机械锚定；INSERT/DELETE/DDL/改 scheduleRule 一律 fail-closed）；事务配方 = busy_timeout + BEGIN IMMEDIATE + 行数/状态闸 + 读回验证（W0 ZC-03 实证：无超时即败、10s 超时等待后提交）；inspect 只读（mode=ro URI，冻结 17 键 + 最近 20 条 runs 触发证据）。与 quota/domain 逻辑零耦合——宿主未来开放官方 API 时只换 adapter、算法层不动。
+- **Global Quota Clock（`quota/clock.py` + `quota/clock_store.py` + CLI `quota-clock-plan/bind/tick/status`）**：每 provider identity 一个 account 级常驻时钟，极低成本无限期运行、不设窗口预算（额度窗口预算属任务侧 `continuity.max_quota_windows`，v2.2 语义零改动）。纯决策层六行冻结决策表（provider 不可用 / weekly blocked 长 park / five_hour 缺失或不可解析 / reset 已过期 / reset_target=reset+120s；weekly 判定复用 epoch.blocking_windows + executable_boundary_at 单一真相源）；用户级状态 `~/.glm-conductor/quota-clocks/<hash>.json`（GLM_CONDUCTOR_HOME 可覆盖；锁内 RMW、重复 bind 拒绝、runtime_path/automation_model 快照）；tick 为唯一生产入口——本 tick 的真实模型调用即新窗口物化，retime 失败零补偿退 native watchdog（三层故障链：reset+2m → +5m retry → 60m watchdog）；status 提供健康判读（tick 陈旧 / DB 行缺失 / 路径悬空 / 目标不一致）与 replace 建议；升级自愈——tick 发现实际运行时路径 ≠ state 记录时自动回写。
+- **Task Wake Bridge 精确化（双 retime 锚点）**：arm 时（新增 `wake-arm` CLI——同时修复 v2.2 既存缺口：persistent arm 记账此前无任何调用面）记账后立即 `next_run_at = wake_at`（fail-open）；fire 后（新增 `wake-retime` CLI）一步完成判定+重定时：额度可执行 → park 桥至一年后（任务下次休眠重走 arm 流程），仍不可执行 → 重排下一额度边界或 5 分钟重试。waiting_quota 任务不再随机等待最多 60 分钟；native recurring 网格仅作 watchdog 兜底。
+- **宿主实验记录（W0）**：`docs/history/v2.3.0/ZCode-Scheduled-Task-Retime-Experiments.md`——off-grid 外部 retime 精确执行 ×2、动态值跨 App 重启存活+精确触发+注入回绑定会话（ZC-01）、SQLite busy 配方（ZC-03）、365 天 park 静默与跨重启（ZC-04）全部实证冻结；schema 33 列/WAL 零漂移。
+
+#### Changed
+
+- **职责收敛（行为保持）**：watcher 正式降级为任务执行额度观察与诊断（Quota Watcher ≠ Quota Clock，时钟运行不依赖 watcher）；primer 定位为 default-disabled 的 manual/experimental fallback（生产窗口物化路径 = Scheduled Clock Tick）；`bridge_interval_minutes` 语义重标为 native watchdog 间隔（值仍 60、校验不变）；Universal Wake Prompt 41 → 25 行（九步语义与红线逐字锚定零损失，黄金断言零改动）；continuity SKILL 增 Global Quota Clock 六角色概念模型（Clock/Task Policy/Wake Bridge/Watcher/Epoch/Primer）。
+
+#### Hardened
+
+- 适配器八类异常层次，参数闸先于任何 I/O；触发回合内零 Cron 系调用面（prompt 红线保留，变更类一律退化为只读的宿主事实不依赖）。
+
+#### Known boundaries
+
+- **ZC-02（Windows 睡眠跨触发点实验）经用户裁决（2026-09-08）延后至 v2.3.1 补做**——本机当前不可睡眠；ZC-01（App 重启）已覆盖"宿主进程消亡再恢复"的主路径语义。
+- dogfood clock 宿主会话的 automation 模型为创建会话继承（本 dogfood 会话为 GLM-5.3 而非 Flash，计划 §3.3 已知边界，bind 时输出告警）；5 分钟实验网格下存在良性的网格竞态额外 fire（换设计的 60 分钟 watchdog 网格后消失）。
+
+#### Testing
+
+- 2214 → 2327（+113：adapter 18 / clock 决策与存储 39 / clock CLI 28 / wake-arm + wake-retime 28 及既有锚定扩展）；ruff 全绿；每单元由主会话独立复现；dogfood 时钟以同一 automation identity 连续跨 ≥3 个真实 5h 窗口、每轮 next_run_at = 最新 reset_at + 120s。
+
 ## 2.2.1
 
 
