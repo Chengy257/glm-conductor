@@ -859,20 +859,29 @@ class WakePlanCliTest(WakePlannerTestBase):
                   encoding="utf-8", newline="\n") as fh:
             json.dump(payload, fh, ensure_ascii=False)
 
-    def test_happy_path_outputs_frozen_nine_keys(self):
+    def test_happy_path_outputs_nine_keys_plus_advisory(self):
+        # v2.3.0 W3：CLI 输出在 §22.2 冻结九键之上增加 additive 字符串
+        # 字段 advisory（one-automation-per-session arm 前须知，§10.5
+        # 宿主代价）——API 层 plan_wake_bridge 九键冻结不变（advisory
+        # 只在 CLI 接线层附加）
         self.write_cache()
         code, payload = run_cli("wake-plan", self.root, TID)
         self.assertEqual(code, 0)
         self.assertEqual(
             sorted(payload.keys()),
-            ["boundary_id", "bridge_interval_minutes", "current_boundary_id",
-             "eager", "mode", "prompt", "reason", "required", "wake_at"])
+            ["advisory", "boundary_id", "bridge_interval_minutes",
+             "current_boundary_id", "eager", "mode", "prompt", "reason",
+             "required", "wake_at"])
         self.assertTrue(payload["required"])
         self.assertTrue(payload["eager"])
         self.assertEqual(payload["boundary_id"], BOUNDARY)
         self.assertEqual(payload["bridge_interval_minutes"], 60)
         self.assertIn("DO NOT CREATE A NEW SCHEDULED TASK",
                       payload["prompt"])
+        # advisory：非空字符串，点名 clock 会话须换会话 arm
+        self.assertIsInstance(payload["advisory"], str)
+        self.assertTrue(payload["advisory"])
+        self.assertIn("one-automation-per-session", payload["advisory"])
 
     def test_without_cache_fails_open(self):
         # 无 quota-cache.json → provider UNKNOWN 保守（绝不默认 AVAILABLE）

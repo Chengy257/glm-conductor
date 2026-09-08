@@ -178,8 +178,8 @@ resumable 模式的唤醒不用 sleep 直到固定时间，而用持久唤醒或
 
 v2.2 的两条标准载体（均不改变上面的检查-恢复语义）：
 
-- **Persistent Wake Bridge（stable 主路径）**：`wake-plan` 裁决 → 主会话执行宿主 CronCreate 建 recurring automation → `arm` 记账。一任务 ↔ 一常驻桥，跨窗口重复触发合法；arm/fire/create 一律不消费窗口预算；retarget 用 `retarget_wake_bridge` 记账而非另建 automation。完成或降级时由会话侧**单次尝试**清理（绝不重试）
-- **额度 Watcher（可选常驻观察面）**：`quota-watcher start` 启动的本地进程，只做 poll-only 观察（零模型调用、绝不发激活）——它把「额度时钟」从任务循环里解耦出来；是否启动由用户/主会话决定，不启动时调度触发探针与刷新点查询照常工作
+- **Persistent Wake Bridge（stable 主路径）**：`wake-plan` 裁决 → 主会话执行宿主 CronCreate 建 recurring automation → `wake-arm` 记账（含 next_run_at=wake_at 锚定，fail-open）→ 观测对账 `wake-reconcile`。一任务 ↔ 一常驻桥，跨窗口重复触发合法；arm/fire/create 一律不消费窗口预算；retarget 用 `retarget_wake_bridge` 记账而非另建 automation。完成或降级时由会话侧**单次尝试**清理（绝不重试）
+- **额度 Watcher（可选常驻观察面）**：`quota-watcher start` 启动的本地进程，只做 poll-only 观察（零模型调用、绝不发激活）——它把额度观察从任务循环里解耦出来；v2.3 起仅为可选观察与诊断面，**≠ 额度时钟**（窗口连续滚动由 Global Quota Clock 承担，clock 不依赖 watcher）；是否启动由用户/主会话决定，不启动时调度触发探针与刷新点查询照常工作
 
 安排定时任务时使用结构化 resume prompt（`wake-plan` / `wake-prompt` 产出自足文本；通用模板见 references/long-horizon.md，必须携带 TASK_ID 与精确 checkpoint 路径）。若希望结果回到当前会话，续作必须从当前聊天内创建绑定本会话的定时任务。
 
@@ -217,17 +217,30 @@ continuity 不重新实现 Goal 模式。职责分工：
 
 ### v2.2 额度控制环（双层模型 + Quota Epoch + Watcher + Primer）
 
-**窗口物化机制（2026-09-03 用户裁决，实测证据 `docs/history/v2.2/GLM-Conductor-v2.2-Phase0-Primer-Experiments.md`）**：reset_at 时刻窗口恢复 100%（周窗优先）；**下一个 reset_at 只在新窗口内发生模型调用时才物化——纯查询绝不推进它**；reset_at 锚定物化时刻 +5h00m01s；会话空闲会推迟窗口起点。编排含义：跨窗口等待的任务恢复时必须先触发一次真实模型调用（或经 primer），窗口才算真正换新——单靠轮询查询看到的旧 reset_at 不会自己滚动。
+**窗口物化机制（2026-09-03 用户裁决，实测证据 `docs/history/v2.2/GLM-Conductor-v2.2-Phase0-Primer-Experiments.md`）**：reset_at 时刻窗口恢复 100%（周窗优先）；**下一个 reset_at 只在新窗口内发生模型调用时才物化——纯查询绝不推进它**；reset_at 锚定物化时刻 +5h00m01s；会话空闲会推迟窗口起点。编排含义：跨窗口等待的任务恢复时必须先触发一次真实模型调用，窗口才算真正换新——单靠轮询查询看到的旧 reset_at 不会自己滚动；v2.3 起生产物化路径 = Global Quota Clock 的 Scheduled Clock Tick，primer 仅为 manual/experimental fallback（见下）。
 
 **双层额度模型**：provider 四态（AVAILABLE / PRESSURE / EXHAUSTED / UNKNOWN）与 execution phase 四态（NORMAL / PRESSURE / DRAINING / BLOCKED）是两个维度——最小编余 ≤20% 即 DRAINING（即使 provider 报 AVAILABLE）；DRAINING 禁开新实施波次只许收尾白名单动作（join/verify/review/checkpoint/wake）；`quota-phase <repo> <task>` 可查当前相与连续性义务，`quota-observe <repo> [task]` 出自适应观测（间隔 NORMAL 1800s → DRAINING/BLOCKED 300s，下限 60s）。
 
 **Quota Epoch**：epoch 身份 = 窗口多重集 `(kind, reset_at)` 的确定性指纹（不含 status/百分比——provider 状态翻转不推进 epoch），`epoch_id = "glm:"+指纹前 16 位`；有意义的恢复触发是「新的可执行 epoch 出现」，不是「定时器触发」。probe boundary（观察收紧用）与 executable boundary（恢复资格用，取阻塞窗最晚 reset+grace）分离，绝不混用。
 
-**额度 Watcher（可选常驻，默认不运行）**：`quota-watcher start|status|stop|once`——本地常驻 poll-only 进程（零模型调用、单实例所有权凭据是独立锁文件 `.glm-conductor/quota/watcher.lock`——O_EXCL 机械原子、锁含 pid+generation+身份指纹；观察状态 `.glm-conductor/quota/watcher.json` 为纯观察面，heartbeat 仅是锁仲裁的 advisory 证据、陈旧判定锚定其新鲜度，见 docs/architecture.md §7.5），Session 休眠时独立维护真实额度时钟；ACTIVE/PASSIVE 逐 tick 重判（有 waiting_quota 或自动续跑任务才 ACTIVE；manual/notify 恒 PASSIVE，可观察但绝不 prime、绝不发激活）。它是加速观察面，不是正确性前提——不运行时既有刷新点查询照常工作。
+**额度 Watcher（可选常驻，默认不运行）**：`quota-watcher start|status|stop|once`——本地常驻 poll-only 进程（零模型调用、单实例所有权凭据是独立锁文件 `.glm-conductor/quota/watcher.lock`——O_EXCL 机械原子、锁含 pid+generation+身份指纹；观察状态 `.glm-conductor/quota/watcher.json` 为纯观察面，heartbeat 仅是锁仲裁的 advisory 证据、陈旧判定锚定其新鲜度，见 docs/architecture.md §7.5），Session 休眠时独立观察真实 provider 额度状态（v2.3 W4 职责降级：只负责 task execution quota observation（ACTIVE/PASSIVE 自适应观察）、diagnostics、optional active-work observation——不再负责 quota window continuity 维持、activation timing、window materialization，三者分别由 Global Quota Clock 与 wake bridge retime 承担；**Quota Watcher ≠ Quota Clock**，clock 的运行不依赖 watcher）；ACTIVE/PASSIVE 逐 tick 重判（有 waiting_quota 或自动续跑任务才 ACTIVE；manual/notify 恒 PASSIVE，可观察但绝不 prime、绝不发激活）。它是加速观察面，不是正确性前提——不运行时既有刷新点查询照常工作。
 
-**Window Primer（默认结构性关闭）**：新窗口需一次最小模型调用才物化；primer 是 runtime 唯一 control-plane 模型调用面，三重授权闸 fail-closed（`primer_enabled` 默认 **false** + auto_resume ∈ {auto_once, until_done} + 授权来源必须是用户）；物化证据只有「两次强制刷新之间的窗口身份变化」——HTTP 200 与百分比下降都不是证据。不要在授权闸之外自行触发「预调用」——那是一次真实消耗额度的模型调用。
+**Window Primer（默认结构性关闭）**：新窗口需一次最小模型调用才物化；primer 是 runtime 唯一 control-plane 模型调用面，三重授权闸 fail-closed（`primer_enabled` 默认 **false** + auto_resume ∈ {auto_once, until_done} + 授权来源必须是用户）；物化证据只有「两次强制刷新之间的窗口身份变化」——HTTP 200 与百分比下降都不是证据。v2.3 定位：default disabled 的 manual/experimental fallback——生产物化路径 = Scheduled Clock Tick（Global Quota Clock）；不接 watcher、不接 clock、不接 resume、不扩大授权，稳定运行一个版本后由后续版本决定是否删除。不要在授权闸之外自行触发「预调用」——那是一次真实消耗额度的模型调用。
 
-**runtime 额度/连续性 CLI 清单（`python3 plugins/glm-conductor/runtime/cli.py <子命令>`）**：`quota-resolve`（[—force-refresh]）/ `quota-observe` / `quota-phase` / `quota-exhausted` / `quota-resume`（退出码 0/1/2/3——3 = durable-but-degraded，转态可能已落盘、幂等重跑安全）/ `wake-record`（legacy，deprecated）/ `wake-prompt` / `wake-plan` / `wake-status` / `wake-reconcile` / `transport-status` / `quota-watcher start|status|stop|once`。宿主事实由会话侧供给（`wake-reconcile` 显式传入 CronList 观测结论）——runtime 自身零宿主 `Cron*` 调用；完成时桥接清理是会话侧单次尝试动作（绝不重试）。
+**runtime 额度/连续性 CLI 清单（`python3 plugins/glm-conductor/runtime/cli.py <子命令>`）**：`quota-resolve`（[—force-refresh]）/ `quota-observe` / `quota-phase` / `quota-exhausted` / `quota-resume`（退出码 0/1/2/3——3 = durable-but-degraded，转态可能已落盘、幂等重跑安全）/ `wake-record`（legacy，deprecated）/ `wake-arm`（persistent arm：arm_transport 稳定通道记账 + next_run_at=wake_at retime 锚定，fail-open）/ `wake-retime`（fire 后重定时：可执行→停摆本桥，不可执行→下一边界或 5 分钟重试）/ `wake-prompt` / `wake-plan` / `wake-status` / `wake-reconcile` / `transport-status` / `quota-clock-plan` / `quota-clock-bind` / `quota-clock-tick` / `quota-clock-status`（v2.3 Global Quota Clock：规划 / 绑定 / tick / 状态）/ `quota-watcher start|status|stop|once`。宿主事实由会话侧供给（`wake-reconcile` 显式传入 CronList 观测结论）——runtime 自身零宿主 `Cron*` 调用；完成时桥接清理是会话侧单次尝试动作（绝不重试）。
+
+### v2.3 Global Quota Clock 与职责边界（概念收敛，计划 §21）
+
+v2.3 后额度/连续性域只表达一个模型——各组件各答一个问题，互不越界：
+
+| 组件 | 回答的问题（语义锁定） |
+| --- | --- |
+| **Quota Clock**（`quota-clock-plan` / `quota-clock-bind` / `quota-clock-tick` / `quota-clock-status`） | 额度窗口什么时候持续滚动——account 级、极低成本常驻、无限期、无窗口预算；正常节拍 = 每窗口 reset_at+120s tick 后 retime，60 分钟 recurring 仅作 watchdog |
+| **Task Policy** | 当前额度怎么花——35/20 阈值、worker budget、resume authorization（v2.2 语义零改动；窗口预算 N = continuity.max_quota_windows 属任务侧） |
+| **Wake Bridge**（`wake-plan` / 宿主 CronCreate / `wake-arm` / `wake-retime`） | dormant task 什么时候重新获得 turn——精确 wake_at + native watchdog |
+| **Watcher** | 可选观察与诊断（≠ Clock；clock 不依赖 watcher） |
+| **Epoch** | 窗口身份（身份证，不是闹钟） |
+| **Primer** | 非主路径 manual/experimental fallback（生产物化路径 = Scheduled Clock Tick） |
 
 ### 授权续跑（v2.1 M5：authorized resume）
 
@@ -244,9 +257,9 @@ continuity 不重新实现 Goal 模式。职责分工：
 
 - **窗口预算与消费点（v2.2 冻结）**：`continuity.consumed_quota_windows` / `max_quota_windows`——窗口扣减的唯一合法位置 = §15.1 resume commit point（`quota-resume` 内「转态 durable + mark 之后」的提交点，经 `record_quota_boundary_consumed` 记账、同 epoch 幂等；manual/notify 永不消费）。**arm/fire/create 一律不消费**（automation lifecycle ≠ quota epoch consumption）；**legacy/deprecated（v2.2 C1a/C1b）**：`wake-record` / `record_quota_wake` 为 v2.1 one-shot 兼容保留，persistent path 禁止调用。预算耗尽任务转 `waiting_user`（等待用户重新授权），此后**不得再创建任何自动化唤醒**
 - **额度订阅与激活记账（v2.2 C5）**：任务订阅 quota 而非拥有额度时钟——state 的 `quota_subscription` 块记录注册 epoch（`quota-exhausted` 转态成功后 runtime best-effort 自动注册）；激活每 epoch 恰一次（QC-07，控制面 `quota_epoch_advanced` 事件落 `.glm-conductor/quota/events.jsonl`）；`quota-resume` 恢复门顺序冻结为 **evaluate → 转态 → mark**——同 epoch 重复唤醒零转态零重复激活，崩溃窗口宁可少记账不卡死恢复
-- **Persistent Wake Bridge 与 Activation Transport（v2.2 M5/C6）**：`wake-plan` 裁决（纯计算，不创建 automation）→ 主会话执行宿主 CronCreate → `arm_wake_bridge` 记账（runtime 绝不调用宿主 `Cron*`；宿主事实由会话侧供给，如 `wake-reconcile` 显式传入 CronList 观测结论——对账只能确认/降级，绝不制造 armed）。`recurring_bridge` 是唯一 stable 传输；`probe_then_hold` / `self_retiming` / `session_injector` 仅预留（arm 一律被 `TransportReservedError` 拒绝）。`transport-status` / `wake-status` 只读查询；完成时桥接清理是会话侧**单次尝试**动作（绝不重试）
+- **Persistent Wake Bridge 与 Activation Transport（v2.2 M5/C6）**：`wake-plan` 裁决（纯计算，不创建 automation）→ 主会话执行宿主 CronCreate → `wake-arm` 记账（`arm_wake_bridge` 经 arm_transport 稳定通道的 CLI 入口，v2.3 W3；含 next_run_at=wake_at retime 锚定，fail-open）（runtime 绝不调用宿主 `Cron*`；宿主事实由会话侧供给，如 `wake-reconcile` 显式传入 CronList 观测结论——对账只能确认/降级，绝不制造 armed）。`recurring_bridge` 是唯一 stable 传输；`probe_then_hold` / `self_retiming` / `session_injector` 仅预留（arm 一律被 `TransportReservedError` 拒绝）。`transport-status` / `wake-status` 只读查询；完成时桥接清理是会话侧**单次尝试**动作（绝不重试）
 - **Stop 门 continuity health（v2.2 C8）**：休眠交接域的任务（waiting_quota/waiting_user 或 PRESSURE/DRAINING + resumable + auto_resume ∈ {auto_once, until_done}）在完成门第 0 位接受三件套核查——handoff durable（checkpoint + resume manifest）、当期 epoch 已注册订阅、激活传输已 armed；`create=forbidden` 或 scheduled-origin 一律降级放行不无限拦截。**离开 Stop 前的义务**：域内任务先把三件套补齐（写 checkpoint、确认订阅注册、arm 桥）或显式降级连续性，不要反复硬闯完成门
-- **wake prompt 自足**：唤醒 prompt 以用户 turn 注入同一会话（宿主实锚：wake=同会话续行、SessionStart 不重放），因此 task_id、账本/仓库根、恢复首步、额度检查口径、预算状态与红线（绝不重试 CronDelete/CronUpdate、发布动作征询用户、RB-1 指纹口径）全部内置。两种形态：persistent bridge 的触发 prompt 由 `wake-plan` 返回（`universal_wake_prompt`，recurring 桥按间隔服役）；`wake-prompt` 是一次性唤醒 prompt（recurring=false、maxRuns=1，v2.1 兼容形态）
+- **wake prompt 自足**：唤醒 prompt 以用户 turn 注入同一会话（宿主实锚：wake=同会话续行、SessionStart 不重放），因此 task_id、账本/仓库根、恢复首步、额度检查口径、预算状态与红线（绝不重试 CronDelete/CronUpdate、发布动作征询用户、RB-1 指纹口径）全部内置。两种形态：persistent bridge 的触发 prompt 由 `wake-plan` 返回（`universal_wake_prompt`，recurring 桥按动态 next_run_at 精确触发、固定间隔仅 watchdog 兜底）；`wake-prompt` 是一次性唤醒 prompt（recurring=false、maxRuns=1，v2.1 兼容形态）
 - **恢复首步（RB-21-01 恢复对账）**：额度唤醒触发或新会话恢复时第一步 `quota-resume <repo> <task>`——runtime 内部已**强制刷新**额度（`force_refresh=True`，wake 后不得信任休眠期缓存；wake prompt 内的 `quota-resolve` 指令同样带 `--force-refresh`），EXHAUSTED 时建议恢复时刻按 scheduler 统一口径（最晚 reset + 宽限，多窗不产生 premature wake）。AVAILABLE/PRESSURE → 订阅资格过 → 任务转回 executing、waiting_quota 单元按中断来源（`runtime.quota_interrupted_from`，`quota-exhausted` 转态时写入）分类落点：ready 来源直回 ready；running 来源先 `reconcile_agent_run` 四分对账——`redispatch_clean` 回 ready 全新派发、`reuse_result` 直达 verifying（先捞取 agent 成果，条目带 `action_required=recover_agent_result`）、`resume_with_progress` 回 ready 且**主会话必须先读子会话 transcript 组装 Previous Progress Package 随新规格续派**（编排纪律，runtime 不机械阻止）、`manual_ruling` 保持 waiting_quota 等人工裁决（此时任务不转 executing、resumed=false）；对账异常 fail-closed 按 manual_ruling 处理。分类与证据句柄经返回值 / journal `quota_resumed` 的 `unit_recovery` map 透传。实际转态后消费段按预闸三查执行（授权族 + source==user + 预算 >0），再按窗口记账。之后按账本就绪顺序继续派发（SELECTIVE ROUTE、permit 门与租约时序不得绕过）；EXHAUSTED/UNKNOWN → 零转态保守等待，不派发、不重建唤醒。CLI 退出码：0 成功 / 1 拒绝 / 2 参数 / **3 durable-but-degraded（转态可能已落盘，幂等重跑安全——先查任务 journal 再决定）**
 - **SessionStart 兜底不变**：无论四态授权如何，automation 不可用时恢复语义始终回退 SessionStart 注入——automation 永远是加速器，不是正确性前提
 

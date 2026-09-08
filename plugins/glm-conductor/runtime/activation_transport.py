@@ -28,9 +28,14 @@ wu-22-C6 ①）。
     opportunity 的事实面（§16 冻结职责边界）。
 
 四词汇（修正计划 §C6 冻结；recurring_bridge 唯一 stable）：
-    recurring_bridge   [STABLE]        one tracked task → one persistent
-                                       recurring Scheduled Task（§17，
-                                       M5 主路径保留）
+    recurring_bridge   [STABLE]        persistent recurring automation +
+                                       dynamic next_run_at retiming +
+                                       native recurrence watchdog
+                                      （§17 M5 主路径保留；v2.3.0 W3
+                                       §10.1 语义重标——transport 名称
+                                       不变、词汇表不扩：正常 wake 时刻
+                                       由动态 next_run_at 决定，recurring
+                                       网格退为 watchdog 兜底节拍）
     probe_then_hold    [EXPERIMENTAL]  §18 预留
     self_retiming      [FUTURE]        §20 预留
     session_injector   [EXPERIMENTAL]  §21 预留

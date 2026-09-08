@@ -4,11 +4,23 @@
 （修正计划 C3 / §6 / §6.1 / §7，wu-22-C3 第一阶段骨架，skeleton-first）。
 
 职责（修正计划 §5 图：watcher.py = NEW: long-running I/O control loop；
-§6.1 要证明的命题：**Session dormant 时，GLM-Conductor 可以独立、持续、
-可靠地维护真实 provider quota clock**）：
+§6.1 要证明的命题——v2.3 W4 措辞修正：**Session dormant 时，
+GLM-Conductor 可以独立、持续、可靠地观察真实 provider quota 状态**
+——是观察面，不是额度窗口连续性的维持者，见下方「v2.3 W4 职责边界」）：
     独立进程内循环：判定 ACTIVE / PASSIVE → provider-only 抓取 →
     epoch 折算 → 原子更新 watcher.json（heartbeat + last_observation）
     → 按模式自适应休眠 → 检查 stop_requested 旗标优雅退出。
+
+v2.3 W4 职责边界（旧 quota continuity 职责收敛，v2.3 计划 §12）：
+    watcher 今后只负责——task execution quota observation（ACTIVE /
+    PASSIVE 自适应观察）、diagnostics、optional active-work
+    observation。watcher 不再负责——quota window continuity 维持、
+    activation timing、window materialization：v2.3 起这三者分别由
+    Global Quota Clock（runtime/quota/clock.py + clock_store.py；窗口
+    连续滚动 + 物化）与 wake bridge retime（CLI wake-retime；激活
+    时刻）承担。一句话：**Quota Watcher ≠ Quota Clock**——clock 的
+    运行不依赖 watcher（watcher 未运行时 clock 正常；v2.3 不需要为
+    Global Clock 启动 watcher）。
 
 §7 ACTIVE / PASSIVE 模式判定（冻结；循环内每 tick 重判——continuous
 activation is demand-coupled, not permanent）：
