@@ -408,7 +408,8 @@ USAGE = (
     "quota-clock-plan <repo_root> | "
     "quota-clock-bind <repo_root> <automation_id> [--db <path>] | "
     "quota-clock-tick <repo_root> | "
-    "quota-clock-status <repo_root>")
+    "quota-clock-status <repo_root> | "
+    "host-check [--db <path>]")
 
 # policy-set-resume 的 max_quota_windows 缺省推导表（§5.4 耦合的
 # 最小合法值：until_done 取下界 1，保守不放大）
@@ -2213,6 +2214,18 @@ def _dispatch(args) -> int:
             raise _UsageError(
                 "quota-clock-status 需要 <repo_root> 一个参数。" + USAGE)
         return _quota_clock_status(rest[0])
+    if cmd == "host-check":
+        if len(rest) not in (0, 2):
+            raise _UsageError(
+                "host-check 无位置参数，可选 [--db <path>]。" + USAGE)
+        db_path = None
+        if len(rest) == 2:
+            if rest[0] != "--db":
+                raise _UsageError(
+                    "host-check 的可选参数只接受 --db <path>。" + USAGE)
+            db_path = rest[1]
+        from runtime.commands import host  # 函数内 import：monkeypatch 友好
+        return host.host_check(db_path=db_path)
     raise _UsageError("未知子命令 %r。" % cmd + USAGE)
 
 
