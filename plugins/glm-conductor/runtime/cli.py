@@ -264,8 +264,13 @@
         provider_identity_hash, reset_at, reset_at_epoch_ms,
         first_target_epoch_ms, grace_seconds, retry_delay_seconds,
         fallback_interval_minutes:60, runtime_path, cli_command,
-        suggested_prompt}——cli_command / suggested_prompt（§9 极简
-        英文模板）供 Scheduled automation 直接取用。five_hour 缺失 /
+        suggested_prompt, placement_guidance}——cli_command /
+        suggested_prompt（§9 极简英文模板）供 Scheduled automation
+        直接取用；placement_guidance（v2.3.1，unit w1-clock-ux）在
+        automation 创建前给出专用会话放置引导（建议独立会话 + 低成本
+        Flash 模型 + 建议命名 + 在该会话内执行 clock 设置；警示不要在
+        主编码会话创建——周期 tick 会注入该会话；advisory 文案，判定
+        纯函数 clock.placement_guidance_for_plan）。five_hour 缺失 /
         reset 不可解析 → {"status": "not_plannable", "reason", "error"}
         退出码 1。
     quota-clock-bind <repo_root> <automation_id> [--db <path>]
@@ -275,7 +280,15 @@
         model_is_flash=false 仅告警不阻断）；--db 缺省走
         zcode_schedule.discover_zcode_tasks_db(None)。automation 行
         缺失 / recurring 假值 / retime 失败 → 退出码 1（retime 失败时
-        state 已写但 next_target 未生效，输出注明）。
+        state 已写但 next_target 未生效，输出注明）。成功输出在
+        v2.3.0 冻结键集上追加（只增不删，unit w1-clock-ux）：
+        session_placement（SESSION PLACEMENT 说明：automation 保持
+        附着当前会话、周期 tick 将出现在本对话中、建议专用低成本
+        Flash 会话、避免绑定主编排/编码会话）与 cost_advisory（非
+        Flash 模型时的成本提示 {current_model, preferred:
+        "low-cost Flash-class model"}；Flash 类为 null——纯 advisory，
+        绝不阻断绑定；判定纯函数 clock.bind_session_placement /
+        clock.cost_advisory_for_model）。
     quota-clock-tick <repo_root>
         Scheduled Task 唯一主入口（v2.3.0 §8）：identity → load
         clock_state（缺失 → {"status": "error", "reason":
@@ -294,7 +307,19 @@
         state × DB 行 × runtime 路径 × tick 新鲜度，health ∈
         {healthy, unhealthy}（reasons 词汇：db_row_missing /
         target_mismatch / runtime_path_missing / tick_stale /
-        db_inspect_failed）。
+        db_inspect_failed）。v2.3.1 追加诊断键（只增不删，unit
+        w1-clock-ux）：placement {session_binding:
+        "active"|"unavailable", preferred_model: <bool>,
+        dedicated_session: "not_mechanically_verifiable"（恒为常量串，
+        插件无会话探测能力，绝不伪造布尔）}；host {adapter:
+        "zcode_sqlite"}；needs_replacement（True ⇔ reasons 含
+        db_row_missing / db_inspect_failed；target_mismatch /
+        tick_stale / runtime_path_missing 仅 advisory 不触发）；
+        needs_replacement=true 时附 recovery_guidance（在专用低成本
+        Flash 会话显式执行 replace/rebind + 「未执行自动会话迁移」
+        声明）。判定纯函数 clock.status_placement_block /
+        clock.status_host_block / clock.needs_replacement_from_reasons
+        / clock.recovery_guidance_for_replacement。
 
 输出与退出码契约：
     stdout 恒为单行 JSON（json.dumps(..., ensure_ascii=True)，中文以
@@ -1586,8 +1611,12 @@ def _quota_clock_plan(raw_repo_root) -> int:
     B + 120s。输出冻结键集 {status:"planned", provider_identity_hash,
     reset_at, reset_at_epoch_ms, first_target_epoch_ms, grace_seconds,
     retry_delay_seconds, fallback_interval_minutes:60, runtime_path,
-    cli_command, suggested_prompt}；five_hour 缺失 / 不可解析 →
-    {"status": "not_plannable", "reason", "error"} 退出码 1。"""
+    cli_command, suggested_prompt, placement_guidance}（v2.3.1 追加
+    placement_guidance：创建 automation 前的专用会话放置引导，纯函数
+    clock.placement_guidance_for_plan——advisory 文案，引导用户在独立
+    低成本 Flash 会话创建，勿在主编码会话创建 Global Quota Clock）；
+    five_hour 缺失 / 不可解析 → {"status": "not_plannable", "reason",
+    "error"} 退出码 1。"""
     from runtime.quota import clock, resolver  # 函数内 import：monkeypatch 友好
     from runtime.quota.identity import (  # 函数内 import：monkeypatch 友好
         compute_provider_identity_hash)
@@ -1618,6 +1647,9 @@ def _quota_clock_plan(raw_repo_root) -> int:
         "cli_command": tick_command,
         "suggested_prompt": _CLOCK_TICK_PROMPT.format(cli=cli_path,
                                                       repo=repo_root),
+        # v2.3.1（w1-clock-ux）：创建前的会话放置引导（纯 advisory，
+        # 判定与文案在 clock 纯函数层，本处仅呈现）
+        "placement_guidance": clock.placement_guidance_for_plan(),
     })
     return 0
 
@@ -1637,8 +1669,17 @@ def _quota_clock_bind(raw_repo_root, automation_id, db_path=None) -> int:
     非零退出并注明 state 已写但 next_target 未生效（automation 仍按旧
     节奏运行，可重试 bind）。输出冻结键集 {status:"bound",
     provider_identity_hash, automation_id, automation_model,
-    model_is_flash, first_target_epoch_ms, retimed, state_path}。"""
-    from runtime.quota import clock_store, resolver  # 函数内 import：monkeypatch 友好
+    model_is_flash, first_target_epoch_ms, retimed, state_path} +
+    v2.3.1 追加（只增不删）：session_placement（SESSION PLACEMENT
+    说明：automation 保持附着当前会话、周期 tick 将出现在本对话中、
+    建议专用低成本 Flash 会话、避免绑定主编排/编码会话；纯函数
+    clock.bind_session_placement）与 cost_advisory（模型名不含
+    "Flash" 时为 {current_model, preferred: "low-cost Flash-class
+    model"}，Flash 类为 null——纯 advisory 成本提示，绝不阻断绑定；
+    纯函数 clock.cost_advisory_for_model）。model_is_flash 判定口径
+    为模型名含 "Flash"（纯函数 clock.model_is_flash，仅 advisory，
+    不作阻断、不作专用会话证据）。"""
+    from runtime.quota import clock, clock_store, resolver  # 函数内 import：monkeypatch 友好
     from runtime.quota.identity import (  # 函数内 import：monkeypatch 友好
         compute_provider_identity_hash)
     from runtime.host import zcode_schedule  # 函数内 import：monkeypatch 友好
@@ -1687,10 +1728,14 @@ def _quota_clock_bind(raw_repo_root, automation_id, db_path=None) -> int:
         "provider_identity_hash": identity,
         "automation_id": automation_id,
         "automation_model": model,
-        "model_is_flash": "Flash" in (model or ""),
+        "model_is_flash": clock.model_is_flash(model),
         "first_target_epoch_ms": first_target,
         "retimed": True,
         "state_path": clock_store.clock_state_path(identity),
+        # v2.3.1（w1-clock-ux）：会话放置说明 + 非 Flash 成本提示
+        # （纯 advisory——绑定永不因模型档位被阻断）
+        "session_placement": clock.bind_session_placement(),
+        "cost_advisory": clock.cost_advisory_for_model(model),
     })
     return 0
 
@@ -1798,7 +1843,23 @@ def _quota_clock_status(raw_repo_root) -> int:
     {bound, provider_identity_hash, automation_id, automation_model,
     status, last_reset_at, next_target_at, db_next_run_at,
     target_matches_db, runtime_path, runtime_path_exists, last_tick_at,
-    tick_stale, recent_run_count, health, reasons, suggestion}。
+    tick_stale, recent_run_count, health, reasons, suggestion} +
+    v2.3.1 追加诊断键（只增不删，unit w1-clock-ux）：placement
+    {session_binding: "active"|"unavailable"（automation 行可查 /
+    缺失或不可查）, preferred_model: <bool>（automation_model 含
+    "Flash"——advisory 口径，绝非专用会话证据）, dedicated_session:
+    "not_mechanically_verifiable"（恒为常量串——插件无会话探测能力，
+    绝不伪造布尔）}；host: {adapter: "zcode_sqlite"}；
+    needs_replacement: <bool>（True ⇔ reasons 含 db_row_missing /
+    db_inspect_failed；target_mismatch / tick_stale /
+    runtime_path_missing 仅 advisory 不触发——锁定决策 c 两极）；
+    needs_replacement=true 时附 recovery_guidance（在专用低成本
+    Flash 会话中显式执行 replace/rebind：quota-clock-bind
+    <new_automation_id>，并声明「未执行自动会话迁移」——本插件不做
+    隐式迁移 / 自动 rebind）。判定全部落 clock 纯函数
+    （status_placement_block / status_host_block /
+    needs_replacement_from_reasons / recovery_guidance_for_replacement），
+    本函数只做呈现。
 
     health 判定（任一命中 → "unhealthy"，reasons 为 snake token）：
       db_row_missing（DB 行缺失）；target_mismatch（DB next_run_at 与
@@ -1812,7 +1873,7 @@ def _quota_clock_status(raw_repo_root) -> int:
     suggestion：db_row_missing / db_inspect_failed → "replace: run
       quota-clock-bind <new_automation_id> from a fresh interactive
       session"；其余原因 → "await next tick"；healthy → null。"""
-    from runtime.quota import clock_store  # 函数内 import：monkeypatch 友好
+    from runtime.quota import clock, clock_store  # 函数内 import：monkeypatch 友好
     from runtime.host import zcode_schedule  # 函数内 import：monkeypatch 友好
     from runtime.quota.identity import (  # 函数内 import：monkeypatch 友好
         compute_provider_identity_hash)
@@ -1878,7 +1939,10 @@ def _quota_clock_status(raw_repo_root) -> int:
             suggestion = "await next tick"
         else:
             suggestion = None
-        _emit({
+        # v2.3.1（w1-clock-ux）：placement 诊断 / host 标识 /
+        # needs_replacement 两极判定——全部经 clock 纯函数，本处只呈现
+        needs_replacement = clock.needs_replacement_from_reasons(reasons)
+        payload = {
             "bound": True,
             "provider_identity_hash": identity,
             "automation_id": clock_state.get("automation_id"),
@@ -1897,7 +1961,16 @@ def _quota_clock_status(raw_repo_root) -> int:
             "health": "unhealthy" if reasons else "healthy",
             "reasons": reasons,
             "suggestion": suggestion,
-        })
+            "placement": clock.status_placement_block(
+                clock_state.get("automation_model"),
+                automation_row_available=row is not None),
+            "host": clock.status_host_block(),
+            "needs_replacement": needs_replacement,
+        }
+        if needs_replacement:
+            payload["recovery_guidance"] = \
+                clock.recovery_guidance_for_replacement()
+        _emit(payload)
         return 0
     except Exception as exc:
         return _clock_fatal("%s: %s" % (type(exc).__name__, exc))

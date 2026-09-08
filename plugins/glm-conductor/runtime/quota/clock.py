@@ -33,6 +33,22 @@
     决策层零关系：本模块的任何输入 / 输出都不得出现 budget /
     consumed 语义字段。
 
+v2.3.1 增补（unit w1-clock-ux）：Placement UX advisory 纯函数层
+    （placement_guidance_for_plan / bind_session_placement /
+    cost_advisory_for_model / status_placement_block /
+    status_host_block / needs_replacement_from_reasons /
+    recovery_guidance_for_replacement / model_is_flash）——plan /
+    bind / status 三命令呈现层共用的会话放置引导、成本提示与
+    needs_replacement 判定。全部纯文案 / 纯判定（零 I/O、零时钟、
+    零阻断）：ZCode 不向插件开放会话探测 / 迁移能力，故
+    dedicated_session 恒为 DEDICATED_SESSION_UNVERIFIABLE 常量串
+    （绝不伪造 true/false 布尔）、恢复指引恒声明「未执行自动会话
+    迁移」；needs_replacement 两极判定（锁定决策 c）：True ⇔ reasons
+    含 db_row_missing / db_inspect_failed（automation 缺失 / 不可
+    查），target_mismatch / tick_stale / runtime_path_missing 仅
+    advisory 不触发；model_is_flash 仅 advisory 用途——绝不作为
+    绑定阻断条件，也绝不当作「专用会话」的证据。
+
 weekly blocked 判定的单一真相源：
     复用 runtime.quota.epoch 的阻塞窗语义（status == "EXHAUSTED"，
     canonical_windows 归一；blocking_windows）与 executable boundary
@@ -58,7 +74,7 @@ weekly blocked 判定的单一真相源：
     - stdlib only；Python 3.7 兼容语法。
 
 来源：v2.3.0 计划 §7（Global Quota Clock）+ §4（决策表），unit
-v23-w2a。
+v23-w2a；v2.3.1 Placement UX advisory 增补，unit w1-clock-ux。
 """
 
 import math
@@ -102,6 +118,38 @@ REASON_FIVE_HOUR_UNPARSABLE = "five_hour_unparsable"
 REASON_RESET_ELAPSED = "reset_elapsed"
 REASON_WINDOW_ADVANCED = "window_advanced"
 REASON_RECONFIRM = "reconfirm"
+
+# —— v2.3.1 Placement UX advisory 词汇（plan / bind / status 呈现层
+# 共用；纯文案与判定，键集冻结，只增不删）——
+
+# plan 输出 placement_guidance 的冻结键集
+PLACEMENT_GUIDANCE_KEYS = ("automation_required", "recommended_steps",
+                           "suggested_name", "warning")
+
+# bind 输出 session_placement 的冻结键集
+SESSION_PLACEMENT_KEYS = ("attachment", "tick_effect", "recommendation",
+                          "avoid")
+
+# status 输出 placement 块的冻结键集
+STATUS_PLACEMENT_KEYS = ("session_binding", "preferred_model",
+                         "dedicated_session")
+
+# status host 块的冻结键集与唯一键值
+STATUS_HOST_KEYS = ("adapter",)
+HOST_ADAPTER = "zcode_sqlite"
+
+# dedicated_session 的唯一合法值（机械不可验证的显式声明——插件无
+# 会话探测能力，恒为字符串，绝不输出布尔）
+DEDICATED_SESSION_UNVERIFIABLE = "not_mechanically_verifiable"
+
+# cost_advisory 的 preferred 固定值（advisory 提示，非阻断）
+PREFERRED_MODEL_ADVICE = "low-cost Flash-class model"
+
+# 建议的 automation 命名（plan 引导口径）
+SUGGESTED_AUTOMATION_NAME = "GLM Conductor · Quota Clock"
+
+# needs_replacement 恢复指引中的无自动迁移声明（逐字冻结）
+NO_AUTO_MIGRATION_DECLARATION = "未执行自动会话迁移"
 
 _MS_PER_SECOND = 1000
 
@@ -312,3 +360,124 @@ def next_clock_target(snapshot, *, now_ms, last_reset_at=None,
               else REASON_RECONFIRM)
     return _target("reset_target", int(reset_ms + grace_ms), reason,
                    reset_at, reset_ms, WINDOW_FIVE_HOUR)
+
+
+# —— v2.3.1 公开 API（Placement UX advisory，纯文案与判定） ——
+
+def model_is_flash(model):
+    """automation 模型名是否 Flash 类（判定口径与 bind 输出一致：
+    模型名含 "Flash"；非 str 含 None → False）。
+
+    仅 advisory 用途：绝不作为绑定阻断条件，也绝不当作「专用会话」
+    的证据（ZCode 不向插件开放会话探测能力）。"""
+    return isinstance(model, str) and "Flash" in model
+
+
+def placement_guidance_for_plan():
+    """quota-clock-plan 的会话放置引导（键集冻结为
+    PLACEMENT_GUIDANCE_KEYS）。
+
+    语义冻结：需先创建一个持久 recurring ZCode automation 作为 tick
+    载体；建议 1) 新建独立 ZCode 会话 2) 用低成本 Flash 模型
+    3) automation 可命名为 SUGGESTED_AUTOMATION_NAME 4) 在该会话内
+    执行 clock 设置；警示：除非有意如此，不要在主编码会话创建
+    Global Quota Clock（周期 tick 会注入该会话）。纯 advisory 文案，
+    不阻断、不探测会话。"""
+    return {
+        "automation_required": (
+            "quota-clock 需要先创建一个持久的 recurring ZCode "
+            "automation 作为周期 tick 载体（创建前请先决定放置会话）"),
+        "recommended_steps": [
+            "新建一个独立的 ZCode 交互会话（勿用主编码会话）",
+            "在该会话选用低成本 Flash 类模型"
+            "（automation 的 model 即发起会话的模型）",
+            "automation 建议命名为 \"%s\"" % SUGGESTED_AUTOMATION_NAME,
+            "在该专用会话内执行 quota-clock-bind 完成 clock 设置",
+        ],
+        "suggested_name": SUGGESTED_AUTOMATION_NAME,
+        "warning": (
+            "除非有意如此，不要在主编码会话创建 Global Quota "
+            "Clock——绑定后周期 quota-clock tick 会注入该会话"),
+    }
+
+
+def bind_session_placement():
+    """quota-clock-bind 的 SESSION PLACEMENT 说明（键集冻结为
+    SESSION_PLACEMENT_KEYS）。
+
+    语义冻结：本 automation 保持附着在当前 ZCode 会话（插件不具备
+    会话迁移能力）；周期 quota-clock tick 将出现在本对话中；建议
+    专用低成本 Flash 会话；避免绑定到主编排 / 编码会话。"""
+    return {
+        "attachment": (
+            "本 automation 保持附着在当前 ZCode 会话（插件不具备会话"
+            "迁移能力）"),
+        "tick_effect": "周期 quota-clock tick 将出现在本对话中",
+        "recommendation": "建议使用专用低成本 Flash 会话执行绑定",
+        "avoid": "避免绑定到主编排 / 编码会话（tick 会周期性注入打断）",
+    }
+
+
+def cost_advisory_for_model(model):
+    """automation 模型非 Flash 类时的成本提示；Flash 类 → None。
+
+    输出键冻结为 {current_model, preferred}（preferred 恒为
+    PREFERRED_MODEL_ADVICE）。advisory 性质：仅提示模型档位偏好，
+    绝不阻断绑定（非 Flash 照常 bind 成功）。"""
+    if model_is_flash(model):
+        return None
+    return {"current_model": model, "preferred": PREFERRED_MODEL_ADVICE}
+
+
+def status_placement_block(automation_model, *, automation_row_available):
+    """quota-clock-status 的 placement 诊断块（键集冻结为
+    STATUS_PLACEMENT_KEYS）。
+
+    session_binding：automation 行可查（inspect 成功且行存在）→
+    "active"；行缺失 / 不可查 → "unavailable"。preferred_model：模型
+    名含 "Flash"（advisory 口径，绝不是「专用会话」的证据）。
+    dedicated_session：恒为 DEDICATED_SESSION_UNVERIFIABLE 常量串——
+    插件无法机械验证会话专用性，绝不伪造 true/false 布尔。"""
+    return {
+        "session_binding": ("active" if automation_row_available
+                            else "unavailable"),
+        "preferred_model": model_is_flash(automation_model),
+        "dedicated_session": DEDICATED_SESSION_UNVERIFIABLE,
+    }
+
+
+def status_host_block():
+    """quota-clock-status 的 host 标识块（键集冻结为
+    STATUS_HOST_KEYS：adapter=zcode_sqlite）。"""
+    return {"adapter": HOST_ADAPTER}
+
+
+def needs_replacement_from_reasons(reasons):
+    """status reasons → needs_replacement 判定（锁定决策 c 两极）。
+
+    True ⇔ reasons 含 db_row_missing 或 db_inspect_failed 前缀 token
+    （automation 缺失 / 不可查——clock 无法继续服务的硬故障）；
+    target_mismatch / tick_stale / runtime_path_missing 仅 advisory，
+    绝不触发。reasons 非 list / 元素非 str 一律按不触发处理（诊断面
+    容错，绝不抛）。"""
+    if not isinstance(reasons, list):
+        return False
+    for item in reasons:
+        if isinstance(item, str) and (
+                item == "db_row_missing"
+                or item.startswith("db_inspect_failed")):
+            return True
+    return False
+
+
+def recovery_guidance_for_replacement():
+    """needs_replacement=true 的恢复指引（advisory 文案）。
+
+    语义冻结：在专用低成本 Flash 交互会话中显式执行 replace/rebind
+    （quota-clock-bind <new_automation_id>）+ 「未执行自动会话迁移」
+    声明——ZCode 不向插件开放会话迁移能力，本插件永远不做隐式迁移
+    / 自动 rebind。"""
+    return ("replace: run quota-clock-bind <new_automation_id> from a "
+            "fresh dedicated low-cost Flash interactive session；"
+            + NO_AUTO_MIGRATION_DECLARATION
+            + "（本插件不做隐式迁移或自动 rebind）")
