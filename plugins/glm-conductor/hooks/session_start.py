@@ -100,7 +100,8 @@ _CLOCK_FALLBACK_MINUTES_FALLBACK = 60
 
 def _clock_fallback_minutes(clock_state):
     """clock state → fallback_interval_minutes 容错读（缺失 / 非法 →
-    60；bool 拒绝）——与 cli._quota_clock_status 的同款容错一致。"""
+    60；bool 拒绝）——与 quota-clock-status（runtime/commands/
+    quota_clock.py）的同款容错一致。"""
     minutes = clock_state.get("fallback_interval_minutes")
     if isinstance(minutes, bool) or not isinstance(minutes, (int, float)):
         return _CLOCK_FALLBACK_MINUTES_FALLBACK
@@ -113,8 +114,9 @@ def _clock_tick_stale(clock_state, *, now_ms):
     now_ms - last_tick_at > 2 × fallback_interval_minutes × 60000 即
     陈旧；last_tick_at 缺失 / 非数值（含 bool）同样视为陈旧；
     fallback_interval_minutes 缺失 / 非法按 60 折算——逐条镜像
-    cli._quota_clock_status 的 tick_stale（阈值与容错的单一真相源在
-    彼处，此处只做 state-file-only 启发式的同口径镜像）。"""
+    quota-clock-status（runtime/commands/quota_clock.py）的 tick_stale
+    （阈值与容错的单一真相源在彼处，此处只做 state-file-only 启发式
+    的同口径镜像）。"""
     last_tick_at = clock_state.get("last_tick_at")
     fallback_minutes = _clock_fallback_minutes(clock_state)
     return (isinstance(last_tick_at, bool)
