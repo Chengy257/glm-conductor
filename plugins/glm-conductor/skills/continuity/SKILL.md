@@ -227,7 +227,7 @@ continuity 不重新实现 Goal 模式。职责分工：
 
 **Window Primer（默认结构性关闭）**：新窗口需一次最小模型调用才物化；primer 是 runtime 唯一 control-plane 模型调用面，三重授权闸 fail-closed（`primer_enabled` 默认 **false** + auto_resume ∈ {auto_once, until_done} + 授权来源必须是用户）；物化证据只有「两次强制刷新之间的窗口身份变化」——HTTP 200 与百分比下降都不是证据。v2.3 定位：default disabled 的 manual/experimental fallback——生产物化路径 = Scheduled Clock Tick（Global Quota Clock）；不接 watcher、不接 clock、不接 resume、不扩大授权，稳定运行一个版本后由后续版本决定是否删除。不要在授权闸之外自行触发「预调用」——那是一次真实消耗额度的模型调用。
 
-**runtime 额度/连续性 CLI 清单（`python3 plugins/glm-conductor/runtime/cli.py <子命令>`）**：`quota-resolve`（[—force-refresh]）/ `quota-observe` / `quota-phase` / `quota-exhausted` / `quota-resume`（退出码 0/1/2/3——3 = durable-but-degraded，转态可能已落盘、幂等重跑安全）/ `wake-record`（legacy，deprecated）/ `wake-arm`（persistent arm：arm_transport 稳定通道记账 + next_run_at=wake_at retime 锚定，fail-open）/ `wake-retime`（fire 后重定时：可执行→停摆本桥，不可执行→下一边界或 5 分钟重试）/ `wake-prompt` / `wake-plan` / `wake-status` / `wake-reconcile` / `transport-status` / `quota-clock-plan` / `quota-clock-bind` / `quota-clock-tick` / `quota-clock-status`（v2.3 Global Quota Clock：规划 / 绑定 / tick / 状态）/ `quota-watcher start|status|stop|once`。宿主事实由会话侧供给（`wake-reconcile` 显式传入 CronList 观测结论）——runtime 自身零宿主 `Cron*` 调用；完成时桥接清理是会话侧单次尝试动作（绝不重试）。
+**runtime 额度/连续性 CLI 清单（`python3 plugins/glm-conductor/runtime/cli.py <子命令>`）**：`quota-resolve`（[—force-refresh]）/ `quota-observe` / `quota-phase` / `quota-exhausted` / `quota-resume`（退出码 0/1/2/3——3 = durable-but-degraded，转态可能已落盘、幂等重跑安全）/ `wake-record`（legacy，deprecated）/ `wake-arm`（persistent arm：arm_transport 稳定通道记账 + next_run_at=wake_at retime 锚定，fail-open）/ `wake-retime`（fire 后重定时：可执行→停摆本桥，不可执行→下一边界或 5 分钟重试）/ `wake-prompt` / `wake-plan` / `wake-status` / `wake-reconcile` / `transport-status` / `quota-clock-plan` / `quota-clock-bind` / `quota-clock-tick` / `quota-clock-status`（v2.3 Global Quota Clock：规划 / 绑定 / tick / 状态；v2.3.1 plan/bind/status 增输出键——plan 附 `placement_guidance`，bind 附 `session_placement` + `cost_advisory`，status 附 `placement` + `host` + `needs_replacement` [+ `recovery_guidance`]）/ `quota-watcher start|status|stop|once`。宿主事实由会话侧供给（`wake-reconcile` 显式传入 CronList 观测结论）——runtime 自身零宿主 `Cron*` 调用；完成时桥接清理是会话侧单次尝试动作（绝不重试）。
 
 ### v2.3 Global Quota Clock 与职责边界（概念收敛，计划 §21）
 
@@ -241,6 +241,8 @@ v2.3 后额度/连续性域只表达一个模型——各组件各答一个问�
 | **Watcher** | 可选观察与诊断（≠ Clock；clock 不依赖 watcher） |
 | **Epoch** | 窗口身份（身份证，不是闹钟） |
 | **Primer** | 非主路径 manual/experimental fallback（生产物化路径 = Scheduled Clock Tick） |
+
+**会话放置与 SessionStart advisory（v2.3.1）**：clock automation 应放置在**专用低成本 Flash 交互会话**（勿绑定主编排 / 编码会话——周期 tick 会注入该会话）；插件不具备会话探测能力，`dedicated_session` 恒为 `not_mechanically_verifiable`（绝不伪造布尔，须人工确认）。`needs_replacement` 两极：True ⇔ `db_row_missing` / `db_inspect_failed`（此时附 `recovery_guidance`：在专用低成本 Flash 会话显式 `quota-clock-bind <new_automation_id>` replace，并声明「未执行自动会话迁移」）；`target_mismatch` / `tick_stale` / `runtime_path_missing` 仅 advisory 不触发。SessionStart 钩子另有**只读 advisory**：clock state 的 `last_tick_at` 陈旧（超 2×fallback_interval_minutes，state 文件启发式）时在恢复注入文本后附加同语义指引——插件绝不自动迁移 / rebind / 写入，权威诊断以 `quota-clock-status`（DB 级）为准。
 
 ### 授权续跑（v2.1 M5：authorized resume）
 
