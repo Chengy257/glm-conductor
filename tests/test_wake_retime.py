@@ -379,7 +379,9 @@ class WakeRetimeExecutableParkTest(WakeRetimeCase):
         arm_bridge(self.root)
 
     def test_executable_parks_bridge_for_365_days(self):
-        before_ms = time.time() * 1000.0
+        # 下界基线与 CLI 同口径 int 截断：float 基线会比 CLI 的 int(now) 高出
+        # 亚毫秒，令 assertGreaterEqual 在毫秒边界翻车（CI 四腿实测踩中）
+        before_ms = int(time.time() * 1000)
         with patched_adapter(db=OTHER_DB) as (_discover, _inspect, retime), \
                 mock.patch("runtime.quota.resolver.resolve_quota_detail",
                            return_value=detail_of("AVAILABLE")):
@@ -454,7 +456,8 @@ class WakeRetimeRetryTest(WakeRetimeCase):
         # EXHAUSTED 但 reset 不可解析 → periodic_fallback（§31 不虚构）
         detail = detail_of("EXHAUSTED",
                            exhausted_window("five_hour", "garbage"))
-        before_ms = time.time() * 1000.0
+        # 下界基线 int 截断对齐 CLI 口径（同 test_executable_parks_bridge_for_365_days）
+        before_ms = int(time.time() * 1000)
         with patched_adapter(db=DB) as (_discover, _inspect, retime), \
                 mock.patch("runtime.quota.resolver.resolve_quota_detail",
                            return_value=detail):
