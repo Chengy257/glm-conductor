@@ -227,7 +227,6 @@ import datetime
 import json
 import pathlib
 import sys
-import time
 
 # 接线插件根以复用 runtime（CLI 脚本与 runtime/ 同插件；quota report 同款）
 PLUGIN_ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -937,29 +936,11 @@ def _manifest_show(repo_root, task_id) -> int:
 # —— v2.3.0（v23-w2b）：Global Quota Clock ——
 
 # —— v2.3.0（v23-w3）：Task Wake Bridge fire 后锚点偏移常量 ——
-# wake-retime 实现已迁 runtime/commands/wake.py（v2.3.1 W3b，unit
-# w3-wake-split）；两个偏移常量的原件按迁移规格留在 cli.py（tests 以
-# cli.WAKE_RETIME_* 锚定取值），commands.wake 内为同实现副本（两处同
-# 值，commands 模块间互不 import）。
-# park 偏移（毫秒）：quota 可执行 → 本桥停摆一年（任务醒了不再等待；
-# 任务下次再睡会走既有 arm 流程重新建置，automation 仍按 native
-# recurring 服役但等价 no-op）
-WAKE_RETIME_PARK_OFFSET_MS = 365 * 86400 * 1000
-# 无已知边界重试偏移（毫秒）：§10.4「保持简单优先」的 5 分钟短重试
-WAKE_RETIME_RETRY_OFFSET_MS = 300 * 1000
-
-# clock 四子命令与 wake 八子命令的处理函数（及其专属私有辅助/常量）
-# 已分别迁 runtime/commands/quota_clock.py（v2.3.1 Wave 3，unit
-# w3-quota-clock-split）与 runtime/commands/wake.py（unit
-# w3-wake-split；依赖方向恒为 cli → commands）。
-# _clock_now_ms 为琐碎取 now 点：按 W3 迁移规格在 cli.py 保留原件，
-# commands.quota_clock / commands.wake 内各为同实现副本（琐碎
-# helper 允许务实重复，commands 模块间互不 import）。
-
-def _clock_now_ms():
-    """当前 epoch 毫秒（v2.3.1 W3 迁移规格保留的原件；quota-clock 四
-    命令与 wake-retime 经各自 commands 模块的同实现副本取值）。"""
-    return int(time.time() * 1000)
+# wake-retime 与 quota-clock 全部处理函数/常量已迁 runtime/commands/
+# （v2.3.1 W3，unit w3-quota-clock-split / w3-wake-split；W4 测试收敛
+# 将 WAKE_RETIME_* 常量锚点改指 commands.wake 后，cli.py 内的常量与
+# _clock_now_ms 副本随之删除——依赖方向恒为 cli → commands）。
+# 偏移常量语义（park=365 天 / retry=5 分钟）见 commands/wake.py 冻结注释。
 
 
 def _dispatch(args) -> int:

@@ -122,13 +122,6 @@ class TransportVocabularyTest(unittest.TestCase):
         self.assertEqual(execution_policy.DEFAULT_ACTIVATION_TRANSPORT,
                          activation_transport.STABLE_TRANSPORT)
 
-    def test_section16_concept_mapping_documented(self):
-        # §16 四概念映射入 docstring（wait_or_fire v1 不由 runtime 实现；
-        # consume_activation 归 C7）
-        doc = activation_transport.__doc__
-        self.assertIn("wait_or_fire", doc)
-        self.assertIn("consume_activation", doc)
-
 
 class TransportStatusTest(TransportCase):
     """activation_transport_status：冻结十二键 + armed 语义 + 容错读。"""
@@ -629,14 +622,9 @@ class ResidualFixesTest(TransportCase):
         self.assertEqual(events, [])
 
 
-class JournalDocstringContractTest(unittest.TestCase):
-    """read_control_plane_events docstring 按实际容错契约修正：
-    不再宣称「绝不抛」；OSError 不在容错面内。"""
-
-    def test_docstring_no_longer_claims_never_raises(self):
-        doc = journal.read_control_plane_events.__doc__
-        self.assertNotIn("绝不抛", doc)
-        self.assertIn("OSError", doc)
+class JournalVocabularyAnchorTest(unittest.TestCase):
+    """journal 事件词汇锚定（read_control_plane_events docstring 的
+    措辞校验已随 v2.3.1 W4 测试收敛移除——文档措辞不进冻结面）。"""
 
     def test_scheduler_capability_observed_in_vocabulary(self):
         # ⑦ 词汇锚定（M1a 已入表，C6 消费方沿用）

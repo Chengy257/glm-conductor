@@ -491,13 +491,8 @@ class ContinuityHealthDirectTest(TempDirFixture):
             outcome = evaluate_continuity_health(str(self.repo), TID, st)
         self.assertEqual(outcome["outcome"], "degraded")
         self.assertEqual(outcome["reason"], "continuity_evaluation_error")
-
-    # —— ⑥ parent_automation_id 消费警示（C6 review P3-3 落地锚定） ——
-    def test_docstring_carries_parent_automation_id_warning(self):
-        doc = stop_gate.evaluate_continuity_health.__doc__ or ""
-        self.assertIn("parent_automation_id", doc)
-        self.assertIn("wake_bridge.automation_id", doc)
-        self.assertIn("观测镜像", doc)
+    # docstring 消费警示校验（C6 review P3-3）已随 v2.3.1 W4 测试收敛
+    # 移除——文档措辞不进冻结面，警示语义由本类行为用例锚定。
 
     # —— 触发域 / 降级词汇常量锚定 ——
     def test_trigger_and_reason_vocabularies(self):

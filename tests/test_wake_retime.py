@@ -2,8 +2,9 @@
 # -*- coding: utf-8 -*-
 """Task Wake Bridge 精确 wake 锚点测试（v2.3.0 §10 / W3，unit v23-w3）。
 
-锚定对象：
-    - runtime/cli.py 的 wake-record（arm 时锚点：登记落地即经 W1
+锚定对象（v2.3.1 W3 后处理函数已迁 runtime/commands/wake.py，本文件
+经 cli.main 调用、常量锚点直指 commands.wake）：
+    - wake-record（arm 时锚点：登记落地即经 W1
       adapter retime 到记录的 wake 时刻 + zcode_db_path 持久化 +
       fail-open retime_applied/retime_warning 输出）、wake-arm（生产
       arm 入口：arm_transport 稳定通道真实记账 + armed 记录 wake_at
@@ -45,6 +46,7 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "plugins" / "glm-conductor"))
 from runtime import cli, execution_policy, journal, state, task_manager
+from runtime.commands import wake as wake_commands  # WAKE_RETIME_* 常量锚点（v2.3.1 W4 起指向实现所在）
 from runtime.activation_transport import (  # 重导断言用（词汇表回归）
     EXPERIMENTAL_TRANSPORTS, STABLE_TRANSPORT, TRANSPORT_KINDS)
 from runtime.continuity import wake_bridge
@@ -392,7 +394,7 @@ class WakeRetimeExecutableParkTest(WakeRetimeCase):
         self.assertEqual(payload["automation_id"], AID)
         self.assertEqual(payload["quota_status"], "AVAILABLE")
         # 365d 数学：now + 365*86400*1000（常量锚定 + 时间窗界内）
-        self.assertEqual(cli.WAKE_RETIME_PARK_OFFSET_MS, PARK_MS)
+        self.assertEqual(wake_commands.WAKE_RETIME_PARK_OFFSET_MS, PARK_MS)
         target = retime.call_args[0][2]
         self.assertGreaterEqual(target, before_ms + PARK_MS)
         self.assertLessEqual(target, after_ms + PARK_MS)
@@ -465,7 +467,7 @@ class WakeRetimeRetryTest(WakeRetimeCase):
         after_ms = time.time() * 1000.0
         self.assertEqual(code, 0)
         self.assertEqual(payload["status"], "retime_retry")
-        self.assertEqual(cli.WAKE_RETIME_RETRY_OFFSET_MS, RETRY_MS)
+        self.assertEqual(wake_commands.WAKE_RETIME_RETRY_OFFSET_MS, RETRY_MS)
         target = retime.call_args[0][2]
         self.assertGreaterEqual(target, before_ms + RETRY_MS)
         self.assertLessEqual(target, after_ms + RETRY_MS)

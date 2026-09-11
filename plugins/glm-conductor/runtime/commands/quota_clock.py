@@ -189,9 +189,11 @@ def _quota_clock_bind(raw_repo_root, automation_id, db_path=None) -> int:
     旧 automation_id → inspect_automation(db, old_id) 复核宿主 DB 行：
     行确认缺失（row is None）→ 以 verified_dead_automation_id=old_id
     重试 bind_clock_state（存储层锁内 TOCTOU 复核通过才放行覆盖，本层
-    负责失效核实、存储层零 DB I/O）；inspect 异常 / 行存活 / 锁内身份
-    不符 → ClockStateConflictError 原样维持（fail-closed——活绑定保护
-    初心不变，本修复非自动迁移，用户仍显式提供新 automation_id）。走
+    负责失效核实、存储层零 DB I/O）；行存活 / 锁内身份不符 →
+    ClockStateConflictError 原样维持；inspect 异常 → 原样向上传播走
+    外层通用 error 面（status="error"、退出码 1、零写入——同样
+    fail-closed；活绑定保护初心不变，本修复非自动迁移，用户仍显式提供
+    新 automation_id）。走
     自愈成功时输出追加键 replaced_dead_binding=<old_automation_id>
     （只增不删，仅此路径出现）。
 
@@ -239,9 +241,11 @@ def _quota_clock_bind(raw_repo_root, automation_id, db_path=None) -> int:
                 automation_model=row.get("model"), now_ms=_clock_now_ms())
         except clock_store.ClockStateConflictError:
             # F-1 死绑定自愈（唯一放行路径，fail-closed）：冲突 → 只读
-            # load 提取旧 automation_id → DB 行复核（异常 / 行存活一律
-            # 原样维持冲突拒绝）→ 行确认缺失才带 verified_dead_automation_id
-            # 重试（存储层锁内 TOCTOU 身份复核后才真正放行）。
+            # load 提取旧 automation_id → DB 行复核（行存活 → 原样维持
+            # 冲突拒绝；inspect 异常不在此捕获，向上传播走外层通用
+            # error 面，同样零写入）→ 行确认缺失才带
+            # verified_dead_automation_id 重试（存储层锁内 TOCTOU 身份
+            # 复核后才真正放行）。
             current = clock_store.load_clock_state(identity)
             old_id = (current.get("automation_id")
                       if isinstance(current, dict) else None)

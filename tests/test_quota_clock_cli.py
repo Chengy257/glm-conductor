@@ -2,7 +2,8 @@
 # -*- coding: utf-8 -*-
 """quota-clock 四个 CLI 子命令测试（v2.3.0 计划 §8，unit v23-w2b）。
 
-锚定对象：runtime/cli.py 的 quota-clock-plan / bind / tick / status
+锚定对象（v2.3.1 W3 后处理函数已迁 runtime/commands/quota_clock.py，
+本文件经 cli.main 调用）：quota-clock-plan / bind / tick / status
 （resolver + identity + zcode_schedule adapter + clock_store 的接线薄
 壳层）。测试类映射：
 
