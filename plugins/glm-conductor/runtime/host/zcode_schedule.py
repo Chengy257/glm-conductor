@@ -4,7 +4,7 @@
 unit v23-w1）。
 
 职责（account 级 Global Quota Clock 的宿主接触面）：
-    ZCode 内部库 tasks-index.sqlite 的唯一适配器。三个公开函数：
+    ZCode 内部库 tasks-index.sqlite 的唯一适配器。四个公开函数：
 
       discover_zcode_tasks_db(explicit_path=None)
           DB 路径解析：explicit_path > 环境变量 GLM_CONDUCTOR_ZCODE_DB >
@@ -17,6 +17,10 @@ unit v23-w1）。
       retime_automation(db_path, automation_id, next_run_at, ...)
           全模块唯一生产写：事务内动态重定时（BEGIN IMMEDIATE → 行数 /
           状态校验 → 单列改写 → 读回验证 → COMMIT；任一失败必回滚）。
+      probe_host_compatibility(db_path)
+          只读兼容性探针（v2.3.1，host-check 子命令域逻辑）：表 / 必
+          需列 / next_run_at 存储类型 / runs 表可达性汇总 + 缺失项明
+          细；全程零写（四类纯读语句，绝不触碰 retime 路径）。
 
 硬安全边界（§6.3；tests/test_zcode_schedule.py ForbiddenSqlTest 机械
 锚定）：
@@ -72,6 +76,22 @@ INSPECT_AUTOMATION_KEYS = (
     "schedule_rule", "dispatch_status", "last_error")
 
 RECENT_RUNS_LIMIT = 20  # recent_runs 最大条数
+
+# —— host-check 只读探针常量（v2.3.1，unit w2-host-check）——
+
+# inspect_automation 的 recent_runs 来源三列（探针核对同一依赖集合，
+# 不臆造列名）
+RECENT_RUNS_COLUMNS = ("scheduled_at", "session_id", "outcome")
+
+# next_run_at 存储类型抽样的合法 typeof 值（INTEGER epoch 毫秒，可 NULL）
+NEXT_RUN_AT_OK_TYPES = frozenset(("integer", "null"))
+
+# typeof 抽样上限（DISTINCT 早停，探测成本有界）
+NEXT_RUN_AT_TYPE_SAMPLE_LIMIT = 8
+
+# host-check 报告常量：adapter 唯一生产写能力 / 探针绝不试写
+HOST_CHECK_WRITE_CAPABILITY = "next_run_at only"
+HOST_CHECK_WRITE_PROBE = "no"
 
 # 全模块唯一生产写语句（§6.3 硬边界；ForbiddenSqlTest 断言本短语在源码
 # 中恰出现一次）
@@ -292,3 +312,125 @@ def retime_automation(db_path, automation_id, next_run_at, *,
             "previous_next_run_at": previous_next_run_at,
             "next_run_at": next_run_at,
             "verified": True}
+
+
+def probe_host_compatibility(db_path):
+    """只读兼容性探针（host-check 子命令的域逻辑；v2.3.1，unit
+    w2-host-check）。ZCode 升级后宿主库 schema 可能漂移——本函数给出
+    一次性的自检判定与缺失项明细。
+
+    绝对零写（与 retime 写路径互斥，绝不调用）：mode=ro URI 打开
+    （_read_only_connect 同款零写句柄），语句只有四类纯读——
+    sqlite_master 表清单、PRAGMA table_info(automations) 纯元数据、
+    recent_runs 三列 LIMIT 0 空读、DISTINCT typeof(next_run_at) 类型
+    抽样。绝不 retime、绝不建任务、绝不合成写、绝不触碰 journal mode
+    （连 journal_mode 查询都不做）、绝不改宿主配置。
+
+    db_path 经 os.path.isfile 存在性闸：DB 缺失 → 干净报告（不抛异
+    常、不 traceback）。打开或读 schema 遭遇 sqlite3.Error（损坏 /
+    权限 / 锁不可得）→ database_readable=False 的干净报告；其余意外
+    异常向上传播（由 CLI 层映射致命退出码）。
+
+    返回 dict（键集冻结，全键恒在）：
+      backend                    恒 "zcode_sqlite"
+      database                   探测的 DB 路径（调用方传入，透传）
+      database_found             os.path.isfile(db_path)
+      database_readable          mode=ro 打开且 sqlite_master 可读
+      schema                     "compatible"（automations 表存在且
+                                 REQUIRED_AUTOMATIONS_COLUMNS 全在）|
+                                 "incompatible"
+      missing_columns            缺失必需列名（sorted；表缺失时 PRAGMA
+                                 空返回 → 列为全部必需列）
+      next_run_at_type_ok        DISTINCT typeof(next_run_at) 抽样
+                                 （上限 NEXT_RUN_AT_TYPE_SAMPLE_LIMIT）
+                                 全部 ∈ NEXT_RUN_AT_OK_TYPES；列缺失或
+                                 不可测 → False；空表（无样本）→ True
+      runs_table_ok              咨询性标志：automation_runs 缺失 →
+                                 True（adapter 容忍，recent_runs 记空
+                                 列表）；存在则 RECENT_RUNS_COLUMNS 三
+                                 列 LIMIT 0 空读可执行 → True。不闸
+                                 support_status（写能力不依赖 runs 表）
+      issues                     人类可读明细（如 "required column
+                                 missing: next_run_at" / "database not
+                                 found: <path>"）
+      write_capability_required  恒 HOST_CHECK_WRITE_CAPABILITY
+                                 （adapter 唯一生产写能力面）
+      write_probe_performed      恒 HOST_CHECK_WRITE_PROBE（探针绝不
+                                 以写试写）
+      support_status             "supported" ⇔ found 且 readable 且
+                                 schema compatible 且
+                                 next_run_at_type_ok；否则 "unsupported"
+    """
+    db_path = os.fspath(db_path)
+    issues = []
+    found = os.path.isfile(db_path)
+    readable = False
+    present_columns = set()
+    type_ok = False
+    runs_ok = False
+    if not found:
+        issues.append("database not found: %s" % (db_path,))
+    else:
+        try:
+            conn = _read_only_connect(db_path)
+            try:
+                tables = set(row[0] for row in conn.execute(
+                    "SELECT name FROM sqlite_master"
+                    " WHERE type = 'table'"))
+                readable = True
+                present_columns = set(row[1] for row in conn.execute(
+                    "PRAGMA table_info(automations)"))
+                if "automation_runs" in tables:
+                    try:
+                        conn.execute(
+                            "SELECT %s FROM automation_runs LIMIT 0"
+                            % ", ".join(RECENT_RUNS_COLUMNS)).fetchall()
+                        runs_ok = True
+                    except sqlite3.Error as exc:
+                        issues.append(
+                            "automation_runs unreadable: %s: %s"
+                            % (type(exc).__name__, exc))
+                else:
+                    runs_ok = True  # adapter 容忍缺失（recent_runs 空表）
+                    issues.append("optional table missing: automation_runs")
+                if "automations" not in tables:
+                    issues.append("required table missing: automations")
+                if "next_run_at" in present_columns:
+                    sampled = set(row[0] for row in conn.execute(
+                        "SELECT DISTINCT typeof(next_run_at)"
+                        " FROM automations LIMIT %d"
+                        % (NEXT_RUN_AT_TYPE_SAMPLE_LIMIT,)))
+                    unexpected = sorted(sampled - NEXT_RUN_AT_OK_TYPES)
+                    if unexpected:
+                        for type_name in unexpected:
+                            issues.append(
+                                "next_run_at stored type not integer:"
+                                " %s" % (type_name,))
+                    else:
+                        type_ok = True
+            finally:
+                conn.close()
+        except sqlite3.Error as exc:
+            readable = False
+            issues.append("database unreadable: %s: %s"
+                          % (type(exc).__name__, exc))
+    missing_columns = sorted(REQUIRED_AUTOMATIONS_COLUMNS
+                             - present_columns)
+    for name in missing_columns:
+        issues.append("required column missing: %s" % (name,))
+    schema_compatible = readable and not missing_columns
+    supported = found and readable and schema_compatible and type_ok
+    return {
+        "backend": "zcode_sqlite",
+        "database": db_path,
+        "database_found": found,
+        "database_readable": readable,
+        "schema": "compatible" if schema_compatible else "incompatible",
+        "missing_columns": missing_columns,
+        "next_run_at_type_ok": type_ok,
+        "runs_table_ok": runs_ok,
+        "issues": issues,
+        "write_capability_required": HOST_CHECK_WRITE_CAPABILITY,
+        "write_probe_performed": HOST_CHECK_WRITE_PROBE,
+        "support_status": "supported" if supported else "unsupported",
+    }

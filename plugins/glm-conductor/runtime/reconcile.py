@@ -154,15 +154,13 @@ Agent Run 四分对账（v2.1 M3，计划 §9 / §7.3）：
     仅 Python 3 标准库，`python3 -S` 可运行。
 
 来源：
-    docs/history/v2.0/glm-conductor-v2-upgrade-guide-final.md §68（恢复后 completed
-    不重跑）/ §69（中断单元恢复证据四步）+ v2 升级计划工作块 B8.4
+    v2.0 设计（已蒸馏入 docs/architecture.md：恢复后 completed 不重跑 /
+    中断单元恢复证据四步）+ v2 升级计划工作块 B8.4
     + v2.0.1 加固工作包 H5（P1-4/P1-5，租约对账）与 H6（P1-7，
-    verification 证据归属绑定 unit）+ release hardening 补丁计划
-    docs/history/v2.0/GLM-Conductor-v2.0.1-Release-Hardening-Patch-Agent-Implementation-Plan.md
+    verification 证据归属绑定 unit）+ v2.0.1 加固计划
     （RB-1 / WU-P1：共享证据谓词 fresh_unit_verification + all-match
-    收紧，D2 决策）+ v2.1 M3 计划
-    docs/history/v2.1/GLM-Conductor-v2.1-Architecture-Agent-Implementation-Plan.md
-    §7.3（证据优先级与僵尸语义）/ §9（Agent Reconcile 四分模型，
+    收紧，D2 决策）+ v2.1 M3 计划（证据优先级与僵尸语义 /
+    Agent Reconcile 四分模型，
     ※DR 拆两层修订：runtime 产分类 + 证据句柄，进度包组装归模型侧）。
 """
 

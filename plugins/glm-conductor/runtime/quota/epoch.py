@@ -77,11 +77,10 @@ epoch 身份（冻结口径）：
     （control 亦 import window_math 的 _earliest_reset_plus）。
 
 来源：
-    docs/history/v2.2/GLM-Conductor-v2.2-Quota-Control-Plane-Architecture-Correction-
-    and-Agent-Implementation-Plan.md §10（Quota Epoch 替代 automation
-    fire）/ §10.1（epoch_id 形状）/ §10.2（probe vs executable 双
-    boundary，2026-09-02 冻结）/ §30（max(reset)+grace）/ §31（绝不
-    虚构 reset）+ 修正计划工作单元 wu-22-C2。
+    v2.2 设计（已蒸馏入 docs/architecture.md：Quota Epoch 替代
+    automation fire / epoch_id 形状 / probe vs executable 双 boundary，
+    2026-09-02 冻结 / max(reset)+grace / 绝不虚构 reset）+ 修正计划
+    工作单元 wu-22-C2。
 """
 
 import hashlib

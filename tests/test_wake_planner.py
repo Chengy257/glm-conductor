@@ -989,16 +989,9 @@ class C1aZeroConsumptionTests(WakePlannerTestBase):
             events(self.root, "quota_wake_recorded"), [])  # 零扣减事件
         self.assertEqual(len(events(self.root, "wake_bridge_fired")),
                          10)  # fire 真实记账（测试非空洞）
-
-    def test_bridge_docstrings_no_legacy_discipline(self):
-        """C1a：arm/plan docstring 不再串联「arm 后 wake-record 记账」
-        旧纪律（legacy 入口标注只归 record_quota_wake 自身）。"""
-        self.assertNotIn("wake-record", task_manager.arm_wake_bridge.__doc__)
-        self.assertNotIn("record_quota_wake",
-                         task_manager.arm_wake_bridge.__doc__)
-        self.assertNotIn("wake-record", task_manager.plan_wake_bridge.__doc__)
-        self.assertNotIn("record_quota_wake",
-                         task_manager.plan_wake_bridge.__doc__)
+    # docstring 措辞校验（C1a arm/plan 不串联 wake-record 旧纪律）已随
+    # v2.3.1 W4 测试收敛移除——文档措辞不进冻结面，legacy 入口的
+    # 行为边界由本类其余用例锚定。
 
 
 # —— v2.2.1 WU-221-A3 fix1：scheduler_facts 锁内重复证据的幂等回归 ——

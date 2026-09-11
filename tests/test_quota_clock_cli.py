@@ -2,10 +2,15 @@
 # -*- coding: utf-8 -*-
 """quota-clock 四个 CLI 子命令测试（v2.3.0 计划 §8，unit v23-w2b）。
 
-锚定对象：runtime/cli.py 的 quota-clock-plan / bind / tick / status
+锚定对象（v2.3.1 W3 后处理函数已迁 runtime/commands/quota_clock.py，
+本文件经 cli.main 调用）：quota-clock-plan / bind / tick / status
 （resolver + identity + zcode_schedule adapter + clock_store 的接线薄
 壳层）。测试类映射：
 
+    ClockPlacementPureTest  v2.3.1（w1-clock-ux）Placement UX 纯函数：
+                            plan/bind/status 的会话放置引导 / 成本
+                            提示 / needs_replacement 两极判定（决策
+                            c）与恢复指引（未执行自动会话迁移声明）
     PlanCliTest             plan：输出键集与 first_target 数学
                             （reset+120s）、force-refresh 透传、相对
                             repo_root 归一、five_hour 缺失 / 不可解析
@@ -56,7 +61,7 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "plugins" / "glm-conductor"))
 from runtime import cli
 from runtime.host import zcode_schedule
-from runtime.quota import clock_store
+from runtime.quota import clock, clock_store
 
 # —— 常量与装置 ——
 
@@ -195,6 +200,119 @@ class ClockCliCase(unittest.TestCase):
         return clock_store.bind_clock_state(self.repo, HASH, AID, **params)
 
 
+# —— 0. Placement UX 纯函数（v2.3.1，unit w1-clock-ux） ——
+
+class ClockPlacementPureTest(unittest.TestCase):
+    """clock.py 的 Placement UX advisory 纯函数：文案语义齐备 +
+    判定两极（needs_replacement 锁定决策 c；model_is_flash 仅
+    advisory——不阻断、不作专用会话证据；dedicated_session 恒为
+    常量串，绝不伪造布尔）。"""
+
+    def test_plan_placement_guidance_semantics(self):
+        guidance = clock.placement_guidance_for_plan()
+        self.assertEqual(set(guidance),
+                         set(clock.PLACEMENT_GUIDANCE_KEYS))
+        self.assertIn("recurring", guidance["automation_required"])
+        steps = guidance["recommended_steps"]
+        self.assertEqual(len(steps), 4)
+        joined = "\n".join(steps)
+        # 建议 1)-4)：独立会话 / Flash 模型 / 建议命名 / 该会话内设置
+        self.assertIn("独立", joined)
+        self.assertIn("Flash", joined)
+        self.assertIn(clock.SUGGESTED_AUTOMATION_NAME, joined)
+        self.assertIn("该专用会话", joined)
+        self.assertEqual(guidance["suggested_name"],
+                         clock.SUGGESTED_AUTOMATION_NAME)
+        # 警示：勿在主编码会话创建（周期 tick 会注入该会话）
+        self.assertIn("主编码会话", guidance["warning"])
+        self.assertIn("tick", guidance["warning"])
+
+    def test_bind_session_placement_semantics(self):
+        placement = clock.bind_session_placement()
+        self.assertEqual(set(placement),
+                         set(clock.SESSION_PLACEMENT_KEYS))
+        self.assertIn("当前 ZCode 会话", placement["attachment"])
+        self.assertIn("本对话", placement["tick_effect"])
+        self.assertIn("Flash", placement["recommendation"])
+        self.assertIn("主编排", placement["avoid"])
+
+    def test_cost_advisory_polarity(self):
+        # Flash 类（模型名含 "Flash"）→ None；其余（含未知 None）→ 提示
+        self.assertIsNone(clock.cost_advisory_for_model("GLM-5.3-Flash"))
+        self.assertIsNone(clock.cost_advisory_for_model("xFlashy"))
+        self.assertEqual(
+            clock.cost_advisory_for_model("glm-5.3"),
+            {"current_model": "glm-5.3",
+             "preferred": clock.PREFERRED_MODEL_ADVICE})
+        self.assertEqual(
+            clock.cost_advisory_for_model(None),
+            {"current_model": None,
+             "preferred": clock.PREFERRED_MODEL_ADVICE})
+
+    def test_model_is_flash_advisory_only_judgment(self):
+        self.assertTrue(clock.model_is_flash("GLM-5.3-Flash"))
+        self.assertFalse(clock.model_is_flash("glm-5.3"))
+        self.assertFalse(clock.model_is_flash(""))
+        self.assertFalse(clock.model_is_flash(None))
+        self.assertFalse(clock.model_is_flash(7))  # 非 str 绝不抛
+
+    def test_status_placement_block_polarity(self):
+        active = clock.status_placement_block(
+            "GLM-5.3-Flash", automation_row_available=True)
+        self.assertEqual(set(active), set(clock.STATUS_PLACEMENT_KEYS))
+        self.assertEqual(active, {
+            "session_binding": "active", "preferred_model": True,
+            "dedicated_session": "not_mechanically_verifiable"})
+        unavailable = clock.status_placement_block(
+            None, automation_row_available=False)
+        self.assertEqual(unavailable, {
+            "session_binding": "unavailable", "preferred_model": False,
+            "dedicated_session": "not_mechanically_verifiable"})
+        # dedicated_session 恒为常量串（机械不可验证），绝不输出布尔
+        self.assertIsInstance(unavailable["dedicated_session"], str)
+        self.assertEqual(unavailable["dedicated_session"],
+                         clock.DEDICATED_SESSION_UNVERIFIABLE)
+
+    def test_needs_replacement_two_pole_decision(self):
+        # True ⇔ db_row_missing / db_inspect_failed；其余仅 advisory
+        self.assertTrue(clock.needs_replacement_from_reasons(
+            ["db_row_missing"]))
+        self.assertTrue(clock.needs_replacement_from_reasons(
+            ["db_inspect_failed: OSError: gone"]))
+        self.assertTrue(clock.needs_replacement_from_reasons(
+            ["target_mismatch", "db_row_missing"]))
+        self.assertFalse(clock.needs_replacement_from_reasons([]))
+        self.assertFalse(clock.needs_replacement_from_reasons(
+            ["target_mismatch", "tick_stale", "runtime_path_missing"]))
+        # 诊断面容错：非 list / 元素非 str 绝不抛、绝不触发
+        self.assertFalse(clock.needs_replacement_from_reasons(None))
+        self.assertFalse(
+            clock.needs_replacement_from_reasons("db_row_missing"))
+        self.assertFalse(clock.needs_replacement_from_reasons([7]))
+
+    def test_recovery_guidance_explicit_replace_no_auto_migration(self):
+        text = clock.recovery_guidance_for_replacement()
+        self.assertIn("replace", text)
+        self.assertIn("quota-clock-bind <new_automation_id>", text)
+        self.assertIn("Flash", text)
+        self.assertIn("未执行自动会话迁移", text)
+        self.assertEqual(clock.NO_AUTO_MIGRATION_DECLARATION,
+                         "未执行自动会话迁移")
+
+    def test_recovery_guidance_mentions_dead_binding_auto_detect(self):
+        # w35-dogfood-fix 指引同步：recovery_guidance 与新 bind 行为
+        # 同口径——bind 自动检测并替换已确认失效的死绑定（宿主 DB 行
+        # 缺失时放行改绑），用户仍显式提供新 automation_id
+        text = clock.recovery_guidance_for_replacement()
+        self.assertIn("auto-detects a verified dead binding", text)
+        self.assertIn("you still provide the new automation_id", text)
+
+    def test_status_host_block(self):
+        self.assertEqual(clock.status_host_block(),
+                         {"adapter": "zcode_sqlite"})
+        self.assertEqual(clock.HOST_ADAPTER, "zcode_sqlite")
+
+
 # —— 1. quota-clock-plan ——
 
 class PlanCliTest(ClockCliCase):
@@ -209,7 +327,8 @@ class PlanCliTest(ClockCliCase):
             {"status", "provider_identity_hash", "reset_at",
              "reset_at_epoch_ms", "first_target_epoch_ms", "grace_seconds",
              "retry_delay_seconds", "fallback_interval_minutes",
-             "runtime_path", "cli_command", "suggested_prompt"})
+             "runtime_path", "cli_command", "suggested_prompt",
+             "placement_guidance"})
         self.assertEqual(payload["status"], "planned")
         self.assertEqual(payload["provider_identity_hash"], HASH)
         self.assertEqual(payload["reset_at"], RESET)
@@ -224,17 +343,37 @@ class PlanCliTest(ClockCliCase):
         self.assertEqual(payload["runtime_path"], RUNTIME_DIR)
         self.assertEqual(
             payload["cli_command"],
-            "python3 %s quota-clock-tick %s" % (CLI_PATH,
-                                                self.repo_norm()))
-        # §9 极简 prompt：逐字头部 + 代入后的 tick 命令 + 收尾约束
+            "%s %s quota-clock-tick %s" % (sys.executable, CLI_PATH,
+                                           self.repo_norm()))
+        # §9 极简 prompt：逐字头部 + 代入后的 tick 命令（F-4：首跳
+        # 解释器 = 当前解释器 sys.executable）+ 收尾约束
         self.assertTrue(payload["suggested_prompt"].startswith(
             "GLM CONDUCTOR QUOTA CLOCK TICK\n"
-            "Run: python3 %s quota-clock-tick %s\n"
-            % (CLI_PATH, self.repo_norm())))
+            "Run: %s %s quota-clock-tick %s\n"
+            % (sys.executable, CLI_PATH, self.repo_norm())))
         self.assertIn("Never call Cron tools. Never do anything else.",
                       payload["suggested_prompt"])
         resolver_mock.assert_called_once_with(self.repo_norm(),
                                               force_refresh=True)
+        # 纯规划：零写盘（quota-clocks 目录不产生）
+        self.assertFalse(os.path.isdir(
+            os.path.join(self.home, "quota-clocks")))
+
+    def test_plan_emits_placement_guidance_before_any_creation(self):
+        # v2.3.1：placement_guidance 在 automation 创建前即可见——纯
+        # 规划零副作用语义不变（零 DB、零 state、quota-clocks 不产生）
+        with patched_quota_clock(FIVE_DETAIL) as (resolver_m, *_rest):
+            code, payload = run_cli("quota-clock-plan", self.repo)
+        self.assertEqual(code, 0)
+        guidance = payload["placement_guidance"]
+        self.assertEqual(set(guidance),
+                         set(clock.PLACEMENT_GUIDANCE_KEYS))
+        self.assertIn("recurring", guidance["automation_required"])
+        self.assertEqual(guidance["suggested_name"],
+                         clock.SUGGESTED_AUTOMATION_NAME)
+        self.assertIn("主编码会话", guidance["warning"])
+        self.assertIn("tick", guidance["warning"])
+        resolver_m.assert_called_once()
         # 纯规划：零写盘（quota-clocks 目录不产生）
         self.assertFalse(os.path.isdir(
             os.path.join(self.home, "quota-clocks")))
@@ -251,6 +390,30 @@ class PlanCliTest(ClockCliCase):
                 self.assertEqual(payload["reason"], reason)
                 self.assertIn("error", payload)
                 self.assertIsNone(self.load_state())  # 零写盘
+
+    def test_plan_interpreter_is_current_executable(self):
+        # F-4（w35-dogfood-fix）：plan 产物首跳解释器 = 当前解释器
+        # （sys.executable），cli_command 与 suggested_prompt 两点
+        # 同源，绝不裸 "python3"（Windows 无 python3 启动器首跳必败）
+        with patched_quota_clock(FIVE_DETAIL):
+            code, payload = run_cli("quota-clock-plan", self.repo)
+        self.assertEqual(code, 0)
+        self.assertTrue(payload["cli_command"].startswith(
+            "%s " % sys.executable))
+        lines = payload["suggested_prompt"].split("\n")
+        self.assertEqual(lines[0], "GLM CONDUCTOR QUOTA CLOCK TICK")
+        self.assertTrue(lines[1].startswith(
+            "Run: %s " % sys.executable))
+        self.assertNotIn("Run: python3 ", payload["suggested_prompt"])
+
+    def test_plan_interpreter_fallback_when_executable_empty(self):
+        # F-4 兜底分支：sys.executable 为空 → 回退 "python3"
+        with mock.patch("sys.executable", ""), \
+                patched_quota_clock(FIVE_DETAIL):
+            code, payload = run_cli("quota-clock-plan", self.repo)
+        self.assertEqual(code, 0)
+        self.assertTrue(payload["cli_command"].startswith("python3 "))
+        self.assertIn("Run: python3 ", payload["suggested_prompt"])
 
     def test_plan_relative_repo_root_normalized(self):
         with patched_quota_clock(FIVE_DETAIL) as (resolver_mock, *_rest):
@@ -283,7 +446,8 @@ class BindCliTest(ClockCliCase):
             set(payload),
             {"status", "provider_identity_hash", "automation_id",
              "automation_model", "model_is_flash",
-             "first_target_epoch_ms", "retimed", "state_path"})
+             "first_target_epoch_ms", "retimed", "state_path",
+             "session_placement", "cost_advisory"})
         self.assertEqual(payload["status"], "bound")
         self.assertEqual(payload["provider_identity_hash"], HASH)
         self.assertEqual(payload["automation_id"], AID)
@@ -316,6 +480,38 @@ class BindCliTest(ClockCliCase):
         self.assertFalse(payload["model_is_flash"])
         self.assertTrue(payload["retimed"])
         self.assertEqual(self.load_state()["automation_model"], "glm-5.3")
+
+    def test_bind_flash_emits_session_placement_without_cost_advisory(self):
+        # v2.3.1：Flash 模型 → session_placement 语义齐备；
+        # cost_advisory 固化为 null（键恒在、值为 None）
+        with patched_quota_clock(FIVE_DETAIL, db=DB,
+                                 row=dict(ROW_FLASH)):
+            code, payload = run_cli("quota-clock-bind", self.repo, AID)
+        self.assertEqual(code, 0)
+        placement = payload["session_placement"]
+        self.assertEqual(set(placement),
+                         set(clock.SESSION_PLACEMENT_KEYS))
+        self.assertIn("当前 ZCode 会话", placement["attachment"])
+        self.assertIn("本对话", placement["tick_effect"])
+        self.assertIn("Flash", placement["recommendation"])
+        self.assertIn("主编排", placement["avoid"])
+        self.assertIsNone(payload["cost_advisory"])
+
+    def test_bind_non_flash_succeeds_with_cost_advisory(self):
+        # 无任何模型阻断路径：非 Flash 也 status=="bound"（retime 照常
+        # 执行、state 落盘），cost_advisory 仅提示 preferred 档位
+        row = dict(ROW_FLASH, model="glm-5.3")
+        with patched_quota_clock(FIVE_DETAIL, db=DB,
+                                 row=row) as (_r, _i, retime_m, _d):
+            code, payload = run_cli("quota-clock-bind", self.repo, AID)
+        self.assertEqual(code, 0)
+        self.assertEqual(payload["status"], "bound")
+        self.assertFalse(payload["model_is_flash"])
+        self.assertEqual(payload["cost_advisory"],
+                         {"current_model": "glm-5.3",
+                          "preferred": "low-cost Flash-class model"})
+        retime_m.assert_called_once_with(DB, AID, FIRST_TARGET)
+        self.assertEqual(self.load_state()["status"], "bound")
 
     def test_bind_missing_row_exit_1_without_state_or_retime(self):
         with patched_quota_clock(FIVE_DETAIL, db=DB) as (_r, _i, retime_m,
@@ -387,6 +583,97 @@ class BindCliTest(ClockCliCase):
                 code, payload = run_cli("quota-clock-bind", *args)
                 self.assertEqual(code, 2)
                 self.assertIn("error", payload)
+
+
+# —— 2b. quota-clock-bind 死绑定自愈（F-1，w35-dogfood-fix） ——
+
+class BindDeadBindingSelfHealTest(ClockCliCase):
+    """F-1 bind CLI 编排四分支：死绑定自愈成功 / 活绑定仍冲突拒绝 /
+    死检 inspect 异常 fail-closed（存储层锁内漂移分支锚定于
+    tests/test_quota_clock.py 的 BindDeadBindingSelfHealTest）。"""
+
+    OLD_AID = "auto-clock-dead"
+
+    def _preset_binding(self, automation_id):
+        """预置一个指向任意 automation_id 的 bound state（写进注入的
+        临时 home；bind_state 助手固定 AID，故此处直调存储层）。"""
+        return clock_store.bind_clock_state(
+            self.repo, HASH, automation_id,
+            zcode_db_path=DB, runtime_path=RUNTIME_DIR,
+            automation_model="GLM-5.3-Flash", now_ms=BIND_NOW_MS)
+
+    def _bind_cli(self, *, first_inspect, second_inspect):
+        """inspect_automation 恰两次调用（第一次=新 id，第二次=旧 id
+        死检），分别注入返回值或异常实例；resolver / discover /
+        retime 常规 mock。返回 (code, payload, retime_mock,
+        inspect_mock)。"""
+        with mock.patch(
+                "runtime.quota.resolver.resolve_quota_detail",
+                return_value=FIVE_DETAIL), \
+            mock.patch(
+                "runtime.host.zcode_schedule.discover_zcode_tasks_db",
+                return_value=DB), \
+            mock.patch(
+                "runtime.host.zcode_schedule.inspect_automation",
+                side_effect=[first_inspect, second_inspect]) as inspect_m, \
+            mock.patch(
+                "runtime.host.zcode_schedule.retime_automation") as retime_m:
+            code, payload = run_cli("quota-clock-bind", self.repo, AID)
+        return code, payload, retime_m, inspect_m
+
+    def test_dead_binding_self_heal_success(self):
+        # 分支 1：旧绑定宿主行已消失（死检 inspect → None）→ 自愈成功
+        self._preset_binding(self.OLD_AID)
+        code, payload, retime_m, inspect_m = self._bind_cli(
+            first_inspect=dict(ROW_FLASH), second_inspect=None)
+        self.assertEqual(code, 0)
+        self.assertEqual(payload["status"], "bound")
+        self.assertEqual(payload["automation_id"], AID)
+        # 自愈路径专属键：replaced_dead_binding = 旧 automation_id
+        self.assertEqual(payload["replaced_dead_binding"], self.OLD_AID)
+        # state 指向新 id（干净 bound 态，观测键重置）
+        st = self.load_state()
+        self.assertEqual(st["automation_id"], AID)
+        self.assertEqual(st["status"], "bound")
+        self.assertIsNone(st["last_tick_at"])
+        # retime 面向新 automation；inspect 顺序 = 新 id → 旧 id 死检
+        retime_m.assert_called_once_with(DB, AID, FIRST_TARGET)
+        self.assertEqual(inspect_m.call_args_list,
+                         [mock.call(DB, AID),
+                          mock.call(DB, self.OLD_AID)])
+
+    def test_live_binding_still_conflict_rejected(self):
+        # 分支 2：旧绑定宿主行存活（活绑定）→ 冲突拒绝原样维持，
+        # 原 state 原样不动，无 replaced_dead_binding 键
+        self._preset_binding(self.OLD_AID)
+        code, payload, retime_m, _inspect_m = self._bind_cli(
+            first_inspect=dict(ROW_FLASH),
+            second_inspect=dict(ROW_FLASH, automation_id=self.OLD_AID))
+        self.assertEqual(code, 1)
+        self.assertEqual(payload["status"], "error")
+        self.assertIn("ClockStateConflictError", payload["error"])
+        self.assertNotIn("replaced_dead_binding", payload)
+        retime_m.assert_not_called()
+        st = self.load_state()
+        self.assertEqual(st["automation_id"], self.OLD_AID)
+        self.assertEqual(st["status"], "bound")
+
+    def test_dead_check_inspect_error_fails_closed(self):
+        # 分支 3：死检 inspect 异常 → fail-closed（冲突拒绝维持），
+        # 原 state 原样不动
+        self._preset_binding(self.OLD_AID)
+        code, payload, retime_m, _inspect_m = self._bind_cli(
+            first_inspect=dict(ROW_FLASH),
+            second_inspect=zcode_schedule.ZcodeScheduleDbMissing(
+                "db gone"))
+        self.assertEqual(code, 1)
+        self.assertEqual(payload["status"], "error")
+        self.assertIn("ZcodeScheduleDbMissing", payload["error"])
+        self.assertNotIn("replaced_dead_binding", payload)
+        retime_m.assert_not_called()
+        st = self.load_state()
+        self.assertEqual(st["automation_id"], self.OLD_AID)
+        self.assertEqual(st["status"], "bound")
 
 
 # —— 3. quota-clock-tick ——
@@ -530,6 +817,53 @@ class StatusCliTest(ClockCliCase):
         self.assertEqual(code, 0)
         return dict(ROW_FLASH, next_run_at=FIRST_TARGET)
 
+    def test_status_first_bind_awaiting_first_tick_healthy(self):
+        # F-3（w35-dogfood-fix）：首绑未 tick → healthy +
+        # awaiting_first_tick=true + tick_stale=false——修复「新装即
+        # unhealthy 与 await next tick 同框」的矛盾呈现
+        self.bind_state()
+        with patched_quota_clock(row=dict(ROW_FLASH)):
+            code, payload = run_cli("quota-clock-status", self.repo)
+        self.assertEqual(code, 0)
+        self.assertTrue(payload["bound"])
+        self.assertIsNone(payload["last_tick_at"])
+        self.assertTrue(payload["awaiting_first_tick"])
+        self.assertFalse(payload["tick_stale"])
+        self.assertEqual(payload["health"], "healthy")
+        self.assertEqual(payload["reasons"], [])
+        self.assertIsNone(payload["suggestion"])
+        self.assertFalse(payload["needs_replacement"])
+        self.assertNotIn("recovery_guidance", payload)
+
+    def test_status_non_numeric_last_tick_is_awaiting_not_stale(self):
+        # F-3：last_tick_at 非数值（垃圾值 / bool）= 无合法 tick 观测 →
+        # awaiting first tick（不再视为陈旧），且 DB 行存活不触发 replace
+        self.bind_state()
+        clock_store.update_clock_state(
+            HASH, lambda s: dict(s, last_tick_at="garbage"))
+        with patched_quota_clock(row=dict(ROW_FLASH)):
+            code, payload = run_cli("quota-clock-status", self.repo)
+        self.assertEqual(code, 0)
+        self.assertTrue(payload["awaiting_first_tick"])
+        self.assertFalse(payload["tick_stale"])
+        self.assertEqual(payload["health"], "healthy")
+
+    def test_status_stale_numeric_tick_still_stale(self):
+        # F-3 回归：合法数值 last_tick_at 超阈值 → 仍判 tick_stale
+        # （awaiting_first_tick=false，陈旧判定只对合法观测生效）
+        self._bound_and_ticked()
+        now_ms = int(time.time() * 1000)
+        clock_store.update_clock_state(
+            HASH, lambda s: dict(s, last_tick_at=now_ms - 4 * 60 * 60000))
+        with patched_quota_clock(row=dict(ROW_FLASH,
+                                          next_run_at=FIRST_TARGET)):
+            code, payload = run_cli("quota-clock-status", self.repo)
+        self.assertEqual(code, 0)
+        self.assertFalse(payload["awaiting_first_tick"])
+        self.assertTrue(payload["tick_stale"])
+        self.assertTrue(any(reason.startswith("tick_stale")
+                            for reason in payload["reasons"]))
+
     def test_status_healthy_after_bind_and_tick(self):
         row = self._bound_and_ticked()
         with patched_quota_clock(row=row) as (resolver_m, _i, retime_m, _d):
@@ -541,8 +875,9 @@ class StatusCliTest(ClockCliCase):
              "automation_model", "status", "last_reset_at",
              "next_target_at", "db_next_run_at", "target_matches_db",
              "runtime_path", "runtime_path_exists", "last_tick_at",
-             "tick_stale", "recent_run_count", "health", "reasons",
-             "suggestion"})
+             "tick_stale", "awaiting_first_tick", "recent_run_count",
+             "health", "reasons", "suggestion", "placement", "host",
+             "needs_replacement"})
         self.assertTrue(payload["bound"])
         self.assertEqual(payload["provider_identity_hash"], HASH)
         self.assertEqual(payload["automation_id"], AID)
@@ -564,6 +899,87 @@ class StatusCliTest(ClockCliCase):
         resolver_m.assert_not_called()
         retime_m.assert_not_called()
         self.assertIsNotNone(self.load_state())
+
+    def test_status_healthy_placement_host_and_no_replacement(self):
+        # v2.3.1：健康态 placement 诊断（dedicated_session 恒常量串）
+        # + host 标识 + needs_replacement=false（无 recovery_guidance）
+        row = self._bound_and_ticked()
+        with patched_quota_clock(row=row):
+            code, payload = run_cli("quota-clock-status", self.repo)
+        self.assertEqual(code, 0)
+        self.assertEqual(
+            payload["placement"],
+            {"session_binding": "active", "preferred_model": True,
+             "dedicated_session": "not_mechanically_verifiable"})
+        self.assertEqual(payload["host"], {"adapter": "zcode_sqlite"})
+        self.assertFalse(payload["needs_replacement"])
+        self.assertNotIn("recovery_guidance", payload)
+
+    def test_status_non_flash_model_preferred_model_false(self):
+        # preferred_model 只是模型档位口径（含 "Flash"），绝非专用
+        # 会话证据；dedicated_session 仍为常量串
+        self.bind_state(automation_model="glm-5.3")
+        with patched_quota_clock(row=dict(ROW_FLASH)):
+            code, payload = run_cli("quota-clock-status", self.repo)
+        self.assertEqual(code, 0)
+        self.assertFalse(payload["placement"]["preferred_model"])
+        self.assertEqual(payload["placement"]["session_binding"],
+                         "active")
+        self.assertEqual(payload["placement"]["dedicated_session"],
+                         "not_mechanically_verifiable")
+
+    def test_status_row_missing_needs_replacement_with_recovery(self):
+        self.bind_state()
+        with patched_quota_clock(row=None):
+            code, payload = run_cli("quota-clock-status", self.repo)
+        self.assertEqual(code, 0)
+        self.assertTrue(payload["needs_replacement"])
+        self.assertIn("recovery_guidance", payload)
+        self.assertIn("replace", payload["recovery_guidance"])
+        self.assertIn("quota-clock-bind <new_automation_id>",
+                      payload["recovery_guidance"])
+        # 恢复指引必含「未执行自动会话迁移」声明（无隐式迁移）
+        self.assertIn("未执行自动会话迁移",
+                      payload["recovery_guidance"])
+        self.assertEqual(payload["placement"]["session_binding"],
+                         "unavailable")
+
+    def test_status_inspect_failed_needs_replacement_with_recovery(self):
+        self.bind_state()
+        gone = zcode_schedule.ZcodeScheduleDbMissing("db gone")
+        with patched_quota_clock(inspect_error=gone):
+            code, payload = run_cli("quota-clock-status", self.repo)
+        self.assertEqual(code, 0)
+        self.assertTrue(payload["needs_replacement"])
+        self.assertIn("quota-clock-bind <new_automation_id>",
+                      payload["recovery_guidance"])
+        self.assertIn("未执行自动会话迁移",
+                      payload["recovery_guidance"])
+        self.assertEqual(payload["placement"]["session_binding"],
+                         "unavailable")
+
+    def test_status_advisory_reasons_do_not_trigger_replacement(self):
+        # 锁定决策 c 两极：target_mismatch / tick_stale 仅 advisory——
+        # needs_replacement 恒 false 且不附 recovery_guidance
+        self._bound_and_ticked()
+        now_ms = int(time.time() * 1000)
+        clock_store.update_clock_state(
+            HASH, lambda s: dict(s,
+                                 last_tick_at=now_ms - 2 * 60 * 60000
+                                 - 1))
+        with patched_quota_clock(
+                row=dict(ROW_FLASH, next_run_at=FIRST_TARGET + 1)):
+            code, payload = run_cli("quota-clock-status", self.repo)
+        self.assertEqual(code, 0)
+        self.assertEqual(payload["health"], "unhealthy")
+        self.assertTrue(any(r.startswith("target_mismatch")
+                            for r in payload["reasons"]))
+        self.assertTrue(any(r.startswith("tick_stale")
+                            for r in payload["reasons"]))
+        self.assertFalse(payload["needs_replacement"])
+        self.assertNotIn("recovery_guidance", payload)
+        self.assertEqual(payload["placement"]["session_binding"],
+                         "active")
 
     def test_status_row_missing_unhealthy(self):
         self.bind_state()

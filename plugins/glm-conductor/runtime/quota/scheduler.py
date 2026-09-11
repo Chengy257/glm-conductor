@@ -45,11 +45,10 @@
     runtime.state，无循环导入）。风格对齐 runtime/quota/parser.py。
 
 来源：
-    docs/history/v2.0/glm-conductor-v2-upgrade-guide-final.md §27（snapshot）、
-    §28（四态评估）、§29（PRESSURE→checkpoint）、§30
-    （max(reset)+grace）、§31（绝不虚构 reset）、§32（唤醒强制
-    刷新）、§33（UNKNOWN 周期存活探针回退）、§45（冒烟场景）
-    + v2 升级计划工作块 B5.3。
+    v2.0 设计（已蒸馏入 docs/architecture.md：snapshot / 四态评估 /
+    PRESSURE→checkpoint / max(reset)+grace / 绝不虚构 reset / 唤醒强制
+    刷新 / UNKNOWN 周期存活探针回退 / 冒烟场景）+ v2 升级计划工作块
+    B5.3。
 """
 
 import math

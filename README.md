@@ -2,29 +2,90 @@
 
 **English** | [简体中文](./README.zh-CN.md)
 
-![Version](https://img.shields.io/badge/version-2.3.0-blue.svg)
+![Version](https://img.shields.io/badge/version-2.3.1-blue.svg)
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
 ![ZCode Plugin](https://img.shields.io/badge/ZCode-plugin-green.svg)
 ![Models](https://img.shields.io/badge/models-GLM--5.3%20%2F%20GLM--5.3--Flash-orange.svg)
 ![CI](https://github.com/Chengy257/glm-conductor/actions/workflows/validate.yml/badge.svg)
 
-> GLM Conductor is a deterministic orchestration, execution-assurance, and quota-aware continuity runtime for GLM coding agents in ZCode. The contracts that make delegation safe are enforced by runtime hooks — not left to model self-discipline.
-
-## What is GLM Conductor
-
-GLM Conductor is a ZCode orchestration plugin for coding agents on the GLM Coding Plan. A GLM-5.3 main session acts as the single architect — planning, routing, verification, and acceptance — while cost-efficient GLM-5.3-Flash subagents execute bounded implementation specs and fresh-context read-only reviewers deliver independent final audits.
-
-Its defining property is that the key contracts (ownership scopes, verification evidence, review verdicts, quota-aware resume) are enforced **mechanically** by plugin-distributed hooks and a stdlib-only Python runtime: out-of-scope changes cannot silently pass the completion gate, completion claims without evidence are blocked, stale evidence expires automatically, and quota-exhausted tasks re-activate in the same session with bounded latency.
+GLM Conductor is a lightweight orchestration extension for GLM coding agents in ZCode. A strong model keeps planning and acceptance in its own hands, hands bounded implementation to low-cost workers, and brings in an independent reviewer when a change deserves one. For long tasks, it keeps work moving safely across quota windows instead of stalling when a plan runs out.
 
 ## Why GLM Conductor
 
-**Selective routing orchestration.** Before the first delegation, the main session declares a machine-auditable `SELECTIVE ROUTE` (five fields: mode / delegability / assurance / executor / continuity) along two independent axes — **Delegability** (is the remaining implementation bounded enough to delegate?) and **Assurance** (does completion need an independent audit?) — mapping to one of four routes: `solo` / `delegate` / `audit` / `full`. Every delegation uses a five-part implementation spec (objective / files and ownership / interfaces / constraints / verification) and returns an IMPLEMENTATION REPORT; routes are reassessed in either direction on new evidence.
+- **Expensive reasoning goes where it matters.** The main model (GLM-5.3) spends its context on what deserves it — resolving ambiguity, designing, routing, checking diffs, accepting results — while well-specified implementation goes to cheaper workers.
+- **Mechanical work gets delegated, with contracts enforced by the runtime.** Every delegation carries a five-part spec (objective, files and ownership, interfaces, constraints, verification), and plugin hooks check it mechanically: out-of-scope changes and completion claims without evidence cannot silently pass. When the enforcement layer itself breaks, it degrades visibly — it never silently blocks your session.
+- **Long tasks survive quota windows.** When quota runs out mid-task, the task parks at a safe milestone and picks up again when quota returns — see [Continuity](#continuity-long-tasks-across-quota-windows) below.
 
-**Mechanical execution assurance.** The Stop-gate completion check is four-fold: ownership (actually touched files ⊆ declared scope), verification (required commands really run, recorded as evidence), review (a fresh independent ship verdict for high-assurance work), and evidence freshness (verification/review receipts are fingerprint-bound to the repository state they were recorded against). Dispatch permits gate implementation subagents before they act, and a table-driven Bash policy always denies destructive commands. Enforcement fails open and visibly (`ENFORCEMENT DEGRADED` on stderr) — a broken enforcement layer never blocks the session.
+## How it works, in one picture
 
-**Quota-aware continuity.** Long tasks survive quota windows safely: the execution phase (NORMAL / PRESSURE / DRAINING / BLOCKED) mechanically decides what may run now; quota-exhausted tasks follow an authorized resume chain and are re-activated in the same session through the persistent wake bridge, with durable SessionStart recovery as the fallback when the host is unavailable. Tasks subscribe to quota epochs instead of owning quota clocks, and on resume the repository's real state always wins over recorded state.
+```
+                    Main model — GLM-5.3
+          planning · routing · verification · acceptance
+                  /                              \
+    bounded task ──▶ implementation worker        high assurance ──▶ independent reviewer
+                   (GLM-5.3-Flash,                                (fresh context,
+                    fresh context)                                 read-only)
 
-## Install
+    Continuity for long tasks
+        ├─ Global Quota Clock    persistent · one per provider identity
+        └─ Task Wake Bridge      temporary · one per waiting task
+```
+
+ZCode remains the underlying harness — the plugin orchestrates within it and adds runtime enforcement on top.
+
+## Routing: who implements, who reviews
+
+Before the first delegation, the main model answers two independent questions:
+
+- **Delegability — is the remaining implementation bounded enough to hand off?** Goal, file scope, interfaces, constraints, and verification all pinned down means high; an open architecture or judgment-dense work means low.
+- **Assurance — does this change deserve an independent review from a fresh context after the main model verifies it?** Contained impact means standard; wide impact or user-visible risk means high.
+
+The two answers pick one of four routes:
+
+| Delegability | Assurance | Route | Implemented by | Independent review |
+| --- | --- | --- | --- | --- |
+| low | standard | `solo` | main model | no |
+| high | standard | `delegate` | implementation worker | no |
+| low | high | `audit` | main model | yes |
+| high | high | `full` | implementation worker | yes |
+
+The route is declared once, before the first delegation, and can be re-assessed in either direction on new evidence. Visual tasks use a visual implementation worker and a visual reviewer.
+
+## Model roles
+
+Today's recommended defaults: **GLM-5.3** as the main session (planning, routing, acceptance), **GLM-5.3-Flash** for implementation workers (standard and visual), and a **fresh-context reviewer** for independent audits — text reviews run on GLM-5.3, visual reviews on multimodal Flash. These are the currently recommended role assignments, not permanent architectural identities: the role contracts are expected to evolve toward semantic model roles (`planner_model` / `executor_model` / `reviewer_model`) so other combinations can be configured over time.
+
+## Continuity: long tasks across quota windows
+
+Continuity is independent of routing — it is a lifecycle layer any long task can use. Two mechanisms cooperate, and they are deliberately different species. Default behavior: a durable task is always recoverable — the next session start picks it up — while automatic cross-window wake-up only ever happens inside authorization you grant explicitly.
+
+### Global Quota Clock — persistent, one per provider identity
+
+- One persistent clock per provider identity (your account), owned by no single task.
+- It periodically wakes and makes a small low-cost call to observe the provider's quota windows and materialize the next one, then re-times itself toward the provider's real reset — it never assumes a fixed reset schedule.
+- The regular recurring schedule (hourly by default) is only a watchdog: the normal path re-times the next wake precisely, to just after the real reset.
+- Quota facts always come from the provider's own monitoring endpoints — the plugin never invents quota interfaces and never hardcodes reset times.
+
+### Task Wake Bridge — temporary, one per waiting task
+
+- Created only when a specific task is actually waiting for quota; it wakes that task near the moment execution can resume.
+- Cleaned up once the task no longer needs it. The clock serves the account; the bridge serves one task — the two are never confused.
+
+### Dedicated clock session (recommended placement)
+
+Host the Global Quota Clock in a small dedicated session running a low-cost Flash model, so its periodic wakes never interrupt your main coding session. ZCode does not currently open session creation to plugins: the plugin can recommend placement and help diagnose a misplaced clock, but it cannot create the session or mechanically guarantee the placement.
+
+## Host compatibility and safety
+
+Scheduling features adapt to your locally observed ZCode host behavior — not a contract API — so a ZCode upgrade can shift it. The adaptation is isolated behind a replaceable adapter, and its only production write is re-timing a single scheduled field (`next_run_at`) of an existing automation; everything else in the host's local store is off limits. After upgrading ZCode, run the read-only self-check:
+
+```
+python3 <plugin-root>/runtime/cli.py host-check
+```
+
+If compatibility breaks, scheduling features fail safely and recovery falls back to session-start injection. Diagnosis and recovery paths — host compatibility, clock health, where state lives — are in [docs/troubleshooting.md](./docs/troubleshooting.md).
+
+## Install and first run
 
 Prerequisites:
 
@@ -40,7 +101,7 @@ Install from the ZCode plugin marketplace:
 
 > Select the marketplace manifest (the repository root), not `plugins/glm-conductor/.zcode-plugin/plugin.json` — that is the plugin manifest, not the marketplace manifest.
 
-## Quick start
+### First run: orchestration works out of the box (normal use)
 
 In a new session, ask for orchestration before the first delegation:
 
@@ -48,7 +109,7 @@ In a new session, ask for orchestration before the first delegation:
 Use glm-conductor:orchestration to plan and implement this feature: declare the route, then verify.
 ```
 
-The main session emits the route declaration first, then executes accordingly:
+The main model declares the route first, then works accordingly:
 
 ```
 SELECTIVE ROUTE
@@ -60,56 +121,29 @@ continuity: foreground
 reason: implementation is bounded by explicit interfaces, owned files, and deterministic verification
 ```
 
-| Delegability | Assurance | Route | Implementation | Independent review |
-| --- | --- | --- | --- | --- |
-| low | standard | `solo` | GLM-5.3 main session | No |
-| high | standard | `delegate` | executor subagent | No |
-| low | high | `audit` | GLM-5.3 main session | Yes |
-| high | high | `full` | executor subagent | Yes |
+That is the whole setup for everyday use — the Global Quota Clock is **not** required for basic orchestration. Useful entry points:
 
-`executor` (standard / visual) and `continuity` (foreground / resumable / idle) are declared as independent dimensions alongside the route.
+- `glm-conductor:orchestration` — route declaration, delegation contracts, review flow
+- `glm-conductor:continuity` — checkpoints and resume for long tasks
+- `glm-conductor:enforcement` — user-side enforcement reference: environment self-check, hook message meanings, recovery when blocked
+- `/glm-conductor:quota` — on-demand quota diagnostics (text report; `--json` for machine-readable output)
 
-Three skills carry the workflow:
+### Optional: quota continuity setup
 
-- `/orchestration` — route declaration, delegation contracts, work-unit management, review flow
-- `/continuity` — long-horizon continuity: per-task checkpoints, resume, quota-aware scheduling
-- `enforcement` — the user-side enforcement reference: environment self-check, hook message meanings, and how to recover when blocked
-
-For quota diagnostics at any time: `/glm-conductor:quota` (text report, or `--json` for machine-readable output).
-
-The runtime CLI is the single entry point for quota/continuity subcommands:
+Only if you want tasks to continue across quota windows: plan and bind a Global Quota Clock (in the dedicated session recommended above), then let it run. The runtime CLI is the single entry point for quota and continuity subcommands — `<plugin-root>` is the installed plugin directory (`plugins/glm-conductor` in a repository checkout):
 
 ```
-python3 plugins/glm-conductor/runtime/cli.py <subcommand>
+python3 <plugin-root>/runtime/cli.py <subcommand>
 ```
 
-for example `quota-resolve`, `quota-phase`, or `quota-resume`.
-
-## Key runtime guarantees
-
-Honest, runtime-supported claims — each enforced by hooks and the stdlib-only runtime:
-
-- **Ownership-scoped enforcement.** The four-fold Stop-gate completion check verifies, per task and against the task's bound Git repository root, that actually touched files ⊆ the declared file scope, that required verification commands were really run, and — for high-assurance work — that a fresh independent ship review exists. Out-of-scope changes and unevidenced completion claims cannot silently pass.
-- **Durable verification / review receipts.** `verify-unit` / `verify-task` have the runtime itself execute the declared commands under whitelist and policy restrictions and persist durable receipts; review verdicts are recorded as fingerprint-bound receipts. The completion gate accepts only receipts — hand-written state fields are not trusted — and `task_fingerprint` binds every receipt to the exact repository state at recording time, so any later edit makes the evidence stale and blocks completion.
-- **DRAINING is finish-only.** Quota awareness is dual-layer: the provider reports four states (AVAILABLE / PRESSURE / EXHAUSTED / UNKNOWN) while the execution phase (NORMAL / PRESSURE / DRAINING / BLOCKED) is derived separately — when the smallest remaining window drops to 20% or less, the phase becomes DRAINING even if the provider still reports AVAILABLE. DRAINING forbids new implementation waves and allows only finish-up actions; BLOCKED freezes both.
-- **Epoch-idempotent consumption.** Tasks subscribe to quota epochs (epoch identity is a deterministic fingerprint of the current window set) instead of owning quota clocks; activation is booked at most once per epoch, and the window budget is consumed exactly once at the resume commit point — idempotent per epoch, so crash-window reruns never double-consume.
-- **The recurring bridge is the only stable transport.** Same-session re-activation of a dormant task rides the persistent wake bridge: `recurring_bridge` is the only activation transport with stable status, and reserved alternatives are refused (`TransportReservedError`) rather than half-implemented. The opt-in resident quota watcher observes only — it never injects turns into a dormant session; when the host is unavailable, durable SessionStart recovery injects the resume context into the next session automatically.
-- **The primer is off by default.** Materializing a fresh quota window requires one minimal model call; the window primer is the runtime's only control-plane model-call surface and is structurally off by default (`primer_enabled=false` behind an authorization gate — manual/notify never prime).
-
-Quota facts come from verified provider monitoring endpoints (credentials are resolved automatically and never persisted) — never from fabricated native quota interfaces or hardcoded reset schedules; when an endpoint is unavailable, quota awareness falls back to periodic probing.
+for example `quota-clock-plan` / `quota-clock-bind` / `quota-clock-status`, `quota-resume`, `quota-phase`, or `host-check`.
 
 ## Documentation
 
 - [docs/core-concepts.md](./docs/core-concepts.md) — the three pillars explained conceptually
-- [docs/architecture.md](./docs/architecture.md) — the authoritative technical reference: state model, routing, dispatch transactions, enforcement, quota continuity, recovery
-- [docs/README.md](./docs/README.md) — documentation index
+- [docs/architecture.md](./docs/architecture.md) — the authoritative technical reference: state model, routing, enforcement, quota continuity, recovery
+- [docs/troubleshooting.md](./docs/troubleshooting.md) — symptom → diagnosis → fix: host compatibility, clock health, state locations
 - [CHANGELOG.md](./CHANGELOG.md) — release-level changes
-
-History archives: development-process records (implementation plans, experiments, release evidence) live under [docs/history/](./docs/history/) — non-authoritative archives; current truth is the code plus the architecture doc.
-
-## Compatibility and stable boundary
-
-The stable boundary is frozen: the routing axes and four routes, the Stop-gate check order and its gate vocabulary, the TASK_ID format and the `.glm-conductor/tasks/<task-id>/` state layout, the transport vocabulary (`recurring_bridge` the only stable transport), and the runtime CLI subcommand surface — changes require an explicit design ruling (see [architecture §14](./docs/architecture.md)). The execution model is single-controller: one orchestrating main session, with implementation workers capped at 4 (bounded parallelism, experimental).
 
 ## License
 

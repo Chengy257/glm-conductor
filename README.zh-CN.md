@@ -2,33 +2,94 @@
 
 [English](./README.md) | **简体中文**
 
-![Version](https://img.shields.io/badge/version-2.3.0-blue.svg)
+![Version](https://img.shields.io/badge/version-2.3.1-blue.svg)
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
 ![ZCode Plugin](https://img.shields.io/badge/ZCode-plugin-green.svg)
 ![Models](https://img.shields.io/badge/models-GLM--5.3%20%2F%20GLM--5.3--Flash-orange.svg)
 ![CI](https://github.com/Chengy257/glm-conductor/actions/workflows/validate.yml/badge.svg)
 
-> GLM Conductor 是面向 ZCode 中 GLM 编码智能体的确定性编排 / 执行保障 / 额度感知连续性运行时。让委派安全的关键契约由运行时钩子确定性强制，而非依赖模型自觉。
+GLM Conductor 是面向 ZCode 中 GLM 编码智能体的轻量编排扩展。强模型把规划与验收握在自己手里，把有界的实施交给低成本工作者，并在改动值得时引入独立审查。对长任务，它让工作在额度窗口之间安全延续，而不是在额度耗尽时停摆。
 
-## 项目简介
+## 为什么选择 GLM Conductor
 
-GLM Conductor 是一个 ZCode 编排插件，服务于使用 GLM Coding Plan 的编码智能体。GLM-5.3 主会话担任唯一架构师——负责规划、路由、验证与验收；高性价比的 GLM-5.3-Flash 子智能体执行有界的实施规格；全新上下文的只读审查者提供独立终审。
+- **贵的推理用在刀刃上。** 主模型（GLM-5.3）把上下文花在真正值得的地方——解决歧义、设计、路由、检查 diff、验收结果——规格完备的实施则交给更便宜的执行者。
+- **机械工作被委派出去，契约由运行时强制。** 每次委派都携带五段式规格（目标、文件与归属、接口、约束、验证），插件钩子对其做机械检查：越界改动与无证据的完成声明无法静默通过。强制层自身故障时可见降级——绝不静默阻断你的会话。
+- **长任务跨额度窗口存活。** 任务中途额度耗尽时，在安全里程碑停泊，额度恢复后继续——见下文「长任务连续性」。
 
-它的决定性特征：关键契约（ownership 范围、验证证据、审查裁决、额度感知续跑）由随插件分发的钩子与纯标准库 Python 运行时**机械地**强制执行——越界改动无法静默通过完成门，无证据的完成声明会被拦截，过期证据自动失效，额度耗尽的任务在有界延迟内于同一会话再激活。
+## 一图看懂工作方式
 
-## 设计动机：三大支柱
+```
+                     主模型 — GLM-5.3
+             规划 · 路由 · 验证 · 验收
+                  /                              \
+    有界任务 ──▶ 实施者                 高保障任务 ──▶ 独立审查者
+                （GLM-5.3-Flash，                   （全新上下文，
+                  全新上下文）                         只读）
 
-**选择性路由编排。** 首次委派前，主会话先声明机器可审计的 `SELECTIVE ROUTE`（五个字段：mode / delegability / assurance / executor / continuity），按两个独立轴分级——**Delegability**（剩余实施是否足够有界可委派）与 **Assurance**（完成后是否需要独立终审）——映射到四条路线之一：`solo` / `delegate` / `audit` / `full`。每次委派都使用五段式实施规格（目标 / 文件与归属 / 接口 / 约束 / 验证）并按 IMPLEMENTATION REPORT 接收；路由可凭新证据双向重估。
+    长任务连续性
+        ├─ 全局额度时钟     常驻 · 每 provider 身份一个
+        └─ 任务唤醒桥      临时 · 每等待任务一个
+```
 
-**机械的执行保障。** Stop 完成门做四重检查：ownership（实际改动 ⊆ 声明范围）、验证（required 命令真的跑过并落证据）、审查（高保障任务须有新鲜的独立 ship 裁决）、证据新鲜度（验证/审查 receipt 经指纹绑定到记录时的仓库状态）。派发许可（permit）在实施者动手前把关，表驱动的 Bash 策略恒拒破坏性命令。强制层 fail-open 且可见（stderr 报 `ENFORCEMENT DEGRADED`）——强制层故障永不阻断会话。
+ZCode 仍是底层 harness——插件在其内部编排，并在其上叠加运行时强制。
 
-**额度感知连续性。** 长任务跨额度窗口安全续跑：执行相（NORMAL / PRESSURE / DRAINING / BLOCKED）机械决定当前允许做什么；额度耗尽的任务走授权续跑链，经持久唤醒桥在同一会话内再激活，宿主不可用时由 durable SessionStart 恢复兜底。任务订阅 quota epoch 而非自持额度时钟；恢复时仓库真实状态始终优先于记录。
+## 路由：谁来实施、谁来审查
 
-## 安装
+首次委派前，主模型先回答两个独立问题：
+
+- **可委派性（Delegability）——剩余实施是否足够有界、可以交出去？** 目标、文件范围、接口、约束、验证全部敲定即 high；架构未定或判断密集即 low。
+- **保障等级（Assurance）——主模型验证之后，这次改动是否值得一次全新上下文的独立审查？** 影响面有限即 standard；影响面宽或用户可见风险高即 high。
+
+两个答案共同选定四条路线之一：
+
+| 可委派性 | 保障等级 | 路由 | 实施 | 独立审查 |
+| --- | --- | --- | --- | --- |
+| low | standard | `solo` | 主模型 | 否 |
+| high | standard | `delegate` | 实施者 | 否 |
+| low | high | `audit` | 主模型 | 是 |
+| high | high | `full` | 实施者 | 是 |
+
+路线在首次委派前声明一次，可凭新证据双向重估。视觉任务使用视觉实施者与视觉审查者。
+
+## 模型角色
+
+当前推荐的默认组合：**GLM-5.3** 担任主会话（规划、路由、验收），**GLM-5.3-Flash** 承担实施者（标准与视觉），独立审查由全新上下文的审查者完成——文本审查跑在 GLM-5.3 上，视觉审查跑在多模态 Flash 上。这些是「当前推荐的角色分配」，不是永久的架构身份：角色契约预期向语义化模型角色（`planner_model` / `executor_model` / `reviewer_model`）演化，未来可配置其他组合。
+
+## 长任务连续性：跨额度窗口
+
+连续性与路由正交——它是任何长任务都可使用的生命周期层。两个机制协作，且刻意是两个物种。默认行为：持久任务总是可恢复——下一次会话启动会接上它；跨额度窗口的自动唤醒则只发生在你显式授权的范围内。
+
+### 全局额度时钟（Global Quota Clock）——常驻，每身份一个
+
+- 每个 provider 身份（你的账号）一个持久时钟，不属于任何单个任务。
+- 它周期性醒来，做一次低成本调用以观察 provider 的额度窗口并物化下一个窗口，随后向 provider 的真实 reset 时刻自校时——绝不假设固定重置时刻。
+- 常规的周期调度（缺省每小时）只是 watchdog：正常路径会把下一次唤醒精确 retime 到真实 reset 之后。
+- 额度事实始终来自 provider 自己的监控端点——插件绝不虚构额度接口、绝不硬编码重置时间。
+
+### 任务唤醒桥（Task Wake Bridge）——临时，每等待任务一个
+
+- 只在某个任务真的在等额度时创建，在临近可恢复执行的时刻唤醒该任务。
+- 任务不再需要时随即清理。时钟服务账号，桥服务单个任务——两者从不混淆。
+
+### 专用额度时钟会话（推荐放置）
+
+建议把全局额度时钟放在一个运行低成本 Flash 模型的小型专用会话里，让它的周期唤醒永不打断你的主编码会话。ZCode 目前未向插件开放会话创建：插件只能建议放置方式、帮助诊断错置的时钟，不能创建会话、也无法机械保证放置。
+
+## 宿主兼容与安全
+
+调度类功能适配的是本地观察到的 ZCode 宿主行为——不是契约 API——因此 ZCode 升级可能使其漂移。适配被隔离在可替换的 adapter 之后，其唯一的生产写入是改写既有定时任务的单个调度字段（`next_run_at`）；宿主本地存储的其余一切不可触碰。ZCode 升级后，运行只读自检：
+
+```
+python3 <plugin-root>/runtime/cli.py host-check
+```
+
+兼容性被破坏时，调度功能安全失败，恢复回退到会话启动注入。诊断与恢复路径——宿主兼容性、时钟健康、状态存放位置——见 [docs/troubleshooting.md](./docs/troubleshooting.md)。
+
+## 安装与首跑
 
 前提条件：
 
-- [ZCode](https://zcode.z.ai) 客户端（Tested with 3.9.2）
+- [ZCode](https://zcode.z.ai) 客户端（已在 3.9.2 版本测试）
 - GLM Coding Plan（或 Z.ai 账号），已连接 GLM-5.3 与 GLM-5.3-Flash——**编排主会话必须是 GLM-5.3**；Flash 承担实施与审查角色
 - `python3`（Python 3.8+）在 PATH 中——强制层钩子的运行时
 
@@ -40,7 +101,7 @@ GLM Conductor 是一个 ZCode 编排插件，服务于使用 GLM Coding Plan 的
 
 > 请选择市场清单（仓库根目录），不要选 `plugins/glm-conductor/.zcode-plugin/plugin.json`——那是插件清单而非市场清单。
 
-## 快速开始
+### 首跑：编排开箱即用（日常使用）
 
 新建会话后，在首次委派前先要求编排：
 
@@ -48,7 +109,7 @@ GLM Conductor 是一个 ZCode 编排插件，服务于使用 GLM Coding Plan 的
 用 glm-conductor:orchestration 规划并实现这个功能：先声明路由，再完成验证。
 ```
 
-主会话会先输出路由声明，再按所选路由执行：
+主模型会先输出路由声明，再按所选路由工作：
 
 ```
 SELECTIVE ROUTE
@@ -60,56 +121,29 @@ continuity: foreground
 reason: implementation is bounded by explicit interfaces, owned files, and deterministic verification
 ```
 
-| Delegability | Assurance | 路由 | 实施 | 独立审查 |
-| --- | --- | --- | --- | --- |
-| low | standard | `solo` | GLM-5.3 主会话 | 否 |
-| high | standard | `delegate` | 实施者子智能体 | 否 |
-| low | high | `audit` | GLM-5.3 主会话 | 是 |
-| high | high | `full` | 实施者子智能体 | 是 |
+日常使用到此为止——全局额度时钟**不是**基本编排的必需品。常用入口：
 
-`executor`（标准 / 视觉）与 `continuity`（foreground / resumable / idle）作为独立维度与路线一并声明。
+- `glm-conductor:orchestration` — 路由声明、委派契约、审查流程
+- `glm-conductor:continuity` — 长任务的 checkpoint 与恢复
+- `glm-conductor:enforcement` — 强制层用户侧参考：环境自检、钩子报文含义、被拦截时的恢复方法
+- `/glm-conductor:quota` — 随时可用的额度诊断（文本报告；`--json` 为机器可读输出）
 
-三个技能承载工作流：
+### 可选：额度连续性设置
 
-- `/orchestration` — 路由声明、委派契约、工作单元管理、审查流程
-- `/continuity` — 长任务连续性：任务专属 checkpoint、恢复、额度感知调度
-- `enforcement` — 强制层用户侧参考：环境自检、钩子报文含义、被拦截时的恢复方法
-
-额度诊断随时可用：`/glm-conductor:quota`（文本报告，`--json` 为机器可读输出）。
-
-runtime CLI 是额度/连续性子命令的唯一入口：
+只在希望任务跨额度窗口继续时才需要：规划并绑定一个全局额度时钟（放在上文推荐的专用会话中），然后让它运行。runtime CLI 是额度与连续性子命令的唯一入口——`<plugin-root>` 为插件安装目录（仓库检出版本中即 `plugins/glm-conductor`）：
 
 ```
-python3 plugins/glm-conductor/runtime/cli.py <subcommand>
+python3 <plugin-root>/runtime/cli.py <subcommand>
 ```
 
-例如 `quota-resolve`、`quota-phase`、`quota-resume`。
-
-## 关键运行时保证
-
-只声明运行时真正支持的行为——每一条都由钩子与纯标准库运行时强制：
-
-- **ownership 范围内的强制。** 四重 Stop 完成门逐任务、按任务绑定的 Git 仓库根求值：实际改动 ⊆ 声明文件范围、required 验证命令真的跑过、高保障任务另有新鲜的独立 ship 审查。越界改动与无证据的完成声明无法静默通过。
-- **durable 验证 / 审查 receipt。** `verify-unit` / `verify-task` 由 runtime 亲自在白名单与策略限制下执行已声明命令并落 durable receipt；审查裁决以指纹绑定 receipt 的形式记录。完成门只认 receipt——state 手写字段不再作为通过依据——且 `task_fingerprint` 把每条 receipt 绑定到记录时刻的仓库状态，任何后续编辑都会使证据过期并拦截完成。
-- **DRAINING 只许收尾。** 额度感知是双层的：provider 报告四态（AVAILABLE / PRESSURE / EXHAUSTED / UNKNOWN），执行相（NORMAL / PRESSURE / DRAINING / BLOCKED）独立推导——最小编余窗口降到 20% 及以下即判 DRAINING，即使 provider 仍报 AVAILABLE。DRAINING 禁开新实施波次、只许收尾动作；BLOCKED 两者一并冻结。
-- **epoch 幂等消费。** 任务订阅 quota epoch（epoch 身份是当前窗口集合的确定性指纹）而非自持额度时钟；激活每 epoch 至多记账一次，窗口预算只在 resume 提交点消费一次——同 epoch 幂等，崩溃窗口重跑绝不重复消费。
-- **recurring bridge 是唯一 stable 传输。** 休眠任务的同会话再激活走持久唤醒桥：`recurring_bridge` 是唯一 stable 状态的激活传输，预留的替代传输被拒绝（`TransportReservedError`）而非半实现。可选常驻额度 watcher 只做观察——绝不向休眠会话注入回合；宿主不可用时，durable SessionStart 恢复自动把续跑上下文注入下一个会话。
-- **primer 默认关闭。** 新额度窗口物化需要一次最小模型调用；window primer 是 runtime 唯一的 control-plane 模型调用面，默认结构性关闭（`primer_enabled=false` 加授权闸——manual/notify 永不 prime）。
-
-额度事实来自经验证的 provider 监控端点（凭证自动解析、零落盘）——绝不虚构原生 quota 接口、不硬编码重置时间表；端点不可用时回退周期性探针。
+例如 `quota-clock-plan` / `quota-clock-bind` / `quota-clock-status`、`quota-resume`、`quota-phase`、`host-check`。
 
 ## 文档
 
 - [docs/core-concepts.md](./docs/core-concepts.md) — 三大支柱的概念性说明
-- [docs/architecture.md](./docs/architecture.md) — 唯一架构真相源：状态模型、路由、派发事务、强制层、额度连续性、恢复
-- [docs/README.md](./docs/README.md) — 文档索引
+- [docs/architecture.md](./docs/architecture.md) — 唯一架构真相源：状态模型、路由、强制层、额度连续性、恢复
+- [docs/troubleshooting.md](./docs/troubleshooting.md) — 按「现象 → 判定 → 处置」组织：宿主兼容性、时钟健康、状态存放位置
 - [CHANGELOG.md](./CHANGELOG.md) — 发布级变更记录
-
-历史存档：开发过程记录（实施计划、实验、发布证据）位于 [docs/history/](./docs/history/)——非权威存档；当前真相 = 仓库代码 + 架构文档。
-
-## 兼容性与稳定边界
-
-稳定边界已冻结：路由双轴与四条路线、Stop 门检查顺序与记账词汇、TASK_ID 格式与 `.glm-conductor/tasks/<task-id>/` 状态布局、传输词汇（`recurring_bridge` 唯一 stable）、runtime CLI 公共子命令面——变更须经显式设计裁决（见[架构文档 §14](./docs/architecture.md)）。执行模型是单控制器：单一编排主会话，实施 worker 上限 4（有界并行，experimental）。
 
 ## 许可
 

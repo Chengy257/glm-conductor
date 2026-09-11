@@ -104,12 +104,20 @@ def run_hook(stdin_text, project_dir):
     进程 locale 严格解码，中文/非 ASCII 字节会 UnicodeDecodeError，
     CI Windows 矩阵实测）；errors="replace" 兜底异常字节。
     ZCODE_PROJECT_DIR 指向被检仓库（钩子据此发现活动任务）。
+    GLM_CONDUCTOR_HOME 注入一次性空目录（v2.3.1 w1-session-advisory）：
+    钩子新增的 clock advisory 读用户级 quota-clocks state，本机存在
+    真实陈旧 clock state 时会按设计触发——不隔离会让「完全静默」
+    断言依赖运行机器的用户级状态（子进程在 with 块内同步跑完，目录
+    生命周期覆盖整个钩子执行）。
     """
-    return subprocess.run(
-        [sys.executable, str(SESSION_START)],
-        input=stdin_text, text=True, capture_output=True,
-        encoding="utf-8", errors="replace",
-        env=dict(os.environ, ZCODE_PROJECT_DIR=str(project_dir)))
+    from runtime.quota import clock_store
+    with tempfile.TemporaryDirectory(prefix="gc-recovery-home-") as home:
+        return subprocess.run(
+            [sys.executable, str(SESSION_START)],
+            input=stdin_text, text=True, capture_output=True,
+            encoding="utf-8", errors="replace",
+            env=dict(os.environ, ZCODE_PROJECT_DIR=str(project_dir),
+                     **{clock_store.GLM_CONDUCTOR_HOME_ENV: home}))
 
 
 def parse_single_line_json(text):
