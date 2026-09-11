@@ -261,7 +261,7 @@ class GitRepoFixture(TempDirFixture):
         return st
 
 
-# —— 直测层：触发域 / trio 矩阵 / 短路 / watcher / fail-open / docstring ——
+# —— 直测层：触发域 / trio 矩阵 / 短路 / watcher / fail-open ——
 
 class ContinuityHealthDirectTest(TempDirFixture):
     """evaluate_continuity_health 直测（无需 git；transport 步骤按需把

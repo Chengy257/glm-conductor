@@ -39,9 +39,9 @@ commands → 域模块，本模块不 import runtime.cli）。输出三形态与
 共用的本地额度输入装配）、WAKE_PLAN_ARM_ADVISORY（wake-plan 输出的
 advisory 词汇；无外部锚点，原件随函数整体迁出）。WAKE_RETIME_
 PARK_OFFSET_MS / WAKE_RETIME_RETRY_OFFSET_MS / _clock_now_ms 为琐碎
-共用件：按 W3 迁移规格原件留在 cli.py（tests 以 cli.WAKE_RETIME_* 锚
-定原件取值），本模块保留同实现副本——两处同值同实现，commands 模块
-间互不 import。
+共用件：W4 测试收敛后本模块是唯一实现所在（tests 以
+wake_commands.WAKE_RETIME_* 锚定，cli.py 副本已删——原 W3 双副本
+形态终结）。
 
 异常词汇（结构例外项，同实现副本）：_TaskMissing / _QuotaFlowRejected
 的原件是 cli 侧多命令组共用（policy / permit / wave / quota-exhausted
@@ -439,12 +439,11 @@ def _wake_status(repo_root, task_id) -> int:
 
 # park 偏移（毫秒）：quota 可执行 → 本桥停摆一年（任务醒了不再等待；
 # 任务下次再睡会走既有 arm 流程重新建置，automation 仍按 native
-# recurring 服役但等价 no-op）。同实现副本：原件留在 cli.py（tests 以
-# cli.WAKE_RETIME_PARK_OFFSET_MS 锚定），两处同值互不 import。
+# recurring 服役但等价 no-op）。本模块为唯一实现所在（v2.3.1 W4 起
+# tests 锚 wake_commands.WAKE_RETIME_PARK_OFFSET_MS，cli.py 副本已删）。
 WAKE_RETIME_PARK_OFFSET_MS = 365 * 86400 * 1000
 # 无已知边界重试偏移（毫秒）：§10.4「保持简单优先」的 5 分钟短重试
-# （同实现副本：原件留在 cli.py，tests 以
-# cli.WAKE_RETIME_RETRY_OFFSET_MS 锚定）。
+# （唯一实现所在，tests 锚 wake_commands.WAKE_RETIME_RETRY_OFFSET_MS）。
 WAKE_RETIME_RETRY_OFFSET_MS = 300 * 1000
 
 
