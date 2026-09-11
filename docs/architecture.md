@@ -1,8 +1,8 @@
 # GLM Conductor 架构（权威文档）
 
-> 本文档是 GLM Conductor 的**唯一架构真相源**，描述插件**当前**（v2.2.1 加固线，基于 2.2.0 stable）的实际运行时行为——每一节回答"系统现在是什么"，不叙述开发历程（历程存档见文末「历史沿革」）。
+> 本文档是 GLM Conductor 的**唯一架构真相源**，描述插件**当前**（v2.2.1 加固线，基于 2.2.0 stable）的实际运行时行为——每一节回答"系统现在是什么"，不叙述开发历程。
 > 契约细节以插件目录为准（`plugins/glm-conductor/` 下的 agents 与 skills）；本文档与其保持一致，冲突时以修复到一致为准，不得偏离开源文档单独演化。
-> `docs/history/` 为非权威历史存档，不构成当前实现依据。
+> 当前真相 = 仓库代码 + 本文档 + [core-concepts.md](core-concepts.md)；排障指引见 [troubleshooting.md](troubleshooting.md)。
 
 ## 1. 定位与设计原则
 
@@ -249,7 +249,7 @@ checkpoint 是导航状态，不是仓库真相源：不复制完整 diff、不�
 
 ### 7.5 Quota Control Plane / Activation Transport / Continuity Health
 
-恢复链在此从 Agent 纪律升级为机械保证。窗口机制实测口径（实测证据存档：[docs/history/v2.2/GLM-Conductor-v2.2-Phase0-Primer-Experiments.md](history/v2.2/GLM-Conductor-v2.2-Phase0-Primer-Experiments.md)）：**reset_at 时刻窗口恢复 100%（周窗优先）；下一个 reset_at 只在新窗口内发生模型调用时才物化——纯查询绝不推进它；reset_at 锚定物化时刻 +5h00m01s；会话空闲推迟窗口起点**。
+恢复链在此从 Agent 纪律升级为机械保证。窗口机制实测口径（实现落点：`runtime/quota/window_math.py` / `epoch.py` / `primer.py`）：**reset_at 时刻窗口恢复 100%（周窗优先）；下一个 reset_at 只在新窗口内发生模型调用时才物化——纯查询绝不推进它；reset_at 锚定物化时刻 +5h00m01s；会话空闲推迟窗口起点**。
 
 - **双层额度模型**：provider 四态（AVAILABLE / PRESSURE / EXHAUSTED / UNKNOWN，`scheduler.evaluate`）与 execution phase 四态（NORMAL / PRESSURE / DRAINING / BLOCKED）是两个维度（冻结映射，`runtime/quota/control.py` 的 `evaluate_task_quota_phase` 冻结 8 键）——provider EXHAUSTED 或任一窗余 0 → BLOCKED；最小编余 ≤ draining_percent（默认 20）→ DRAINING（即使 provider 报 AVAILABLE）；draining < 编余 ≤ pressure_percent（35）→ PRESSURE；provider UNKNOWN / 无可数值窗 → PRESSURE（fail-open，预算 1 不阻塞不虚构唤醒时刻）；其余 NORMAL。派发预算：NORMAL → max_workers 可开新波次；PRESSURE → 1；DRAINING → 0 且禁新波次仅许收尾白名单（join/verify/review/checkpoint/wake 等）；BLOCKED → 0 且新波次与收尾一并冻结。`runtime/quota/observer.py` 叠加观测层（纯决策零 I/O 零 daemon）：自适应间隔表（NORMAL 1800s / PRESSURE 600s / DRAINING 300s / BLOCKED 300s，下限 60s）+ lazy heartbeat `should_refresh` + 八键观测 dict；prepare 层硬拒绝 DRAINING 的新单元/新 wave 并按 execution phase 折算 worker cap
 - **Quota Epoch（`runtime/quota/epoch.py`）**：有意义的事件不再是 "automation fired"，而是「新的可执行 quota epoch 出现」——定时器触发只是观察机会，本身不构成新 epoch。epoch 身份 = 排序后 `(kind, reset_at|"unknown")` 窗口多重集的 sha256 确定性指纹，**不含 status / 百分比**（provider 状态翻转是消费状态变化，不是新 epoch；窗口滚动 = reset_at 变化 = 新 epoch），`epoch_id = "glm:" + 指纹前 16 位`。双 boundary 冻结分离：probe boundary = min(全部可解析 reset_at)+grace（只服务观察收紧，Resume Controller 绝不当 executable 消费）；executable boundary = max(阻塞 EXHAUSTED 窗可解析 reset_at)+grace（最晚多窗语义）；无阻塞窗或 reset 全不可解析 → None（绝不虚构时刻）。**QuotaIdentity 双形态（v2.2.1）**：六个记账面（订阅注册/激活/消费/primer/缓存身份/对账）的「某 epoch 记录是否属于当前 provider 身份」统一为 `quota_identity_matches` 判定——epoch_id 等值 AND（记录侧指纹缺席 OR 指纹相等）；异身份同名 epoch 的记录按「无先前记录」处理（不授权、不幂等拦截、不消费）；v2.2 legacy 记录未携带指纹 → 保守信任（可读可用）
@@ -259,8 +259,9 @@ checkpoint 是导航状态，不是仓库真相源：不复制完整 diff、不�
 - **commit-point 消费与记账域（`runtime/quota/accounting.py`）**：窗口预算消费的唯一合法位置 = resume commit point（转态 durable + mark 之后的提交点），入口 `record_quota_boundary_consumed`（幂等 key = `task_id + epoch_id`；授权预闸三查镜像 `auto_resume ∈ {auto_once, until_done}` AND `source == "user"` AND `remaining > 0`——manual/notify 永不消费；boundary 证据派生 = 当前 epoch 快照最早可解析窗口的 `"kind:reset_at"` 形态，记作 `representative_boundary_id`——epoch 中用于人类审计的代表窗口身份，并非 executable boundary；旧事件以 legacy 键 `executable_boundary_id` 记录，读侧双键兼容；`record_quota_boundary_consumed` 的 kwargs 参数名与返回键名 `executable_boundary_id` 冻结不变，键值承载代表窗口身份）；同域规范落点还有 `migrate_quota_window_accounting`（幂等 one-shot 存量迁移；身份键去重使 legacy boundary 证据与新 epoch 证据不双计）。事务序冻结：授权预闸 → boundary 派生 → migrate（先行）→ record（三查竞态 TaskManagerError → face 降级不抛——转态已 durable 不回滚；OSError 自然上抛——证据丢失必须可见）。CLI `quota-resume` 退出码 0/1/2/3：**3 = durable-but-degraded**（转态可能已落盘、幂等重跑安全），区别于 1 拒绝 / 2 参数错误
 - **消费/迁移崩溃一致性（write-ahead pending marker）**：上述两记账 API 在任何可变投影（state save）之前先向任务 journal 追加 pending 事件冻结证据——`quota_consumption_pending` {epoch_id, representative_boundary_id, target_consumed, resume_started_at} 与 `quota_accounting_migration_pending` {legacy_consumed, verified_boundary_ids, attributed_consumed, legacy_unattributed_consumed, new_consumed}（epoch 身份先于投影存在）。重入事务序：先扫 committed（同 epoch 已消费 → 幂等原样返回），再扫 pending 做恢复闭合（reconcile，**先于授权三查**——pending 是上一进程已过授权的持久证据，闭合不重查预算，否则 state 已投影 + 预算恰好耗尽时永远无法闭合）：state 投影已达冻结 target → 只补 committed/marker 事件；差一窗未落 → 补一次投影再落事件；state 与 pending 冻结值矛盾（领先/差距>1/多条 pending 不一致/形状损坏）→ TaskManagerError 零写、pending 保留待人工裁决。迁移闭合按 pending 冻结五数直接补 marker，绝不从已更新 state 重算 legacy。两 API 公开签名与返回键零变化
 - **Persistent Wake Bridge 与 Activation Transport（`runtime/continuity/wake_bridge.py` + `runtime/activation_transport.py`）**：`plan_wake_bridge`（CLI `wake-plan`，纯计算零 automation 创建，只读本地 quota-cache 绝不发网络）裁决 → 主会话宿主 CronCreate（**宿主动作，runtime 绝不调用宿主 `Cron*`**——宿主事实由会话侧供给，如 `wake-reconcile <repo> <task> <host_status>` 显式传入 CronList 观测结论）→ `arm_wake_bridge` 记账即止。**arm/fire/create 一律不消费窗口预算**（automation lifecycle ≠ quota epoch consumption）；`wake-record` / `record_quota_wake` 是 v2.1 legacy 兼容入口（deprecated），persistent path 禁止调用。传输四词汇冻结：`recurring_bridge` 唯一 STABLE（一任务 ↔ 一常驻循环 automation）；`probe_then_hold` / `self_retiming` / `session_injector` 预留——`arm_transport` 对实验 kind 一律 `TransportReservedError`（预留即预留，绝不半实现）。`activation_transport_status`（CLI `transport-status`）输出冻结 12 键事实面，是 Stop 门 armed 检查的接口面；armed 只认显式 arm 路径落下的记账（对账降级 cancelled/stale 即 missing），观测面绝不制造 armed。`runtime/scheduler_facts.py` 以 session_id 缓存宿主 scheduler 能力已证事实（`.glm-conductor/scheduler/session_facts.json`）：证据只进不退——四能力 allowed/forbidden 落定即冻结、origin 只允许 unknown → interactive / scheduled_task 单向升级（被 Scheduled Task 触发过的会话禁止再创建 automation），单探针纪律的数据基础。完成时桥接清理是**会话侧单次尝试**动作（pause/delete 绝不重试，tombstone 快速 no-op）
+- **Global Quota Clock（`runtime/quota/clock.py` + `clock_store.py` + `runtime/commands/quota_clock.py` + `runtime/host/zcode_schedule.py`）**：account（provider 身份）级常驻额度时钟——与 Task Wake Bridge 是两个物种，分工冻结：**Clock 是身份级常驻机制**（一 provider 身份 ↔ 一 clock automation，无窗口预算、无限期，周期观察并物化下一额度窗口），**Bridge 是任务级临时机制**（任务等额度时创建、临近执行时刻唤醒、不再需要时清理）——Clock 不属于任何任务，Bridge 不维护身份级时钟。**recurring 网格只是 watchdog 兜底角色**：正常定时路径 = 每次 tick 按冻结决策表（`clock.next_clock_target`：reset_target / short_retry / weekly_park 三决策）把 `next_run_at` 精确 retime 到 reset+grace（缺省 120s），网格失准只影响兜底节奏、不影响 retime 精确性；retime 失败时 tick 零补偿动作（native watchdog 网格接管，`retimed=false` 照常计一次 tick）。**placement UX 模型（纯 advisory，零阻断零探测）**：专用会话建议（新独立会话 + 低成本 Flash 类模型承载 clock automation，automation 的 model 即发起会话的模型——`placement_guidance_for_plan` / `bind_session_placement`）；`dedicated_session` 恒为 `not_mechanically_verifiable` 常量串（`clock.DEDICATED_SESSION_UNVERIFIABLE`——插件无会话探测能力，绝不伪造布尔）；`needs_replacement` 两极判定（`clock.needs_replacement_from_reasons`：True ⇔ reasons 含 db_row_missing / db_inspect_failed，target_mismatch / tick_stale / runtime_path_missing 仅 advisory 不触发）；**死绑定 bind 自愈**：bind 遇 `ClockStateConflictError` 时只读复核旧 automation 的宿主 DB 行，行确认缺失才以 `verified_dead_automation_id` 在存储层锁内 TOCTOU 复核后放行改绑（输出追加 `replaced_dead_binding=<old_id>`，仅此路径出现；行存活 / 复核不符维持冲突拒绝 fail-closed——非自动迁移，新 automation_id 仍由用户显式提供）；**awaiting_first_tick**：last_tick_at 缺失 / 非数值 = 首绑未 tick（healthy + awaiting_first_tick=true，不判 stale 不触发 replace——`quota-clock-status` 与 SessionStart advisory 同口径镜像）。state 落用户级 `~/.glm-conductor/quota-clocks/<provider_identity_hash>.json`（`clock_store`，durable_io 原子原语，键集绝不含 budget/consumed 语义字段）。CLI：`quota-clock-plan` / `quota-clock-bind` / `quota-clock-tick` / `quota-clock-status`
 - **Stop 门第 0 位 continuity health（`hooks/stop_gate.py`）**：四重检查之前对「触发域内」任务做连续性健康检查——触发域冻结（域外零介入，Stop 每回合都触发、trio 是 dormant 交接要求不是日常要求）：任务活动 且（status ∈ {waiting_quota, waiting_user} 或 quota.execution_phase ∈ {PRESSURE, DRAINING}）且 route.continuity == "resumable" 且 auto_resume ∈ {auto_once, until_done}。域内按依赖序三检查（trio）：handoff durable（checkpoint.md + resume manifest 存在）→ quota subscription（enabled 且已注册当期 epoch）→ transport armed（经 `activation_transport_status`）；未 armed 且 create==forbidden 或 origin==scheduled_task → **降级放行不无限拦截**，双未知 → block + 复用 gate_exhausted 释放阀防死锁；watcher 缺席/过期只是降级注记，绝不独立 block；obligation==degraded 短路放行。reason 以 `continuity_` 为前缀的 gate_degraded 是门侧注记（非模型工作），跳过不破 gate_exhausted trailing 链——否则持续降级任务的计数永不达上限、释放阀永不触发。本检查纯读零写零网络零模型调用
-- **runtime CLI 额度/连续性面**：`quota-resolve` / `quota-observe` / `quota-phase` / `quota-exhausted` / `quota-resume`（退出码 0/1/2/3）/ `wake-record`（legacy）/ `wake-prompt` / `wake-plan` / `wake-status` / `wake-reconcile` / `transport-status` / `quota-watcher start|status|stop|once`
+- **runtime CLI 额度/连续性面**：`quota-resolve` / `quota-observe` / `quota-phase` / `quota-exhausted` / `quota-resume`（退出码 0/1/2/3）/ `wake-record`（legacy）/ `wake-prompt` / `wake-plan` / `wake-status` / `wake-reconcile` / `transport-status` / `quota-watcher start|status|stop|once` / `quota-clock-plan|bind|tick|status` / `host-check`
 
 ### 7.6 运行时写者持久化分类（共享 JSON 状态的 durable storage）
 
@@ -419,15 +420,39 @@ R4 delegate/full 实质性：ownership.files 与 verification.required 必须非
 ## 12. 运行时边界（ZCode 约束）
 
 - 连续性编排基于 ZCode 原生的本地会话生命周期机制，不是独立的云调度器或后台守护进程；桌面客户端需保持运行、机器需保持唤醒
+- **睡眠/唤醒对 Scheduled Task 触发的影响未验证**（2026-09-11 用户裁定不验证）——连续性设计不依赖跨睡眠行为：时钟依赖 native recurring watchdog 网格自愈、恢复兜底归 SessionStart 注入，跨窗行为按"未验证"如实对待，不做任何已验证声明
+- **电源操作边界**：插件与代理严禁替用户执行睡眠/唤醒/关机等 OS 电源操作——电源操作是用户本人权限，不属于插件（适用于 runtime、技能/代理行为与一切附属脚本）
+- **确定性宿主事实**：一会话一 automation 是宿主硬规则（绑定会话已有 scheduled task 时再次创建被宿主直接拒绝，非 advisory）；fire 实际执行相对排定时刻有秒级延迟；模型注入在会话忙时排队、空闲时送达
 - 强制层钩子依赖 `python3` 在 PATH（安装自检见 README / enforcement 技能）；钩子随插件分发、仅安装/更新后的新会话生效；子代理会话不触发钩子（Layer A/B 设计的由来）
 - 定时任务数量与频率受 ZCode automation 机制约束；闲时任务可用性取决于版本与账号能力
 - 子智能体以前台调用受支持为前提，不假定后台子智能体可用
 - 子智能体只能看到会话启动时已连接的 MCP 服务，跨会话恢复后需重新确认
 - fail-closed 纪律：所需角色缺失、证据路径不可得时停止通道并告知用户，绝不静默降级或替换角色（强制层自身的 fail-open 降级是显式可见的例外，见 §9.3）
 
+### 12.1 host 适配器边界（稳定接口 = recurring_bridge）
+
+GLM Conductor 与宿主调度机制的关系分层如下——上层契约与下层观察事实严格分离：
+
+```
+GLM Conductor 稳定抽象：recurring_bridge（传输四词汇唯一 STABLE，§7.5）
+        ↓
+host scheduling adapter：runtime/host/zcode_schedule.py（可替换接触面）
+        ↓
+当前宿主实现：ZCode Scheduled Task（本地 SQLite）
+        ↓
+~/.zcode/v2/tasks-index.sqlite（WAL）→ automations 表 → next_run_at 列
+```
+
+- **稳定项目接口只有 `recurring_bridge`**；**当前观察后端是 ZCode Scheduled Task SQLite adapter**（`runtime/host/zcode_schedule.py`）——宿主库 schema、表布局与列名是 **observed host behavior（观察到的宿主行为），不是契约性 ZCode API**；ZCode 升级可能导致其漂移
+- **当前适配器假设**（host-check 可枚举）：必需列集 = `automation_id` / `recurring` / `enabled` / `lifecycle_status` / `next_run_at`（`REQUIRED_AUTOMATIONS_COLUMNS`），且 `next_run_at` 为 INTEGER epoch 毫秒（可 NULL）；adapter 在写入前置 schema 闸上安全失败（`ZcodeScheduleSchemaError`，绝不带病写）
+- **生产写边界**：adapter 全模块唯一生产写语句是 `UPDATE automations SET next_run_at = ? WHERE automation_id = ?`（事务化单列改写 + 写后读回验证；增删行、结构变更、改 prompt/model/recurring 等一律禁止——`tests/test_zcode_schedule.py` 的 ForbiddenSqlTest 机械锚定）
+- **自定义 `next_run_at` 为 one-shot**：外部写入的精确时刻触发一次后，宿主按 recurring 网格从当前时间重算下一槽接管（醒态实测重确认）——retime（动态重定时）因此是正常定时路径，网格只是兜底（见 §7.5 Global Quota Clock）
+- **宿主升级后的自检**：`host-check`（`runtime/commands/host.py` → `probe_host_compatibility`）以四类纯读语句（表清单 / PRAGMA 元数据 / 空读 / typeof 抽样）输出兼容性报告（`support_status` supported/unsupported + 缺失列与类型异常明细），绝对零写、绝不以写试写
+- **替换性**：若 ZCode 未来提供官方调度 API，adapter 可整体替换而 `recurring_bridge` 契约不变——上层（`quota-clock-*` / wake 面）不感知后端形态
+
 ## 13. 静态校验与测试
 
-- `scripts/validate_plugin.py`（纯标准库，15 项检查）+ CI（`.github/workflows/validate.yml`，静态校验 + 单元测试）维护契约一致性：扫描 `plugins/`、`README.md`、`marketplace.json` 与本文档，`docs/history/` 不参与当前契约校验；全部文件扫描一律跳过 `__pycache__` 目录与 `*.pyc` / `*.pyo` 字节码（编译缓存残影不属契约面）
+- `scripts/validate_plugin.py`（纯标准库，15 项检查）+ CI（`.github/workflows/validate.yml`，静态校验 + 单元测试）维护契约一致性：扫描 `plugins/`、`README.md`、`marketplace.json` 与本文档；全部文件扫描一律跳过 `__pycache__` 目录与 `*.pyc` / `*.pyo` 字节码（编译缓存残影不属契约面）
 - 检查覆盖：旧名清理、禁词、quota 否定式声明、任务专属 checkpoint 路径、视觉协议标记、TASK_ID 必含、视觉新调用规范措辞、`plugin.json` 与 CHANGELOG 的版本一致性、钩子清单完整性（含脚本存在性）、runtime 状态层与技能契约标记、enforcement 审查 receipt 权威标记
 - 测试（`tests/`，纯标准库 unittest，当前 2214 用例）覆盖 runtime / hooks / quota / continuity 各子系统与端到端策略/传输场景，随 CI 执行；共享 JSON 并发面配**多进程回归**（`tests/test_durable_io.py`、`tests/test_multiprocess_runtime.py`——多进程真实并发下原子写/锁仲裁/写方分类的机械锚定），关键契约配子进程冒烟
 - 版本策略：`plugin.json` 版本、CHANGELOG 最新条目、git tag / GitHub Release 三者保持一致
@@ -445,7 +470,3 @@ R4 delegate/full 实质性：ownership.files 与 verification.required 必须非
 - runtime CLI 公共子命令面与退出码语义；QuotaIdentity / epoch_id 推导口径
 
 演化纪律：除非实际使用暴露出具体能力缺口，不新增路由维度或角色；强制层只针对高置信不变量（越界、缺失证据、过期证据），不做语义解释型拦截。
-
-## 15. 历史沿革
-
-本文档只描述现状，不叙述开发历程。各版本的实施计划、Phase 0 运行验证、架构校正讨论、dogfood 实测与发布门记录，完整存档于 [docs/history/](history/)（按 [v1](history/v1/) / [v2.0](history/v2.0/) / [v2.1](history/v2.1/) / [v2.2](history/v2.2/) 分类，各子目录含中文索引；[reference/](history/reference/) 收录宿主行为研究）。该目录为**非权威存档**：其中的术语可能描述已被现行设计取代的中间方案，仅供追溯。当前真相 = 仓库代码 + 本文档 + [core-concepts.md](core-concepts.md)。
