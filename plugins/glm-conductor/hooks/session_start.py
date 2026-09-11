@@ -40,16 +40,21 @@ v2.3.1 增补（unit w1-session-advisory）：
     main() 在恢复发现之外追加只读 Quota Clock advisory
     （render_clock_advisory）：读用户级 Global Quota Clock state
     （clock_store.load_clock_state 单次容错 JSON 读，绝不打开
-    SQLite / 任何 DB），clock 已绑定且 last_tick_at 陈旧（now -
-    last_tick_at > 2×fallback_interval_minutes——与 cli 的
-    quota-clock-status tick_stale 同口径；last_tick_at 缺失 / 非数值
-    视为陈旧，fallback_interval_minutes 缺失 / 非法按 60 折算）时，
-    在 additionalContext 末尾（与 resume text 空行分隔）注入恢复指引：
-    建议在专用低成本 Flash 交互会话显式执行 quota-clock-bind
-    <new_automation_id> replace，声明「未执行自动会话迁移」，并指路
-    quota-clock-status 做权威诊断。红线：advisory 层只读零写、绝不
+    SQLite / 任何 DB），clock 已绑定且 last_tick_at 陈旧（合法数值
+    last_tick_at 且 now - last_tick_at > 2×fallback_interval_minutes
+    ——与 cli 的 quota-clock-status tick_stale 同口径；
+    w35-dogfood-fix 起 last_tick_at 缺失 / 非数值改判 awaiting first
+    tick（首绑未 tick 不误报，镜像彼处 awaiting_first_tick 语义，
+    单一真相源互指），fallback_interval_minutes 缺失 / 非法按 60
+    折算）时，在 additionalContext 末尾（与 resume text 空行分隔）
+    注入恢复指引：建议在专用低成本 Flash 交互会话显式执行
+    quota-clock-bind <new_automation_id> replace（bind 对已确认失效
+    的死绑定自动检测并替换，用户仍显式提供新 automation_id），声明
+    「未执行自动会话迁移」，并指路 quota-clock-status 做权威诊断。
+    红线：advisory 层只读零写、绝不
     bind / replace / 迁移、不探测会话；state 缺失（unbound 不提示）/
-    tick 新鲜 / 任何内部异常 → ""（输出与既有行为逐字节一致，零噪音）。
+    tick 新鲜 / 首绑未 tick / 任何内部异常 → ""（输出与既有行为逐字
+    节一致，零噪音）。
 
 来源：
     docs/history/v2.1/GLM-Conductor-v2.1-Architecture-Agent-Implementation-Plan.md
@@ -111,17 +116,20 @@ def _clock_fallback_minutes(clock_state):
 def _clock_tick_stale(clock_state, *, now_ms):
     """clock state → tick 是否陈旧（quota-clock-status 同口径，纯函数）。
 
+    last_tick_at 为合法数值（非 bool）且
     now_ms - last_tick_at > 2 × fallback_interval_minutes × 60000 即
-    陈旧；last_tick_at 缺失 / 非数值（含 bool）同样视为陈旧；
-    fallback_interval_minutes 缺失 / 非法按 60 折算——逐条镜像
-    quota-clock-status（runtime/commands/quota_clock.py）的 tick_stale
-    （阈值与容错的单一真相源在彼处，此处只做 state-file-only 启发式
-    的同口径镜像）。"""
+    陈旧；w35-dogfood-fix 起 last_tick_at 缺失 / 非数值（含 bool）改判
+    awaiting first tick（首绑未 tick 不误报陈旧——不再返回 True），
+    与 quota-clock-status（runtime/commands/quota_clock.py）的
+    awaiting_first_tick / tick_stale 同口径（阈值与容错的单一真相源
+    在彼处，两处 docstring 注释互指；此处只做 state-file-only 启发式
+    的同口径镜像）；fallback_interval_minutes 缺失 / 非法按 60 折算。"""
     last_tick_at = clock_state.get("last_tick_at")
+    if isinstance(last_tick_at, bool) or \
+            not isinstance(last_tick_at, (int, float)):
+        return False  # F-3：无合法 tick 观测 = awaiting first tick，不误报
     fallback_minutes = _clock_fallback_minutes(clock_state)
-    return (isinstance(last_tick_at, bool)
-            or not isinstance(last_tick_at, (int, float))
-            or now_ms - last_tick_at > 2 * fallback_minutes * 60000)
+    return now_ms - last_tick_at > 2 * fallback_minutes * 60000
 
 
 def render_clock_advisory(*, now_ms=None):
@@ -130,10 +138,13 @@ def render_clock_advisory(*, now_ms=None):
     触发（启发式，state-file-only）：clock 已绑定（用户级
     quota-clocks/<identity_hash>.json 存在且为可识别 v1 state）且
     last_tick_at 陈旧（_clock_tick_stale，与 quota-clock-status 的
-    tick_stale 同口径）。返回文本要素：标识头 + 陈旧事实 + 恢复指引
+    tick_stale 同口径——w35-dogfood-fix 起 last_tick_at 缺失 / 非数值
+    为 awaiting first tick，首绑未 tick 不触发本 advisory）。
+    返回文本要素：标识头 + 陈旧事实 + 恢复指引
     （专用低成本 Flash 交互会话内显式 quota-clock-bind
-    <new_automation_id> replace）+ 「未执行自动会话迁移」声明
-    （clock.NO_AUTO_MIGRATION_DECLARATION 逐字）+ 会话专用性不可
+    <new_automation_id> replace——bind 对已确认失效的死绑定自动检测
+    并替换，用户仍显式提供新 automation_id）+ 「未执行自动会话迁移」
+    声明（clock.NO_AUTO_MIGRATION_DECLARATION 逐字）+ 会话专用性不可
     机械验证声明（clock.DEDICATED_SESSION_UNVERIFIABLE）+ 指路
     quota-clock-status 权威诊断（DB 级 needs_replacement 彼处判定，
     本处绝不越权）。
@@ -141,10 +152,11 @@ def render_clock_advisory(*, now_ms=None):
     红线：只读（唯一 I/O = load_clock_state 的一次容错 JSON 读，
     绝不打开 SQLite / 任何 DB，state / env / DB 零写）、绝不执行
     bind / replace / 迁移、不探测会话、不做主会话推断。state 缺失
-    （unbound 不提示未绑定者）/ tick 新鲜 / 任何内部异常（identity
-    不可得、import 失败、读盘异常）→ 一律返回 ""：advisory 层
-    fail-open 静默，绝不波及既有 resume context 路径，也绝不阻塞
-    会话启动（零噪音红线：无陈旧 clock 时输出与无本函数完全一致）。
+    （unbound 不提示未绑定者）/ tick 新鲜 / 首绑未 tick / 任何内部
+    异常（identity 不可得、import 失败、读盘异常）→ 一律返回 ""：
+    advisory 层 fail-open 静默，绝不波及既有 resume context 路径，
+    也绝不阻塞会话启动（零噪音红线：无陈旧 clock 时输出与无本函数
+    完全一致）。
 
     now_ms：仅供测试注入当前时刻（epoch 毫秒）；None → time.time()。
     """
@@ -173,7 +185,9 @@ def render_clock_advisory(*, now_ms=None):
             % (automation_id, int(2 * fallback_minutes)),
             "To restore: from a fresh dedicated low-cost Flash interactive "
             "session, explicitly run quota-clock-bind <new_automation_id> "
-            "to replace the dead binding.",
+            "to replace the dead binding; bind auto-detects a verified "
+            "dead binding (missing host DB row) and replaces it, while "
+            "you still provide the new automation_id.",
             "This hook is advisory only: %s（本插件不做隐式迁移或自动 "
             "rebind）；本钩子未执行任何 bind / replace / state 写入。"
             % clock.NO_AUTO_MIGRATION_DECLARATION,

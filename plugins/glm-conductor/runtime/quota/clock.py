@@ -474,10 +474,15 @@ def recovery_guidance_for_replacement():
     """needs_replacement=true 的恢复指引（advisory 文案）。
 
     语义冻结：在专用低成本 Flash 交互会话中显式执行 replace/rebind
-    （quota-clock-bind <new_automation_id>）+ 「未执行自动会话迁移」
-    声明——ZCode 不向插件开放会话迁移能力，本插件永远不做隐式迁移
+    （quota-clock-bind <new_automation_id>——w35-dogfood-fix 起 bind
+    对已确认失效的死绑定自动检测并替换：宿主 DB 行缺失时放行改绑，
+    用户仍显式提供新 automation_id）+ 「未执行自动会话迁移」声明
+    ——ZCode 不向插件开放会话迁移能力，本插件永远不做隐式迁移
     / 自动 rebind。"""
     return ("replace: run quota-clock-bind <new_automation_id> from a "
             "fresh dedicated low-cost Flash interactive session；"
+            "bind auto-detects a verified dead binding (missing host "
+            "DB row) and replaces it, while you still provide the new "
+            "automation_id；"
             + NO_AUTO_MIGRATION_DECLARATION
             + "（本插件不做隐式迁移或自动 rebind）")

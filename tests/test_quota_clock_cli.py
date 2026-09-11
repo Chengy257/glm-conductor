@@ -298,6 +298,14 @@ class ClockPlacementPureTest(unittest.TestCase):
         self.assertEqual(clock.NO_AUTO_MIGRATION_DECLARATION,
                          "未执行自动会话迁移")
 
+    def test_recovery_guidance_mentions_dead_binding_auto_detect(self):
+        # w35-dogfood-fix 指引同步：recovery_guidance 与新 bind 行为
+        # 同口径——bind 自动检测并替换已确认失效的死绑定（宿主 DB 行
+        # 缺失时放行改绑），用户仍显式提供新 automation_id
+        text = clock.recovery_guidance_for_replacement()
+        self.assertIn("auto-detects a verified dead binding", text)
+        self.assertIn("you still provide the new automation_id", text)
+
     def test_status_host_block(self):
         self.assertEqual(clock.status_host_block(),
                          {"adapter": "zcode_sqlite"})
@@ -334,13 +342,14 @@ class PlanCliTest(ClockCliCase):
         self.assertEqual(payload["runtime_path"], RUNTIME_DIR)
         self.assertEqual(
             payload["cli_command"],
-            "python3 %s quota-clock-tick %s" % (CLI_PATH,
-                                                self.repo_norm()))
-        # §9 极简 prompt：逐字头部 + 代入后的 tick 命令 + 收尾约束
+            "%s %s quota-clock-tick %s" % (sys.executable, CLI_PATH,
+                                           self.repo_norm()))
+        # §9 极简 prompt：逐字头部 + 代入后的 tick 命令（F-4：首跳
+        # 解释器 = 当前解释器 sys.executable）+ 收尾约束
         self.assertTrue(payload["suggested_prompt"].startswith(
             "GLM CONDUCTOR QUOTA CLOCK TICK\n"
-            "Run: python3 %s quota-clock-tick %s\n"
-            % (CLI_PATH, self.repo_norm())))
+            "Run: %s %s quota-clock-tick %s\n"
+            % (sys.executable, CLI_PATH, self.repo_norm())))
         self.assertIn("Never call Cron tools. Never do anything else.",
                       payload["suggested_prompt"])
         resolver_mock.assert_called_once_with(self.repo_norm(),
@@ -380,6 +389,30 @@ class PlanCliTest(ClockCliCase):
                 self.assertEqual(payload["reason"], reason)
                 self.assertIn("error", payload)
                 self.assertIsNone(self.load_state())  # 零写盘
+
+    def test_plan_interpreter_is_current_executable(self):
+        # F-4（w35-dogfood-fix）：plan 产物首跳解释器 = 当前解释器
+        # （sys.executable），cli_command 与 suggested_prompt 两点
+        # 同源，绝不裸 "python3"（Windows 无 python3 启动器首跳必败）
+        with patched_quota_clock(FIVE_DETAIL):
+            code, payload = run_cli("quota-clock-plan", self.repo)
+        self.assertEqual(code, 0)
+        self.assertTrue(payload["cli_command"].startswith(
+            "%s " % sys.executable))
+        lines = payload["suggested_prompt"].split("\n")
+        self.assertEqual(lines[0], "GLM CONDUCTOR QUOTA CLOCK TICK")
+        self.assertTrue(lines[1].startswith(
+            "Run: %s " % sys.executable))
+        self.assertNotIn("Run: python3 ", payload["suggested_prompt"])
+
+    def test_plan_interpreter_fallback_when_executable_empty(self):
+        # F-4 兜底分支：sys.executable 为空 → 回退 "python3"
+        with mock.patch("sys.executable", ""), \
+                patched_quota_clock(FIVE_DETAIL):
+            code, payload = run_cli("quota-clock-plan", self.repo)
+        self.assertEqual(code, 0)
+        self.assertTrue(payload["cli_command"].startswith("python3 "))
+        self.assertIn("Run: python3 ", payload["suggested_prompt"])
 
     def test_plan_relative_repo_root_normalized(self):
         with patched_quota_clock(FIVE_DETAIL) as (resolver_mock, *_rest):
@@ -551,6 +584,97 @@ class BindCliTest(ClockCliCase):
                 self.assertIn("error", payload)
 
 
+# —— 2b. quota-clock-bind 死绑定自愈（F-1，w35-dogfood-fix） ——
+
+class BindDeadBindingSelfHealTest(ClockCliCase):
+    """F-1 bind CLI 编排四分支：死绑定自愈成功 / 活绑定仍冲突拒绝 /
+    死检 inspect 异常 fail-closed（存储层锁内漂移分支锚定于
+    tests/test_quota_clock.py 的 BindDeadBindingSelfHealTest）。"""
+
+    OLD_AID = "auto-clock-dead"
+
+    def _preset_binding(self, automation_id):
+        """预置一个指向任意 automation_id 的 bound state（写进注入的
+        临时 home；bind_state 助手固定 AID，故此处直调存储层）。"""
+        return clock_store.bind_clock_state(
+            self.repo, HASH, automation_id,
+            zcode_db_path=DB, runtime_path=RUNTIME_DIR,
+            automation_model="GLM-5.3-Flash", now_ms=BIND_NOW_MS)
+
+    def _bind_cli(self, *, first_inspect, second_inspect):
+        """inspect_automation 恰两次调用（第一次=新 id，第二次=旧 id
+        死检），分别注入返回值或异常实例；resolver / discover /
+        retime 常规 mock。返回 (code, payload, retime_mock,
+        inspect_mock)。"""
+        with mock.patch(
+                "runtime.quota.resolver.resolve_quota_detail",
+                return_value=FIVE_DETAIL), \
+            mock.patch(
+                "runtime.host.zcode_schedule.discover_zcode_tasks_db",
+                return_value=DB), \
+            mock.patch(
+                "runtime.host.zcode_schedule.inspect_automation",
+                side_effect=[first_inspect, second_inspect]) as inspect_m, \
+            mock.patch(
+                "runtime.host.zcode_schedule.retime_automation") as retime_m:
+            code, payload = run_cli("quota-clock-bind", self.repo, AID)
+        return code, payload, retime_m, inspect_m
+
+    def test_dead_binding_self_heal_success(self):
+        # 分支 1：旧绑定宿主行已消失（死检 inspect → None）→ 自愈成功
+        self._preset_binding(self.OLD_AID)
+        code, payload, retime_m, inspect_m = self._bind_cli(
+            first_inspect=dict(ROW_FLASH), second_inspect=None)
+        self.assertEqual(code, 0)
+        self.assertEqual(payload["status"], "bound")
+        self.assertEqual(payload["automation_id"], AID)
+        # 自愈路径专属键：replaced_dead_binding = 旧 automation_id
+        self.assertEqual(payload["replaced_dead_binding"], self.OLD_AID)
+        # state 指向新 id（干净 bound 态，观测键重置）
+        st = self.load_state()
+        self.assertEqual(st["automation_id"], AID)
+        self.assertEqual(st["status"], "bound")
+        self.assertIsNone(st["last_tick_at"])
+        # retime 面向新 automation；inspect 顺序 = 新 id → 旧 id 死检
+        retime_m.assert_called_once_with(DB, AID, FIRST_TARGET)
+        self.assertEqual(inspect_m.call_args_list,
+                         [mock.call(DB, AID),
+                          mock.call(DB, self.OLD_AID)])
+
+    def test_live_binding_still_conflict_rejected(self):
+        # 分支 2：旧绑定宿主行存活（活绑定）→ 冲突拒绝原样维持，
+        # 原 state 原样不动，无 replaced_dead_binding 键
+        self._preset_binding(self.OLD_AID)
+        code, payload, retime_m, _inspect_m = self._bind_cli(
+            first_inspect=dict(ROW_FLASH),
+            second_inspect=dict(ROW_FLASH, automation_id=self.OLD_AID))
+        self.assertEqual(code, 1)
+        self.assertEqual(payload["status"], "error")
+        self.assertIn("ClockStateConflictError", payload["error"])
+        self.assertNotIn("replaced_dead_binding", payload)
+        retime_m.assert_not_called()
+        st = self.load_state()
+        self.assertEqual(st["automation_id"], self.OLD_AID)
+        self.assertEqual(st["status"], "bound")
+
+    def test_dead_check_inspect_error_fails_closed(self):
+        # 分支 3：死检 inspect 异常 → fail-closed（冲突拒绝维持），
+        # 原 state 原样不动
+        self._preset_binding(self.OLD_AID)
+        code, payload, retime_m, _inspect_m = self._bind_cli(
+            first_inspect=dict(ROW_FLASH),
+            second_inspect=zcode_schedule.ZcodeScheduleDbMissing(
+                "db gone"))
+        self.assertEqual(code, 1)
+        self.assertEqual(payload["status"], "error")
+        self.assertIn("ZcodeScheduleDbMissing", payload["error"])
+        self.assertNotIn("replaced_dead_binding", payload)
+        retime_m.assert_not_called()
+        st = self.load_state()
+        self.assertEqual(st["automation_id"], self.OLD_AID)
+        self.assertEqual(st["status"], "bound")
+
+
 # —— 3. quota-clock-tick ——
 
 class TickCliTest(ClockCliCase):
@@ -692,6 +816,53 @@ class StatusCliTest(ClockCliCase):
         self.assertEqual(code, 0)
         return dict(ROW_FLASH, next_run_at=FIRST_TARGET)
 
+    def test_status_first_bind_awaiting_first_tick_healthy(self):
+        # F-3（w35-dogfood-fix）：首绑未 tick → healthy +
+        # awaiting_first_tick=true + tick_stale=false——修复「新装即
+        # unhealthy 与 await next tick 同框」的矛盾呈现
+        self.bind_state()
+        with patched_quota_clock(row=dict(ROW_FLASH)):
+            code, payload = run_cli("quota-clock-status", self.repo)
+        self.assertEqual(code, 0)
+        self.assertTrue(payload["bound"])
+        self.assertIsNone(payload["last_tick_at"])
+        self.assertTrue(payload["awaiting_first_tick"])
+        self.assertFalse(payload["tick_stale"])
+        self.assertEqual(payload["health"], "healthy")
+        self.assertEqual(payload["reasons"], [])
+        self.assertIsNone(payload["suggestion"])
+        self.assertFalse(payload["needs_replacement"])
+        self.assertNotIn("recovery_guidance", payload)
+
+    def test_status_non_numeric_last_tick_is_awaiting_not_stale(self):
+        # F-3：last_tick_at 非数值（垃圾值 / bool）= 无合法 tick 观测 →
+        # awaiting first tick（不再视为陈旧），且 DB 行存活不触发 replace
+        self.bind_state()
+        clock_store.update_clock_state(
+            HASH, lambda s: dict(s, last_tick_at="garbage"))
+        with patched_quota_clock(row=dict(ROW_FLASH)):
+            code, payload = run_cli("quota-clock-status", self.repo)
+        self.assertEqual(code, 0)
+        self.assertTrue(payload["awaiting_first_tick"])
+        self.assertFalse(payload["tick_stale"])
+        self.assertEqual(payload["health"], "healthy")
+
+    def test_status_stale_numeric_tick_still_stale(self):
+        # F-3 回归：合法数值 last_tick_at 超阈值 → 仍判 tick_stale
+        # （awaiting_first_tick=false，陈旧判定只对合法观测生效）
+        self._bound_and_ticked()
+        now_ms = int(time.time() * 1000)
+        clock_store.update_clock_state(
+            HASH, lambda s: dict(s, last_tick_at=now_ms - 4 * 60 * 60000))
+        with patched_quota_clock(row=dict(ROW_FLASH,
+                                          next_run_at=FIRST_TARGET)):
+            code, payload = run_cli("quota-clock-status", self.repo)
+        self.assertEqual(code, 0)
+        self.assertFalse(payload["awaiting_first_tick"])
+        self.assertTrue(payload["tick_stale"])
+        self.assertTrue(any(reason.startswith("tick_stale")
+                            for reason in payload["reasons"]))
+
     def test_status_healthy_after_bind_and_tick(self):
         row = self._bound_and_ticked()
         with patched_quota_clock(row=row) as (resolver_m, _i, retime_m, _d):
@@ -703,8 +874,9 @@ class StatusCliTest(ClockCliCase):
              "automation_model", "status", "last_reset_at",
              "next_target_at", "db_next_run_at", "target_matches_db",
              "runtime_path", "runtime_path_exists", "last_tick_at",
-             "tick_stale", "recent_run_count", "health", "reasons",
-             "suggestion", "placement", "host", "needs_replacement"})
+             "tick_stale", "awaiting_first_tick", "recent_run_count",
+             "health", "reasons", "suggestion", "placement", "host",
+             "needs_replacement"})
         self.assertTrue(payload["bound"])
         self.assertEqual(payload["provider_identity_hash"], HASH)
         self.assertEqual(payload["automation_id"], AID)

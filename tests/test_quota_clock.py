@@ -36,6 +36,10 @@
                              （架构裁决锚定）
     BindConflictTest         bound 态异 automation 冲突拒绝且原 state
                              不动；非 bound 态可改绑
+    BindDeadBindingSelfHealTest
+                             F-1（w35-dogfood-fix）死绑定自愈存储层
+                             TOCTOU 守卫：verified_dead_automation_id
+                             锁内相符放行干净覆盖 / 锁内漂移冲突拒绝
     BindIdempotentTest       同 automation 幂等重绑（保留既有合法
                              status）
     MalformedStateTest       malformed / 未知 schema → load None 且
@@ -554,6 +558,47 @@ class BindConflictTest(StoreTestBase):
         rebound = bind_default(automation_id=AID_2)
         self.assertEqual(rebound["automation_id"], AID_2)
         self.assertEqual(rebound["status"], "bound")
+
+
+class BindDeadBindingSelfHealTest(StoreTestBase):
+    """F-1（v2.3.1 w35-dogfood-fix）死绑定自愈的存储层 TOCTOU 守卫。
+
+    分工：失效核实（宿主 DB 行缺失检查）在 CLI 编排层（本文件零
+    DB 概念）；存储层只认锁内身份复核——verified_dead_automation_id
+    与锁内当前 automation_id 逐一相符才放行覆盖，缺省 / 不符一律
+    ClockStateConflictError（fail-closed）。"""
+
+    def test_verified_dead_id_replaces_dead_binding_clean(self):
+        """锁内身份相符 → 放行覆盖：state 指向新 id、干净 bound 态
+        （观测键重置）、键集冻结完整、落盘往返一致。"""
+        bind_default()
+        replaced = bind_default(automation_id=AID_2,
+                                verified_dead_automation_id=AID_1)
+        self.assertEqual(replaced["automation_id"], AID_2)
+        self.assertEqual(replaced["status"], "bound")
+        self.assertEqual(set(replaced), set(clock_store.CLOCK_STATE_KEYS))
+        for key in ("last_tick_at", "last_reset_at", "next_target_at",
+                    "last_retime_at"):
+            self.assertIsNone(replaced[key])
+        self.assertEqual(clock_store.load_clock_state(HASH_A), replaced)
+
+    def test_verified_dead_id_mismatch_in_lock_still_conflict(self):
+        """锁内漂移（锁内当前 id ≠ verified_dead_automation_id）→
+        ClockStateConflictError，原 state 原样不动（TOCTOU 守卫）。"""
+        first = bind_default()
+        with self.assertRaises(clock_store.ClockStateConflictError):
+            bind_default(automation_id=AID_2,
+                         verified_dead_automation_id="auto-drifted-id")
+        self.assertEqual(clock_store.load_clock_state(HASH_A), first)
+
+    def test_verified_dead_id_none_keeps_conflict(self):
+        """verified_dead_automation_id 缺省（None）→ 既有冲突语义逐字
+        不变（活绑定保护初心完整保留）。"""
+        first = bind_default()
+        with self.assertRaises(clock_store.ClockStateConflictError):
+            bind_default(automation_id=AID_2,
+                         verified_dead_automation_id=None)
+        self.assertEqual(clock_store.load_clock_state(HASH_A), first)
 
 
 class BindIdempotentTest(StoreTestBase):

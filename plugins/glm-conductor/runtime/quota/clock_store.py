@@ -38,9 +38,15 @@ state 形状（v1，键集冻结为 CLOCK_STATE_KEYS 十五键）：
     - 容忍为无状态：文件缺失 / 非 dict / schema_version 不认识
       （legacy / 未来版本 / malformed）→ load 返回 None；bind 会
       重写干净态（不阻塞重绑）；
-    - 冲突面唯一：已存在 status=="bound" 且 automation_id 不同 →
+    - 冲突面：已存在 status=="bound" 且 automation_id 不同 →
       ClockStateConflictError（冲突检查在 durable_io 独占锁内进行，
-      原 state 原样不动）；automation_id 相同 → 幂等覆盖；
+      原 state 原样不动）；automation_id 相同 → 幂等覆盖。唯一例外
+      （v2.3.1 F-1 死绑定自愈，unit w35-dogfood-fix）：调用方以
+      verified_dead_automation_id 显式声明旧 automation_id 已被其
+      核实失效（宿主 DB 行缺失由调用方检查——本存储层保持
+      file-I/O-only、零 DB I/O），且锁内复核 current.automation_id
+      与之逐一相符（TOCTOU 守卫）才放行覆盖；验证不符一律维持
+      冲突拒绝（fail-closed）；
     - 不存任何凭证材料；
     - docstring 中文；stdlib only；Python 3.7 兼容语法。
 
@@ -109,7 +115,10 @@ class ClockStateError(Exception):
 
 class ClockStateConflictError(ClockStateError):
     """绑定冲突：已存在 status=="bound" 的 state 属于另一
-    automation_id（原 state 原样不动）。"""
+    automation_id（原 state 原样不动）。唯一放行例外：调用方传入
+    verified_dead_automation_id 且与锁内当前 automation_id 逐一相符
+    （F-1 死绑定自愈——失效核实责任在调用方 DB 检查，本层只做锁内
+    TOCTOU 身份复核）。"""
 
 
 def _sanitize_filename_component(raw):
@@ -178,6 +187,7 @@ def bind_clock_state(repo_root, provider_identity_hash, automation_id, *,
                      retry_delay_seconds=_BIND_DEFAULT_RETRY_DELAY_SECONDS,
                      fallback_interval_minutes=(
                          _BIND_DEFAULT_FALLBACK_INTERVAL_MINUTES),
+                     verified_dead_automation_id=None,
                      now_ms):
     """绑定 clock automation：全键干净写入 / 幂等覆盖 / 冲突拒绝。
 
@@ -191,12 +201,18 @@ def bind_clock_state(repo_root, provider_identity_hash, automation_id, *,
       2. 锁内冲突检查（只认 schema 相同的可识别 state）：已存在
          status=="bound" 且 automation_id 不同 →
          ClockStateConflictError，原 state 原样不动（updater 抛错
-         时 atomic_update_json 绝不写盘）；
+         时 atomic_update_json 绝不写盘）。唯一放行例外（F-1 死
+         绑定自愈）：verified_dead_automation_id 非 None 且与锁内
+         当前 automation_id 逐一相符（TOCTOU 守卫）——旧绑定的
+         「确已失效（宿主 DB 行缺失）」核实责任在调用方（本存储层
+         file-I/O-only、零 DB I/O），本层只做锁内身份复核，不符
+         一律冲突拒绝（fail-closed）；
       3. 全键按 CLOCK_STATE_KEYS 干净写入：last_tick_at /
          last_reset_at / next_target_at / last_retime_at 初始 None，
          grace / retry / fallback 取参数，owner_repository =
          repo_root；automation_id 相同的幂等重绑保留既有合法
-         status（不改写运行态标签），其余一律置 "bound"；
+         status（不改写运行态标签），其余一律置 "bound"（含死绑定
+         替换路径——新 automation 从干净 bound 态起步）；
       4. 写后 read-back（load_clock_state）返回落盘后的 state；
          读回失败 → ClockStateError。
 
@@ -214,11 +230,19 @@ def bind_clock_state(repo_root, provider_identity_hash, automation_id, *,
                 current.get("schema_version") == CLOCK_STATE_SCHEMA_VERSION:
             if current.get("status") == "bound" and \
                     current.get("automation_id") != automation_id:
-                raise ClockStateConflictError(
-                    "bind_clock_state：provider %s 的 clock 已绑定到 "
-                    "automation %r，拒绝改绑 %r（原 state 未动）"
-                    % (provider_identity_hash,
-                       current.get("automation_id"), automation_id))
+                # F-1 死绑定自愈的唯一放行闸（锁内 TOCTOU 复核）：
+                # 仅当调用方显式传入 verified_dead_automation_id 且与
+                # 锁内当前 automation_id 逐一相符才放行覆盖（失效核实
+                # 在调用方 DB 检查，本层零 DB I/O）；缺省 / 不符一律
+                # 冲突拒绝（活绑定保护初心不变，fail-closed）。
+                if verified_dead_automation_id is None or \
+                        current.get("automation_id") != \
+                        verified_dead_automation_id:
+                    raise ClockStateConflictError(
+                        "bind_clock_state：provider %s 的 clock 已绑定到 "
+                        "automation %r，拒绝改绑 %r（原 state 未动）"
+                        % (provider_identity_hash,
+                           current.get("automation_id"), automation_id))
             existing_status = current.get("status")
             same_automation = current.get("automation_id") == automation_id
         # 幂等覆盖：同一 automation_id 重绑保留既有合法 status（不改写

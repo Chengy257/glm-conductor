@@ -51,10 +51,14 @@ def _emit(payload):
 _CLOCK_RUNTIME_DIR = os.path.dirname(os.path.dirname(
     os.path.abspath(__file__)))
 
-# §9 极简 tick prompt 模板（逐字冻结；仅 {cli} / {repo} 两处代入）。
+# §9 极简 tick prompt 模板（逐字冻结；v2.3.1 w35-dogfood-fix 经裁决
+# 修订冻结版：原硬编码 "python3" → 第三代入槽 {python}——plan 时以
+# sys.executable 代入（空则回退 "python3"），消除 Windows 无 python3
+# 启动器的首跳必失败；其余文本逐字不变，仅 {cli} / {repo} / {python}
+# 三处代入）。
 _CLOCK_TICK_PROMPT = (
     "GLM CONDUCTOR QUOTA CLOCK TICK\n"
-    "Run: python3 {cli} quota-clock-tick {repo}\n"
+    "Run: {python} {cli} quota-clock-tick {repo}\n"
     "If that path is missing, locate cli.py under the current glm-conductor\n"
     "plugin cache runtime directory and run it there.\n"
     "Reply with the tick JSON in one line, then end the turn.\n"
@@ -136,8 +140,14 @@ def _quota_clock_plan(raw_repo_root) -> int:
             status="not_plannable", reason=str(exc))
     except Exception as exc:
         return _clock_fatal("%s: %s" % (type(exc).__name__, exc))
+    # F-4（v2.3.1 w35-dogfood-fix）：plan 产物以当前解释器生成——
+    # sys.executable（空则回退 "python3"），cli_command 与
+    # suggested_prompt（{python} 槽）两点同源代入，本机解释器一跳
+    # 可执行（Windows 无 python3 启动器的首跳必失败就此消除）
+    python = sys.executable or "python3"
     cli_path = _CLOCK_RUNTIME_DIR + "/cli.py"
-    tick_command = "python3 %s quota-clock-tick %s" % (cli_path, repo_root)
+    tick_command = "%s %s quota-clock-tick %s" % (python, cli_path,
+                                                  repo_root)
     _emit({
         "status": "planned",
         "provider_identity_hash": identity,
@@ -149,7 +159,8 @@ def _quota_clock_plan(raw_repo_root) -> int:
         "fallback_interval_minutes": 60,
         "runtime_path": _CLOCK_RUNTIME_DIR,
         "cli_command": tick_command,
-        "suggested_prompt": _CLOCK_TICK_PROMPT.format(cli=cli_path,
+        "suggested_prompt": _CLOCK_TICK_PROMPT.format(python=python,
+                                                      cli=cli_path,
                                                       repo=repo_root),
         # v2.3.1（w1-clock-ux）：创建前的会话放置引导（纯 advisory，
         # 判定与文案在 clock 纯函数层，本处仅呈现）
@@ -171,7 +182,20 @@ def _quota_clock_bind(raw_repo_root, automation_id, db_path=None) -> int:
     recurring 假值 → 非零）→ bind_clock_state（grace / retry / fallback
     取存储层缺省）→ retime_automation(first_target)；retime 失败 →
     非零退出并注明 state 已写但 next_target 未生效（automation 仍按旧
-    节奏运行，可重试 bind）。输出冻结键集 {status:"bound",
+    节奏运行，可重试 bind）。
+
+    F-1 死绑定自愈（v2.3.1 w35-dogfood-fix）：bind_clock_state 报
+    ClockStateConflictError（已绑定其它 automation）时，只读 load 提取
+    旧 automation_id → inspect_automation(db, old_id) 复核宿主 DB 行：
+    行确认缺失（row is None）→ 以 verified_dead_automation_id=old_id
+    重试 bind_clock_state（存储层锁内 TOCTOU 复核通过才放行覆盖，本层
+    负责失效核实、存储层零 DB I/O）；inspect 异常 / 行存活 / 锁内身份
+    不符 → ClockStateConflictError 原样维持（fail-closed——活绑定保护
+    初心不变，本修复非自动迁移，用户仍显式提供新 automation_id）。走
+    自愈成功时输出追加键 replaced_dead_binding=<old_automation_id>
+    （只增不删，仅此路径出现）。
+
+    输出冻结键集 {status:"bound",
     provider_identity_hash, automation_id, automation_model,
     model_is_flash, first_target_epoch_ms, retimed, state_path} +
     v2.3.1 追加（只增不删）：session_placement（SESSION PLACEMENT
@@ -180,7 +204,8 @@ def _quota_clock_bind(raw_repo_root, automation_id, db_path=None) -> int:
     clock.bind_session_placement）与 cost_advisory（模型名不含
     "Flash" 时为 {current_model, preferred: "low-cost Flash-class
     model"}，Flash 类为 null——纯 advisory 成本提示，绝不阻断绑定；
-    纯函数 clock.cost_advisory_for_model）。model_is_flash 判定口径
+    纯函数 clock.cost_advisory_for_model）与 replaced_dead_binding
+    （F-1 死绑定自愈路径专属，见上）。model_is_flash 判定口径
     为模型名含 "Flash"（纯函数 clock.model_is_flash，仅 advisory，
     不作阻断、不作专用会话证据）。"""
     from runtime.quota import clock, clock_store, resolver  # 函数内 import：monkeypatch 友好
@@ -188,6 +213,7 @@ def _quota_clock_bind(raw_repo_root, automation_id, db_path=None) -> int:
         compute_provider_identity_hash)
     from runtime.host import zcode_schedule  # 函数内 import：monkeypatch 友好
     repo_root = _clock_repo_root(raw_repo_root)
+    replaced_dead_binding = None
     try:
         detail = resolver.resolve_quota_detail(repo_root,
                                                force_refresh=True)
@@ -206,10 +232,31 @@ def _quota_clock_bind(raw_repo_root, automation_id, db_path=None) -> int:
                 "quota-clock-bind：automation %r recurring=%r 非 "
                 "recurring 行，拒绝绑定" % (automation_id,
                                            row.get("recurring")))
-        clock_store.bind_clock_state(
-            repo_root, identity, automation_id,
-            zcode_db_path=db, runtime_path=_CLOCK_RUNTIME_DIR,
-            automation_model=row.get("model"), now_ms=_clock_now_ms())
+        try:
+            clock_store.bind_clock_state(
+                repo_root, identity, automation_id,
+                zcode_db_path=db, runtime_path=_CLOCK_RUNTIME_DIR,
+                automation_model=row.get("model"), now_ms=_clock_now_ms())
+        except clock_store.ClockStateConflictError:
+            # F-1 死绑定自愈（唯一放行路径，fail-closed）：冲突 → 只读
+            # load 提取旧 automation_id → DB 行复核（异常 / 行存活一律
+            # 原样维持冲突拒绝）→ 行确认缺失才带 verified_dead_automation_id
+            # 重试（存储层锁内 TOCTOU 身份复核后才真正放行）。
+            current = clock_store.load_clock_state(identity)
+            old_id = (current.get("automation_id")
+                      if isinstance(current, dict) else None)
+            if not isinstance(old_id, str) or not old_id \
+                    or old_id == automation_id:
+                raise
+            if zcode_schedule.inspect_automation(db, old_id) is not None:
+                raise  # 宿主行存活 = 活绑定：保护初心不变
+            clock_store.bind_clock_state(
+                repo_root, identity, automation_id,
+                zcode_db_path=db, runtime_path=_CLOCK_RUNTIME_DIR,
+                automation_model=row.get("model"),
+                now_ms=_clock_now_ms(),
+                verified_dead_automation_id=old_id)
+            replaced_dead_binding = old_id
     except _ClockNotPlannable as exc:
         return _clock_fatal(
             "quota-clock-bind：无法规划确定性目标时刻（%s）" % exc,
@@ -227,7 +274,7 @@ def _quota_clock_bind(raw_repo_root, automation_id, db_path=None) -> int:
             next_target_applied=False,
             first_target_epoch_ms=first_target)
     model = row.get("model")
-    _emit({
+    payload = {
         "status": "bound",
         "provider_identity_hash": identity,
         "automation_id": automation_id,
@@ -240,7 +287,11 @@ def _quota_clock_bind(raw_repo_root, automation_id, db_path=None) -> int:
         # （纯 advisory——绑定永不因模型档位被阻断）
         "session_placement": clock.bind_session_placement(),
         "cost_advisory": clock.cost_advisory_for_model(model),
-    })
+    }
+    if replaced_dead_binding is not None:
+        # F-1（w35-dogfood-fix）死绑定自愈路径专属键（只增不删）
+        payload["replaced_dead_binding"] = replaced_dead_binding
+    _emit(payload)
     return 0
 
 
@@ -353,14 +404,19 @@ def _quota_clock_status(raw_repo_root) -> int:
     缺失或不可查）, preferred_model: <bool>（automation_model 含
     "Flash"——advisory 口径，绝非专用会话证据）, dedicated_session:
     "not_mechanically_verifiable"（恒为常量串——插件无会话探测能力，
-    绝不伪造布尔）}；host: {adapter: "zcode_sqlite"}；
+    绝不伪造布尔）}；host: {adapter: "zcode_sqlite"}；w35-dogfood-fix
+    追加 awaiting_first_tick: <bool>（last_tick_at 缺失 / 非数值 =
+    首绑未 tick 的 awaiting first tick 语义——与 hooks/session_start.py
+    的 _clock_tick_stale 同口径镜像，单一真相源互指）；
     needs_replacement: <bool>（True ⇔ reasons 含 db_row_missing /
     db_inspect_failed；target_mismatch / tick_stale /
     runtime_path_missing 仅 advisory 不触发——锁定决策 c 两极）；
     needs_replacement=true 时附 recovery_guidance（在专用低成本
     Flash 会话中显式执行 replace/rebind：quota-clock-bind
-    <new_automation_id>，并声明「未执行自动会话迁移」——本插件不做
-    隐式迁移 / 自动 rebind）。判定全部落 clock 纯函数
+    <new_automation_id>——bind 对已确认失效的死绑定自动检测并替换
+    （宿主 DB 行缺失时放行改绑，用户仍显式提供新 automation_id），
+    并声明「未执行自动会话迁移」——本插件不做隐式迁移 / 自动
+    rebind）。判定全部落 clock 纯函数
     （status_placement_block / status_host_block /
     needs_replacement_from_reasons / recovery_guidance_for_replacement），
     本函数只做呈现。
@@ -370,8 +426,11 @@ def _quota_clock_status(raw_repo_root) -> int:
       state.next_target_at 不一致——next_target_at 为 None（bind 后首
       tick 前）不判不一致，避免对刚绑定者误报 replace 建议）；
       runtime_path_missing（state.runtime_path 目录不存在，tick 将
-      §10.5 自愈）；tick_stale（now - last_tick_at >
-      2×fallback_interval_minutes；last_tick_at 缺失同样视为陈旧——
+      §10.5 自愈）；tick_stale（last_tick_at 为合法数值且
+      now - last_tick_at > 2×fallback_interval_minutes；w35-dogfood-fix
+      起 last_tick_at 缺失 / 非数值改判 awaiting_first_tick=true——
+      不再视为陈旧（首绑未 tick 的 healthy + awaiting_first_tick
+      自洽呈现，镜像 hooks/session_start.py 的 _clock_tick_stale），
       只触发「await next tick」级提示，不触发 replace）；
       db_inspect_failed（inspect 异常，token 后附异常摘要）。
     suggestion：db_row_missing / db_inspect_failed → "replace: run
@@ -427,10 +486,15 @@ def _quota_clock_status(raw_repo_root) -> int:
         if isinstance(fallback_minutes, bool) \
                 or not isinstance(fallback_minutes, (int, float)):
             fallback_minutes = 60  # state 半块容错：按缺省 60 分钟折算
-        tick_stale = (
-            isinstance(last_tick_at, bool)
-            or not isinstance(last_tick_at, (int, float))
-            or now_ms - last_tick_at > 2 * fallback_minutes * 60000)
+        # F-3（v2.3.1 w35-dogfood-fix）：last_tick_at 缺失 / 非数值 =
+        # 首绑未 tick 的 awaiting first tick 语义，不再判 tick_stale
+        #（修复「新装即 unhealthy 与 await next tick 同框矛盾」；
+        # hooks/session_start.py 的 _clock_tick_stale 与此同口径镜像，
+        # 单一真相源互指）。
+        awaiting_first_tick = isinstance(last_tick_at, bool) or \
+            not isinstance(last_tick_at, (int, float))
+        tick_stale = (not awaiting_first_tick) and (
+            now_ms - last_tick_at > 2 * fallback_minutes * 60000)
         if tick_stale:
             reasons.append("tick_stale")
         if "db_row_missing" in reasons \
@@ -460,6 +524,7 @@ def _quota_clock_status(raw_repo_root) -> int:
             "runtime_path_exists": runtime_path_exists,
             "last_tick_at": last_tick_at,
             "tick_stale": tick_stale,
+            "awaiting_first_tick": awaiting_first_tick,
             "recent_run_count": (row.get("run_count")
                                  if isinstance(row, dict) else 0),
             "health": "unhealthy" if reasons else "healthy",

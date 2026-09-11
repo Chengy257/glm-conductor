@@ -15,11 +15,16 @@ tests/test_quota_clock_cli.py），identity 经 GLM_CONDUCTOR_QUOTA_API_KEY
   - 新鲜 tick（未超 2×fallback 阈值）→ stdout 恒空（零噪音红线）；
   - 陈旧 tick → 单行 JSON hookSpecificOutput（顶层仅
     hookSpecificOutput / 内层仅两键），advisory 含标识头 / 陈旧事实 /
-    Flash 专用会话 replace 指引 / 「未执行自动会话迁移」声明 /
-    quota-clock-status 指路 / not_mechanically_verifiable；
-  - last_tick_at 缺失（None / 键缺省）→ 视为陈旧；
-  - last_tick_at 非数值 → 视为陈旧；fallback_interval_minutes 非法
-    → 按 60 折算（90 分钟前的 tick 折算后不陈旧）；
+    Flash 专用会话 replace 指引（w35-dogfood-fix：含「bind 自动检测
+    并替换已确认死绑定、用户仍显式提供新 automation_id」口径）/
+    「未执行自动会话迁移」声明 / quota-clock-status 指路 /
+    not_mechanically_verifiable；
+  - last_tick_at 缺失（None）→ w35-dogfood-fix 起为 awaiting first
+    tick 语义（首绑未 tick 不误报）→ 静默（与 quota-clock-status
+    awaiting_first_tick 同口径镜像）；
+  - last_tick_at 非数值 → 同 awaiting first tick → 静默；
+    fallback_interval_minutes 非法 → 按 60 折算（90 分钟前的 tick
+    折算后不陈旧）；
   - state 文件 advisory 前后 sha256 不变（零写证明）；
   - state 损坏 / 非法 JSON / schema 版本不认识 → fail-open 完全静默；
   - active 任务 resume context 与 advisory 共存：resume 在前、空行
@@ -223,17 +228,26 @@ class StaleAdvisoryTest(AdvisoryCase):
         # 权威诊断指路
         self.assertIn("quota-clock-status", ctx)
 
-    def test_missing_last_tick_at_treated_stale(self):
-        # last_tick_at 缺失（None）→ 与 status 口径一致视为陈旧
-        self.write_state(last_tick_at=None)
+    def test_stale_advisory_mentions_dead_binding_auto_detect(self):
+        # w35-dogfood-fix 指引同步：advisory 与新 bind 行为同口径——
+        # bind 自动检测并替换已确认死绑定，用户仍显式提供新 automation_id
+        self.write_state(last_tick_at=STALE_TICK_MS)
         ctx = self._advisory_context()
-        self.assertIn("GLM CONDUCTOR QUOTA CLOCK ADVISORY", ctx)
+        self.assertIn("auto-detects a verified dead binding", ctx)
+        self.assertIn("you still provide the new automation_id", ctx)
 
-    def test_non_numeric_last_tick_at_treated_stale(self):
-        # last_tick_at 非数值（bool 拒绝口径外的垃圾值）→ 视为陈旧
+    def test_missing_last_tick_at_awaiting_first_tick_silent(self):
+        # F-3（w35-dogfood-fix）：last_tick_at 缺失（首绑未 tick）→
+        # awaiting first tick 语义，不再误报陈旧 → 完全静默（与
+        # quota-clock-status awaiting_first_tick 同口径镜像）
+        self.write_state(last_tick_at=None)
+        self.assert_silent(self.run_hook())
+
+    def test_non_numeric_last_tick_at_awaiting_first_tick_silent(self):
+        # F-3：last_tick_at 非数值（垃圾值）= 无合法 tick 观测 → 同
+        # awaiting first tick 语义 → 静默
         self.write_state(last_tick_at="garbage")
-        ctx = self._advisory_context()
-        self.assertIn("GLM CONDUCTOR QUOTA CLOCK ADVISORY", ctx)
+        self.assert_silent(self.run_hook())
 
     def test_invalid_fallback_folded_to_60(self):
         # fallback_interval_minutes 非法 → 按 60 折算（同 status 容错）：
