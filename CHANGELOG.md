@@ -1,5 +1,34 @@
 # Changelog
 
+## 2.3.1
+
+Hardening & Convergence 批次：不加新架构层——宿主边界安全、Quota Clock 会话放置与恢复 UX、运行时 CLI 分解、测试收敛与公共文档面收敛。额度连续性子系统自此进入维护模式。
+
+#### Added
+
+- **`host-check` 只读探针**：ZCode 宿主调度兼容性一条命令自检——DB 发现 / `automations` 表 / 必需列 / `next_run_at` 存储类型 / runs 表可达性 + 缺失项明细；绝对零写（探针句柄 mode=ro，零写有测试机械证明）。ZCode 升级后先跑它再决定是否继续使用额度连续性。
+- **Quota Clock 放置与恢复诊断**：`quota-clock-plan` 在 automation 创建前给出专用会话放置引导；`quota-clock-bind` 说明 tick 将驻留在当前会话 + 非 Flash 模型成本提示（仅提示，永不阻断）；`quota-clock-status` 新增 placement / host 诊断块与 `needs_replacement` 两极判定 + 恢复指引；SessionStart 钩子新增只读 advisory（clock 陈旧时提示恢复路径，绝不自动迁移 / rebind / 写入）。
+- **`runtime/commands/` 命令分解**：quota-clock 与 wake/transport 处理函数自 `cli.py` 迁出（2273 → 1278 行，−44%），零行为变化（AST 逐字等价 + 子进程输出字节等价 + 测试零改动三重证据）；子命令 / 参数 / 退出码 / 输出完全兼容。
+
+#### Changed
+
+- **bind 死绑定自愈（生产 dogfood P1 修复）**：宿主行确认缺失的死绑定可在同一独占锁事务内安全替换（成功输出 `replaced_dead_binding`；活绑定 / 检查异常 / 锁内身份漂移一律维持拒绝——显式 replace 语义，非自动迁移）；`quota-clock-plan` 产物以 `sys.executable` 生成 tick 命令与提示词（Windows 无 `python3` 启动器的首跳失败消除）；首绑未 tick 的 clock 呈现 `awaiting_first_tick`（不再"unhealthy + await next tick"自相矛盾）。
+- **公共文档面收敛**：README 双语按用户视角重写（开场零内部词汇；Global Quota Clock 与 Task Wake Bridge 显式区分；专用额度时钟会话放置注记；编排开箱即用与可选 quota continuity setup 分离）；新增 `docs/troubleshooting.md`（host-check 解读 / clock 失联恢复 / 停摆-but-healthy 排障 / advisory 语义 / 状态存储位置对照）；六类持久事实蒸馏入 `docs/architecture.md`（含 host 适配器边界正式化：稳定接口 = `recurring_bridge`，SQLite schema = 观察后端非契约 API）；开发史文档树（v1 至 v2.3.0 的实施计划 / 实验记录 / dogfood 档案）退出公共仓库（git 历史即存档）。
+- **测试收敛**：删除 4 条文档措辞锚（行为 / 契约 / 安全守卫零损失，台账化），`WAKE_RETIME_*` 常量锚点直指实现所在模块；成功标准 = 维护负担降低而非数量增长。
+
+#### Fixed
+
+- 生产 dogfood 三缺陷：死绑定 replace 路径结构性死锁（恢复指引此前指向必败命令）、plan 产物硬编码 `python3`（双点）、首绑即 unhealthy 的矛盾呈现。
+
+#### Internal
+
+- **项目边界**：插件与代理严禁代用户执行睡眠 / 唤醒 / 关机等 OS 电源操作（用户本人权限）；Windows 睡眠跨触发点的宿主行为按"未验证"如实记录（用户裁定不实验，2026-09-11）；确定性宿主事实入册（一会话一 automation 为硬规则、fire 秒级延迟、注入在会话忙时排队）。
+
+#### Testing
+
+- 2327 → 2383（placement UX 16 + SessionStart advisory 11 + host-check 20 + dogfood 修复 13 − 措辞锚 4，净 +56）；ruff 全绿；每个单元由主会话独立复现验证 + 全新上下文独立终审（审查收据机械落账）。
+
+
 ## 2.3.0
 
 
@@ -10,7 +39,7 @@ Global Quota Clock 与额度连续性简化批次：account 级额度窗口时�
 - **ZCode Scheduled Task 宿主适配器（`runtime/host/zcode_schedule.py`）**：宿主内部库 `~/.zcode/v2/tasks-index.sqlite` 的唯一接触面。生产写操作全模块仅一条 `UPDATE automations SET next_run_at`（源码扫描测试机械锚定；INSERT/DELETE/DDL/改 scheduleRule 一律 fail-closed）；事务配方 = busy_timeout + BEGIN IMMEDIATE + 行数/状态闸 + 读回验证（W0 ZC-03 实证：无超时即败、10s 超时等待后提交）；inspect 只读（mode=ro URI，冻结 17 键 + 最近 20 条 runs 触发证据）。与 quota/domain 逻辑零耦合——宿主未来开放官方 API 时只换 adapter、算法层不动。
 - **Global Quota Clock（`quota/clock.py` + `quota/clock_store.py` + CLI `quota-clock-plan/bind/tick/status`）**：每 provider identity 一个 account 级常驻时钟，极低成本无限期运行、不设窗口预算（额度窗口预算属任务侧 `continuity.max_quota_windows`，v2.2 语义零改动）。纯决策层六行冻结决策表（provider 不可用 / weekly blocked 长 park / five_hour 缺失或不可解析 / reset 已过期 / reset_target=reset+120s；weekly 判定复用 epoch.blocking_windows + executable_boundary_at 单一真相源）；用户级状态 `~/.glm-conductor/quota-clocks/<hash>.json`（GLM_CONDUCTOR_HOME 可覆盖；锁内 RMW、重复 bind 拒绝、runtime_path/automation_model 快照）；tick 为唯一生产入口——本 tick 的真实模型调用即新窗口物化，retime 失败零补偿退 native watchdog（三层故障链：reset+2m → +5m retry → 60m watchdog）；status 提供健康判读（tick 陈旧 / DB 行缺失 / 路径悬空 / 目标不一致）与 replace 建议；升级自愈——tick 发现实际运行时路径 ≠ state 记录时自动回写。
 - **Task Wake Bridge 精确化（双 retime 锚点）**：arm 时（新增 `wake-arm` CLI——同时修复 v2.2 既存缺口：persistent arm 记账此前无任何调用面）记账后立即 `next_run_at = wake_at`（fail-open）；fire 后（新增 `wake-retime` CLI）一步完成判定+重定时：额度可执行 → park 桥至一年后（任务下次休眠重走 arm 流程），仍不可执行 → 重排下一额度边界或 5 分钟重试。waiting_quota 任务不再随机等待最多 60 分钟；native recurring 网格仅作 watchdog 兜底。
-- **宿主实验记录（W0）**：`docs/history/v2.3.0/ZCode-Scheduled-Task-Retime-Experiments.md`——off-grid 外部 retime 精确执行 ×2、动态值跨 App 重启存活+精确触发+注入回绑定会话（ZC-01）、SQLite busy 配方（ZC-03）、365 天 park 静默与跨重启（ZC-04）全部实证冻结；schema 33 列/WAL 零漂移。
+- **宿主实验记录（W0）**：（实验存档随 v2.3.1 退出仓库，git 历史可溯）——off-grid 外部 retime 精确执行 ×2、动态值跨 App 重启存活+精确触发+注入回绑定会话（ZC-01）、SQLite busy 配方（ZC-03）、365 天 park 静默与跨重启（ZC-04）全部实证冻结；schema 33 列/WAL 零漂移。
 
 #### Changed
 
@@ -42,7 +71,7 @@ Global Quota Clock 与额度连续性简化批次：account 级额度窗口时�
 - **真多进程测试套件（`tests/test_multiprocess_runtime.py`）**：barrier 同步的真实进程覆盖六类需求场景——并发获取（N 进程恰好一个赢家、败者确定性冲突、状态文件零损坏）、死 pid 与过期心跳接管、持有者中途死亡恢复、stop/start 竞争全程。
 - **provider 身份绑定**：共享模块 `quota/identity.py`（非秘密 16-hex 身份哈希，可安全记录/持久化）；quota 缓存写入 `provider_identity_hash`——新鲜复用与 stale 回退仅限同一身份，外来或 legacy（无哈希）缓存永不作为权威，fetch 失败按 UNKNOWN fail-open 而非落回他身份快照；`QuotaIdentity` 双形态匹配贯穿全部六个记账面（epoch 匹配、订阅注册/资格/激活、崩溃对账、消费 committed/pending 扫描、直接读缓存门、唤醒规划）——凭证切换后，A 账户的消费既不满足也不阻塞 B 账户的记账。
 - **运行时分解（行为保持）**：quota 记账域提取至 `quota/accounting.py`（消费记账 + 迁移 + TaskManagerError 规范家）；wake bridge / subscription / resume 域提取至新 `runtime/continuity/` 包；共享时间/窗口助手沉淀为 `quota/time_utils.py` 与 `quota/window_math.py`；公共面契约测试（`tests/test_public_surface.py`）冻结公共 API 面——46 名子集 + 类型钉定、跨分解模块的 facade 恒等 re-export、子进程验证的反向依赖冻结。
-- **文档重构**：新增概念层入口 `docs/core-concepts.md` 与 `docs/README.md` 索引；全版本历史文档按 `docs/history/{v1, v2.0, v2.1, v2.2, reference}/` 归类并附各目录索引（明确非权威存档，现行权威为 `docs/architecture.md`）；`docs/architecture.md` 重写为逐节回答"系统现在是什么"的现态权威文档；README 改为英文优先（GitHub 默认面）+ 中文自然镜像 `README.zh-CN.md`，`README.en.md` 退役。
+- **文档重构**：新增概念层入口 `docs/core-concepts.md` 与 `docs/README.md` 索引；全版本历史文档按版本归类归档（该历史树已于 v2.3.1 退出仓库，git 历史可溯；现行权威为 `docs/architecture.md`）；`docs/architecture.md` 重写为逐节回答"系统现在是什么"的现态权威文档；README 改为英文优先（GitHub 默认面）+ 中文自然镜像 `README.zh-CN.md`，`README.en.md` 退役。
 
 #### Changed
 
@@ -63,7 +92,7 @@ Global Quota Clock 与额度连续性简化批次：account 级额度窗口时�
 
 ## 2.2.0
 
-Quota Continuity Control Loop Closure — the resume chain upgrades from agent discipline to a mechanical guarantee: a dual-layer quota model (provider four-state × execution phase), a persistent wake bridge with an activation-transport abstraction, a resident quota watcher, an epoch-based subscription/consumption ledger, and a Stop-gate continuity health check. Full uncondensed entry archived at `docs/history/v2.2/CHANGELOG-2.2.0-full.md`.
+Quota Continuity Control Loop Closure — the resume chain upgrades from agent discipline to a mechanical guarantee: a dual-layer quota model (provider four-state × execution phase), a persistent wake bridge with an activation-transport abstraction, a resident quota watcher, an epoch-based subscription/consumption ledger, and a Stop-gate continuity health check. Full uncondensed entry preserved in git history.
 
 ### Added
 
@@ -74,7 +103,7 @@ Quota Continuity Control Loop Closure — the resume chain upgrades from agent d
 - **Resident quota watcher** (opt-in): a poll-only, zero-model-call control loop that keeps the true provider quota clock while the session is dormant — ACTIVE/PASSIVE re-evaluated every tick from the task ledger (manual/notify stays PASSIVE: observable, never primes, never activates); heartbeat-staleness-guarded single-instance lock; fetch failures degrade to a typed observation error and the loop continues.
 - **Window primer** (opt-in, default **off**): the runtime's only control-plane model-call surface, materializing a new quota window with one minimal auditable call plus a forced-refresh confirmation; mechanical fail-closed triple authorization gate (`primer_enabled` AND `auto_resume ∈ {auto_once, until_done}` AND `authorization.source == "user"`); single-flight idempotency per `(provider_identity_hash, boundary_id)` with failed attempts durably recorded; materialization evidence is the epoch identity change between two forced refreshes only — HTTP 200 and percent deltas are not evidence.
 - **Stop-gate continuity health check**: a position-0 check bound to the dormant-handoff trigger domain only (ordinary NORMAL turns get zero intervention) — in-domain tasks must present durable handoff (checkpoint + resume manifest), a registered quota subscription for the current epoch, and an armed activation transport, in dependency order; not-armed with create-forbidden or scheduled-task origin degrades and allows instead of blocking forever; watcher absence/staleness is a degrade-only annotation, never an independent block; the `gate_exhausted` release valve still applies.
-- **Mechanism facts** (evidence archived in `docs/history/v2.2/GLM-Conductor-v2.2-Phase0-Primer-Experiments.md`): at `reset_at` a window recovers to 100% (weekly precedence); the next `reset_at` materializes only on a model call in the new window — pure queries never advance it; `reset_at` anchors to the materialization moment +5h00m01s; an idle session defers its window start.
+- **Mechanism facts** (evidence preserved in git history): at `reset_at` a window recovers to 100% (weekly precedence); the next `reset_at` materializes only on a model call in the new window — pure queries never advance it; `reset_at` anchors to the materialization moment +5h00m01s; an idle session defers its window start.
 
 ### Changed
 
@@ -110,7 +139,7 @@ Release candidate, landed **2026-09-01** — **bugfix / docs / dogfood fallout o
 
 - **README version surface fix (final-review finding)**: version badge 2.0.1 → current and a v2.1-alpha3 milestone section added to both README / README.en (plugin.json / CHANGELOG / README version consistency restored); independently reviewed (fresh glm-reviewer: ship)
 - **CI matrix confirmed on the alpha3 tag**: ubuntu + windows × Python 3.8 / 3.13 all green on v2.1.0-alpha3 (run 33460399614) — the local suite had run under CPython 3.7, closing the reviewer's evidence-scope note
-- **Dogfood A–E non-regression**: the alpha3 session itself live-exercised the batch-two scenarios as a superset — six real dispatch waves with auto-close (A), a real background worker killed mid-run with reconcile classification and evidence package (B/R2), multi-window exhaustion + forced-refresh wake recovery incl. the real one-shot wake automation that resumed this very session (C/D/R1), and quota-folded worker budgets on every dispatch (E); no regression observed, recorded in `docs/history/v2.1/GLM-Conductor-v2.1-Dogfood-Records.md`
+- **Dogfood A–E non-regression**: the alpha3 session itself live-exercised the batch-two scenarios as a superset — six real dispatch waves with auto-close (A), a real background worker killed mid-run with reconcile classification and evidence package (B/R2), multi-window exhaustion + forced-refresh wake recovery incl. the real one-shot wake automation that resumed this very session (C/D/R1), and quota-folded worker budgets on every dispatch (E); no regression observed, recorded in the dogfood records (git history)
 
 ## 2.1.0-alpha3
 
@@ -124,11 +153,11 @@ Third batch of v2.1, landed **2026-08-31** — **secondary hardening (RB-21 seri
 - **SH-21-01 — `wake-record` idempotence + pre-write authorization re-check (wu-a3-06)**: `task_manager.record_quota_wake` is now **idempotent per `automation_id`** — a journal that already carries a `quota_wake_recorded` event for the same automation returns the original consumption result (existing return keys preserved, plus `"idempotent": true`) without incrementing or re-journaling, so cron-glitch replays and accidental retries no longer double-spend window budget (different automation ids still consume one window each); before any first-time booking the API independently re-verifies authorization — `auto_resume ∈ {auto_once, until_done}`, `authorization.source == "user"`, and remaining budget > 0, read through the same `_continuity_view` lens as the decision matrix (legacy / missing blocks interpret as manual) — and rejects with `TaskManagerError` naming the violated condition and **zero side effects** (no journal events, `state.json` bytes unchanged); the CLI `wake-record` surfaces rejections as exit 1
 - **SH-21-02 — release metadata discipline documented (wu-a3-06)**: README / README.en state the release rule — GitHub Releases for `alpha` / `rc` must be marked **prerelease=true**; only `stable` versions ship as the latest stable release (marketplace users rely on the flag to decide whether updates are offered automatically)
 - **SH-21-03 — Python version consistency verified (wu-a3-06)**: verified with zero code changes — README declares Python 3.8+, the CI matrix is ubuntu + windows × Python 3.8/3.13 (`.github/workflows/validate.yml`), and the repository carries no 3.7 requirement declaration (remaining "Python 3.7" strings are stdlib-availability notes in module docstrings and historical ledger artifacts)
-- **Testing**: `tests.test_authorized_resume` gains the §10.6 named cases (`test_same_automation_recorded_once`, `test_different_automation_consumes_second_window`, `test_manual_mode_cannot_record_auto_wake`, `test_budget_zero_rejects_new_wake`, plus the defense-in-depth unauthorized-source rejection); `tests.test_cli_extensions` wake-record fixture grants explicit authorization per the stricter semantics; dogfood R1–R5 (multi-window exhaustion, crash-during-worker quota recovery, wave partial-permit fault injection, fake-review rejection + real-reviewer chain, ledger≠git-root reconcile) recorded in `docs/history/v2.1/GLM-Conductor-v2.1-Dogfood-Records.md`; full suite **1328 tests green**, `validate_plugin` **15/15**
+- **Testing**: `tests.test_authorized_resume` gains the §10.6 named cases (`test_same_automation_recorded_once`, `test_different_automation_consumes_second_window`, `test_manual_mode_cannot_record_auto_wake`, `test_budget_zero_rejects_new_wake`, plus the defense-in-depth unauthorized-source rejection); `tests.test_cli_extensions` wake-record fixture grants explicit authorization per the stricter semantics; dogfood R1–R5 (multi-window exhaustion, crash-during-worker quota recovery, wave partial-permit fault injection, fake-review rejection + real-reviewer chain, ledger≠git-root reconcile) recorded in the dogfood records (git history); full suite **1328 tests green**, `validate_plugin` **15/15**
 
 ## 2.1.0-alpha2
 
-Second batch of v2.1, landed **2026-08-31** — **bounded parallel activation, quota decisions, and evidence provenance (M4-M6)**: dispatch waves, runtime quota resolution with authorized resume, and verification/review provenance receipts turn the remaining advisory disciplines into deterministic runtime facts. Companion to `docs/history/v2.1/GLM-Conductor-v2.1-Dogfood-Records.md` (five live scenarios recorded during this very batch). Unit-level results:
+Second batch of v2.1, landed **2026-08-31** — **bounded parallel activation, quota decisions, and evidence provenance (M4-M6)**: dispatch waves, runtime quota resolution with authorized resume, and verification/review provenance receipts turn the remaining advisory disciplines into deterministic runtime facts. Companion dogfood records (five live scenarios recorded during this very batch, preserved in git history). Unit-level results:
 
 - **M4 — dispatch wave batch transaction (wu-21-08)**: `task_manager.prepare_dispatch_wave` (CLI `wave-prepare`) fuses "resolve quota → full plan_dispatch decision → per-unit leases → wave record + batch permits → single `dispatch_wave_prepared` event" into one call with all-or-safe-degrade semantics (lease-conflict units are excluded and re-planned; the wave record never lands with partial leases); `finish_unit` auto-closes waves when all members reach terminal/verifying (`wave_closed`); `wave-show` read-only query; PreToolUse permit gate gains the **wave membership ring** (check step 5.5: a wave permit must point at an active wave and its unit must still be on the member list, deny message carries the re-prepare-wave guidance); **wave launch contract (§11.5)**: wave.units > 1 must be dispatched concurrently in the same turn — waiting for the first to return is forbidden
 - **M4 — bounded-parallel activation (wu-21-09)**: parallelism on by default — **default 2 workers, hard limit 4 frozen**; `effective_worker_budget` folds quota into the budget (AVAILABLE → policy value, PRESSURE/UNKNOWN → 1, EXHAUSTED → 0) and the dispatcher no longer suspends whole batches on UNKNOWN/PRESSURE (eff=0 feeds 1 into plan, the quota gate converts everything to waiting_quota naturally)
@@ -139,12 +168,12 @@ Second batch of v2.1, landed **2026-08-31** — **bounded parallel activation, q
 - **Runtime CLI extensions (wu-21-15)**: 8 new subcommands (`wave-prepare` / `wave-show` / `quota-resolve` / `verify-unit` / `verify-task` / `review-record` / `quota-exhausted` / `quota-resume` / `wake-record` / `wake-prompt` family) with the same single-line ASCII JSON contract and 0/2/1 exit codes; `wake-prompt` stays plain text by design
 - **Breaking / semantic changes**: dispatcher UNKNOWN/PRESSURE suspended branch removed (conservative suppression → budget-folding); stop gate review evidence authority moves from state.review to the fresh ship receipt; `prepare_dispatch` / `prepare_dispatch_wave` `quota_status` default None → runtime resolution (explicit strings still pass through verbatim); default parallelism 1 → 2 (hard limit 4 unchanged, escalation to 3-4 still requires user authorization); wake prompt's inline `python3 -c` resolver snippet replaced by the CLI form
 - **Validator**: all file scans now skip `__pycache__` directories and `*.pyc` / `*.pyo` files (root cause of the phantom-name 4/14 FAIL recorded in wu-21-08 dogfood); new **check 15** anchors the review-receipt authority vocabulary (`run_review` / `review-record`) in the enforcement skill; 14 → 15 checks, all green
-- **Docs**: architecture §9.6 (M4-M6); orchestration / enforcement / continuity skills synced (wave contract, authorized-resume mechanics, receipt authority, `waiting_user` vocabulary, new journal events); README / README.en capability list gains bounded parallelism (default 2), runtime quota resolution, authorized resume, provenance receipts — stale "advisory boundary" limitation removed; new `docs/history/v2.1/GLM-Conductor-v2.1-Dogfood-Records.md` (second batch, scenarios A-E)
+- **Docs**: architecture §9.6 (M4-M6); orchestration / enforcement / continuity skills synced (wave contract, authorized-resume mechanics, receipt authority, `waiting_user` vocabulary, new journal events); README / README.en capability list gains bounded parallelism (default 2), runtime quota resolution, authorized resume, provenance receipts — stale "advisory boundary" limitation removed; new dogfood records for the second batch (scenarios A-E, preserved in git history)
 - **Testing**: 1256 tests, all green; `validate_plugin` 15/15
 
 ## 2.1.0-alpha1
 
-First batch of v2.1 — **Runtime Control Plane Closure (M1-M3)**: turning capabilities that existed but could be bypassed by advisory text into enforced, machine-checked control-plane facts. Plan: `docs/history/v2.1/GLM-Conductor-v2.1-Architecture-Agent-Implementation-Plan.md` (with 17 ※DR amendments from the pre-implementation probe round, `docs/history/v2.1/GLM-Conductor-v2.1-实施前缺口探查与设计决策记录.md`). Second batch (M4-M6: dispatch waves, bounded-parallel activation, quota-aware authorized resume, verification/review provenance) is out of scope for alpha1.
+First batch of v2.1 — **Runtime Control Plane Closure (M1-M3)**: turning capabilities that existed but could be bypassed by advisory text into enforced, machine-checked control-plane facts. Plan and its 17 ※DR amendments from the pre-implementation probe round are preserved in git history. Second batch (M4-M6: dispatch waves, bounded-parallel activation, quota-aware authorized resume, verification/review provenance) is out of scope for alpha1.
 
 - **M1 — execution policy (authorization source of truth)**: state gains an optional top-level `execution_policy` block (frozen schema: `worker_execution.default_mode`, `parallelism.{mode,default_workers,max_workers,hard_limit}`, `continuity.{mode,auto_resume,max_quota_windows}`, `authorization.{source,confirmed_at,scope}`). New `runtime/execution_policy.py` with five pure APIs: `default_execution_policy` (conservative defaults: background / standard / 2 workers / hard limit 4 / auto_resume manual), `validate_execution_policy` (§5.4 authorization invariants enforced at save time — `hard_limit` frozen at 4, `auto_once`/`until_done`/`max_workers > 2` require `authorization.source == "user"`), `set_parallel_authorization` / `set_resume_authorization` (pure transforms with early zero-side-effect validation), `effective_worker_budget` (AVAILABLE → max_workers, PRESSURE/UNKNOWN → 1, EXHAUSTED → 0). Legacy states without the block remain valid and are interpreted against the conservative default (R7)
 - **M2 — dispatch permits (anti-bypass gate)**: `runtime/dispatch_wave.py` durable permit primitives — one file per permit under `tasks/<id>/permits/`, atomic `os.replace` create, **consume = atomic rename to `.consumed.json`** (replay mechanically denied; no file locks needed across the hook/main-session double-writer boundary), invalidate on abort, TTL expiry as backstop, `permit_id` shape guard (path-escape defense), `GLM_CONDUCTOR_DISPATCH=<permit_id>` marker helpers. `prepare_dispatch` issues a permit (mode from `execution_policy.worker_execution.default_mode`, legacy-safe) and returns it; `abort_dispatch` invalidates all unconsumed permits of the unit. CLI: `permits` / `permit-show` / `permit-consume`
@@ -162,7 +191,7 @@ First batch of v2.1 — **Runtime Control Plane Closure (M1-M3)**: turning capab
 
 ## 2.0.1
 
-v2.0.1 — runtime integrity / correctness hardening wave, driven by the v2.0.0 comprehensive review (`docs/history/v2.0/GLM-Conductor-v2.0.0-全面审查与v2.0.1加固建议.md`, work packages H1-H8 plus release closeout). No new routing dimensions or roles; enforcement only tightens machine-checkable invariants:
+v2.0.1 — runtime integrity / correctness hardening wave, driven by the v2.0.0 comprehensive review (work packages H1-H8 plus release closeout; review document preserved in git history). No new routing dimensions or roles; enforcement only tightens machine-checkable invariants:
 
 - **P0 — completion lifecycle**: completion is requested by entering `finalizing`; `save_state` enforces the `TASK_TRANSITIONS` migration table; `completed` is only committable through the Stop gate's internal channel (`state.commit_completion`, `_gate_commit`)
 - **P0 — route invariants**: `validate_route_invariants` enforces cross-field consistency at save time — route matrix (delegability × assurance → mode), executor binding, `review.required` derivation, and delegate/full substantive ownership + verification
@@ -233,7 +262,7 @@ v2 第三里程碑——**额度感知连续性**（Quota-Aware Continuity，依
 
 ## 2.0.0-alpha2
 
-v2 第二里程碑——**证据完整性**：「任何修复使先前验证/审查失效」从提示词契约升级为完成门的自动强制（依据 docs/history/v2.0/glm-conductor-v2-upgrade-guide-final.md §17-§22，实施计划轮 4 块 B3/B4）：
+v2 第二里程碑——**证据完整性**：「任何修复使先前验证/审查失效」从提示词契约升级为完成门的自动强制（依据 v2.0 升级指南 §17-§22（git 历史可溯），实施计划轮 4 块 B3/B4）：
 
 - **证据指纹层（`runtime/fingerprint.py`）**：`task_fingerprint` = sha256(基线修订 + 相关文件集归一化内容状态)——换行归一（CRLF/LF 逻辑内容不变则指纹不变）、路径归一、unborn 仓库基线回退；范围规则：声明了 ownership 取「当前改动 ∩ 声明范围」，未声明取全部改动；主会话记录证据与 Stop 完成门比对共用同一入口
 - **完成门四重检查（`hooks/stop_gate.py`）**：Layer A 从单一 ownership 校验升级为 §15 顺序流水线——① ownership（touched ⊆ owned）② 验证（required 命令全部由主会话完成 + 指纹新鲜）③ 审查（required 时 verdict=ship + 指纹新鲜）④ 视觉证据（截图字节 sha256 一致）；七种失败形态（ownership / verification_missing / verification_stale / review_missing / review_rejected / review_stale / visual_stale）各有可行动 block 报文与 journal `check` 字段；参与判定：四项声明任一非空即受门跟踪
@@ -246,7 +275,7 @@ v2 第二里程碑——**证据完整性**：「任何修复使先前验证/审
 
 ## 2.0.0-alpha1
 
-v2「从提示词契约到强制执行契约」——alpha1 强制基座达成（运行时状态层 + Ownership Layer A/B + 执行日志；依据 docs/history/v2.0/glm-conductor-v2-upgrade-guide-final.md 与实施计划，Phase 0 运行时验证先行）：
+v2「从提示词契约到强制执行契约」——alpha1 强制基座达成（运行时状态层 + Ownership Layer A/B + 执行日志；依据 v2.0 升级指南与实施计划（git 历史可溯），Phase 0 运行时验证先行）：
 
 - **任务标识更名**：`CONTINUITY_ID` → `TASK_ID`（v1.x 遗留 checkpoint 读取时归一化，无需重写）；路径占位统一为 `<task-id>`
 - **运行时状态层（`runtime/state.py`）**：`state.json` 作为强制状态源——schema 校验（路由五字段 / ownership.files / verification / review / 13 态生命周期词汇）、原子保存、`CONTINUITY_ID` legacy 归一、活动任务发现；创建 state.json 即受完成门跟踪，foreground 普通短任务零干预
@@ -271,10 +300,10 @@ v1.1.0 — v1.0 发布后的审计整改与运行时加固（release hardening�
 - **市场描述更新（P1）**：marketplace 插件条目描述补全视觉通道与长任务连续性
 - **静态校验器与 CI（P2）**：新增 `scripts/validate_plugin.py`（纯标准库 8 项检查：JSON 合法性、agent/skill frontmatter 必填字段、引用 agent 存在、命名一致、v1 禁词、continuity 安全、视觉协议名一致）与 `.github/workflows/validate.yml`
 - **发布质量（P2）**：README 声明 Tested with ZCode 3.9.2；「成本优化分工」重定位为「分层执行能力」，成本优势作为次级收益呈现
-- **架构真相源（P0/P1）**：新增权威架构文档 `docs/architecture.md`（与 v1.1 运行时契约一致）；pre-v1.1 架构提案移入 `docs/history/` 并标注 SUPERSEDED，不再作为实现依据
+- **架构真相源（P0/P1）**：新增权威架构文档 `docs/architecture.md`（与 v1.1 运行时契约一致）；pre-v1.1 架构提案归档并标注 SUPERSEDED（该归档树已于 v2.3.1 退出仓库），不再作为实现依据
 - **CONTINUITY_ID 机械唯一（P1）**：ID 格式改为「语义前缀 + 6~8 位随机十六进制后缀」——并行同时创建的任务不再依赖命名约定防碰撞；生成、持久化、恢复、清理全程使用同一精确 ID
 - **视觉新调用规范化（P1）**：视觉反馈环的续作以「携带完整状态的新调用」为规范路径（规格、当前 diff、上一轮 VISUAL_CAPTURE_REQUEST、截图路径、VISUAL_ROUND 轮次号）；子代理 resume 仅为可选优化，协议正确性不依赖 resume
-- **校验器扩展（P2）**：权威架构文档纳入静态校验扫描（`docs/history/` 排除）；新增 CONTINUITY_ID 与视觉规范措辞必含检查、plugin.json 与 CHANGELOG 版本一致性检查
+- **校验器扩展（P2）**：权威架构文档纳入静态校验扫描（当时的历史归档树排除，该树现已退场）；新增 CONTINUITY_ID 与视觉规范措辞必含检查、plugin.json 与 CHANGELOG 版本一致性检查
 
 ## 1.0.0
 
