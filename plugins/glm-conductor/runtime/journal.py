@@ -5,8 +5,7 @@
 职责：
     管理 v2 任务的本地执行日志 `.glm-conductor/tasks/<task-id>/events.jsonl`：
     append-only 追加、容错读取、尾部查询。用途是本地执行溯源
-    （调试 / 恢复 / 审计），不是遥测
-    （docs/history/v2.0/glm-conductor-v2-upgrade-guide-final.md §54-§56）。
+    （调试 / 恢复 / 审计），不是遥测。
     v2.2 C5a（wu-22-C5a）起增设控制面 journal
     `.glm-conductor/quota/events.jsonl`（与 watcher.json / primer.json
     同层）：无任务上下文的控制面事件（quota_epoch_advanced、

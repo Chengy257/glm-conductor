@@ -98,10 +98,9 @@ watcher 进程退出时按释放身份纪律删 watcher.lock（release_watcher_l
     runtime.task_manager。
 
 来源：
-    docs/history/v2.2/GLM-Conductor-v2.2-Quota-Control-Plane-Architecture-Correction-
-    and-Agent-Implementation-Plan.md §6（Watcher 运行模式 / 状态锁字段）
-    / §6.1（第一阶段范围）/ §6.2（P0-WATCH-00 五项 Windows 前置硬门）
-    / §11（状态模型修正，schema_version / next_poll_at 形状参照）
+    v2.2 设计（已蒸馏入 docs/architecture.md：Watcher 运行模式 / 状态锁
+    字段 / 第一阶段范围 / P0-WATCH-00 五项 Windows 前置硬门 / 状态模型
+    修正，schema_version / next_poll_at 形状参照）
     + 修正计划工作单元 wu-22-C3
     + v2.2.1 hardening 工作单元 WU-221-A2（锁所有权与观察状态分离）。
 """

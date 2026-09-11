@@ -35,9 +35,8 @@
     python3 report.py [--json]
 
 来源：
-    docs/history/v2.0/glm-conductor-v2-upgrade-guide-final.md §36（凭证三模式）、
-    §27（snapshot）、§28-§33（评估与恢复规划）、§37（凭证安全）、
-    §43（quota 诊断面）+ v2 升级计划工作块 B5.5。
+    v2.0 设计（已蒸馏入 docs/architecture.md：凭证三模式 / snapshot /
+    评估与恢复规划 / 凭证安全 / quota 诊断面）+ v2 升级计划工作块 B5.5。
 """
 
 import argparse

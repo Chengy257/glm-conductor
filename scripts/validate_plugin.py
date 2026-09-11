@@ -96,7 +96,7 @@
 
     扫描范围说明：检查 5/6/7/8（及 8 内的旧名负向检查）的扫描范围是显式
     列表——plugins/ 全部文件 + marketplace.json + README.md +
-    docs/architecture.md。docs/history/ 与 docs/ 下其他文件不在该显式列表
+    docs/architecture.md。docs/ 下其他文件不在该显式列表
     中，天然不被扫描，无需目录排除逻辑。**编译缓存排除（v2.1 alpha2，
     wu-21-08 幻影名根因修复）**：全部文件扫描一律跳过 `__pycache__`
     目录与 `*.pyc` / `*.pyo` 文件——字节码缓存内的旧字符串残影曾让
@@ -169,8 +169,8 @@ OLD_VISUAL_NAME = "VISUAL_ACCEPT_REQUEST"
 FORBIDDEN_WORDS = ("升级信号", "上报升级", "升级路由")
 
 # 检查 5/6/7（及 8 的旧名负向检查）使用的扫描范围：plugins/ 全部文件 +
-# marketplace.json + README.md + docs/architecture.md（显式列表；docs/history/
-# 与 docs/ 下其他文件不在列表内，天然不被扫描）
+# marketplace.json + README.md + docs/architecture.md（显式列表；docs/ 下
+# 其他文件不在列表内，天然不被扫描）
 SCAN_EXTRA_FILES = (MARKETPLACE_JSON, README, ARCH_DOC)
 # 扫描范围的人类可读描述（仅用于 PASS 明细文案，与实际范围保持同步）
 SCAN_SCOPE_DESC = (

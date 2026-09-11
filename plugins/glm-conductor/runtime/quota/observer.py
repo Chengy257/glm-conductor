@@ -41,14 +41,12 @@
     quota/* 包纪律：不 import runtime.state / runtime.task_manager。
 
 来源：
-    docs/history/v2.2/GLM-Conductor-v2.2-Quota-Continuity-Control-Loop-Implementation-
-    Plan.md §6（Adaptive Quota Heartbeat）/ §6.2（推荐心跳周期）/
-    §6.3（事件触发刷新——查询侧对应：进 runtime 先判 should_refresh）/
-    §6.4（lazy heartbeat：无 daemon、避免多余 truth source）/ §16
-    （Quota Observer 设计）/ §16.1（输出 dict 形状）/ §16.2（Observer
-    不做什么）/ §22.1（CLI 输出）/ WU-22-03（adaptive interval /
-    event-triggered refresh / lazy heartbeat / next_check_at / 禁
-    daemon）。
+    v2.2 设计（已蒸馏入 docs/architecture.md：Adaptive Quota Heartbeat /
+    推荐心跳周期 / 事件触发刷新——查询侧对应：进 runtime 先判
+    should_refresh / lazy heartbeat：无 daemon、避免多余 truth source /
+    Quota Observer 设计与输出 dict 形状 / Observer 不做什么 / CLI 输出）
+    + WU-22-03（adaptive interval / event-triggered refresh /
+    lazy heartbeat / next_check_at / 禁 daemon）。
 """
 
 from datetime import datetime, timedelta, timezone

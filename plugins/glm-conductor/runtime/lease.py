@@ -64,10 +64,10 @@ TTL / generation / 崩溃恢复（v2.0.1 加固 H5，审查项 P1-4）：
     标准库，`python3 -S` 可运行。
 
 来源：
-    docs/history/v2.0/glm-conductor-v2-upgrade-guide-final.md §78（文件租约）/
-    §81（并行安全 = ownership 声明判定可并行且无外来活跃租约冲突）/
-    §82（并行上限 2-4，实验特性 experimental）+ v2 升级计划工作块
-    B9.1 + v2.0.1 加固工作包 H5（审查项 P1-4/P1-5）。
+    v2.0 设计（已蒸馏入 docs/architecture.md：文件租约 / 并行安全 =
+    ownership 声明判定可并行且无外来活跃租约冲突 / 并行上限 2-4，
+    实验特性 experimental）+ v2 升级计划工作块 B9.1 + v2.0.1 加固
+    工作包 H5（审查项 P1-4/P1-5）。
 """
 
 import datetime

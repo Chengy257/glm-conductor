@@ -57,8 +57,7 @@ v2.3.1 增补（unit w1-session-advisory）：
     节一致，零噪音）。
 
 来源：
-    docs/history/v2.1/GLM-Conductor-v2.1-Architecture-Agent-Implementation-Plan.md
-    §8（SessionStart Recovery，全部）+ §2.3-H2；v2.3.1 计划 P1.1/P1.2
+    v2.1 设计（已蒸馏入 docs/architecture.md）；v2.3.1 计划 P1.1/P1.2
     （SessionStart Quota Clock advisory，unit w1-session-advisory）。
 """
 

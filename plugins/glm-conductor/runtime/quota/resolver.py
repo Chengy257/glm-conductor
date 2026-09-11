@@ -71,11 +71,9 @@
     runtime/quota/scheduler.py。
 
 来源：
-    docs/history/v2.1/GLM-Conductor-v2.1-Architecture-Agent-Implementation-Plan.md
-    §13（Runtime Quota 集成，主会话 wu-21-10 实施规格）+
-    docs/history/v2.0/glm-conductor-v2-upgrade-guide-final.md §27（snapshot）、
-    §28（四态评估）、§34（缓存）、§37（凭证安全）+ wu-21-09 已落地
-    的预算语义（UNKNOWN → 预算 1，不挂起）。
+    v2.1 设计（已蒸馏入 docs/architecture.md：Runtime Quota 集成，
+    wu-21-10 实施规格）+ v2.0 设计（snapshot / 四态评估 / 缓存 /
+    凭证安全）+ wu-21-09 已落地的预算语义（UNKNOWN → 预算 1，不挂起）。
 """
 
 import hashlib

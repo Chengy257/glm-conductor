@@ -65,12 +65,10 @@ continuation_obligation（§8.3，只产出 runtime.state 词汇子集）：
     runtime.quota.parser（parser 不反向依赖，无循环导入）。
 
 来源：
-    docs/history/v2.2/GLM-Conductor-v2.2-Quota-Continuity-Control-Loop-Implementation-
-    Plan.md §4.2（execution phase 四态）/ §5.1（固定阈值）/ §8.3
-    （obligation 规则）/ §17.1（返回 dict 形状）/ §18/§18.1（预算与
-    白名单）/ WU-22-02；
-    docs/history/v2.2/GLM-Conductor-v2.2-实施前缺口探查与设计决策记录.md D5
-    （阈值配置落点）/ D7（双层映射冻结）。
+    v2.2 设计（已蒸馏入 docs/architecture.md：execution phase 四态 /
+    固定阈值 / obligation 规则 / 返回 dict 形状 / 预算与白名单）
+    + WU-22-02；v2.2 缺口探查决策记录 D5（阈值配置落点）/
+    D7（双层映射冻结）。
 """
 
 from datetime import timedelta

@@ -35,8 +35,8 @@
     本模块做 work_units 校验，本模块不导入 state，无循环导入）。
 
 来源：
-    docs/history/v2.0/glm-conductor-v2-upgrade-guide-final.md §61（contract）/ §62
-    （status model）/ §70（verification）/ §73（retry）+ 工作块 B8.1。
+    v2.0 设计（已蒸馏入 docs/architecture.md：contract / status model /
+    verification / retry）+ 工作块 B8.1。
 """
 
 # —— 词汇表常量（枚举校验用） ——

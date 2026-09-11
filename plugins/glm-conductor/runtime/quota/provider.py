@@ -45,9 +45,8 @@
     风格对齐 runtime/state.py / runtime/fingerprint.py。
 
 来源：
-    docs/history/v2.0/glm-conductor-v2-upgrade-guide-final.md §24（provider 抽象）、
-    §25（端点兼容）、§27（snapshot 形状）、§28（状态词汇）、
-    §37（凭证安全政策）+ v2 升级计划工作块 B5.1。
+    v2.0 设计（已蒸馏入 docs/architecture.md：provider 抽象 / 端点兼容 /
+    snapshot 形状 / 状态词汇 / 凭证安全政策）+ v2 升级计划工作块 B5.1。
 """
 
 # —— host allowlist（§37 初始清单；适配器引用本常量，不自行散布 host） ——

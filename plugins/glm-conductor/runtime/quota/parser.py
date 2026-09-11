@@ -38,10 +38,8 @@ status 纪律：
     runtime/fingerprint.py。
 
 来源：
-    docs/history/v2.0/glm-conductor-v2-upgrade-guide-final.md §26（V2/V3 解析兼容）、
-    §27（snapshot 形状）、§28（状态词汇）、§44（fixture 清单）
-    + v2 升级计划工作块 B5.1；实测知识见
-    docs/history/v2.0/glm-conductor-v2-phase0-runtime-verification.md §2.4。
+    v2.0 设计（已蒸馏入 docs/architecture.md：V2/V3 解析兼容 /
+    snapshot 形状 / 状态词汇 / fixture 清单）+ v2 升级计划工作块 B5.1。
 """
 
 import math

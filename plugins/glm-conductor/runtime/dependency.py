@@ -29,8 +29,8 @@
     一个状态字面量；与 work_unit.py / state.py 均无循环导入）。
 
 来源：
-    docs/history/v2.0/glm-conductor-v2-upgrade-guide-final.md §63（dependency graph）
-    / §64（ready queue）/ §69（resume semantics）+ 工作块 B8.2。
+    v2.0 设计（已蒸馏入 docs/architecture.md：dependency graph / ready
+    queue / resume semantics）+ 工作块 B8.2。
 """
 
 import heapq

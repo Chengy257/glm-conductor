@@ -11,8 +11,7 @@ v2.3 定位（W4 旧职责收敛，v2.3 计划 §13）：
     C1b unwired 先例继续成立，primer_enabled 默认恒 False）。稳定运行
     一个版本后，由后续版本决定是否删除。
 
-职责（修正计划 §8.1 / §8.2 / §8.3 / §C4，P0-QP 实验门已由用户机制裁决
-关闭——见 docs/history/v2.2/GLM-Conductor-v2.2-Phase0-Primer-Experiments.md 门总览）：
+职责（修正计划 §8.1 / §8.2 / §8.3 / §C4，P0-QP 实验门已由用户机制裁决关闭）：
     用一次最小、独立、可审计的模型调用使新 quota window materialize，
     并随后强制 quota refresh 二次确认。本模块是 v2.2 运行时里唯一的
     control-plane 模型调用面（P0-QP-08 结构审计的落点），由三部分构成：
@@ -143,14 +142,11 @@ runtime/execution_policy.py 的 quota_control.primer_enabled
     _format_iso_z / _normalize_now）是 quota 包既定惯例。
 
 来源：
-    docs/history/v2.2/GLM-Conductor-v2.2-Quota-Control-Plane-Architecture-Correction-
-    and-Agent-Implementation-Plan.md §8（Window Primer 严格隔离）/
-    §8.1（物化语义）/ §8.2（control-plane call 不属 Task Resume）/
-    §8.3（Feature-Gate + 三重授权）/ §9 / §C4（红线：200 与百分比都不
-    是证据，必须 refresh 二次确认）/ §QC-04..QC-06、QC-12
-    + docs/history/v2.2/GLM-Conductor-v2.2-Phase0-Primer-Experiments.md（P0-QP-00
-    实测端点形态 / P0-QP-04 成本 / P0-QP-05 anchor 行为 / P0-QP-07
-    幂等设计门）+ 修正计划工作单元 wu-22-C4。
+    v2.2 设计（已蒸馏入 docs/architecture.md：Window Primer 严格隔离 /
+    物化语义 / control-plane call 不属 Task Resume / Feature-Gate +
+    三重授权 / 红线：200 与百分比都不是证据，必须 refresh 二次确认）
+    + P0-QP 实测（端点形态 / 成本 / anchor 行为 / 幂等设计门）+ 修正
+    计划工作单元 wu-22-C4。
 """
 
 import json

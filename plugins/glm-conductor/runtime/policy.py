@@ -29,8 +29,8 @@ deny / ask 语义：
       保障任务不升级（allow，reason 注明）。
 
 来源：
-    docs/history/v2.0/glm-conductor-v2-upgrade-guide-final.md §57-§59
-    （Route-aware Permission Policy）+ 实施计划工作块 B7.1/B7.2。
+    v2.0 设计（已蒸馏入 docs/architecture.md：Route-aware Permission
+    Policy）+ 实施计划工作块 B7.1/B7.2。
 
 依赖：
     仅 Python 3.7 标准库（re），零第三方依赖，`python3 -S` 可运行。

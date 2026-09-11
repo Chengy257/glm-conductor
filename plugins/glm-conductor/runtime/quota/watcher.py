@@ -101,11 +101,9 @@ journal（task 面接线归 C5+）。
     层零改动。
 
 来源：
-    docs/history/v2.2/GLM-Conductor-v2.2-Quota-Control-Plane-Architecture-Correction-
-    and-Agent-Implementation-Plan.md §5（runtime/quota 布局）/ §6
-    （Watcher 运行模式）/ §6.1（第一阶段范围）/ §7（ACTIVE / PASSIVE）
-    / §10（epoch）/ §11（状态模型）/ §6.2（P0-WATCH-00）+ 工作单元
-    wu-22-C3。
+    v2.2 设计（已蒸馏入 docs/architecture.md：runtime/quota 布局 /
+    Watcher 运行模式 / 第一阶段范围 / ACTIVE / PASSIVE / epoch / 状态
+    模型 / P0-WATCH-00）+ 工作单元 wu-22-C3。
 """
 
 import json

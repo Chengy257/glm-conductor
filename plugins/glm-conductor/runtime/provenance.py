@@ -122,8 +122,8 @@ RB-2 双根分离（与 task_manager 同口径）：
     库，`python3 -S` 可运行。
 
 来源：
-    docs/history/v2.1/GLM-Conductor-v2.1-Architecture-Agent-Implementation-Plan.md
-    §16.3/§16.4（验证溯源）+ §16.5（review receipt，wu-21-13 落定）
+    v2.1 设计（已蒸馏入 docs/architecture.md：验证溯源 + review
+    receipt，wu-21-13 落定）
     + v2.1 M5/M6 wu-21-12 实施规格（主会话锁定 2026-08-31：D4 runtime
     受限主动执行 + receipt 键名冻结）+ wu-21-13 实施规格（主会话锁定
     2026-08-31：run_review receipt 键冻结 + Stop 完成门「只有 fresh

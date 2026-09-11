@@ -217,7 +217,7 @@ continuity 不重新实现 Goal 模式。职责分工：
 
 ### v2.2 额度控制环（双层模型 + Quota Epoch + Watcher + Primer）
 
-**窗口物化机制（2026-09-03 用户裁决，实测证据 `docs/history/v2.2/GLM-Conductor-v2.2-Phase0-Primer-Experiments.md`）**：reset_at 时刻窗口恢复 100%（周窗优先）；**下一个 reset_at 只在新窗口内发生模型调用时才物化——纯查询绝不推进它**；reset_at 锚定物化时刻 +5h00m01s；会话空闲会推迟窗口起点。编排含义：跨窗口等待的任务恢复时必须先触发一次真实模型调用，窗口才算真正换新——单靠轮询查询看到的旧 reset_at 不会自己滚动；v2.3 起生产物化路径 = Global Quota Clock 的 Scheduled Clock Tick，primer 仅为 manual/experimental fallback（见下）。
+**窗口物化机制（2026-09-03 用户裁决，机制事实已蒸馏入 docs/architecture.md）**：reset_at 时刻窗口恢复 100%（周窗优先）；**下一个 reset_at 只在新窗口内发生模型调用时才物化——纯查询绝不推进它**；reset_at 锚定物化时刻 +5h00m01s；会话空闲会推迟窗口起点。编排含义：跨窗口等待的任务恢复时必须先触发一次真实模型调用，窗口才算真正换新——单靠轮询查询看到的旧 reset_at 不会自己滚动；v2.3 起生产物化路径 = Global Quota Clock 的 Scheduled Clock Tick，primer 仅为 manual/experimental fallback（见下）。
 
 **双层额度模型**：provider 四态（AVAILABLE / PRESSURE / EXHAUSTED / UNKNOWN）与 execution phase 四态（NORMAL / PRESSURE / DRAINING / BLOCKED）是两个维度——最小编余 ≤20% 即 DRAINING（即使 provider 报 AVAILABLE）；DRAINING 禁开新实施波次只许收尾白名单动作（join/verify/review/checkpoint/wake）；`quota-phase <repo> <task>` 可查当前相与连续性义务，`quota-observe <repo> [task]` 出自适应观测（间隔 NORMAL 1800s → DRAINING/BLOCKED 300s，下限 60s）。
 
