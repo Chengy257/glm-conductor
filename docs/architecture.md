@@ -1,6 +1,6 @@
 # GLM Conductor 架构（权威文档）
 
-> 本文档是 GLM Conductor 的**唯一架构真相源**，描述插件**当前**（v2.2.1 加固线，基于 2.2.0 stable）的实际运行时行为——每一节回答"系统现在是什么"，不叙述开发历程。
+> 本文档是 GLM Conductor 的**唯一架构真相源**，描述插件**当前**（v2.3.1，基于 v2.3.0 stable 的收敛版）的实际运行时行为——每一节回答"系统现在是什么"，不叙述开发历程。
 > 契约细节以插件目录为准（`plugins/glm-conductor/` 下的 agents 与 skills）；本文档与其保持一致，冲突时以修复到一致为准，不得偏离开源文档单独演化。
 > 当前真相 = 仓库代码 + 本文档 + [core-concepts.md](core-concepts.md)；排障指引见 [troubleshooting.md](troubleshooting.md)。
 
@@ -454,12 +454,12 @@ host scheduling adapter：runtime/host/zcode_schedule.py（可替换接触面）
 
 - `scripts/validate_plugin.py`（纯标准库，15 项检查）+ CI（`.github/workflows/validate.yml`，静态校验 + 单元测试）维护契约一致性：扫描 `plugins/`、`README.md`、`marketplace.json` 与本文档；全部文件扫描一律跳过 `__pycache__` 目录与 `*.pyc` / `*.pyo` 字节码（编译缓存残影不属契约面）
 - 检查覆盖：旧名清理、禁词、quota 否定式声明、任务专属 checkpoint 路径、视觉协议标记、TASK_ID 必含、视觉新调用规范措辞、`plugin.json` 与 CHANGELOG 的版本一致性、钩子清单完整性（含脚本存在性）、runtime 状态层与技能契约标记、enforcement 审查 receipt 权威标记
-- 测试（`tests/`，纯标准库 unittest，当前 2214 用例）覆盖 runtime / hooks / quota / continuity 各子系统与端到端策略/传输场景，随 CI 执行；共享 JSON 并发面配**多进程回归**（`tests/test_durable_io.py`、`tests/test_multiprocess_runtime.py`——多进程真实并发下原子写/锁仲裁/写方分类的机械锚定），关键契约配子进程冒烟
+- 测试（`tests/`，纯标准库 unittest，当前 2383 用例）覆盖 runtime / hooks / quota / continuity 各子系统与端到端策略/传输场景，随 CI 执行；共享 JSON 并发面配**多进程回归**（`tests/test_durable_io.py`、`tests/test_multiprocess_runtime.py`——多进程真实并发下原子写/锁仲裁/写方分类的机械锚定），关键契约配子进程冒烟
 - 版本策略：`plugin.json` 版本、CHANGELOG 最新条目、git tag / GitHub Release 三者保持一致
 
 ## 14. 稳定边界与演化纪律
 
-当前行 = v2.2.1 加固线（基于 2.2.0 stable）：在强制层（状态/四重完成门/指纹/策略门控/完成生命周期门控/路由不变量/发现四分类/事务边界/租约保护的有界并行（上限 4，experimental 允许 stable 保留标记））+ 额度感知连续性 + 任务与工作单元管理 + 持久唤醒桥与额度连续性控制面之上，v2.2.1 叠加多进程共享状态加固（durable_io 原语层与写方迁移、watcher.lock 所有权与观察状态分离、RMW 锁、QuotaIdentity 双形态、provider-identity 绑定缓存、continuity/quota 规范落点归一）。
+当前行 = v2.3.1 收敛线：在强制层（状态/四重完成门/指纹/策略门控/完成生命周期门控/路由不变量/发现四分类/事务边界/租约保护的有界并行（上限 4，experimental 允许 stable 保留标记））+ 额度感知连续性 + 任务与工作单元管理 + 持久唤醒桥与额度连续性控制面 + v2.2.1 多进程共享状态加固（durable_io 原语层与写方迁移、watcher.lock 所有权与观察状态分离、RMW 锁、QuotaIdentity 双形态、provider-identity 绑定缓存、continuity/quota 规范落点归一）之上，v2.3.0 引入额度连续性简化与 Global Quota Clock（Clock 与 Wake Bridge 职责分离、`recurring_bridge` 稳定传输、宿主调度适配隔离、wake 锚点精确化）；v2.3.1 叠加收敛（Quota Clock 会话放置 UX 与 `needs_replacement` 恢复路径、死绑定 bind 自愈、`host-check` 只读探针、CLI 命令分解 `commands/`、测试收敛与公共文档面收敛）。
 
 冻结边界（变更须经显式设计裁决并同步全部契约面）：
 

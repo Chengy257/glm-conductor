@@ -89,7 +89,7 @@ python3 <plugin-root>/runtime/cli.py host-check
 
 前提条件：
 
-- [ZCode](https://zcode.z.ai) 客户端（Tested with 3.9.2）
+- [ZCode](https://zcode.z.ai) 客户端（已在 3.9.2 版本测试）
 - GLM Coding Plan（或 Z.ai 账号），已连接 GLM-5.3 与 GLM-5.3-Flash——**编排主会话必须是 GLM-5.3**；Flash 承担实施与审查角色
 - `python3`（Python 3.8+）在 PATH 中——强制层钩子的运行时
 

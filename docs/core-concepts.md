@@ -156,7 +156,8 @@ active task 在专属目录维护机器可读状态：
 ### 激活传输与观察面
 
 - **Persistent Wake Bridge**：`wake-plan` 纯计算裁决 → 主会话执行宿主 CronCreate → `arm` 记账（runtime 自身绝不调用宿主 `Cron*`，宿主事实由会话侧供给，如 `wake-reconcile` 显式传入观测结论）。一任务 ↔ 一常驻桥。**`recurring_bridge` 是唯一 stable 传输**；其余传输词仅预留，arm 一律被拒绝。完成时桥接清理是会话侧单次尝试动作（绝不重试）。
-- **Quota Watcher（可选，默认不运行）**：`quota-watcher start|status|stop|once`——本地 poll-only 常驻进程，零模型调用，独立维护真实额度时钟。它是观察加速面，不是正确性前提；不运行时刷新点查询照常工作。
+- **Quota Watcher（可选，默认不运行）**：`quota-watcher start|status|stop|once`——本地 poll-only 常驻进程，零模型调用。v2.3 起它是纯观察/诊断加速面（**不**维护额度时钟，窗口延续职责已移交 Global Quota Clock）；不是正确性前提，不运行时刷新点查询照常工作。
+- **Global Quota Clock（额度连续性主路径）**：每个 provider 身份一个持久时钟——周期做低成本模型调用以观察/物化下个额度窗口并向真实 reset 自校时（每小时 recurring 网格仅 watchdog 兜底）；建议放置在专用低成本 Flash 会话（插件只能建议与诊断，不验证会话专用性）。窗口物化的生产路径是 Scheduled Clock Tick，不是 primer。
 - **Window Primer（默认关闭）**：新窗口需一次最小模型调用才物化；primer 是 runtime 唯一的 control-plane 模型调用面，三重授权闸 fail-closed（`primer_enabled` 默认 false + 自动续跑档位 + 用户授权来源）。授权闸之外绝不自行预调用——那是一次真实消耗额度的模型调用。
 - **Stop 门 continuity health**：休眠交接域的任务（`waiting_quota` / `waiting_user`，或 PRESSURE / DRAINING 相位下的 resumable 自动续跑任务）在四重检查之前先核查三件套——handoff durable（checkpoint + resume manifest）、当期 epoch 订阅已注册、激活传输已 armed。
 
