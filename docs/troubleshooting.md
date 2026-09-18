@@ -35,7 +35,27 @@ python <cli> host-check
 - `supported` → 无需任何动作。
 - `unsupported` → 插件的调度写入会在前置闸上安全失败并报错（绝不带病写——`ZcodeScheduleSchemaError`，`runtime/host/zcode_schedule.py`）；请勿手工修改宿主库，等待适配新宿主版本的插件更新；在修复前，连续性恢复始终有 SessionStart 注入兜底（自动化是加速器，不是正确性前提）。
 
-## 2. Quota Clock 失联：诊断与恢复路径
+## 2. 子智能体模型静默回退：agent 模型绑定与宿主 provider 格式
+
+**现象**：派发实施者 / 审查者后，用量与行为显示它们实际运行在主会话的旗舰模型（GLM-5.3）上；视觉系角色「看不见」截图（旗舰为纯文本模型）；用量记录里 flash 系 agent 的模型与 provider 和主会话完全一致。
+
+**背景事实**：ZCode 3.12.3（2026-09-16 起）重构模型管理，provider 体系由 `builtin:bigmodel-coding-plan` 切换为 `account:<套餐标识>`（个体 Coding Plan 为 `account:bigmodel-individual-coding-plan`）。此后 agent 定义 frontmatter 中的**裸模型 ID（如 `model: GLM-5.3-Flash`）不再可解析，宿主不报错、静默回退到主会话模型**。自 v2.3.2 起四个 agent 定义（`plugins/glm-conductor/agents/*.md`）一律使用 provider 全限定写法：
+
+```
+model: "account:bigmodel-individual-coding-plan/GLM-5.3-Flash"
+```
+
+**判定**（两步）：
+
+1. 核对实际派发模型：读 `~/.zcode/cli/db/db.sqlite` 的 `model_usage` 表，按 `query_source='subagent'` 行核对 `agent` × `model_id` × `provider_id`（`~/.zcode/cli/rollout/model-io-sess_*.jsonl` 的逐请求 `"model"` 字段亦可）。
+2. 核对定义快照时点：agent 定义只在**会话启动时快照**，运行中会话不热加载——修复定义后必须由新会话派发才生效。
+
+**处置**：
+
+- 修复定义：把 `agents/<agent>.md` 的 `model` 改为 provider 全限定 `account:<套餐标识>/<模型>`（本插件默认面向个体 Coding Plan；其他套餐 / 接入方式的用户请按宿主 Settings → Subagents 模型下拉所示的实际 ID 调整前缀；`tests/test_agent_model_binding.py` 机械锚定本格式）。
+- 生效：新开会话后再派发，回到第 1 步核对命中。
+
+## 3. Quota Clock 失联：诊断与恢复路径
 
 **现象**：额度窗口不再被自动观察/物化、周期 tick 不再出现（此前设置过 Quota Clock）。
 
@@ -64,7 +84,7 @@ python <cli> quota-clock-bind <repo_root> <new_automation_id>
 
 **死绑定自动替换说明**：bind 遇到「已绑定其它 automation」的冲突时，会只读复核旧 automation 的宿主库行；确认该行已消失（verified dead binding）才自动放行改绑，成功输出的 JSON 会多出 `replaced_dead_binding: <旧 automation_id>` 键（仅此路径出现）。旧绑定行仍存活时照样拒绝改绑（`ClockStateConflictError`，保护活绑定）；本插件**不做隐式迁移或自动 rebind**——新 automation_id 始终由你显式提供（`runtime/commands/quota_clock.py` + `runtime/quota/clock_store.py` 的锁内 TOCTOU 复核）。
 
-## 3. 「clock 已停摆但 status 报 healthy」——awaiting_first_tick 语义注记
+## 4. 「clock 已停摆但 status 报 healthy」——awaiting_first_tick 语义注记
 
 `last_tick_at` 缺失或非数值会被判为**首绑未 tick**（`awaiting_first_tick: true`，healthy、只提示等待下一次 tick，不触发 replace 建议）——这是为修复「新绑定立刻报 unhealthy」的自相矛盾而定的语义（`runtime/commands/quota_clock.py` 与 `hooks/session_start.py` 同口径镜像）。
 
@@ -76,17 +96,17 @@ python <cli> quota-clock-bind <repo_root> <new_automation_id>
 ~/.glm-conductor/quota-clocks/<provider_identity_hash>.json
 ```
 
-检查 `last_tick_at` 是否为合理的 epoch 毫秒数值（对比当前时间与 clock 周期）。数值明显过旧或键缺失而 clock 实际长期未 tick → 按 §2 的恢复路径替换绑定。
+检查 `last_tick_at` 是否为合理的 epoch 毫秒数值（对比当前时间与 clock 周期）。数值明显过旧或键缺失而 clock 实际长期未 tick → 按 §3 的恢复路径替换绑定。
 
-## 4. SessionStart advisory：触发条件与语义
+## 5. SessionStart advisory：触发条件与语义
 
 **触发条件**（启发式，只读 state 文件、绝不打开任何数据库——`hooks/session_start.py` 的 `render_clock_advisory`）：Quota Clock 已绑定（用户级 state 文件存在且可识别），且 `last_tick_at` 落后当前时刻超过 **2 × fallback_interval_minutes**（缺省 60 分钟，即阈值 2 小时）。首绑未 tick 不触发；state 缺失 / tick 新鲜 / 任何内部异常一律静默（fail-open，绝不阻塞会话启动、零噪音）。
 
 **语义**：advisory 只是提示，不执行任何 bind / replace / 迁移、零写入；文本含恢复指引、会话专用性声明（专用会话放置 `not_mechanically_verifiable`——插件无会话探测能力）与权威诊断指路。
 
-**收到 advisory 后**：运行 `quota-clock-status <repo_root>` 做权威 DB 级诊断（`needs_replacement` 只在那里判定），再按 §2 处置。
+**收到 advisory 后**：运行 `quota-clock-status <repo_root>` 做权威 DB 级诊断（`needs_replacement` 只在那里判定），再按 §3 处置。
 
-## 5. 状态存储位置对照（排障先找对文件）
+## 6. 状态存储位置对照（排障先找对文件）
 
 | 状态 | 位置 | 说明 |
 | --- | --- | --- |
@@ -98,13 +118,13 @@ python <cli> quota-clock-bind <repo_root> <new_automation_id>
 
 排障时最容易找错的是最后两行：watcher / 缓存 / 事件在**仓库级** `.glm-conductor/` 下，clock state 与宿主库在**用户级** home 目录下。
 
-## 6. 告警盲区（advisory 的结构性边界）
+## 7. 告警盲区（advisory 的结构性边界）
 
 SessionStart advisory 是 state 文件启发式：宿主库中的 automation 行丢失（`db_row_missing`）对它**结构性不可感知**（advisory 按设计不打开数据库），只能靠「tick 停止刷新 last_tick_at → 超过 2×fallback 阈值」间接收敛——因此从行丢失到告警存在**最长 2×fallback 间隔的延迟**，且 advisory 本身无法区分「停摆」与「宿主行丢失」这两种处置紧迫度不同的形态。
 
 DB 级诊断（`needs_replacement` / `placement` / `recovery_guidance`）权威归属 `quota-clock-status`——advisory 文本中的指路即此意。对告警时效有要求的场景，可让常驻 Quota Watcher 保持运行（它是观察面，不是正确性前提）。
 
-## 7. 安全边界速查
+## 8. 安全边界速查
 
 - **插件不做 OS 电源操作**：睡眠/唤醒/关机等电源操作是用户本人权限，插件与代理严禁代为执行（适用于 runtime、技能/代理行为与一切附属脚本）。
 - **睡眠/唤醒跨窗行为未验证**：连续性设计不依赖它——时钟靠 recurring watchdog 网格自愈、恢复兜底归 SessionStart 注入；机器长期睡眠时定时触发不可依赖，这是如实记录的边界，不是已修复的缺陷。

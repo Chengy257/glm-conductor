@@ -2,7 +2,7 @@
 
 [English](./README.md) | **简体中文**
 
-![Version](https://img.shields.io/badge/version-2.3.1-blue.svg)
+![Version](https://img.shields.io/badge/version-2.3.2-blue.svg)
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
 ![ZCode Plugin](https://img.shields.io/badge/ZCode-plugin-green.svg)
 ![Models](https://img.shields.io/badge/models-GLM--5.3%20%2F%20GLM--5.3--Flash-orange.svg)
@@ -142,7 +142,7 @@ python3 <plugin-root>/runtime/cli.py <subcommand>
 
 - [docs/core-concepts.md](./docs/core-concepts.md) — 三大支柱的概念性说明
 - [docs/architecture.md](./docs/architecture.md) — 唯一架构真相源：状态模型、路由、强制层、额度连续性、恢复
-- [docs/troubleshooting.md](./docs/troubleshooting.md) — 按「现象 → 判定 → 处置」组织：宿主兼容性、时钟健康、状态存放位置
+- [docs/troubleshooting.md](./docs/troubleshooting.md) — 按「现象 → 判定 → 处置」组织：宿主兼容性、子智能体模型绑定、时钟健康、状态存放位置
 - [CHANGELOG.md](./CHANGELOG.md) — 发布级变更记录
 
 ## 许可

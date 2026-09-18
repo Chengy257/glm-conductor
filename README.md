@@ -2,7 +2,7 @@
 
 **English** | [简体中文](./README.zh-CN.md)
 
-![Version](https://img.shields.io/badge/version-2.3.1-blue.svg)
+![Version](https://img.shields.io/badge/version-2.3.2-blue.svg)
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
 ![ZCode Plugin](https://img.shields.io/badge/ZCode-plugin-green.svg)
 ![Models](https://img.shields.io/badge/models-GLM--5.3%20%2F%20GLM--5.3--Flash-orange.svg)
@@ -142,7 +142,7 @@ for example `quota-clock-plan` / `quota-clock-bind` / `quota-clock-status`, `quo
 
 - [docs/core-concepts.md](./docs/core-concepts.md) — the three pillars explained conceptually
 - [docs/architecture.md](./docs/architecture.md) — the authoritative technical reference: state model, routing, enforcement, quota continuity, recovery
-- [docs/troubleshooting.md](./docs/troubleshooting.md) — symptom → diagnosis → fix: host compatibility, clock health, state locations
+- [docs/troubleshooting.md](./docs/troubleshooting.md) — symptom → diagnosis → fix: host compatibility, agent model binding, clock health, state locations
 - [CHANGELOG.md](./CHANGELOG.md) — release-level changes
 
 ## License

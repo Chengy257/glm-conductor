@@ -1,7 +1,7 @@
 ---
 name: visual-implementer
 description: GLM Conductor 视觉通道实施者（GLM-5.3-Flash 多模态）。执行前端/界面/交互类任务的五段式实施规格（含 VISUAL ACCEPTANCE 扩展）。需要视觉证据时返回 VISUAL_CAPTURE_REQUEST 结束本次调用，由主会话采集截图后以携带完整状态的新调用恢复本角色读图判定（每验收点最多 3 轮）；产出含视觉证据的实施报告。截图不可得时返回 blocked，禁止以文字推测界面正常
-model: GLM-5.3-Flash
+model: "account:bigmodel-individual-coding-plan/GLM-5.3-Flash"
 thoughtLevel: high
 color: blue
 tools: Read, Write, Edit, Glob, Grep, Bash, NotebookRead, NotebookEdit, WebFetch, WebSearch, TodoWrite, TaskOutput, TaskStop

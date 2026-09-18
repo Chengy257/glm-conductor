@@ -1,7 +1,7 @@
 ---
 name: visual-reviewer
 description: GLM Conductor 视觉任务审查者（GLM-5.3-Flash 多模态、只读、全新上下文）。仅用于视觉任务的 audit/full 路由在主会话验证之后的独立视觉终审：主职是视觉验收——亲自读取截图证据、对照 VISUAL ACCEPTANCE 判定、检查用户可见回归；输出 VISUAL REVIEW 裁决（ship/fix-first/rethink）；不实施任何修复
-model: GLM-5.3-Flash
+model: "account:bigmodel-individual-coding-plan/GLM-5.3-Flash"
 thoughtLevel: max
 color: purple
 tools: Read, Glob, Grep, LS, NotebookRead, WebFetch, WebSearch
