@@ -2,7 +2,7 @@
 
 [English](./README.md) | **简体中文**
 
-![Version](https://img.shields.io/badge/version-2.3.1-blue.svg)
+![Version](https://img.shields.io/badge/version-2.3.2-blue.svg)
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
 ![ZCode Plugin](https://img.shields.io/badge/ZCode-plugin-green.svg)
 ![Models](https://img.shields.io/badge/models-GLM--5.3%20%2F%20GLM--5.3--Flash-orange.svg)
@@ -166,7 +166,7 @@ python <plugin-root>/runtime/cli.py <subcommand>
 
 - [核心概念](./docs/core-concepts.md) —— 编排、执行保障与连续性的概念说明
 - [架构](./docs/architecture.md) —— 当前运行时设计的权威技术参考
-- [故障排查](./docs/troubleshooting.md) —— 宿主兼容性、时钟健康、状态位置与恢复
+- [故障排查](./docs/troubleshooting.md) —— 宿主兼容性、子智能体模型绑定、时钟健康、状态位置与恢复
 - [更新日志](./CHANGELOG.md) —— 发布级变更记录
 
 ## 项目状态

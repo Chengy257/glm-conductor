@@ -1,5 +1,22 @@
 # Changelog
 
+## 2.3.2
+
+宿主兼容性补丁（单主题）：ZCode 3.12.3（2026-09-16 起安装）重构模型管理后，agent 定义的模型绑定改为 provider 全限定 ID。
+
+#### Fixed
+
+- **agent 模型绑定静默回退（ZCode 3.12.3 provider 重构适配）**：宿主把 provider 体系从 `builtin:bigmodel-coding-plan` 切换为 `account:bigmodel-individual-coding-plan` 后，agents frontmatter 的裸模型 ID（`model: GLM-5.3-Flash` / `model: GLM-5.3`）不再可解析，宿主不报错、**静默回退主会话模型**——flash 系实施者全部落在旗舰 GLM-5.3 上（2026-09-17 至 09-18 生产实测 428 次派发被回退；visual 系另叠加失去多模态判定的结构性风险）。四个 agent 定义（flash-implementer / visual-implementer / visual-reviewer / glm-reviewer）改为全限定写法 `model: "account:bigmodel-individual-coding-plan/<model>"`；修复内容先在生产缓存就地生效、经新会话双通道（flash-impl 与 glm-conductor:flash-implementer）派发实测命中 GLM-5.3-Flash（`~/.zcode/cli/db/db.sqlite` 的 model_usage 表 agent×model_id×provider_id 证据）后入册。裸 ID 时代写法退出。
+
+#### Added
+
+- **troubleshooting 新条目「子智能体模型静默回退」**：现象 / 背景事实 / 两步判定（model_usage 表或 rollout 逐请求日志核对实际派发模型 + agent 定义会话启动快照时点）/ 处置（全限定 ID 写法；其他套餐 / 接入方式的用户按宿主 Settings → Subagents 模型下拉所示实际 ID 调整前缀）；README 双语 troubleshooting 内容清单同步入列。
+- **`tests/test_agent_model_binding.py` 机械锚**：四个 agent 的 model 字段必须 provider 全限定（裸 ID 即回归）+ 各角色模型后缀对照 role-contracts.md（实施者与视觉审查者 /GLM-5.3-Flash、文本审查者 /GLM-5.3）。
+
+#### Testing
+
+- 2383 → 2385（+2：agent 模型绑定 provider 全限定机械锚）；validator 15/15；ruff 全绿（本补丁仅触达 agents/*.md、docs、README、plugin.json 与新测试文件，runtime 零改动）。
+
 ## 2.3.1
 
 Hardening & Convergence 批次：不加新架构层——宿主边界安全、Quota Clock 会话放置与恢复 UX、运行时 CLI 分解、测试收敛与公共文档面收敛。额度连续性子系统自此进入维护模式。

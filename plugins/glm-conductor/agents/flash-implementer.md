@@ -1,7 +1,7 @@
 ---
 name: flash-implementer
 description: GLM Conductor 的常规实施通道（GLM-5.3-Flash）。执行边界清晰、规格完备的五段式实施规格，产出结构化实施报告交主会话验证。当任务已由主会话完成规划分解、只需机械执行实现时选用；判断密集、范围边界失效或误分类的工作应停止并返回 ROUTE REASSESSMENT 请求，而非自行重新设计
-model: GLM-5.3-Flash
+model: "account:bigmodel-individual-coding-plan/GLM-5.3-Flash"
 thoughtLevel: high
 color: green
 tools: Read, Write, Edit, Glob, Grep, Bash, NotebookRead, NotebookEdit, WebFetch, WebSearch, TodoWrite, TaskOutput, TaskStop

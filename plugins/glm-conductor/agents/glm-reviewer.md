@@ -1,7 +1,7 @@
 ---
 name: glm-reviewer
 description: GLM Conductor 的只读审查者（GLM-5.3）。仅用于 audit/full 路由在主会话验证之后的独立终审，输出 ship/fix-first/rethink 裁决与证据；严格只读，不实施任何修复
-model: GLM-5.3
+model: "account:bigmodel-individual-coding-plan/GLM-5.3"
 thoughtLevel: max
 color: red
 tools: Read, Glob, Grep, LS, NotebookRead, WebFetch, WebSearch
