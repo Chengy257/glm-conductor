@@ -1,6 +1,6 @@
 # GLM Conductor v2.4 Native-First Re-baseline Specification
 
-> **Status:** target architecture frozen for v2.4 implementation, subject only to the narrow W0 host revalidation in §13.  
+> **Status:** target architecture frozen for v2.4 implementation, subject only to the narrow W0 host revalidation in §13 (executed 2026-09-20, see §13.1; two assumption changes recorded).  
 > **Current runtime truth:** `docs/architecture.md` continues to describe the released 2.3.x implementation until v2.4 lands.  
 > **Purpose:** replace legacy orchestration/runtime duplication with ZCode 3.14 native Workflow and native Scheduled Task capabilities while retaining only Conductor-specific semantics.
 
@@ -522,6 +522,16 @@ On current ZCode 3.14 verify:
 Exact five-hour quota-window maintenance is **not** a Conductor W0 requirement; it belongs to the separate Global Quota Clock project.
 
 If native scheduling cannot express an exact five-hour interval, Conductor should prefer a supported shorter periodic wake over reintroducing direct writes to ZCode internal SQLite state.
+
+### 13.1 W0 closure record (2026-09-20)
+
+W0 was executed per the implementation plan §3. Evidence: `ZCODE_3_14_NATIVE_WORKFLOW_RESULTS.md` §13 (raw probe log in the git-ignored `.glm-conductor/spikes/w0-phase0/` tree); capability matrix rows CAP-07/08/09/10 updated, CAP-29…CAP-33 added.
+
+- **W0-A (hook visibility):** the structural Workflow bypass conclusion is upheld on the current build (workflow child with a bogus dispatch permit marker launched and ran while an active Conductor task existed; zero hook-visible trace; markers echoed verbatim). The clean functioning-hook re-run is queued for the first session after the next ZCode restart — the python3 hook environment is fixed at machine level (miniconda `python3.exe` + user PATH + absolute-path hook command in the installed plugin cache), but the running process predates the fix. This does not gate Phase 1: the target design already removes these hooks.
+- **W0-B (scheduled resume): closed.** A native recurring Scheduled Task was created and fired on schedule; a scheduled turn located a stopped run (project-scoped, cross-session `ListWorkflowRuns`) and resumed it directly (same run id; unfinished ask re-dispatched live; run completed). Repeated resume attempts on non-waiting runs are deterministic safe refusals; idle fires are no-ops. The supported activation path required by §12.1 exists.
+- **Assumption changes discovered by W0** (both now reflected in the capability matrix):
+  1. On this build, scheduled turns are mid-turn continuations of the owning session's conversation — not fresh sessions or processes. Wake turns share the main session's environment and permission state; firing while the app is closed is unverified and belongs to the Global Quota Clock host-adapter inventory (§6.5).
+  2. The native reviewer agent types (`glm-reviewer`, `visual-reviewer`) are deterministically unstartable on single-model hosts: their frontmatter model ids are not host-configured and the ordinary Agent surface hard-fails. §5.4's retained reviewer path requires model-binding remediation (host-configured model or omitting the model field) during Phase 1 routing integration.
 
 ## 14. Legacy compatibility policy
 

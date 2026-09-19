@@ -60,6 +60,13 @@ NOTES: exactly ONE model configured on the host (ListModels); plugin agent front
   (exit 49, no output) ⇒ plugin hooks could not spawn in this session at all (fail-open).
   Consequence: hook-visibility conclusions (WF-06/07) rest on the STRUCTURAL bypass
   (§3 WF-06/07), with the observed empty `.glm-conductor/` tree as weak corroboration only.
+  **UPDATE (W0, 2026-09-20):** both hygiene items from §9.7 are fixed — plugin cache now
+  loads 2.3.2 (this session), and `python3` resolves to miniconda 3.13.12 (a `python3.exe`
+  copy next to `python.exe` + user-PATH prepend ahead of the Store stub; the installed
+  cache `hooks/hooks.json` command was additionally pinned to that absolute path). The
+  machine-level hook chain is verified (synthetic payload → hook script exit 0 →
+  scheduler facts written). The running ZCode process still snapshots its start-time PATH,
+  so hooks stay inoperable until the next ZCode session; see §13.
 - Session permission mode auto-approved all 15 workflow submissions (no interactive prompt).
 
 ## 3. Per-case results (WF-00 … WF-25)
@@ -447,6 +454,82 @@ flagship-reviewer path stay on the legacy substrate.
   idempotency beyond completed-run no-op: UNKNOWN (low architecture impact).
 - Hook-firing observations are corroborated-absence only in this session (hooks inoperable —
   §2.3); the structural bypass argument carries the conclusion.
+  **UPDATE (W0, 2026-09-20):** re-tested under the W0 probes (§13) — hooks remained
+  inoperable in the probe session (running-process env), so the functioning-hook
+  re-confirmation of WF-06/07 is still pending a fresh ZCode session; machine-level
+  hook chain is verified and the environment fixes are in place for that re-run.
+
+## 13. W0 Phase 0 closure (2026-09-20) — host evidence gap re-tests
+
+Executed per `docs/roadmap/V2_4_NATIVE_WORKFLOW_IMPLEMENTATION_PLAN.md` §3 (Phase 0) and
+spec §13 (W0 gate). Raw evidence: git-ignored `.glm-conductor/spikes/w0-phase0/evidence.md`
+(scheduled-probe log); probe support script committed at
+`scripts/spikes/w0_phase0/probe_task.py`. Run ledger: `dwfrun-12b0fdbc` (W0-P0B-TARGET,
+stopped→resumed→completed), `dwfrun-2d5a19c5` (W0-P0B-NOOP-TARGET, completed),
+`dwfrun-366cd17f` (W0-HOOK-PROBE), automation `automation-8d4f0565` (`*/12 * * * *`,
+3 fires). Build unchanged: ZCode 3.14.0, plugin 2.3.2 loaded, single-model host.
+
+### 13.1 P0-A — hook visibility (WF-06/07 equivalents)
+
+- In-session re-run with an active Conductor task present (probe task `w0-phase0-probe`,
+  solo/standard, non-empty ownership): a main-session Explore dispatch showed NO
+  ownership advisory injection; `.glm-conductor/` snapshots before/after a marker-bearing
+  workflow probe showed NO new hook-written files (`NO-NEW-FILES`); hooks were inoperable
+  in this session (running-process env predates the PATH fix), so this is corroborating
+  absence, not yet the clean functioning-hook discrimination.
+- Marker transport reconfirmed on the current build: a workflow child launched with
+  `[GLM_CONDUCTOR_DISPATCH=SPIKE-BOGUS-PERMIT]` + `[GLM_CONDUCTOR_REVIEW=w0-phase0-probe]`
+  in its instructions ran successfully and echoed both markers verbatim
+  (`dwfrun-366cd17f`). A bogus permit marker gated nothing; no hook denied or mutated the
+  launch — consistent with F6 (actor-protocol spawn never touches the Agent|Task surface).
+- Verdict: the spike's structural bypass conclusion is UPHELD; the plan's expected
+  architecture (v2.4 removes the Agent|Task hooks rather than adapting permits) is
+  unaffected. The functioning-hook re-run (A2/A3/A7 subset) is queued as a cheap
+  next-session follow-up and does not gate Phase 1.
+- **NEW architecture-relevant fact:** both reviewer agent types are deterministically
+  unstartable on this host via the main-session Agent surface —
+  `glm-conductor:glm-reviewer` and `glm-conductor:visual-reviewer` (alias included) fail
+  with `account-connection-unavailable` selecting their frontmatter models
+  (`…individual-coding-plan/GLM-5.3` / `…/GLM-5.3-Flash`), which are not host-configured.
+  This is F3's counterpart on the ordinary Agent|Task surface (plugin agent model
+  frontmatter IS consumed there, and hard-fails when unconfigured). v2.4 §5.4's
+  "keep native glm-reviewer/visual-reviewer" requires model-binding remediation
+  (host-configured model or omitting the model field) — queued for Phase 1 routing
+  integration.
+
+### 13.2 P0-B — Scheduled Task → Workflow resume
+
+- Recurring native Scheduled Task created via host capability (`*/12 * * * *`); fired 3×
+  on wall-clock boundaries; a fourth `delayMinutes` one-shot variant also observed earlier.
+- A scheduled turn located the stopped target run: `ListWorkflowRuns` is project-scoped
+  and cross-session (18 runs listed, 15 owned by the previous spike session).
+- A scheduled turn resumed the stopped run directly: `ResumeWorkflowRun` accepted without
+  confirmation prompt or ownership error; SAME run id; the unfinished in-flight ask
+  re-dispatched live; the run reached `completed` with its designed result
+  (`{"stamp": "SLEPT-45"}`) — full stopped → resume → completed lifecycle.
+- Repeated activation safety: two `ResumeWorkflowRun` attempts on completed runs returned
+  the same deterministic refusal (`workflow_run_not_resumable …`) with zero state change;
+  an idle fire with no pending step executed nothing.
+- **NEW constraint:** on this build, scheduled turns surface as MID-TURN CONTINUATIONS of
+  the owning session's conversation (the automation prompt arrived inside the live owning
+  turn), not as separate fresh sessions or processes. Wake turns therefore share the
+  main session's environment and permission state, and unattended firing while the app is
+  closed is UNVERIFIED. v2.4 §12.1 wake design must not assume a fresh session; the
+  closed-app firing question stays open for the Global Quota Clock project's host-adapter
+  inventory (spec §6.5 / §3 P0-B scope note).
+
+### 13.3 Phase 0 exit gate (plan §3)
+
+- Workflow execution substrate remains usable: YES (3 new runs compiled, ran, resumed,
+  completed on the current build).
+- Reviewer path remains available outside Workflow: QUALIFIED YES — the native reviewer
+  agent types exist on the Agent surface but are unstartable on this host until their
+  model bindings are fixed (13.1); remediation is a bounded definition change, not an
+  architecture question.
+- Supported future activation path for quota resume exists: YES — native recurring
+  Scheduled Task + project-scoped run inspection + supported resume surface, all observed
+  (13.2), with the session-continuation constraint documented.
+
 
 ## 11. Closeout checklist
 
