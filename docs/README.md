@@ -9,7 +9,12 @@
 
 ## Active review / implementation handoff（非架构真相源）
 
-以下文档用于正在进行的宿主兼容性实验与下一版本 re-baseline 审查。实验完成并作出架构裁决前，它们**不修改** `architecture.md` 的当前冻结结论。
+- [V2_4_NATIVE_WORKFLOW_REBASELINE_SPEC.md](reviews/V2_4_NATIVE_WORKFLOW_REBASELINE_SPEC.md) — **v2.4 target architecture 的冻结规格**：Native Workflow 接管 execution orchestration；Conductor 收敛为 routing / canonical DAG / ownership / task-level acceptance / bounded quota resume；Global Quota Clock 独立为 companion project。该文档是 v2.4 实施目标的权威来源，但在 v2.4 落地前不替代当前 2.3.x 的 `architecture.md`。
+- [V2_4_NATIVE_WORKFLOW_IMPLEMENTATION_PLAN.md](roadmap/V2_4_NATIVE_WORKFLOW_IMPLEMENTATION_PLAN.md) — v2.4 实施交付计划：W0 两项宿主复验 + 4 个较大实施阶段；阶段内只做针对性测试，最终集成门只跑一次全量回归。
+
+以下文档用于正在进行的宿主兼容性实验与下一版本 re-baseline 审查。v2.4 target architecture 已单独冻结，但在代码落地前仍**不修改** `architecture.md` 的当前 2.3.x 真相。
+
+> ZCode 3.14 spike 的完整结果目前保留在 `review/zcode-3.14-native-workflow` evidence branch；W0 清洁复验完成后再决定 evidence branch 的最终合并，不以未完成复验冒充已冻结宿主事实。
 
 - [ZCODE_3_14_NATIVE_WORKFLOW_REBASELINE_PLAN.md](reviews/ZCODE_3_14_NATIVE_WORKFLOW_REBASELINE_PLAN.md) — ZCode 3.14 native workflow compatibility spike + re-baseline review 的可交付实施计划；定义 WF-00–WF-25、决策闸、最终 capability/module-disposition 产物与最小测试纪律。
 - [ZCODE_3_14_NATIVE_WORKFLOW_EVIDENCE_TEMPLATE.md](reviews/ZCODE_3_14_NATIVE_WORKFLOW_EVIDENCE_TEMPLATE.md) — 实施端证据记录模板：host/run/model/hook/并行写入/cancel-resume/quota 观测字段，以及最终返回格式。
