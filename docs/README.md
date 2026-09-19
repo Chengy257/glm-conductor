@@ -7,6 +7,13 @@
 - [README.md（仓库根）](../README.md) — 项目入口：项目定位、三支柱概览、安装与快速上手。
 - [core-concepts.md](core-concepts.md) — 核心概念：三个支柱（选择性路由编排 / 运行时强制层 / 额度感知连续性）与稳定边界的概念性说明。
 
+## Active review / implementation handoff（非架构真相源）
+
+以下文档用于正在进行的宿主兼容性实验与下一版本 re-baseline 审查。实验完成并作出架构裁决前，它们**不修改** `architecture.md` 的当前冻结结论。
+
+- [ZCODE_3_14_NATIVE_WORKFLOW_REBASELINE_PLAN.md](reviews/ZCODE_3_14_NATIVE_WORKFLOW_REBASELINE_PLAN.md) — ZCode 3.14 native workflow compatibility spike + re-baseline review 的可交付实施计划；定义 WF-00–WF-25、决策闸、最终 capability/module-disposition 产物与最小测试纪律。
+- [ZCODE_3_14_NATIVE_WORKFLOW_EVIDENCE_TEMPLATE.md](reviews/ZCODE_3_14_NATIVE_WORKFLOW_EVIDENCE_TEMPLATE.md) — 实施端证据记录模板：host/run/model/hook/并行写入/cancel-resume/quota 观测字段，以及最终返回格式。
+
 ## 技术参考（Technical Reference）
 
 - [architecture.md](architecture.md) — **唯一架构真相源**：当前运行时行为的权威技术描述（状态模型、路由、派发事务、强制层、额度连续性、恢复、稳定边界）。
