@@ -1,6 +1,6 @@
 # GLM Conductor v2.4 Native-First Re-baseline Specification
 
-> **Status:** target architecture frozen for v2.4 implementation, subject only to the narrow W0 host revalidation in `13.  
+> **Status:** target architecture frozen for v2.4 implementation, subject only to the narrow W0 host revalidation in §13.  
 > **Current runtime truth:** `docs/architecture.md` continues to describe the released 2.3.x implementation until v2.4 lands.  
 > **Purpose:** replace legacy orchestration/runtime duplication with ZCode 3.14 native Workflow and native Scheduled Task capabilities while retaining only Conductor-specific semantics.
 
@@ -102,7 +102,7 @@ For text tasks:
 - `solo/audit` imply main-session implementation;
 - `delegate/full` imply Native Workflow implementation.
 
-Visual implementation remains a capability exception (`10), not a second general orchestration substrate.
+Visual implementation remains a capability exception (§10), not a second general orchestration substrate.
 
 Routing may still be reassessed when new evidence changes delegability or assurance.
 
