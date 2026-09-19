@@ -163,8 +163,10 @@ Reproducible-from-clean-session condition met: all probes are standalone `.ts` f
   whole file at `…501.8`; final content = ALPHA. Host detected nothing: no conflict event, no
   serialization, no error. The only conflict signal was incidental (alpha happened to read
   beta's content and mentioned it in prose).
-- Conclusion: host provides no conflict protection; GLM Conductor ownership+lease enforcement
-  cannot be reduced while parallel writes exist.
+- Conclusion: host provides no conflict protection; GLM Conductor must retain an explicit
+  conflict-safety semantic for parallel writes. The exact mechanism (legacy per-unit leases vs
+  compile-time ownership plus a coarser repository writer guard) is a re-baseline decision, not
+  established by this spike.
 
 ### WF-12 — Staged dependency execution — PASS
 
@@ -223,8 +225,9 @@ Reproducible-from-clean-session condition met: all probes are standalone `.ts` f
   replayed children contribute cached results only. Parent session identity unchanged.
   Child ids: site ids stable per ask; re-dispatched asks got fresh step attempts.
 - Conclusion: host resume is execution-lifecycle recovery at ASK granularity. It does NOT
-  re-verify repository truth, has no unit/verification semantics, and trusts its journal —
-  it cannot replace `reconcile.py`'s repo-authoritative triage.
+  by itself perform repository-level acceptance or re-verification. Whether legacy per-unit
+  `reconcile.py` remains necessary depends on the v2.4 task-state model; this spike establishes
+  only the host boundary, not the final Conductor recovery architecture.
 
 ### WF-18 — App/session restart boundary — BLOCKED (live); DOCUMENTED proxy
 
@@ -247,9 +250,12 @@ Reproducible-from-clean-session condition met: all probes are standalone `.ts` f
   EV-003 (flagship model binding impossible), EV-009 (explicit diff/evidence inputs and
   fix-first→new-reviewer both expressible: each `agent()` is a fresh actor; prompts carry
   content verbatim).
-- Conclusion: a fresh-context reviewer can be constructed and evidenced, but its read-only
-  property is persona-only and its model cannot be bound ⇒ `audit`/`full` routes cannot
-  migrate wholesale without weakening assurance semantics (G5 partial fail).
+- Conclusion: a fresh-context reviewer actor can be constructed, but the tested Workflow
+  path does not consume Custom Subagent tool/model contracts by role name. On this single-model
+  host, the desired Flash implementer + flagship strict-reviewer split was therefore not
+  expressible inside one Workflow run. This does not establish that every future host/model
+  configuration lacks flagship access; it establishes that per-role Custom Subagent contracts
+  were not preserved by the tested Workflow path.
 
 ### WF-21 — Existing dispatch-marker compatibility — PASS
 
@@ -287,8 +293,10 @@ Reproducible-from-clean-session condition met: all probes are standalone `.ts` f
   nothing schedules future reactivation; resume is user-initiated.
 - (4) Does it provide authorization/accounting semantics? NO — only per-run `spent_tokens`
   exposure; no authorization, no window accounting, no epoch identity.
-- Conclusion: workflow lifecycle recovery and provider-quota continuity are SEPARATE layers
-  (G6 explicit). GLM Conductor's continuity stack remains necessary.
+- Conclusion: workflow lifecycle recovery and provider-quota continuity are SEPARATE concerns
+  (G6 explicit). Native Workflow alone does not provide provider-reset-aware reactivation; the
+  v2.4 re-baseline decides which minimal quota-resume semantics remain in Conductor and which
+  provider-level clocking belongs in a separate companion project.
 
 ### WF-25 — User-facing invocation and ergonomics — PASS (with unknowns)
 
