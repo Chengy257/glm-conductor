@@ -1,103 +1,93 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""GLM Conductor v2 任务运行时状态层（state.json）。
+"""GLM Conductor v2.4 任务运行时状态层（state.json，Phase 2 P2-A 重基线）。
 
 职责：
-    管理 v2 任务的确定性状态文件 `.glm-conductor/tasks/<task-id>/state.json`：
-      - 定位：tasks_root / task_dir / state_path 三个纯路径函数；
-      - 创建：new_task_state() 构造带默认值的完整状态 dict（只构造不校验）；
-      - 写入：record_verification() / record_review() /
-        record_visual_evidence() 三个纯 dict 变换助手（就地修改并返回
-        同一 dict，不触碰磁盘，调用方负责 save_state）——记录验证命令 /
-        审查裁决的证据指纹与视觉证据 sha256（升级指南 §19/§20/§22）；
-      - 校验：validate_state() 返回中文错误列表（空列表 = 合法），不抛异常；
-        除逐字段枚举外还强制 route 跨字段不变量（矩阵一致性 / executor /
-        review / delegate-full 实质性绑定，validate_route_invariants，
-        H2/P0-2）；
-      - 保存：save_state() 先校验再原子写（同目录 tmp + os.replace），并按
-        顶层状态转换表（TASK_TRANSITIONS）拒绝非法 status 迁移——
-        completed 只能由完成门经内部通道（commit_completion）提交；
-      - 迁移 / 提交：transition_task_status() 公共状态迁移入口（记
-        status_changed 事件）；commit_completion() 完成门专用提交通道；
-      - 读取：load_state() 读取并归一 v1.x legacy 标识（CONTINUITY_ID 等）；
+    管理 v2.4 任务的确定性状态文件 `.glm-conductor/tasks/<task-id>/state.json`：
+      - 定位：tasks_root / task_dir / state_path 三个纯路径函数（签名
+        与 v2.3 完全一致，构成 20 个导入者的导入安全边界）；
+      - 构造：new_task_state() 构造 v2.4 完整状态 dict（只构造不校验，
+        调用方负责 validate_state）；
+      - 校验：validate_state() 返回中文错误列表（空列表 = 合法，不抛
+        异常）；dag 数组逐节点经 runtime.work_unit.validate_node 校验
+        （错误前缀 dag[i].），整图经 runtime.dependency.graph_errors
+        校验（nodes[i] 路径统一改写为 dag[i] 路径）；
+      - 保存 / 读取：save_state() 先校验再经 runtime.durable_io 原子写
+        （每次调用唯一临时名 + os.replace + PermissionError 有界重试），
+        并按 v2.4 顶层状态转换表（TASK_TRANSITIONS）拒绝非法迁移——
+        终态不得静默重开；load_state() 读取并归一任务标识，JSON 损坏
+        抛 ValueError 不静默；
+      - 迁移 / 重开：transition_task_status() 公共迁移入口（记
+        status_changed 事件）；reopen_task() 显式重开通道——终态重开
+        只能走它，必须落 task_reopened 事件，绝不静默改写；
       - 发现：discover_tasks() 对 tasks_root 全部子目录四分类
-        （active / terminal / corrupt / orphaned，H3/P0-3——损坏的
-        state.json 不再从发现阶段静默消失）；find_active_tasks() 保留为
-        兼容 helper（实现复用 discover_tasks，输出与四分类引入前一致）；
-      - 仓库根绑定（RB-2，release hardening）：可选顶层 "repository"
-        块为任务绑定专属 Git 仓库根——bind_repository_root() 写入 /
+        （active / terminal / corrupt / orphaned）；find_active_tasks()
+        保留为兼容 helper；
+      - 仓库根绑定（RB-2）：bind_repository_root() 写入 /
         new_task_state(repository_root=...) 构造期绑定 /
         bound_repository_root() 容错读 / resolve_repository_root()
-        解析生效根（绑定优先，缺省回退账本根）。绑定后任务的 git 操作
-        （touched 清单 / 基线 / 证据指纹）按绑定根求值，而账本（
-        state.json / events.jsonl / 租约）恒在账本根——两根分离是多仓
-        隔离的基础；无 repository 键即 legacy 形态，行为与单仓时代
-        完全一致。
-      - 执行策略（v2.1 M1，自动化强度授权事实源）：可选顶层
-        "execution_policy" 块——new_task_state() 构造默认块
-        （runtime.execution_policy.default_execution_policy），
-        validate_state 规则 8.7 复用 runtime.execution_policy 校验
-        （错误路径前缀 execution_policy.）；无该键即 legacy 形态，
-        完全合法，由消费方按保守默认块解释。
-      - 续跑义务（v2.2 M1，控制回路数据载体）：可选顶层 "continuation"
-        块——new_task_state() 构造默认块（default_continuation，
-        obligation="none" + 未退役 tombstone + 全 unknown
-        scheduler_context + 无事实 wake_bridge），validate_state 规则
-        8.8 做形状校验（obligation 六枚举 / wake_bridge.status 十枚举 /
-        scheduler_context 词汇 / tombstone 形状 / reason 与各字段的
-        null 或合法值）；无该键即 legacy v2.1 形态，完全合法，由消费方
-        按默认块解释（无义务态）。
-      - 额度订阅（v2.2 C5a，wu-22-C5a，控制面数据载体）：可选顶层
-        "quota_subscription" 块——new_task_state() 构造默认块
-        （default_quota_subscription，enabled=False + 两个 epoch_id
-        键为 null + minimum_state="AVAILABLE" + continuation_mode=
-        "manual"），validate_state 规则 8.9 做形状校验（enabled 布尔 /
-        epoch_id 两键 null 或 "glm:"+16hex 形状 / minimum_state 四档
-        枚举 / continuation_mode 四枚举）；无该键即 legacy 形态，完全
-        合法，由消费方按默认块解释（未订阅）。规格适配：主计划 §14
-        草图的 registered_epoch:17 是 int 序数示意，实现以 §10.1
-        epoch_id（"glm:"+指纹前 16 位的字符串）为准——epoch 新旧判定
-        用字符串等值比较（C2 冻结：fingerprint 等值、顺序无关、
-        durable 重建安全），不引入任何 int 序数。
-    本文件是 Stop 完成门钩子等强制状态源的确定性来源。
+        解析生效根（绑定优先，缺省回退账本根）——签名与 v2.3 一致；
+      - 遗留检测：is_legacy_state() / detect_legacy_task() 只读识别
+        v2.3 遗留任务。
+
+v2.4 顶层概念（schema 权威清单）：
+    task_id / goal / repository / route / dag / status / phase（可选
+    描述性标注）/ workflow_run_id（可空，委派运行启动前为 null）/
+    validation / review / quota_resume（Phase 3 定稿语义的占位块）。
+    validation 与 review 是任务级唯一记录（无逐单元证据）。
+
+durable status 恰为七态：
+    active / waiting_quota / waiting_user / blocked / completed /
+    cancelled / failed；终态 = completed / cancelled / failed，终态
+    不得静默重开（显式重开只能走 reopen_task，落 journal 记录）。
+    phase 仅是描述性标注（planning / workflow / validating /
+    reviewing），无转换矩阵——推进语义归任务生命周期层，不在本层
+    做矩阵约束。
+
+v2.3 遗留面处置（本模块 v2.4 重基线明确退役的形态，只识别不兼容）：
+    v2.3 state.json 的 work_units 单元账本、permit / lease / receipt
+    运行时字段，record_verification / record_review / visual_evidence
+    逐命令证据面，以及 execution_policy / continuation /
+    quota_subscription 授权块，全部不再是 v2.4 schema 概念（validate
+    按缺键报错，绝不自动迁移、绝不伪造 v2.4 完成证据）。载入带这些
+    标记的 state 时 is_legacy_state() 返回 True，消费方按
+    LEGACY_STATE_GUIDANCE 报告「v2.3 任务：请在 2.3.x 下收尾或显式
+    放弃」。quota/continuity 等 Phase-3 才删的旧模块对本层新 schema
+    的运行时退化是被接受的（v2.4 路径不调用它们），但其模块仍在模块
+    作用域读取的词汇常量（QUOTA_SUBSCRIPTION_MINIMUM_STATES）保留于
+    本模块（仅常量、非 schema），保证导入图不断——该常量随 Phase 3
+    订阅面一并退役。
 
 路径布局：
     <repo_root>/.glm-conductor/tasks/<task-id>/state.json
-    与 runtime.journal 管理的 events.jsonl 同处一个任务目录，各管各的文件。
+    与 runtime.journal 管理的 events.jsonl 同处一个任务目录，各管各的
+    文件。
 
 schema 来源：
-    v2.0 设计（推荐 schema 的权威定义，已蒸馏入 docs/architecture.md）；
-    continuation 块见 v2.2 设计（obligation / wake_bridge 冻结 schema /
-    默认块与向后兼容）；
-    v2.2 M1a Persistent Bridge 扩展（scheduler_context / wake_bridge 五
-    扩展键 / tombstone / 10 值 status）见同计划 D15-e 决策（WU-22-01a，
-    只做 schema 不做行为）。
+    docs/roadmap/V2_4_PHASE_2_STATE_ASSURANCE_RETIREMENT_SPEC.md §2
+    （任务形态 / 七态 / 终态重开 / 遗留处置）
+    + docs/roadmap/V2_4_PHASE_2_WORKFLOW_EXECUTION_PLAN.md W1
+    （单元规格：签名冻结 / dag 校验 / quota_resume 占位）。
     repository 文件仍是代码状态真相源，本文件只是运行时任务状态。
 
-legacy 标识归一：
-    v1.x checkpoint/状态用 CONTINUITY_ID 标识任务；v2 统一为 task_id
-    （TASK_ID 全量替代 CONTINUITY_ID）。读取时按 TASK_ID_KEYS 顺序归一。
-
 依赖：
-    仅 Python 3 标准库（datetime / json / os / pathlib / re）+ runtime.quota.parser
-    （quota 状态词汇 QUOTA_STATUSES，§39；quota/* 不 import 本模块，
-    无循环导入）+ runtime.work_unit（work unit 逐项校验，B8.1；
-    本模块单向导入它，它不导入本模块，无循环导入）+
-    runtime.execution_policy（v2.1 M1 授权事实源：默认块构造与块内
-    校验；它只依赖 runtime.quota.parser，不导入本模块，无循环导入），
-    零第三方依赖，`python3 -S` 可运行（无 site-packages）。
+    仅 Python 3 标准库（json / os / pathlib / re）
+    + runtime.work_unit（静态节点 validate_node，Phase 1 P1-B；
+      本模块单向导入它，它不导入本模块，无循环导入）
+    + runtime.dependency（图校验 graph_errors，Phase 1 P1-B；同上）
+    + runtime.durable_io（共享原子写原语 atomic_write_json；它不导入
+      runtime 包内任何模块，无循环导入），
+    零第三方依赖，`python3 -S` 可运行。
 """
 
-import datetime
 import json
 import os
 import pathlib
 import re
 
-from runtime.execution_policy import (default_execution_policy,
-                                      validate_execution_policy)
-from runtime.quota.parser import QUOTA_STATUSES
-from runtime.legacy_unit import validate_work_unit
+from runtime.dependency import graph_errors
+from runtime.durable_io import atomic_write_json
+from runtime.work_unit import validate_node
 
 # —— 路径常量与定位 ——
 
@@ -108,215 +98,99 @@ STATE_FILENAME = "state.json"
 
 # —— 词汇表常量（枚举校验用）——
 
-# SELECTIVE ROUTE 四模式
+# SELECTIVE ROUTE 四模式（v2.4 route 词汇恰为此四值）
 ROUTE_MODES = ("solo", "delegate", "audit", "full")
-# Delegability 两级
-DELEGABILITY_LEVELS = ("low", "high")
-# Assurance 两级
+# route.assurance 两级（可选字段；completion 守卫据此决定独立审查义务）
 ASSURANCE_LEVELS = ("standard", "high")
-# 实施者（主会话自己实施 / 两个实施侧 agent）
-EXECUTORS = ("main", "flash-implementer", "visual-implementer")
-# Delegability × Assurance → mode 路由矩阵（SKILL.md §5 的代码化权威定义；
-# validate_route_invariants 规则 1 据此强制矩阵一致性，H2/P0-2）
-ROUTE_MATRIX = {
-    "low": {"standard": "solo", "high": "audit"},
-    "high": {"standard": "delegate", "high": "full"},
-}
-# 委派实施侧的两个实施者（R2 executor 绑定的 delegate/full 合法集合）
-IMPLEMENTER_EXECUTORS = ("flash-implementer", "visual-implementer")
-# 连续性三模式
-CONTINUITY_MODES = ("foreground", "resumable", "idle")
-# 任务全生命周期状态（finalizing = 完成请求态：进入即请求完成，
-# completed 只能由 Stop 完成门在其四重检查全部通过后提交；
-# waiting_user = v2.1 §14.5 自动续跑授权耗尽态：auto_once / until_done
-# 的窗口预算用尽后等待用户重新授权，重新授权后经 waiting_user →
-# executing 回到执行态族）
+# 任务全生命周期状态（v2.4 恰为七态；不再有 created/preflight/... 等
+# v2.3 阶段态，也不再需要 finalizing 完成请求态）
 TASK_STATUSES = (
-    "created", "preflight", "routed", "decomposed", "executing",
-    "joining", "verifying", "reviewing", "finalizing", "completed",
-    "waiting_quota", "waiting_user", "blocked", "cancelled", "failed")
-# 终态：discover_tasks 归入 terminal 桶（find_active_tasks 不再返回）
+    "active", "waiting_quota", "waiting_user", "blocked",
+    "completed", "cancelled", "failed")
+# 终态：discover_tasks 归入 terminal 桶（find_active_tasks 不返回）；
+# 终态不得静默重开（显式重开走 reopen_task，落 journal 记录）
 TERMINAL_STATUSES = ("completed", "cancelled", "failed")
-# 顶层状态转换表：键 = 旧 status，值 = 允许的直接后继（终态无表项 =
-# 不接受任何转换）。save_state 与 transition_task_status 据此拒绝非法
-# 迁移；completed 唯一入边 finalizing→completed 只对完成门内部通道
-# （save_state 的 _gate_commit=True）放行，公共 API 一律拒绝。
-TASK_TRANSITIONS = {
-    "created": ("preflight", "routed", "decomposed", "executing",
-                "blocked", "failed", "cancelled"),
-    "preflight": ("routed", "decomposed", "executing", "blocked",
-                  "failed", "cancelled"),
-    "routed": ("decomposed", "executing", "blocked", "failed", "cancelled"),
-    "decomposed": ("executing", "blocked", "failed", "cancelled"),
-    "executing": ("joining", "verifying", "reviewing", "waiting_quota",
-                  "finalizing", "blocked", "failed", "cancelled"),
-    "joining": ("executing", "verifying", "reviewing", "finalizing",
-                "blocked", "failed", "cancelled"),
-    "verifying": ("reviewing", "finalizing", "executing", "blocked",
-                  "failed", "cancelled"),
-    "reviewing": ("finalizing", "executing", "blocked", "failed",
-                  "cancelled"),
-    "waiting_quota": ("executing", "waiting_user", "blocked", "failed",
-                      "cancelled"),
-    # waiting_user（v2.1 §14.5）：自动续跑授权耗尽后等待用户重新授权；
-    # 用户重新授权（或主会话经授权升档）后回到 executing，公共尾巴
-    # （blocked/failed/cancelled）与 waiting_quota 同款
-    "waiting_user": ("executing", "blocked", "failed", "cancelled"),
-    "blocked": ("preflight", "routed", "decomposed", "executing",
-                "joining", "verifying", "reviewing", "waiting_quota",
-                "finalizing", "failed", "cancelled"),
-    "finalizing": ("completed", "failed", "cancelled"),
-}
-# 验证结果词汇
-VERIFICATION_STATUSES = ("missing", "valid", "stale", "failed")
-# 审查裁决词汇
-REVIEW_VERDICTS = ("not-required", "missing", "ship", "fix-first", "rethink", "stale")
-# v2.2 M1：continuation obligation 词汇（主计划 §8.1 冻结枚举；
-# none 为默认 / 无义务态，其余为控制回路推进的义务态）
-CONTINUATION_OBLIGATIONS = (
-    "none", "checkpoint_required", "wake_required", "armed",
-    "waiting_user", "degraded")
-# v2.2 M1：wake_bridge.status 词汇（主计划 §8.2 冻结枚举；none 为默认。
-# v2.2 M1a D15-e 扩为 10 值——Persistent Wake Bridge 跨多个 quota window
-# 后新增 retarget_required / degraded / paused 三态，原 7 值顺序不变）
-WAKE_BRIDGE_STATUSES = (
-    "none", "requested", "armed", "fired", "retarget_required",
-    "degraded", "paused", "cancelled", "stale", "failed")
-# v2.2 M1a（D15-e）：scheduler_context.origin 词汇——本会话由什么启动
-# （scheduled_task = 被 Scheduled Task 触发，Phase 0 #13：此类会话被
-# 禁止再创建 automation）；unknown 为默认（尚无探针结论）
-SCHEDULER_ORIGINS = ("interactive", "scheduled_task", "unknown")
-# v2.2 M1a（D15-e）：scheduler_context 四能力（create/update/pause/delete）
-# 的观察词汇——allowed / forbidden / unknown（unknown 为默认）
-SCHEDULER_CAPABILITIES = ("allowed", "forbidden", "unknown")
-# v2.2 M1a（D15-e）：wake_bridge.mode 词汇——recurring（固定间隔持久
-# automation，默认）/ self_retiming（每次触发后自改期的持久 automation）
-WAKE_BRIDGE_MODES = ("recurring", "self_retiming")
+# 可选描述性 phase 词汇（无转换矩阵——推进语义归任务生命周期层）
+TASK_PHASES = ("planning", "workflow", "validating", "reviewing")
+# 任务级 validation.status 词汇（P2-C 最小验证记录）
+VALIDATION_STATUSES = ("passed", "failed")
+# 任务级 review.verdict 词汇（P2-C 最小审查记录；v2.3 的
+# not-required / missing / stale 等裁决词汇随之退役）
+REVIEW_VERDICTS = ("ship", "fix-first", "rethink")
+# quota_resume.mode 词汇（占位块 Phase 3 定稿；当前仅 manual）
+QUOTA_RESUME_MODES = ("manual",)
 
-# legacy 标识归一：v1.x checkpoint/状态用 CONTINUITY_ID，v2 统一为 task_id
+# 顶层状态转换表：键 = 旧 status，值 = 允许的直接后继（终态无表项 =
+# 不接受任何转换——终态不得静默重开，显式重开只能走 reopen_task）。
+# save_state 与 transition_task_status 据此拒绝非法迁移；旧 == 新
+# （无转换）放行。
+TASK_TRANSITIONS = {
+    "active": ("waiting_quota", "waiting_user", "blocked",
+               "completed", "cancelled", "failed"),
+    "waiting_quota": ("active", "waiting_user", "blocked",
+                      "failed", "cancelled"),
+    "waiting_user": ("active", "blocked", "failed", "cancelled"),
+    "blocked": ("active", "waiting_quota", "waiting_user",
+                "failed", "cancelled"),
+}
+
+# legacy 标识归一：v1.x checkpoint/状态用 CONTINUITY_ID，v2 起统一为
+# task_id。v2.4 保留本归一（读取盘上既有 state.json 的容错面，签名不变）
 TASK_ID_KEYS = ("task_id", "TASK_ID", "CONTINUITY_ID", "continuity_id")
 
 # task_id 合法格式：字母数字开头，仅含字母数字与连字符
 # （「语义前缀+随机后缀」机械唯一格式的落点约束）
 _TASK_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9-]*$")
 
-# 必填顶层键（缺一即非法；未知顶层键忽略，向前兼容）
-_REQUIRED_TOP_KEYS = ("task_id", "goal", "route", "status")
+# 必填顶层键（缺一即非法；未知顶层键忽略，向前兼容）。phase 是唯一
+# 可选顶层键（缺省即不写键——描述性标注无 null 空档）。
+_REQUIRED_TOP_KEYS = ("task_id", "goal", "repository", "route", "dag",
+                      "status", "workflow_run_id", "validation", "review",
+                      "quota_resume")
 
-# v2.2 M1：顶层 continuation 默认块（主计划 §23.2 冻结 schema，逐字段
-# 不得增删改名；模块常量只读，default_continuation() 每次返回全新
-# 拷贝，防止调用方改动波及本常量。v2.2 M1a D15-e 扩展：新增顶层
-# scheduler_context（scheduler 能力事实）与 tombstone（bridge 退役
-# 记录），wake_bridge 新增 mode / generation / current_boundary_id /
-# next_wake_at / bridge_interval_minutes 五键——原 7 键不动）
-DEFAULT_CONTINUATION = {
-    "obligation": "none",
-    "reason": None,
-    # v2.2 M1a（D15-e）：本会话的 scheduler 启动来源与四能力观察
-    # （Phase 0 #13：被 Scheduled Task 触发过的会话禁止再创建
-    # automation——能力事实由探针单元写入，本层只定义形状）
-    "scheduler_context": {
-        "origin": "unknown",
-        "create": "unknown",
-        "update": "unknown",
-        "pause": "unknown",
-        "delete": "unknown",
-        "parent_automation_id": None,
-    },
-    "wake_bridge": {
-        "status": "none",
-        "boundary_id": None,
-        "automation_id": None,
-        "reset_at": None,
-        "wake_at": None,
-        "armed_at": None,
-        "fired_at": None,
-        # v2.2 M1a（D15-e）：Persistent Wake Bridge 扩展记账——拓扑
-        # 模式（recurring 固定间隔 / self_retiming 自改期）、跨窗口
-        # 世代计数、当前生效 boundary、下次唤醒时刻与固定间隔分钟数
-        "mode": "recurring",
-        "generation": 0,
-        "current_boundary_id": None,
-        "next_wake_at": None,
-        "bridge_interval_minutes": None,
-    },
-    # v2.2 M1a（D15-e）：bridge 退役墓碑（null = 未退役；退役时写
-    # task_id / status="completed" / completed_at / bridge_should_noop）
-    "tombstone": None,
+# —— v2.3 遗留标记（is_legacy_state 的检测面） ——
+
+# v2.3 顶层集合键：work_units 单元账本 + permit/lease/receipt 三类
+# 授权/凭证集合（出现任一即 v2.3 遗留 state）
+_LEGACY_COLLECTION_KEYS = ("work_units", "permits", "leases", "receipts")
+# v2.3 work_units 条目内的运行时字段（permit/lease/receipt 字段）
+_LEGACY_UNIT_FIELD_KEYS = ("permit", "lease", "receipt")
+
+# v2.3 遗留任务的一行处置指引（消费方原样向用户报告）
+LEGACY_STATE_GUIDANCE = (
+    "v2.3 遗留任务：请在 2.3.x 下收尾或显式放弃"
+    "（v2.4 不自动迁移、不伪造 v2.4 完成证据）")
+
+
+# —— quota_resume 占位块（Phase 3 定稿语义前的冻结初始形状） ——
+
+# v2.4 顶层 quota_resume 占位块的冻结初始形状（恰为四键；Phase 3
+# 定稿额度续跑语义。模块常量只读，default_quota_resume() 每次返回
+# 全新拷贝，防止调用方改动波及本常量）
+DEFAULT_QUOTA_RESUME = {
+    "mode": "manual",
+    "max_resumes": 0,
+    "resume_count": 0,
+    "automation_id": None,
 }
 
 
-def default_continuation() -> dict:
-    """返回 v2.2 continuation 默认块的全新拷贝。
-
-    每次调用构造新 dict（嵌套 wake_bridge / scheduler_context 二层
-    拷贝隔离），调用方改写返回值不影响模块常量 DEFAULT_CONTINUATION；
-    legacy 缺块 / 形状异常的消费方按本块解释（obligation="none" 即
-    无义务态，scheduler 能力全 unknown，bridge 未建置、未退役）。
-    """
-    return {
-        "obligation": DEFAULT_CONTINUATION["obligation"],
-        "reason": DEFAULT_CONTINUATION["reason"],
-        "scheduler_context": dict(DEFAULT_CONTINUATION["scheduler_context"]),
-        "wake_bridge": dict(DEFAULT_CONTINUATION["wake_bridge"]),
-        "tombstone": DEFAULT_CONTINUATION["tombstone"],
-    }
-
-
-# —— v2.2 C5a（wu-22-C5a）：quota_subscription 词汇与默认块 ——
-
-# epoch_id 合法形状（§10.1 冻结）："glm:" + 指纹前 16 位十六进制。
-# §14 草图的 registered_epoch:17 是 int 序数示意，实现一律用本形状的
-# 字符串身份（C2 冻结：fingerprint 等值比较，无序数、durable 重建安全）
-QUOTA_EPOCH_ID_RE = re.compile(r"^glm:[0-9a-f]{16}$")
-
-# minimum_state 四态档位词汇（§14 adapted）：订阅方声明的「低到此档即
-# 有资格」阈值。供比较的词汇序在此本地冻结——索引越小档位越高，即
-# AVAILABLE > PRESSURE > DRAINING > EXHAUSTED（可执行度优劣序，注释即
-# 契约：消费方按索引比较，绝不引入第二套排序）。注意这不是观测四态
-# （parser.QUOTA_STATUSES 含 UNKNOWN、无 DRAINING）——本词汇是订阅
-# 阈值档位词汇，观测面出现词汇外的 status（如 UNKNOWN）时按「不满足
-# 阈值」保守处理，绝不猜测折算。
-QUOTA_SUBSCRIPTION_MINIMUM_STATES = (
-    "AVAILABLE", "PRESSURE", "DRAINING", "EXHAUSTED")
-
-# continuation_mode 词汇：镜像 execution_policy.continuity.auto_resume
-# 的冻结四枚举（§14.2-§14.5 授权词汇，register 缺省经容错读镜像）。
-QUOTA_SUBSCRIPTION_CONTINUATION_MODES = (
-    "manual", "notify", "auto_once", "until_done")
-
-# v2.2 C5a：顶层 quota_subscription 默认块（§14 规范 adapted 的五键
-# 形状，逐字段不得增删改名；模块常量只读，default_quota_subscription()
-# 每次返回全新拷贝。enabled=False 即未订阅初始态；两个 epoch_id 键为
-# null = 尚未注册 / 尚未激活；continuation_mode="manual" 与
-# default_execution_policy 的 continuity.auto_resume 保守默认同源）
-DEFAULT_QUOTA_SUBSCRIPTION = {
-    "enabled": False,
-    "registered_epoch_id": None,
-    "last_activation_epoch_id": None,
-    "minimum_state": "AVAILABLE",
-    "continuation_mode": "manual",
-}
-
-
-def default_quota_subscription() -> dict:
-    """返回 v2.2 C5a quota_subscription 默认块的全新拷贝。
+def default_quota_resume() -> dict:
+    """返回 quota_resume 占位块的全新拷贝。
 
     每次调用构造新 dict，调用方改写返回值不影响模块常量
-    DEFAULT_QUOTA_SUBSCRIPTION；legacy 缺块 / 形状异常的消费方按本块
-    解释（未订阅：enabled=False，无注册 epoch、无激活记录，阈值
-    AVAILABLE，续跑模式 manual）。
+    DEFAULT_QUOTA_RESUME；形状恰为 mode="manual" / max_resumes=0 /
+    resume_count=0 / automation_id=None（Phase 3 定稿前的占位初始态）。
     """
-    return dict(DEFAULT_QUOTA_SUBSCRIPTION)
+    return dict(DEFAULT_QUOTA_RESUME)
 
 
-def is_quota_epoch_id(value) -> bool:
-    """判断 value 是否为合法 epoch_id 形状（"glm:"+16 位十六进制）。
-
-    §10.1 冻结形状的唯一判定入口（state 校验与 task_manager 三 API
-    共用，防两处正则漂移）；None / 非 str / 形状不符 → False。
-    """
-    return isinstance(value, str) and QUOTA_EPOCH_ID_RE.match(value) is not None
+# v2.3 quota_subscription 词汇（Phase 3 随订阅面退役）：v2.4 schema
+# 无 quota_subscription 块，本常量仅为 runtime.continuity.subscription
+# 的模块作用域消费保留（删除即断其导入——违反「导入不许断」约束）；
+# v2.4 路径绝不读取它。
+QUOTA_SUBSCRIPTION_MINIMUM_STATES = (
+    "AVAILABLE", "PRESSURE", "DRAINING", "EXHAUSTED")
 
 
 # —— 路径定位 ——
@@ -364,6 +238,79 @@ def normalize_task_id(raw: dict) -> str:
     return value
 
 
+# —— 遗留检测（只读，绝不迁移） ——
+
+def detect_legacy_markers(raw) -> "list[str]":
+    """返回 raw 携带的 v2.3 标记清单（空列表 = 无标记，即 v2.4 形态）。
+
+    检测面（v2.4 重基线点名 markers）：
+      - 顶层集合键：work_units / permits / leases / receipts 任一出现
+        （记作 "key:<键名>"）；
+      - work_units 条目内的 permit / lease / receipt 运行时字段
+        （记作 "work_units[i].<字段>"）；
+      - status 为非空字符串但不在 v2.4 七态词汇内（记作
+        "status:<值>"——v2.3 阶段态 created/executing/... 或手写
+        坏值均归遗留面，由消费方按遗留任务报告，validate_state 仍
+        独立报枚举错误）。
+    raw 非 dict → 空列表（归一失败归 normalize_task_id / validate_state）。
+    """
+    if not isinstance(raw, dict):
+        return []
+    markers = []
+    for key in _LEGACY_COLLECTION_KEYS:
+        if key in raw:
+            markers.append("key:" + key)
+    work_units = raw.get("work_units")
+    if isinstance(work_units, list):
+        for index, unit in enumerate(work_units):
+            if not isinstance(unit, dict):
+                continue
+            for key in _LEGACY_UNIT_FIELD_KEYS:
+                if key in unit:
+                    markers.append("work_units[%d].%s" % (index, key))
+    status = raw.get("status")
+    if isinstance(status, str) and status != "" \
+            and status not in TASK_STATUSES:
+        markers.append("status:%s" % status)
+    return markers
+
+
+def is_legacy_state(raw) -> bool:
+    """判断 state dict 是否携带 v2.3 标记（True = v2.3 遗留任务）。
+
+    只读判定：work_units 键、permit/lease/receipt 字段或 v2.3 status
+    词汇任一命中即为 True。本函数绝不迁移、绝不改写入参；载入侧
+    （load_state）不做此判定——消费方（恢复渲染 / 完成守卫）载入后
+    自行调用并在 True 时按 LEGACY_STATE_GUIDANCE 报告。
+    """
+    return bool(detect_legacy_markers(raw))
+
+
+def detect_legacy_task(repo_root, task_id) -> "dict | None":
+    """只读检测任务是否 v2.3 遗留（不写盘、不迁移、不改 state.json）。
+
+    - 无 state.json → None；
+    - JSON 损坏 → ValueError 原样上抛（load_state 不静默）；
+    - 其余返回检测记录 dict（legacy 与否均返回）：
+        {"task_id": 归一标识, "status": 状态值,
+         "legacy": 是否 v2.3 遗留, "markers": v2.3 标记清单,
+         "guidance": 遗留时的一行处置指引（LEGACY_STATE_GUIDANCE），
+                     v2.4 形态为 None}
+    """
+    raw = load_state(repo_root, task_id)
+    if raw is None:
+        return None
+    markers = detect_legacy_markers(raw)
+    legacy = bool(markers)
+    return {
+        "task_id": raw.get("task_id"),
+        "status": raw.get("status"),
+        "legacy": legacy,
+        "markers": markers,
+        "guidance": LEGACY_STATE_GUIDANCE if legacy else None,
+    }
+
+
 # —— 校验 ——
 
 def _enum_error(path, value, allowed):
@@ -383,322 +330,30 @@ def _str_list_errors(path, value):
 
 
 def _validate_route(route):
-    """校验 route 子对象（mode 必填；其余键存在且非 None 时校验枚举）。"""
+    """校验 route 子对象（v2.4：mode 四模式必填；assurance 可选两级）。
+
+    未知键忽略（向前兼容）；v2.3 的 delegability/executor/continuity
+    路由矩阵字段不再是 schema 概念——带它们的 state 先经遗留检测
+    识别，本函数不再为其维护矩阵不变量。
+    """
     if not isinstance(route, dict):
         return ["route 必须是 JSON 对象"]
     errors = []
     mode = route.get("mode")
     if mode not in ROUTE_MODES:
         errors.append(_enum_error("route.mode", mode, ROUTE_MODES))
-    for key, allowed in (
-            ("delegability", DELEGABILITY_LEVELS),
-            ("assurance", ASSURANCE_LEVELS),
-            ("executor", EXECUTORS),
-            ("continuity", CONTINUITY_MODES)):
-        if key in route and route[key] is not None and route[key] not in allowed:
-            errors.append(_enum_error("route." + key, route[key], allowed))
-    return errors
-
-
-def derive_review_required(route):
-    """由 route 推导审查义务：mode ∈ (audit, full) 或 assurance == "high"
-    → True；mode ∈ (solo, delegate) 且 assurance == "standard" → False；
-    其余（信息不足 / route 非 dict）→ None。"""
-    if not isinstance(route, dict):
-        return None
-    mode = route.get("mode")
-    assurance = route.get("assurance")
-    if mode in ("audit", "full") or assurance == "high":
-        return True
-    if mode in ("solo", "delegate") and assurance == "standard":
-        return False
-    return None
-
-
-def validate_route_invariants(state) -> "list[str]":
-    """校验 route 跨字段不变量（H2/P0-2：route 与 review/executor/
-    ownership/verification 的关系成为确定性约束），返回中文错误列表
-    （空列表 = 合法；不抛异常）。
-
-    四条规则（均在涉及字段为合法枚举值时生效——非法值已有基线枚举
-    错误，不重复报；route 非 dict 或 mode 非法 → 返回空列表）：
-      - R1 矩阵一致性：mode 必须等于 ROUTE_MATRIX[delegability][assurance]；
-      - R2 executor 绑定：solo/audit ↔ "main"；delegate/full ↔ 实施者；
-      - R3 review 绑定：derive_review_required 为 True 时 review.required
-        必须为 True（review 块缺失按非 True 处理）；
-      - R4 delegate/full 实质性：ownership.files 与 verification.required
-        必须为非空数组。
-    """
-    if not isinstance(state, dict):
-        return []
-    route = state.get("route")
-    if not isinstance(route, dict):
-        return []
-    mode = route.get("mode")
-    if mode not in ROUTE_MODES:
-        return []
-    errors = []
-
-    delegability = route.get("delegability")
-    assurance = route.get("assurance")
-    # R1 矩阵一致性（delegability 与 assurance 均为合法枚举时才判）
-    if delegability in DELEGABILITY_LEVELS and assurance in ASSURANCE_LEVELS:
-        expected = ROUTE_MATRIX[delegability][assurance]
-        if mode != expected:
-            errors.append(
-                "route.mode %r 与 delegability=%r / assurance=%r "
-                "的矩阵组合不一致（应为 %r）"
-                % (mode, delegability, assurance, expected))
-
-    # R2 executor 绑定（executor 为合法枚举值时才判；None / 非法值跳过）
-    executor = route.get("executor")
-    if executor in EXECUTORS:
-        if mode in ("solo", "audit"):
-            if executor != "main":
-                errors.append(
-                    "route.executor %r 与 mode=%r 不一致"
-                    "（solo/audit 要求 executor 为 \"main\"）"
-                    % (executor, mode))
-        elif executor not in IMPLEMENTER_EXECUTORS:
-            errors.append(
-                "route.executor %r 与 mode=%r 不一致"
-                "（delegate/full 要求 executor 为 %s 之一）"
-                % (executor, mode, " / ".join(IMPLEMENTER_EXECUTORS)))
-
-    # R3 review 绑定：route 推导要求审查时 review.required 必须为 True
-    if derive_review_required(route) is True:
-        review = state.get("review")
-        required = review.get("required") if isinstance(review, dict) else None
-        if required is not True:
-            errors.append(
-                "review.required 必须为 true：route.mode=%r / "
-                "route.assurance=%r 推导出独立审查义务——该路由要求 "
-                "review.required=true" % (mode, assurance))
-
-    # R4 delegate/full 实质性：必须声明非空 ownership 与 verification
-    if mode in ("delegate", "full"):
-        ownership = state.get("ownership")
-        files = (
-            ownership.get("files") if isinstance(ownership, dict) else None)
-        if not isinstance(files, list) or not files:
-            errors.append(
-                "route.mode=%r 要求 ownership.files 为非空数组"
-                "（delegate/full 任务必须声明实质文件范围）" % mode)
-        verification = state.get("verification")
-        required_commands = (
-            verification.get("required")
-            if isinstance(verification, dict) else None)
-        if not isinstance(required_commands, list) or not required_commands:
-            errors.append(
-                "route.mode=%r 要求 verification.required 为非空数组"
-                "（delegate/full 任务必须声明验证命令）" % mode)
-
-    return errors
-
-
-def _validate_ownership(ownership):
-    """校验 ownership 子对象（files 必须是非空字符串数组）。"""
-    if not isinstance(ownership, dict):
-        return ["ownership 必须是 JSON 对象"]
-    return _str_list_errors("ownership.files", ownership.get("files", []))
-
-
-def _validate_verification(verification):
-    """校验 verification 子对象（required/completed 数组 + fingerprint）。"""
-    if not isinstance(verification, dict):
-        return ["verification 必须是 JSON 对象"]
-    errors = []
-    errors.extend(
-        _str_list_errors("verification.required", verification.get("required", [])))
-    errors.extend(
-        _str_list_errors("verification.completed", verification.get("completed", [])))
-    fingerprint = verification.get("fingerprint")
-    if fingerprint is not None and not isinstance(fingerprint, str):
-        errors.append("verification.fingerprint 必须是字符串或 null")
-    return errors
-
-
-def _validate_review(review):
-    """校验 review 子对象（required 布尔 + reviewer/verdict 可空枚举 + fingerprint）。"""
-    if not isinstance(review, dict):
-        return ["review 必须是 JSON 对象"]
-    errors = []
-    if not isinstance(review.get("required"), bool):
-        errors.append("review.required 必须是布尔值")
-    reviewer = review.get("reviewer")
-    if reviewer is not None and not isinstance(reviewer, str):
-        errors.append("review.reviewer 必须是字符串或 null")
-    verdict = review.get("verdict")
-    if verdict is not None and verdict not in REVIEW_VERDICTS:
-        errors.append(_enum_error("review.verdict", verdict, REVIEW_VERDICTS))
-    fingerprint = review.get("fingerprint")
-    if fingerprint is not None and not isinstance(fingerprint, str):
-        errors.append("review.fingerprint 必须是字符串或 null")
-    return errors
-
-
-def _validate_visual_evidence(entries):
-    """校验 visual_evidence 顶层数组（§22 视觉证据）。
-
-    值必须是 list；每项必须是 dict 且含非空 str 的 path 与 sha256
-    两键（其他键忽略，向前兼容）。
-    """
-    if not isinstance(entries, list):
-        return ["visual_evidence 必须是数组"]
-    errors = []
-    for index, item in enumerate(entries):
-        if not isinstance(item, dict):
-            errors.append("visual_evidence[%d] 必须是 JSON 对象" % index)
-            continue
-        path = item.get("path")
-        if not isinstance(path, str) or path == "":
-            errors.append("visual_evidence[%d].path 必须是非空字符串" % index)
-        sha256 = item.get("sha256")
-        if not isinstance(sha256, str) or sha256 == "":
-            errors.append("visual_evidence[%d].sha256 必须是非空字符串" % index)
-    return errors
-
-
-def _validate_dispatch_waves(waves) -> "list[str]":
-    """校验可选 dispatch.waves 数组（v2.1 M4 wu-21-08 wave 记录）。
-
-    键名冻结：wave_id（非空 str 且列表内唯一）/ units（非空字符串
-    数组）/ worker_budget（>= 1 整数）/ quota_status（四态）/
-    created_at（非空 str，ISO-8601 落盘口径）/ status（active|closed）/
-    closed_at（非空 str 或 None；status="closed" 时必须非 None）。
-    缺 waves 键 = legacy 合法（调用方把关）；逐条聚合全部错误不短路，
-    错误消息中文、前缀 dispatch.waves[i]。
-    """
-    if not isinstance(waves, list):
-        return ["dispatch.waves 必须是数组"]
-    errors = []
-    seen_wave_ids = set()
-    for index, wave in enumerate(waves):
-        prefix = "dispatch.waves[%d]" % index
-        if not isinstance(wave, dict):
-            errors.append("%s 必须是 JSON 对象" % prefix)
-            continue
-        for key in ("wave_id", "units", "worker_budget", "quota_status",
-                    "created_at", "status", "closed_at"):
-            if key not in wave:
-                errors.append("%s 缺少必填键 %s" % (prefix, key))
-        if "wave_id" in wave:
-            wave_id = wave["wave_id"]
-            if not isinstance(wave_id, str) or wave_id == "":
-                errors.append("%s.wave_id 必须是非空字符串" % prefix)
-            elif wave_id in seen_wave_ids:
-                errors.append(
-                    "%s.wave_id %r 重复（wave_id 必须在列表内唯一）"
-                    % (prefix, wave_id))
-            else:
-                seen_wave_ids.add(wave_id)
-        if "units" in wave:
-            units = wave["units"]
-            if not isinstance(units, list) or not units:
-                errors.append("%s.units 必须是非空数组" % prefix)
-            else:
-                errors.extend(
-                    "%s.units[%d] 必须是非空字符串" % (prefix, u_index)
-                    for u_index, item in enumerate(units)
-                    if not isinstance(item, str) or item == "")
-        if "worker_budget" in wave:
-            worker_budget = wave["worker_budget"]
-            # bool 是 int 的子类，但 True/False 不应充当 worker_budget
-            if isinstance(worker_budget, bool) \
-                    or not isinstance(worker_budget, int) or worker_budget < 1:
-                errors.append("%s.worker_budget 必须是 >= 1 的整数" % prefix)
-        if "quota_status" in wave:
-            quota_status = wave["quota_status"]
-            if quota_status not in QUOTA_STATUSES:
-                errors.append(_enum_error(prefix + ".quota_status",
-                                          quota_status, QUOTA_STATUSES))
-        if "created_at" in wave:
-            created_at = wave["created_at"]
-            if not isinstance(created_at, str) or created_at == "":
-                errors.append(
-                    "%s.created_at 必须是非空字符串（ISO-8601）" % prefix)
-        if "status" in wave:
-            status = wave["status"]
-            if status not in ("active", "closed"):
-                errors.append(_enum_error(prefix + ".status", status,
-                                          ("active", "closed")))
-        if "closed_at" in wave:
-            closed_at = wave["closed_at"]
-            if closed_at is not None and (
-                    not isinstance(closed_at, str) or closed_at == ""):
-                errors.append(
-                    "%s.closed_at 必须是非空字符串（ISO-8601）或 null"
-                    % prefix)
-            if wave.get("status") == "closed" and (
-                    not isinstance(closed_at, str) or closed_at == ""):
-                errors.append(
-                    "%s.closed_at 与 status=\"closed\" 矛盾：closed 波必须"
-                    "携带 closed_at" % prefix)
-    return errors
-
-
-def _validate_dispatch(dispatch):
-    """校验 dispatch 子对象（max_workers 为 1-§82 上限的整数 + active 数组
-    + 可选 waves 数组，wu-21-08）。"""
-    if not isinstance(dispatch, dict):
-        return ["dispatch 必须是 JSON 对象"]
-    from runtime.lease import DEFAULT_MAX_WORKERS_LIMIT
-    errors = []
-    max_workers = dispatch.get("max_workers", 1)
-    # bool 是 int 的子类，但 True/False 不应充当 max_workers
-    if isinstance(max_workers, bool) or not isinstance(max_workers, int) \
-            or max_workers < 1:
-        errors.append("dispatch.max_workers 必须是 >= 1 的整数")
-    elif max_workers > DEFAULT_MAX_WORKERS_LIMIT:
-        errors.append(
-            "dispatch.max_workers 超过并行上限 %d（§82，1-%d）"
-            % (DEFAULT_MAX_WORKERS_LIMIT, DEFAULT_MAX_WORKERS_LIMIT))
-    if not isinstance(dispatch.get("active", []), list):
-        errors.append("dispatch.active 必须是数组")
-    # 可选 waves 键（wu-21-08 wave 记录）：缺键 = legacy 合法
-    if "waves" in dispatch:
-        errors.extend(_validate_dispatch_waves(dispatch["waves"]))
-    return errors
-
-
-def _validate_quota(quota):
-    """校验可选顶层 quota 块（§39，B5.3 增补；四态评估见
-    runtime.quota.scheduler）。
-
-    只做形状校验：quota 块按契约永不含凭证（§37 凭证零落盘），
-    本函数因此不校验任何秘密字段的存在性，内部细粒度形状
-    （five_hour / weekly 的窗口字段）也留给 quota 子系统。
-      - status 存在且非 None → ∈ QUOTA_STATUSES（词汇复用
-        runtime.quota.parser，与调度器共用同一词汇表）；
-      - source / provider / last_checked 存在且非 None → 非空 str；
-      - five_hour / weekly 存在且非 None → dict。
-    """
-    if not isinstance(quota, dict):
-        return ["quota 必须是 JSON 对象"]
-    errors = []
-    status = quota.get("status")
-    if status is not None and status not in QUOTA_STATUSES:
-        errors.append(_enum_error("quota.status", status, QUOTA_STATUSES))
-    for key in ("source", "provider", "last_checked"):
-        value = quota.get(key)
-        if value is not None and (not isinstance(value, str) or value == ""):
-            errors.append("quota.%s 必须是非空字符串或 null" % key)
-    for key in ("five_hour", "weekly"):
-        value = quota.get(key)
-        if value is not None and not isinstance(value, dict):
-            errors.append("quota.%s 必须是 JSON 对象或 null" % key)
+    if "assurance" in route and route["assurance"] is not None \
+            and route["assurance"] not in ASSURANCE_LEVELS:
+        errors.append(_enum_error("route.assurance", route["assurance"],
+                                  ASSURANCE_LEVELS))
     return errors
 
 
 def _validate_repository(repository):
-    """校验可选顶层 repository 块（RB-2 任务专属仓库根绑定）。
+    """校验必填顶层 repository 块（任务绑定的仓库根）。
 
-    只做形状校验：
-      - repository 非 dict → 错误；
-      - root 缺失 / 非 str / 空串 → 错误（绑定后 root 是唯一必填子键）；
-      - 未知子键忽略（向前兼容）。
-    无 repository 键 → 完全合法（legacy 任务无绑定是合法形态，
-    validate_state 不要求绑定存在）。
+    v2.4 中 repository 是必填概念：root 为唯一必填子键（非空 str）；
+    未知子键忽略（向前兼容）。
     """
     if not isinstance(repository, dict):
         return ["repository 必须是 JSON 对象"]
@@ -708,280 +363,133 @@ def _validate_repository(repository):
     return []
 
 
-def _is_iso8601(value) -> bool:
-    """判断 value 是否为可解析的 ISO8601 时间字符串。
+def _validate_dag(dag) -> "list[str]":
+    """校验 dag 数组（静态节点经 Phase 1 校验器，错误带节点路径）。
 
-    与 runtime.execution_policy._is_iso8601 同款判定（本地复制，不在
-    模块间引用私有函数）：兼容结尾 Z/z 后缀（先归一为 +00:00 再解析
-    ——Python 3.11 之前 fromisoformat 不认 Z）。非字符串 / 空串 /
-    解析失败 → False。
+    两层校验（聚合全部，不短路）：
+      - 逐节点：runtime.work_unit.validate_node，错误统一加
+        "dag[i]." 节点路径前缀（如 "dag[0].node.objective 必须是
+        非空字符串"）；
+      - 整图：runtime.dependency.graph_errors（重复 id / 缺失依赖 /
+        自依赖 / 环），消息内 nodes[i] 路径统一改写为 dag[i]；不含
+        节点下标的整图消息（如环成员清单）加 "dag." 前缀。
+    dag 允许为空数组（solo 任务可暂无节点；是否可编译归编译器判定）。
     """
-    if not isinstance(value, str) or value == "":
-        return False
-    probe = value[:-1] + "+00:00" if value.endswith(("Z", "z")) else value
-    try:
-        datetime.datetime.fromisoformat(probe)
-    except ValueError:
-        return False
-    return True
-
-
-def _validate_continuation(continuation):
-    """校验可选顶层 continuation 块（v2.2 M1 控制回路事实块，主计划
-    §8 冻结 schema / §23.2 默认块）。
-
-    只做形状校验（错误消息中文、路径前缀 continuation.，聚合不短路）：
-      - continuation 非 dict → 错误；
-      - obligation / wake_bridge.status 存在时 → 冻结枚举
-        （CONTINUATION_OBLIGATIONS / WAKE_BRIDGE_STATUSES；None 亦拒
-        ——枚举字段与 reason 不同，无 null 空档，缺省即不写键）；
-      - reason 存在时 → null 或 str；
-      - wake_bridge 键存在且非 None 时 → dict；七字段逐键（存在才
-        校验，缺键合法按默认解释）：boundary_id / automation_id 为
-        null 或非空 str；reset_at / wake_at / armed_at / fired_at 为
-        null 或 ISO8601 字符串（_is_iso8601 同款判定）；wake_bridge
-        显式 null 视同缺省（与 quota 块 five_hour/weekly 的容错同风格）；
-      - v2.2 M1a（D15-e）wake_bridge 新键逐键（存在才校验，缺键合法
-        按默认解释）：mode ∈ WAKE_BRIDGE_MODES（None 亦拒，枚举无
-        null 空档）；generation 为 null 或 >= 0 的 int（bool 拒绝）；
-        current_boundary_id 为 null 或非空 str；next_wake_at 为 null
-        或 ISO8601；bridge_interval_minutes 为 null 或 5-1440 的 int
-        （bool 拒绝——bool 是 int 子类，True/False 不得充当分钟数）；
-      - scheduler_context 键存在且非 None 时 → dict（显式 null 视同
-        缺省，与 wake_bridge 同风格）：origin 存在时 ∈ SCHEDULER_
-        ORIGINS（None 亦拒）；create / update / pause / delete 存在时
-        ∈ SCHEDULER_CAPABILITIES（None 亦拒）；parent_automation_id
-        为 null 或非空 str；未知键忽略；
-      - tombstone：null 合法（未退役）；dict 时四键必填——task_id 非
-        空 str、status 必须等于 "completed"、completed_at 为非空
-        ISO8601 str、bridge_should_noop 必须为 True（bool）；其他类型
-        （非 dict 非 null）或 dict 缺键 → continuation.tombstone.*
-        错误；
-      - 未知键忽略（向前兼容）。
-    无 continuation 键 → 完全合法（legacy v2.1 形态，消费方按
-    default_continuation 解释——obligation="none" 无义务态）。
-    wu-22-01 已写形态（7 键 wake_bridge、无 scheduler_context /
-    tombstone）仍然合法——新键全部存在才校验，缺键按默认解释。
-    """
-    if not isinstance(continuation, dict):
-        return ["continuation 必须是 JSON 对象"]
+    if not isinstance(dag, list):
+        return ["dag 必须是数组"]
     errors = []
-    obligation = continuation.get("obligation")
-    if "obligation" in continuation \
-            and obligation not in CONTINUATION_OBLIGATIONS:
-        errors.append(_enum_error("continuation.obligation", obligation,
-                                  CONTINUATION_OBLIGATIONS))
-    if "reason" in continuation:
-        reason = continuation["reason"]
-        if reason is not None and not isinstance(reason, str):
-            errors.append("continuation.reason 必须是字符串或 null")
-    wake_bridge = continuation.get("wake_bridge")
-    if "wake_bridge" in continuation and wake_bridge is not None:
-        if not isinstance(wake_bridge, dict):
-            errors.append("continuation.wake_bridge 必须是 JSON 对象或 null")
-        else:
-            status = wake_bridge.get("status")
-            if "status" in wake_bridge and status not in \
-                    WAKE_BRIDGE_STATUSES:
-                errors.append(_enum_error("continuation.wake_bridge.status",
-                                          status, WAKE_BRIDGE_STATUSES))
-            for key in ("boundary_id", "automation_id"):
-                if key in wake_bridge:
-                    value = wake_bridge[key]
-                    if value is not None and (
-                            not isinstance(value, str) or value == ""):
-                        errors.append(
-                            "continuation.wake_bridge.%s 必须是非空字符串"
-                            "或 null" % key)
-            for key in ("reset_at", "wake_at", "armed_at", "fired_at"):
-                if key in wake_bridge:
-                    value = wake_bridge[key]
-                    if value is not None and not _is_iso8601(value):
-                        errors.append(
-                            "continuation.wake_bridge.%s 必须是 ISO8601 "
-                            "字符串或 null" % key)
-            # —— v2.2 M1a（D15-e）Persistent Bridge 扩展五键 ——
-            mode = wake_bridge.get("mode")
-            if "mode" in wake_bridge and mode not in WAKE_BRIDGE_MODES:
-                errors.append(_enum_error("continuation.wake_bridge.mode",
-                                          mode, WAKE_BRIDGE_MODES))
-            if "generation" in wake_bridge:
-                generation = wake_bridge["generation"]
-                # bool 是 int 的子类，但 True/False 不应充当世代计数
-                if generation is not None and (
-                        isinstance(generation, bool)
-                        or not isinstance(generation, int)
-                        or generation < 0):
-                    errors.append(
-                        "continuation.wake_bridge.generation 必须是 >= 0 "
-                        "的整数或 null")
-            if "current_boundary_id" in wake_bridge:
-                value = wake_bridge["current_boundary_id"]
-                if value is not None and (
-                        not isinstance(value, str) or value == ""):
-                    errors.append(
-                        "continuation.wake_bridge.current_boundary_id "
-                        "必须是非空字符串或 null")
-            if "next_wake_at" in wake_bridge:
-                value = wake_bridge["next_wake_at"]
-                if value is not None and not _is_iso8601(value):
-                    errors.append(
-                        "continuation.wake_bridge.next_wake_at 必须是 "
-                        "ISO8601 字符串或 null")
-            if "bridge_interval_minutes" in wake_bridge:
-                interval = wake_bridge["bridge_interval_minutes"]
-                if interval is not None and (
-                        isinstance(interval, bool)
-                        or not isinstance(interval, int)
-                        or not 5 <= interval <= 1440):
-                    errors.append(
-                        "continuation.wake_bridge.bridge_interval_minutes "
-                        "必须是 5-1440 的整数或 null")
-    # —— v2.2 M1a（D15-e）scheduler 能力事实块 ——
-    scheduler_context = continuation.get("scheduler_context")
-    if "scheduler_context" in continuation and scheduler_context is not None:
-        if not isinstance(scheduler_context, dict):
-            errors.append(
-                "continuation.scheduler_context 必须是 JSON 对象或 null")
-        else:
-            origin = scheduler_context.get("origin")
-            if "origin" in scheduler_context \
-                    and origin not in SCHEDULER_ORIGINS:
-                errors.append(_enum_error(
-                    "continuation.scheduler_context.origin", origin,
-                    SCHEDULER_ORIGINS))
-            for key in ("create", "update", "pause", "delete"):
-                capability = scheduler_context.get(key)
-                if key in scheduler_context \
-                        and capability not in SCHEDULER_CAPABILITIES:
-                    errors.append(_enum_error(
-                        "continuation.scheduler_context.%s" % key,
-                        capability, SCHEDULER_CAPABILITIES))
-            if "parent_automation_id" in scheduler_context:
-                parent_id = scheduler_context["parent_automation_id"]
-                if parent_id is not None and (
-                        not isinstance(parent_id, str) or parent_id == ""):
-                    errors.append(
-                        "continuation.scheduler_context."
-                        "parent_automation_id 必须是非空字符串或 null")
-    # —— v2.2 M1a（D15-e）bridge 退役墓碑 ——
-    if "tombstone" in continuation and continuation["tombstone"] is not None:
-        tombstone = continuation["tombstone"]
-        if not isinstance(tombstone, dict):
-            errors.append("continuation.tombstone 必须是 JSON 对象或 null")
-        else:
-            for key in ("task_id", "status", "completed_at",
-                        "bridge_should_noop"):
-                if key not in tombstone:
-                    errors.append(
-                        "continuation.tombstone 缺少必填键 %s" % key)
-            if "task_id" in tombstone:
-                value = tombstone["task_id"]
-                if not isinstance(value, str) or value == "":
-                    errors.append(
-                        "continuation.tombstone.task_id 必须是非空字符串")
-            if "status" in tombstone and tombstone["status"] != "completed":
-                errors.append(_enum_error(
-                    "continuation.tombstone.status", tombstone["status"],
-                    ("completed",)))
-            if "completed_at" in tombstone:
-                value = tombstone["completed_at"]
-                if not _is_iso8601(value):
-                    errors.append(
-                        "continuation.tombstone.completed_at 必须是 "
-                        "ISO8601 字符串")
-            if "bridge_should_noop" in tombstone \
-                    and tombstone["bridge_should_noop"] is not True:
-                errors.append(
-                    "continuation.tombstone.bridge_should_noop 必须为"
-                    "布尔 true")
+    for index, node in enumerate(dag):
+        errors.extend(
+            "dag[%d].%s" % (index, node_error)
+            for node_error in validate_node(node))
+    for graph_error in graph_errors(dag):
+        rewritten = graph_error.replace("nodes[", "dag[")
+        if not rewritten.startswith("dag["):
+            rewritten = "dag." + rewritten
+        errors.append(rewritten)
     return errors
 
 
-def _validate_quota_subscription(subscription):
-    """校验可选顶层 quota_subscription 块（v2.2 C5a 订阅事实块，§14
-    规范 adapted——epoch 身份用 §10.1 epoch_id 字符串，不用 §14 草图的
-    int 序数）。
+def _validate_validation(validation):
+    """校验任务级 validation 记录（P2-C 最小验证记录）。
 
-    只做形状校验（错误消息中文、路径前缀 quota_subscription.，聚合
-    不短路）：
-      - subscription 非 dict → 错误；
-      - enabled 存在时 → 必须是 bool（True/False 之外的任何值——含
-        "true"/1 等经典 fail-open 坏值——一律报错）；
-      - registered_epoch_id / last_activation_epoch_id 存在时 → null
-        或 is_quota_epoch_id 形状（"glm:"+16 位十六进制；§10.1）；
-      - minimum_state 存在时 → ∈ QUOTA_SUBSCRIPTION_MINIMUM_STATES
-        （None 亦拒——枚举无 null 空档，缺省语义靠缺键表达）；
-      - continuation_mode 存在时 → ∈ QUOTA_SUBSCRIPTION_CONTINUATION_
-        MODES（None 亦拒，同上）；
-      - 未知键忽略（向前兼容）。
-    缺键合法：缺哪个键就按 DEFAULT_QUOTA_SUBSCRIPTION 对应默认解释
-    （与 continuation 块「存在才校验，缺键按默认」同风格）。无
-    quota_subscription 键 → 完全合法（legacy 形态，消费方按
-    default_quota_subscription 解释——未订阅）。
+    键（存在才校验，缺键按「未记录」解释；未知键忽略）：
+      - status：null 或 ∈ VALIDATION_STATUSES（passed/failed）；
+      - change_id / summary：null 或非空 str；
+      - commands：null 或非空字符串数组（允许空数组——诊断性命令
+        摘要无「必填非空」语义）。
     """
-    if not isinstance(subscription, dict):
-        return ["quota_subscription 必须是 JSON 对象"]
+    if not isinstance(validation, dict):
+        return ["validation 必须是 JSON 对象"]
     errors = []
-    if "enabled" in subscription \
-            and not isinstance(subscription["enabled"], bool):
-        errors.append("quota_subscription.enabled 必须是布尔值")
-    for key in ("registered_epoch_id", "last_activation_epoch_id"):
-        if key in subscription:
-            value = subscription[key]
-            if value is not None and not is_quota_epoch_id(value):
-                errors.append(
-                    "quota_subscription.%s 必须是 null 或 \"glm:\"+16 位"
-                    "十六进制的 epoch_id（§10.1 形状）" % key)
-    if "minimum_state" in subscription \
-            and subscription["minimum_state"] \
-            not in QUOTA_SUBSCRIPTION_MINIMUM_STATES:
-        errors.append(_enum_error("quota_subscription.minimum_state",
-                                  subscription["minimum_state"],
-                                  QUOTA_SUBSCRIPTION_MINIMUM_STATES))
-    if "continuation_mode" in subscription \
-            and subscription["continuation_mode"] \
-            not in QUOTA_SUBSCRIPTION_CONTINUATION_MODES:
-        errors.append(_enum_error("quota_subscription.continuation_mode",
-                                  subscription["continuation_mode"],
-                                  QUOTA_SUBSCRIPTION_CONTINUATION_MODES))
+    if "status" in validation and validation["status"] is not None \
+            and validation["status"] not in VALIDATION_STATUSES:
+        errors.append(_enum_error("validation.status", validation["status"],
+                                  VALIDATION_STATUSES))
+    for key in ("change_id", "summary"):
+        if key in validation:
+            value = validation[key]
+            if value is not None and (
+                    not isinstance(value, str) or value == ""):
+                errors.append("validation.%s 必须是非空字符串或 null" % key)
+    if "commands" in validation and validation["commands"] is not None:
+        errors.extend(
+            _str_list_errors("validation.commands", validation["commands"]))
+    return errors
+
+
+def _validate_review(review):
+    """校验任务级 review 记录（P2-C 最小审查记录）。
+
+    键（存在才校验，缺键按「未记录」解释；未知键忽略）：
+      - verdict：null 或 ∈ REVIEW_VERDICTS（ship/fix-first/rethink）；
+      - reviewer / change_id / findings：null 或非空 str。
+    """
+    if not isinstance(review, dict):
+        return ["review 必须是 JSON 对象"]
+    errors = []
+    if "verdict" in review and review["verdict"] is not None \
+            and review["verdict"] not in REVIEW_VERDICTS:
+        errors.append(_enum_error("review.verdict", review["verdict"],
+                                  REVIEW_VERDICTS))
+    for key in ("reviewer", "change_id", "findings"):
+        if key in review:
+            value = review[key]
+            if value is not None and (
+                    not isinstance(value, str) or value == ""):
+                errors.append("review.%s 必须是非空字符串或 null" % key)
+    return errors
+
+
+def _validate_quota_resume(block):
+    """校验 quota_resume 占位块（Phase 3 定稿前的形状闸）。
+
+    键（存在才校验，缺键按 DEFAULT_QUOTA_RESUME 默认解释；未知键
+    忽略）：mode ∈ QUOTA_RESUME_MODES（当前仅 manual）；max_resumes /
+    resume_count 为 >= 0 的整数（bool 拒绝——bool 是 int 子类，
+    True/False 不得充当计数）；automation_id 为 null 或非空 str。
+    """
+    if not isinstance(block, dict):
+        return ["quota_resume 必须是 JSON 对象"]
+    errors = []
+    if "mode" in block and block["mode"] not in QUOTA_RESUME_MODES:
+        errors.append(_enum_error("quota_resume.mode", block["mode"],
+                                  QUOTA_RESUME_MODES))
+    for key in ("max_resumes", "resume_count"):
+        if key in block:
+            value = block[key]
+            if isinstance(value, bool) or not isinstance(value, int) \
+                    or value < 0:
+                errors.append("quota_resume.%s 必须是 >= 0 的整数" % key)
+    if "automation_id" in block and block["automation_id"] is not None:
+        value = block["automation_id"]
+        if not isinstance(value, str) or value == "":
+            errors.append("quota_resume.automation_id 必须是非空字符串或 null")
     return errors
 
 
 def validate_state(state) -> "list[str]":
-    """校验状态 dict，返回错误消息列表（中文，含字段路径）；空列表 = 合法。
+    """校验 v2.4 状态 dict，返回错误消息列表（中文，含字段路径）。
 
-    不抛异常；state 非 dict → ["state 必须是 JSON 对象"]。
-    未知顶层键忽略（向前兼容），不报错。
-    可选顶层 repository 块（RB-2）：存在时必须为 dict 且 root 为非空
-    字符串；缺失时完全合法（legacy 无绑定形态）。
-    可选顶层 execution_policy 块（v2.1 M1 授权事实源）：存在时必须为
-    dict 且复用 validate_execution_policy（§3 冻结 schema + §5.4
-    授权不变量，错误路径前缀 execution_policy.）；缺失时完全合法
-    （legacy 保守默认形态，R7）。
-    可选顶层 continuation 块（v2.2 M1 控制回路事实块）：存在时按规则
-    8.8 做形状校验（obligation / wake_bridge.status 冻结枚举 + reason
-    与 wake_bridge 各字段的 null 或合法值 + v2.2 M1a D15-e 的
-    scheduler_context 词汇 / tombstone 形状，错误路径前缀
-    continuation.）；缺失时完全合法（legacy v2.1 形态，消费方按
-    default_continuation 解释——obligation="none" 无义务态）。
-    可选顶层 quota_subscription 块（v2.2 C5a 订阅事实块，§14 adapted
-    ——epoch_id 字符串等值身份，不引入 int 序数）：存在时按规则 8.9
-    做形状校验（enabled 布尔 / epoch_id 两键 null 或 "glm:"+16hex /
-    minimum_state 四档枚举 / continuation_mode 四枚举，缺键按默认，
-    错误路径前缀 quota_subscription.）；缺失时完全合法（legacy 形态，
-    消费方按 default_quota_subscription 解释——未订阅）。
+    空列表 = 合法；不抛异常；state 非 dict → ["state 必须是 JSON 对象"]。
+    必填顶层键（_REQUIRED_TOP_KEYS）：task_id / goal / repository /
+    route / dag / status / workflow_run_id / validation / review /
+    quota_resume；phase 可选（缺省即不写键）。未知顶层键忽略（向前
+    兼容），不报错。
+    带 v2.3 标记的遗留 state 在本函数无豁免：缺 v2.4 必填键照常报错
+    （绝不自动迁移）——消费方应先经 is_legacy_state / detect_legacy_
+    task 识别并按 LEGACY_STATE_GUIDANCE 报告为 v2.3 任务。
     """
     if not isinstance(state, dict):
         return ["state 必须是 JSON 对象"]
     errors = []
 
-    # 规则 10：必填顶层键（task_id / goal / route / status）
+    # 必填顶层键
     for key in _REQUIRED_TOP_KEYS:
         if key not in state:
             errors.append("缺少必填顶层键 %s" % key)
 
-    # 规则 1：task_id 非空 str 且匹配格式
+    # task_id 非空 str 且匹配格式
     if "task_id" in state:
         task_id = state["task_id"]
         if not isinstance(task_id, str) or task_id == "":
@@ -991,201 +499,131 @@ def validate_state(state) -> "list[str]":
                 "task_id %r 不匹配格式 ^[A-Za-z0-9][A-Za-z0-9-]*$"
                 "（字母数字开头，仅含字母数字与连字符）" % task_id)
 
-    # 规则 2：goal 非空 str
+    # goal 非空 str
     if "goal" in state:
         goal = state["goal"]
         if not isinstance(goal, str) or goal == "":
             errors.append("goal 必须是非空字符串")
 
-    # 规则 3：route
+    # route（mode 四模式 + 可选 assurance 两级）
     if "route" in state:
         errors.extend(_validate_route(state["route"]))
 
-    # 规则 4：ownership
-    if "ownership" in state:
-        errors.extend(_validate_ownership(state["ownership"]))
-
-    # 规则 5：verification
-    if "verification" in state:
-        errors.extend(_validate_verification(state["verification"]))
-
-    # 规则 6：review
-    if "review" in state:
-        errors.extend(_validate_review(state["review"]))
-
-    # 规则 6.5：visual_evidence（§22 视觉证据数组）
-    if "visual_evidence" in state:
-        errors.extend(_validate_visual_evidence(state["visual_evidence"]))
-
-    # 规则 7：work_units 必须是 list，且逐项按 §61 契约校验
-    # （runtime.work_unit.validate_work_unit；错误路径前缀
-    # work_units[i]，聚合全部错误不短路）
-    if "work_units" in state:
-        work_units = state["work_units"]
-        if not isinstance(work_units, list):
-            errors.append("work_units 必须是数组")
-        else:
-            for index, unit in enumerate(work_units):
-                errors.extend(
-                    "work_units[%d].%s" % (index, unit_error)
-                    for unit_error in validate_work_unit(unit))
-
-    # 规则 8：dispatch
-    if "dispatch" in state:
-        errors.extend(_validate_dispatch(state["dispatch"]))
-
-    # 规则 8.5：quota（§39 可选顶层 quota 块；永不含有凭证字段）
-    if "quota" in state:
-        errors.extend(_validate_quota(state["quota"]))
-
-    # 规则 8.6：repository（RB-2 可选顶层仓库根绑定；无该键完全合法
-    # ——legacy 形态，存在时 root 是唯一必填子键）
+    # repository（必填仓库根绑定块）
     if "repository" in state:
         errors.extend(_validate_repository(state["repository"]))
 
-    # 规则 8.7：execution_policy（v2.1 M1 可选顶层授权事实源块；无该键
-    # 完全合法——legacy 保守默认形态，消费方按 default_execution_policy
-    # 解释；存在时复用 runtime.execution_policy 全量校验（§3 冻结
-    # schema + §5.4 授权不变量），错误路径前缀 execution_policy.，
-    # 聚合不短路——与规则 7 的 work_units[i] 前缀同风格）
-    if "execution_policy" in state:
-        policy_block = state["execution_policy"]
-        if not isinstance(policy_block, dict):
-            errors.append("execution_policy 必须是 JSON 对象")
-        else:
-            errors.extend(
-                "execution_policy.%s" % policy_error
-                for policy_error in validate_execution_policy(policy_block))
+    # dag（静态节点逐项 + 整图，错误带 dag[i] 节点路径）
+    if "dag" in state:
+        errors.extend(_validate_dag(state["dag"]))
 
-    # 规则 8.8：continuation（v2.2 M1 可选顶层续跑义务 + wake bridge
-    # 事实块；无该键完全合法——legacy v2.1 形态，消费方按
-    # default_continuation 解释（obligation="none" 无义务态）；存在时
-    # 按主计划 §8 冻结 schema 做形状校验，错误路径前缀 continuation.，
-    # 聚合不短路——与规则 8.7 的 execution_policy 前缀同风格）
-    if "continuation" in state:
-        errors.extend(_validate_continuation(state["continuation"]))
-
-    # 规则 8.9：quota_subscription（v2.2 C5a 可选顶层额度订阅事实块；
-    # 无该键完全合法——legacy 形态，消费方按 default_quota_subscription
-    # 解释（未订阅）；存在时按 §14 adapted 五键形状校验，缺键按默认，
-    # 错误路径前缀 quota_subscription.，聚合不短路——与规则 8.8 的
-    # continuation 前缀同风格）
-    if "quota_subscription" in state:
-        errors.extend(
-            _validate_quota_subscription(state["quota_subscription"]))
-
-    # 规则 9：status ∈ TASK_STATUSES
+    # status ∈ 七态
     if "status" in state:
         status = state["status"]
         if status not in TASK_STATUSES:
             errors.append(_enum_error("status", status, TASK_STATUSES))
 
-    # 规则 11：route 不变量（H2/P0-2 跨字段一致性：矩阵 / executor /
-    # review / delegate-full 实质性绑定；非法组合在 save_state 即被拒）
-    errors.extend(validate_route_invariants(state))
+    # phase 可选描述性标注（缺省即不写键；写入则必须 ∈ TASK_PHASES）
+    if "phase" in state and state["phase"] not in TASK_PHASES:
+        errors.append(_enum_error("phase", state["phase"], TASK_PHASES))
+
+    # workflow_run_id：null 或非空 str（委派运行启动前为 null）
+    if "workflow_run_id" in state:
+        workflow_run_id = state["workflow_run_id"]
+        if workflow_run_id is not None and (
+                not isinstance(workflow_run_id, str)
+                or workflow_run_id == ""):
+            errors.append("workflow_run_id 必须是非空字符串或 null")
+
+    # validation / review（任务级最小记录）
+    if "validation" in state:
+        errors.extend(_validate_validation(state["validation"]))
+    if "review" in state:
+        errors.extend(_validate_review(state["review"]))
+
+    # quota_resume（Phase 3 定稿前的占位块）
+    if "quota_resume" in state:
+        errors.extend(_validate_quota_resume(state["quota_resume"]))
 
     return errors
 
 
 # —— 构造 ——
 
-def new_task_state(task_id, goal, route, *, ownership_files=(),
-                   verification_required=(), review_required=None,
-                   reviewer=None, status="created",
-                   repository_root=None) -> dict:
-    """构造带默认值的完整状态 dict。
+def new_task_state(task_id, goal, route, *, repository_root, dag_nodes=(),
+                   workflow_run_id=None, status="active",
+                   phase=None) -> dict:
+    """构造带默认值的 v2.4 完整状态 dict。
 
-    只做构造不做校验（调用方负责 validate_state）。route 接受 dict，
-    含 mode / delegability / assurance / executor / continuity 五键，
-    缺键时对应值填 None（mode 缺失会导致 validate_state 报 route.mode 错）；
-    route 非 dict 时抛 TypeError。
+    只做构造不做语义校验（调用方负责 validate_state）。
 
-    review_required 缺省 None 时由 route 推导审查义务
-    （derive_review_required）：audit / full 或 assurance=high → True，
-    solo / delegate + standard → False，信息不足落 False；显式 True/False
-    照传（显式 False + 派生 True 的组合由 validate_route_invariants 规则
-    R3 在保存时拒绝；显式 True 恒合法——比推导更严）。
+    参数：
+      - task_id / goal：任务标识与目标（原样写入，合法性归
+        validate_state）；
+      - route：dict（v2.3 同款「mode 必填」口径）——构造只摘取
+        mode 与 assurance（非 None 时）两键；route 非 dict 抛
+        TypeError；
+      - repository_root（关键字专用，必填）：v2.4 中 repository 是
+        必填概念——经 bind_repository_root 归一为绝对路径写入顶层
+        "repository" 块；空串 / 非路径类型抛 ValueError；
+      - dag_nodes：静态节点 dict 列表（runtime.work_unit.new_node
+        产物），浅拷贝为 list；非 list/tuple 抛 TypeError；
+      - workflow_run_id：委派运行 id，缺省 None（启动前可空）；
+      - status：缺省 "active"（v2.4 无 created 阶段态）；
+      - phase：可选描述性标注（None = 不写键——枚举无 null 空档）。
 
-    repository_root（RB-2，关键字专用）：非 None 时构造期绑定任务专属
-    Git 仓库根（经 bind_repository_root 归一为绝对路径写入顶层
-    "repository" 块）；None（缺省）→ 整键省略（legacy 无绑定形态）。
-    非法输入（空串 / 非路径类型）抛 ValueError。
-
-    v2.1 M1：构造结果恒含顶层 "execution_policy" 默认块
-    （runtime.execution_policy.default_execution_policy() 的保守
-    默认——授权事实源的初始形状；升档经 set_*_authorization 变换）。
-
-    v2.2 M1：构造结果恒含顶层 "continuation" 默认块
-    （default_continuation()——obligation="none" + 未退役 tombstone +
-    全 unknown scheduler_context + 无事实 wake_bridge 的初始形状，含
-    v2.2 M1a D15-e 的 mode/generation/current_boundary_id/
-    next_wake_at/bridge_interval_minutes 五扩展键；义务推进 /
-    wake bridge 记账由控制回路单元经纯变换写入）。
-
-    v2.2 C5a（wu-22-C5a）：构造结果恒含顶层 "quota_subscription" 默认块
-    （default_quota_subscription()——enabled=False 未订阅初始态，两个
-    epoch_id 键为 null，minimum_state="AVAILABLE"，continuation_mode=
-    "manual"；epoch 身份用 §10.1 epoch_id 字符串，注册 / 激活记账由
-    task_manager 三 API 写入）。
-
-    v2.1 §11.5（wu-21-09）：dispatch.max_workers 默认 1 → 2——与
-    dispatcher.DEFAULT_MAX_WORKERS=2、execution_policy parallelism
-    默认块（default_workers=max_workers=2）三处口径一致；真实并发
-    预算另按 quota 四态经 execution_policy.effective_worker_budget
-    折算（§12 表，接线在 task_manager._effective_worker_cap）。
+    构造结果恒含 validation / review（全 null 未记录态）与
+    quota_resume（default_quota_resume 占位块）三个任务级块。
+    v2.3 构造面的 ownership_files / verification_required /
+    review_required / reviewer 等关键字已随逐单元证据面退役，不再
+    接受（旧调用方在调用时 TypeError——按遗留面处置，不做兼容垫片）。
     """
     if not isinstance(route, dict):
         raise TypeError(
-            "route 必须是 dict（SELECTIVE ROUTE 五字段），得到 %s"
-            % type(route).__name__)
-    if review_required is None:
-        derived = derive_review_required(route)
-        review_required = False if derived is None else derived
+            "new_task_state：route 必须是 dict（v2.4 route 含 mode/"
+            "assurance），得到 %s" % type(route).__name__)
+    if not isinstance(dag_nodes, (list, tuple)):
+        raise TypeError(
+            "new_task_state：dag_nodes 必须是 list 或 tuple，得到 %s"
+            % type(dag_nodes).__name__)
+    route_block = {"mode": route.get("mode")}
+    if route.get("assurance") is not None:
+        route_block["assurance"] = route.get("assurance")
     st = {
         "task_id": task_id,
         "goal": goal,
-        "route": {
-            "mode": route.get("mode"),
-            "delegability": route.get("delegability"),
-            "assurance": route.get("assurance"),
-            "executor": route.get("executor"),
-            "continuity": route.get("continuity"),
-        },
-        "ownership": {"files": list(ownership_files)},
-        "verification": {
-            "required": list(verification_required),
-            "completed": [],
-            "fingerprint": None,
-        },
-        "review": {
-            "required": review_required,
-            "reviewer": reviewer,
-            "verdict": None,
-            "fingerprint": None,
-        },
-        "visual_evidence": [],
-        "work_units": [],
-        "dispatch": {"max_workers": 2, "active": []},
+        "repository": {},
+        "route": route_block,
+        "dag": list(dag_nodes),
         "status": status,
-        # v2.1 M1：执行策略授权事实源（§3 冻结 schema 的保守默认块；
-        # 授权升档经 execution_policy.set_*_authorization 变换后写入）
-        "execution_policy": default_execution_policy(),
-        # v2.2 M1：续跑义务 + wake bridge 事实块（§23.2 冻结默认形状；
-        # obligation 推进与 bridge 记账由控制回路单元经纯变换写入）
-        "continuation": default_continuation(),
-        # v2.2 C5a：额度订阅事实块（§14 adapted 默认形状；注册 / 资格
-        # 判定 / 激活记账由 task_manager 三 API 写入）
-        "quota_subscription": default_quota_subscription(),
+        "workflow_run_id": workflow_run_id,
+        # 任务级最小验证记录（P2-C）：全 null = 未记录
+        "validation": {
+            "status": None,
+            "change_id": None,
+            "summary": None,
+            "commands": None,
+        },
+        # 任务级最小审查记录（P2-C）：全 null = 未记录
+        "review": {
+            "reviewer": None,
+            "verdict": None,
+            "change_id": None,
+            "findings": None,
+        },
+        # quota_resume 占位块（Phase 3 定稿语义前的冻结初始形状）
+        "quota_resume": default_quota_resume(),
     }
-    if repository_root is not None:
-        bind_repository_root(st, repository_root)
+    if phase is not None:
+        st["phase"] = phase
+    bind_repository_root(st, repository_root)
     return st
 
 
-# —— 任务仓库根绑定（RB-2，release hardening） ——
+# —— 任务仓库根绑定（RB-2，签名与 v2.3 一致） ——
 
 def bind_repository_root(st, repo_root) -> dict:
-    """为任务绑定专属 Git 仓库根（RB-2），就地写入并返回同一 dict。
+    """为任务绑定仓库根（RB-2），就地写入并返回同一 dict。
 
     - 归一口径：root 恒存为 str(Path(repo_root).resolve())（相对路径
       → 绝对路径；Windows 反斜杠原样保留，JSON 转义由落盘层负责）。
@@ -1193,15 +631,14 @@ def bind_repository_root(st, repo_root) -> dict:
       对不存在的相对路径不做绝对化（3.8 起 bpo-37834 才修复），abspath
       前置保证「相对 → 绝对」在 3.7/3.8+ 行为一致；对已存在的绝对路径
       两者完全等价（resolve 仍做符号链接归一）。
-    - repository 块缺失 / 形状异常时按需重建（与 record_* 助手同风格）；
+    - repository 块缺失 / 形状异常时按需重建；
     - 非法输入（空串、非 str/Path 路径类型）→ ValueError（先校验后
       修改，失败零副作用）；
     - 调用方负责 save_state（本函数不触碰磁盘）。
 
-    绑定语义：root 是该任务全部 git 操作（touched 清单 / 基线修订 /
-    证据指纹 / 视觉证据哈希）的求值根；账本（state.json / events.jsonl
-    / 租约）不跟随迁移，恒在账本根——两根分离由调用方（Stop 完成门 /
-    task_manager）按 resolve_repository_root 消费。
+    v2.4 中 repository 是必填概念：root 即任务全部 git 操作（touched
+    清单 / change_id 求值）的仓库根；账本（state.json / events.jsonl）
+    恒在账本根，两根分离由调用方按 resolve_repository_root 消费。
     """
     if isinstance(repo_root, pathlib.Path):
         resolved = pathlib.Path(os.path.abspath(str(repo_root))).resolve()
@@ -1220,12 +657,12 @@ def bind_repository_root(st, repo_root) -> dict:
 
 
 def bound_repository_root(task_state):
-    """读取任务绑定的专属仓库根（RB-2），返回字符串或 None。
+    """读取任务绑定的仓库根（RB-2），返回字符串或 None。
 
     合法绑定（repository.root 为非空 str）→ 返回该字符串；任务未绑定 /
     repository 缺失或非 dict / root 缺失或形状非法 → None。本函数是
-    容错读（手写 state.json 的形状异常不炸消费方——门 / task_manager
-    据此走 legacy 回退或降级），形状纠错归 validate_state。
+    容错读（手写 state.json 的形状异常不炸消费方），形状纠错归
+    validate_state。
     """
     if not isinstance(task_state, dict):
         return None
@@ -1241,142 +678,42 @@ def bound_repository_root(task_state):
 def resolve_repository_root(task_state, fallback_root) -> str:
     """解析任务的生效仓库根（RB-2）：绑定优先，未绑定回退 fallback_root。
 
-    fallback_root 通常是账本根（任务账本所在目录）——legacy 任务（无
-    repository 绑定）在其上求值 git，行为与单仓时代完全一致；绑定任务
-    返回其归一后的绑定根（原字符串，不做二次解析）。
+    fallback_root 通常是账本根（任务账本所在目录）——未绑定任务在其上
+    求值 git，行为与单仓时代完全一致；绑定任务返回其归一后的绑定根
+    （原字符串，不做二次解析）。
     """
     bound = bound_repository_root(task_state)
     return fallback_root if bound is None else bound
 
 
-# —— 指纹 / 证据写入助手（纯 dict 变换，不触碰磁盘） ——
+# —— 保存 / 读取 / 迁移 / 重开 ——
 
-def record_verification(st, command, fingerprint=None) -> dict:
-    """记录一条已执行验证命令（可选绑定证据指纹），就地修改并返回同一 dict。
-
-    - command 必须是非空 str，fingerprint 必须是 None 或非空 str，
-      否则 ValueError（先全量校验参数，再修改，失败不产生副作用）；
-    - command 追加进 verification.completed（已存在则不重复追加，
-      保持既有顺序）；verification 子 dict 或 completed list 缺失 /
-      形状异常时按需重建；
-    - fingerprint 非 None 时更新 verification.fingerprint；None 表示
-      「本次不更新指纹」，保留旧值。
-    调用方负责 save_state（本函数不触碰磁盘）。
-    """
-    if not isinstance(command, str) or command == "":
-        raise ValueError("record_verification：command 必须是非空字符串")
-    if fingerprint is not None and (
-            not isinstance(fingerprint, str) or fingerprint == ""):
-        raise ValueError(
-            "record_verification：fingerprint 必须是 None 或非空字符串")
-    verification = st.get("verification")
-    if not isinstance(verification, dict):
-        verification = {}
-        st["verification"] = verification
-    completed = verification.get("completed")
-    if not isinstance(completed, list):
-        completed = []
-        verification["completed"] = completed
-    if command not in completed:
-        completed.append(command)
-    if fingerprint is not None:
-        verification["fingerprint"] = fingerprint
-    return st
-
-
-def record_review(st, verdict, fingerprint=None) -> dict:
-    """记录审查裁决（可选绑定证据指纹），就地修改并返回同一 dict。
-
-    - verdict 必须在 REVIEW_VERDICTS 内，fingerprint 必须是 None 或
-      非空 str，否则 ValueError（先全量校验参数，再修改，失败不产生
-      副作用）；
-    - 更新 review.verdict；fingerprint 非 None 时更新 review.fingerprint
-      （None 表示「本次不更新指纹」，保留旧值）；
-    - review 子 dict 缺失 / 形状异常时按需重建，含 required=False、
-      reviewer=None 默认值（此时 required 语义由调用方后续负责）。
-    调用方负责 save_state（本函数不触碰磁盘）。
-    """
-    if verdict not in REVIEW_VERDICTS:
-        raise ValueError(
-            "record_review：verdict %r 不在合法取值内（%s）"
-            % (verdict, ", ".join(REVIEW_VERDICTS)))
-    if fingerprint is not None and (
-            not isinstance(fingerprint, str) or fingerprint == ""):
-        raise ValueError(
-            "record_review：fingerprint 必须是 None 或非空字符串")
-    review = st.get("review")
-    if not isinstance(review, dict):
-        review = {"required": False, "reviewer": None}
-        st["review"] = review
-    review["verdict"] = verdict
-    if fingerprint is not None:
-        review["fingerprint"] = fingerprint
-    return st
-
-
-def record_visual_evidence(st, path, sha256) -> dict:
-    """记录一条视觉证据（§22：按文件自身 sha256），就地修改并返回同一 dict。
-
-    - path / sha256 均必须是非空 str，否则 ValueError（先全量校验
-      参数，再修改，失败不产生副作用）；
-    - 向 visual_evidence 追加 {"path": ..., "sha256": ...}；同 path
-      已存在 → 就地替换该项的 sha256（不追加第二条）；顶层键缺失 /
-      形状异常时按需重建为空 list。
-    调用方负责 save_state（本函数不触碰磁盘）。
-    """
-    if not isinstance(path, str) or path == "":
-        raise ValueError("record_visual_evidence：path 必须是非空字符串")
-    if not isinstance(sha256, str) or sha256 == "":
-        raise ValueError("record_visual_evidence：sha256 必须是非空字符串")
-    entries = st.get("visual_evidence")
-    if not isinstance(entries, list):
-        entries = []
-        st["visual_evidence"] = entries
-    for entry in entries:
-        if isinstance(entry, dict) and entry.get("path") == path:
-            entry["sha256"] = sha256
-            return st
-    entries.append({"path": path, "sha256": sha256})
-    return st
-
-
-# —— 保存 / 读取 / 发现 ——
-
-def _transition_errors(previous, new_status, *, _gate_commit=False):
+def _transition_errors(previous, new_status):
     """按 TASK_TRANSITIONS 校验一次 status 迁移，非法时抛 ValueError。
 
     规则（save_state 与 transition_task_status 共用）：
-      - 新 status 为 completed 且非完成门内部通道（_gate_commit=False）
-        → 无条件拒绝（completed 只能由 Stop 完成门提交，请将状态置为
-        finalizing 请求完成）；
-      - 完成门内部通道（_gate_commit=True）要求盘上旧 status 恰为
-        finalizing（首存无盘上状态，同样拒绝）；
-      - 盘上旧 status（previous 为 None = 首存，无转换可言）与新 status
-        不同 → 新 status 必须在 TASK_TRANSITIONS.get(旧 status, ()) 内；
-        终态无表项，任何变化自然拒绝；旧 == 新（无转换）放行。
+      - previous 为 None（首存，无盘上状态）→ 无转换可言，放行；
+      - 旧 == 新（无转换）→ 放行；
+      - 终态（completed / cancelled / failed）无表项 → 任何变化拒绝
+        ——终态不得静默重开；显式重开只能走 reopen_task（唯一落
+        task_reopened 事件的通道）；
+      - 其余：新 status 必须在 TASK_TRANSITIONS.get(旧 status, ()) 内。
     previous 为盘上已加载的状态 dict（不存在为 None）；其 JSON 损坏由
     load_state 抛 ValueError，自然向上传播，不覆盖损坏文件。
     """
-    old_status = previous.get("status") if previous is not None else None
-    if new_status == "completed" and not _gate_commit:
-        raise ValueError(
-            "status 转换被拒绝：%r 不经完成门不得写入（completed 只能由 "
-            "Stop 完成门提交，请将状态置为 finalizing 请求完成）" % new_status)
-    if _gate_commit and old_status != "finalizing":
-        raise ValueError(
-            "完成门提交被拒绝：_gate_commit 要求盘上旧 status 为 finalizing，"
-            "得到 %r（completed 只能由 Stop 完成门对 finalizing 任务提交）"
-            % old_status)
     if previous is None:
         return  # 首存：无盘上旧状态，无转换可言
-    if old_status != new_status:
-        allowed = TASK_TRANSITIONS.get(old_status, ())
-        if new_status not in allowed:
-            targets = ", ".join(allowed) if allowed else "无（终态不接受任何转换）"
-            raise ValueError(
-                "status 转换被拒绝：%r → %r 不在合法转换内"
-                "（%s 的合法目标：%s；完整转换表见 TASK_TRANSITIONS）"
-                % (old_status, new_status, old_status, targets))
+    old_status = previous.get("status")
+    if old_status == new_status:
+        return  # 无转换，放行
+    allowed = TASK_TRANSITIONS.get(old_status, ())
+    if new_status not in allowed:
+        targets = ", ".join(allowed) if allowed \
+            else "无（终态不接受任何转换；显式重开请走 reopen_task）"
+        raise ValueError(
+            "status 转换被拒绝：%r → %r 不在合法转换内"
+            "（%s 的合法目标：%s；完整转换表见 TASK_TRANSITIONS）"
+            % (old_status, new_status, old_status, targets))
 
 
 def save_state(repo_root, state, *, task_id=None, _gate_commit=False) -> pathlib.Path:
@@ -1387,17 +724,20 @@ def save_state(repo_root, state, *, task_id=None, _gate_commit=False) -> pathlib
     - 目录/内容一致性（P1-9）：显式 task_id 参数非 None 时必须等于
       state["task_id"]，不一致 → ValueError（目录与内容的任务标识
       必须一致；如需迁移请以内容 ID 为准重建目录）；
-    - 状态转换门（P0-1）：写盘前读盘上现有 state.json（不存在视为首存），
-      status 变化必须落在 TASK_TRANSITIONS 内；completed 一律不接受公共
-      写入——只能由 Stop 完成门以内部通道提交（_gate_commit=True，且仅
-      对盘上 status == finalizing 的任务）；盘上文件损坏（load_state 抛
+    - 状态转换门：写盘前读盘上现有 state.json（不存在视为首存），
+      status 变化必须落在 TASK_TRANSITIONS 内；终态一律不得静默重开
+      （显式重开请走 reopen_task）；盘上文件损坏（load_state 抛
       ValueError）自然向上传播，不覆盖损坏文件；
-    - 目录不存在自动创建；
-    - 原子写：先写同目录 <name>.tmp（UTF-8、ensure_ascii=False、缩进 2），
-      再 os.replace 覆盖；任何失败路径清理 tmp，成功后确保 tmp 不存在。
+    - 目录不存在自动创建（durable_io 负责）；
+    - 原子写：复用 runtime.durable_io.atomic_write_json——每次调用
+      唯一临时名（<目标名>.durable-tmp.<pid>.<uuid>.tmp）+ os.replace，
+      UTF-8、ensure_ascii=False、缩进 2、固定 \n 换行，PermissionError
+      有界重试；读方永不见撕裂文件。
 
-    _gate_commit 为私有参数：仅供 Stop 完成门钩子（hooks/stop_gate.py，
-    经 state.commit_completion）使用，其他调用方不得传。
+    _gate_commit 为 v2.3 完成门内部通道的保留形参：v2.4 已无
+    finalizing→completed 门内通道（completed 由完成门 API 直接落盘，
+    终态守卫转向「不得静默重开」），本参数无任何行为差异，仅为既有
+    调用方签名兼容而保留；其他调用方不得传。
     """
     errors = validate_state(state)
     if errors:
@@ -1412,22 +752,8 @@ def save_state(repo_root, state, *, task_id=None, _gate_commit=False) -> pathlib
             "为准重建目录）" % (task_id, state.get("task_id")))
     path = state_path(repo_root, tid)
     # 转换门先于落盘：盘上损坏文件在此抛 ValueError，不会被覆盖
-    _transition_errors(load_state(repo_root, tid), state.get("status"),
-                       _gate_commit=_gate_commit)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path = path.parent / (path.name + ".tmp")
-    try:
-        # newline="\n"：固定 \n 换行，避免 Windows 文本模式写出 \r\n
-        with open(tmp_path, "w", encoding="utf-8", newline="\n") as fh:
-            json.dump(state, fh, ensure_ascii=False, indent=2)
-        os.replace(tmp_path, path)
-    except Exception:
-        if tmp_path.exists():
-            tmp_path.unlink()
-        raise
-    # os.replace 成功后 tmp 已不存在；防御性兜底，确保 tmp 不残留
-    if tmp_path.exists():
-        tmp_path.unlink()
+    _transition_errors(load_state(repo_root, tid), state.get("status"))
+    atomic_write_json(path, state, sort_keys=False)
     return path
 
 
@@ -1436,6 +762,10 @@ def load_state(repo_root, task_id) -> "dict | None":
 
     读取后按 TASK_ID_KEYS 顺序归一 task_id 写回 raw["task_id"]，并 pop 掉
     值与归一结果一致的 legacy 键（TASK_ID / CONTINUITY_ID / continuity_id）。
+
+    本函数不做 schema 校验、不做遗留判定（读原样返回）——消费方载入后
+    经 validate_state 校验、经 is_legacy_state / detect_legacy_task
+    识别 v2.3 遗留任务（绝不自动迁移）。
     """
     path = state_path(repo_root, task_id)
     if not path.is_file():
@@ -1454,43 +784,16 @@ def load_state(repo_root, task_id) -> "dict | None":
     return raw
 
 
-def commit_completion(repo_root, task_id) -> dict:
-    """完成门专用：把 finalizing 任务原子提交为 completed，返回提交后状态。
-
-    仅 Stop 完成门钩子在四重检查全部通过后调用：
-      - load_state 缺失（None）→ ValueError；JSON 损坏由 load_state 抛
-        ValueError，自然向上传播；
-      - 盘上 status 非 finalizing → ValueError（finalizing 是唯一完成
-        请求态，completed 只能从它提交）；
-      - 内部经 save_state(..., _gate_commit=True) 落盘（唯一的 completed
-        写入通道）。
-    本函数不写 journal——completed 审计事件由钩子在提交成功后追加。
-    """
-    st = load_state(repo_root, task_id)
-    if st is None:
-        raise ValueError(
-            "commit_completion：任务 %s 不存在（无 state.json），无法提交完成"
-            % task_id)
-    if st.get("status") != "finalizing":
-        raise ValueError(
-            "commit_completion：任务 %s 的 status 为 %r 而非 finalizing，"
-            "拒绝提交 completed（先进入 finalizing 请求完成）"
-            % (task_id, st.get("status")))
-    st["status"] = "completed"
-    save_state(repo_root, st, _gate_commit=True)
-    return st
-
-
 def transition_task_status(repo_root, task_id, new_status) -> dict:
     """按 TASK_TRANSITIONS 把任务状态迁移到 new_status，返回迁移后的状态。
 
-    公共运行时迁移入口（如收尾时进入 finalizing 请求完成）：
+    公共运行时迁移入口：
       - load_state 缺失（None）→ ValueError；JSON 损坏自然向上传播；
-      - 迁移校验与 save_state 同规则（终态无表项、completed 无条件拒绝
-        ——completed 只能由完成门提交）；
+      - 迁移校验与 save_state 同规则（终态无表项——终态迁移含重开
+        一律拒绝，显式重开走 reopen_task）；
       - 成功后向任务 journal 追加一条 status_changed 事件
         （{"event": "status_changed", "from": 旧, "to": 新}），journal
-        在函数内 import（与钩子的延迟 import 风格一致）。
+        在函数内 import（惰性 import 风格，与钩子一致）。
     """
     from runtime import journal
 
@@ -1509,6 +812,45 @@ def transition_task_status(repo_root, task_id, new_status) -> dict:
     return st
 
 
+def reopen_task(repo_root, task_id, *, reason=None) -> dict:
+    """显式重开终态任务（completed / cancelled / failed → active）。
+
+    终态不得静默重开：save_state / transition_task_status 对终态迁移
+    一律拒绝，本函数是唯一放行通道——重开动作必须落 journal 记录
+    （{"event": "task_reopened", "from": 旧终态, "to": "active",
+    "reason": reason}），绝不静默改写：
+      - load_state 缺失 → ValueError；JSON 损坏自然向上传播；
+      - 盘上 status 非终态 → ValueError（非终态任务无需重开）；
+      - 置 active 后先 validate_state（终态 state 合法则重开态亦合法）
+        再经 durable_io 原子写盘——绕开 save_state 的终态转换门正是本
+        函数的存在意义，校验与原子写约定与 save_state 完全一致；
+      - reason 可空（缺省 None），供调用方留重开缘由。
+    """
+    from runtime import journal
+
+    st = load_state(repo_root, task_id)
+    if st is None:
+        raise ValueError(
+            "reopen_task：任务 %s 不存在（无 state.json），无法重开" % task_id)
+    old_status = st.get("status")
+    if old_status not in TERMINAL_STATUSES:
+        raise ValueError(
+            "reopen_task：任务 %s 的 status 为 %r，非终态任务无需重开"
+            "（迁移请走 transition_task_status）" % (task_id, old_status))
+    st["status"] = "active"
+    errors = validate_state(st)
+    if errors:
+        raise ValueError("state 非法，无法保存：%s" % "；".join(errors))
+    atomic_write_json(state_path(repo_root, task_id), st, sort_keys=False)
+    journal.append_event(
+        repo_root, task_id,
+        {"event": "task_reopened", "from": old_status, "to": "active",
+         "reason": reason})
+    return st
+
+
+# —— 发现 ——
+
 # corrupt 分类的 reason 长度上限（异常消息简写，避免超长 JSON 错误
 # 撑爆 stderr / journal 记录）
 _CORRUPT_REASON_LIMIT = 80
@@ -1523,11 +865,13 @@ def _short_reason(text) -> str:
 
 
 def discover_tasks(repo_root) -> dict:
-    """扫描 tasks_root 下全部子目录，返回任务四分类 dict（H3/P0-3）。
+    """扫描 tasks_root 下全部子目录，返回任务四分类 dict。
 
     返回结构（四个键恒存在，桶内条目均为 (目录名, reason) 二元组，
     按目录名排序）：
-      - "active"：state.json 可读且 status 非终态（reason 为 status 字符串）；
+      - "active"：state.json 可读且 status 非终态（reason 为 status
+        字符串；v2.3 遗留任务的 status 不在 v2.4 七态内，同样落本桶
+        ——遗留判定与一行处置指引由消费方经 detect_legacy_task 补）；
       - "terminal"：status ∈ TERMINAL_STATUSES（reason 为 status 字符串）；
       - "corrupt"：state.json 存在但 JSON 损坏 / 任务标识归一失败
         （ValueError）或读取时 OSError——reason 为异常消息简写
@@ -1536,9 +880,9 @@ def discover_tasks(repo_root) -> dict:
       - "orphaned"：目录存在但无 state.json（reason 为「无 state.json」）。
 
     发现完整性语义：损坏的 state.json 不再被解释成「没有任务」——
-    corrupt 与 orphaned 都被显式报告，由调用方（Stop 完成门）决定
-    拦截或降级。tasks_root 不存在 → 四桶全空；tasks_root 下的非目录
-    项跳过；单目录解析失败不中断扫描（健壮性优先）。
+    corrupt 与 orphaned 都被显式报告，由调用方决定拦截或降级。
+    tasks_root 不存在 → 四桶全空；tasks_root 下的非目录项跳过；单
+    目录解析失败不中断扫描（健壮性优先）。
     """
     discovery = {"active": [], "terminal": [], "corrupt": [], "orphaned": []}
     root = tasks_root(repo_root)
@@ -1571,10 +915,8 @@ def discover_tasks(repo_root) -> dict:
 def find_active_tasks(repo_root) -> "list[str]":
     """兼容 helper：返回全部非终态活动任务的 task_id（按目录名排序）。
 
-    H3（P0-3）起 Stop 完成门改用 discover_tasks() 四分类发现（损坏目录
-    不再静默消失，见其 docstring），本函数保留为既有调用方的兼容出口
-    ——实现直接取 discover_tasks 的 active 桶目录名，输出与四分类引入前
-    完全一致：单个任务目录解析失败（JSON 损坏 / 缺 task_id / 无
-    state.json / 读取时 OSError）不进入 active，也不中断扫描。
+    实现直接取 discover_tasks 的 active 桶目录名：单个任务目录解析
+    失败（JSON 损坏 / 缺任务标识 / 无 state.json / 读取时 OSError）
+    不进入 active，也不中断扫描。
     """
     return [name for name, _status in discover_tasks(repo_root)["active"]]
