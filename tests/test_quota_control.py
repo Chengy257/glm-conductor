@@ -32,8 +32,8 @@ D5（阈值默认单一真相源 DEFAULT_QUOTA_CONTROL）。
        draining>=pressure、非法 wake_bridge_status、max_workers<=0
        等）
     8  两窗 severity 混合（18%+50%→DRAINING）与坏窗容忍跳过
-    +  §17.1 冻结 8 键形状、quota_control 键级合并、词汇与
-       runtime.state 枚举同步
+    +  §17.1 冻结 8 键形状、quota_control 键级合并、grace 默认与
+       scheduler 同步（单一真相源）
 """
 
 import sys
@@ -41,7 +41,7 @@ import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "plugins" / "glm-conductor"))
-from runtime import execution_policy, state
+from runtime import execution_policy
 from runtime.quota import control
 
 # —— 常量与装置 ——
@@ -468,20 +468,6 @@ class QuotaControlMergeTest(unittest.TestCase):
 # —— 词汇一致性（control 字面量 ↔ runtime.state 枚举） ——
 
 class VocabularySyncTest(unittest.TestCase):
-
-    def test_wake_bridge_literal_matches_state_enum(self):
-        """control 的 wake_bridge 十值字面量与 runtime.state 枚举一致。"""
-        self.assertEqual(sorted(control._WAKE_BRIDGE_STATUSES),
-                         sorted(state.WAKE_BRIDGE_STATUSES))
-
-    def test_obligation_outputs_within_state_vocabularies(self):
-        """义务输出 ⊆ CONTINUATION_OBLIGATIONS ∪ {waiting_quota}，
-        waiting_quota 属 runtime.state.TASK_STATUSES（跨词汇机械映射）。"""
-        produced = {"none", "armed", "wake_required", "waiting_quota",
-                    "degraded"}
-        for word in produced - {"waiting_quota"}:
-            self.assertIn(word, state.CONTINUATION_OBLIGATIONS)
-        self.assertIn("waiting_quota", state.TASK_STATUSES)
 
     def test_grace_default_matches_scheduler(self):
         """grace 默认复用 scheduler.DEFAULT_GRACE_SECONDS（无第二真相源）。"""

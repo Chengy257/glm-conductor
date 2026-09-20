@@ -8,7 +8,7 @@
 全部离线：snapshot 以手写 dict 为主（§27 形状，与
 parser.parse_quota_body 产出同形），并取一个 fixture
 （both_exhausted.json）经 parse_quota_body 转换锚定解析层到调度层
-的衔接；另含 runtime.state 可选顶层 quota 块校验（§39）用例。
+的衔接。
 
 覆盖映射（§45 十场景中可在本层测的部分 + 补充）：
     1  AVAILABLE → continue
@@ -23,7 +23,6 @@ parser.parse_quota_body 产出同形），并取一个 fixture
     10 grace / now 注入（grace=0 时 resume_at 精确等于 max(reset)）
     11 evaluate 逐窗状态与 reason
     12 非法输入 ValueError
-    13 state.py quota 块校验（§39）
 """
 
 import json
@@ -33,7 +32,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "plugins" / "glm-conductor"))
-from runtime import state
 from runtime.quota import parser, scheduler
 
 # —— 常量与装置 ——
@@ -421,79 +419,6 @@ class TestPlanResumeValidation(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     scheduler.evaluate(
                         snapshot, pressure_threshold_percent=bad)
-
-
-# —— runtime.state：可选顶层 quota 块校验（§39，场景 13） ——
-
-class TestStateQuotaBlock(unittest.TestCase):
-
-    @staticmethod
-    def _state_with_quota(quota):
-        st = state.new_task_state("t-quota-1", "目标", {"mode": "solo"})
-        st["quota"] = quota
-        return st
-
-    def test_valid_quota_blocks_pass(self):
-        """合法 quota 块通过：四态 status / 可空字段 / 双窗 dict。"""
-        for status in state.QUOTA_STATUSES:
-            with self.subTest(status=status):
-                st = self._state_with_quota({
-                    "status": status, "source": "live",
-                    "provider": "bigmodel",
-                    "last_checked": "2026-08-28T05:00:00Z",
-                    "five_hour": {"used_percent": 82.5},
-                    "weekly": None})
-                self.assertEqual(state.validate_state(st), [])
-
-    def test_quota_absent_still_valid(self):
-        """不写 quota 块依然合法（可选块，向前兼容）。"""
-        self.assertEqual(state.validate_state(
-            state.new_task_state("t-quota-1", "目标", {"mode": "solo"})), [])
-
-    def test_quota_must_be_dict(self):
-        """quota 非 dict（含 None）→ 报「quota 必须是 JSON 对象」。"""
-        for bad in (None, [], "x", 42):
-            with self.subTest(quota=bad):
-                errors = state.validate_state(self._state_with_quota(bad))
-                self.assertTrue(
-                    any("quota 必须是 JSON 对象" in e for e in errors), bad)
-
-    def test_quota_status_vocabulary(self):
-        """status 在词汇表外 → 报 quota.status 枚举错；None 视为未评估。"""
-        st = self._state_with_quota({"status": "BROKEN"})
-        errors = state.validate_state(st)
-        self.assertTrue(any("quota.status" in e for e in errors))
-        st = self._state_with_quota({"status": None})
-        self.assertEqual(state.validate_state(st), [])
-
-    def test_quota_string_fields(self):
-        """source / provider / last_checked：非 None 时必须是非空 str。"""
-        base = {"status": "AVAILABLE"}
-        st = self._state_with_quota(dict(base, source=""))
-        self.assertTrue(
-            any("quota.source" in e for e in state.validate_state(st)))
-        st = self._state_with_quota(dict(base, last_checked=123))
-        self.assertTrue(any(
-            "quota.last_checked" in e for e in state.validate_state(st)))
-        st = self._state_with_quota(dict(base, provider=None))
-        self.assertEqual(state.validate_state(st), [])
-
-    def test_quota_window_fields_must_be_dict(self):
-        """five_hour / weekly 非 None 时必须是 dict。"""
-        base = {"status": "AVAILABLE"}
-        st = self._state_with_quota(dict(base, five_hour="x"))
-        self.assertTrue(
-            any("quota.five_hour" in e for e in state.validate_state(st)))
-        st = self._state_with_quota(dict(base, weekly=[1, 2]))
-        self.assertTrue(
-            any("quota.weekly" in e for e in state.validate_state(st)))
-        st = self._state_with_quota(dict(base, weekly={}))
-        self.assertEqual(state.validate_state(st), [])
-
-    def test_no_secret_field_expectations(self):
-        """quota 块不要求任何凭证/秘密字段（契约：永不含凭证）。"""
-        st = self._state_with_quota({"status": "UNKNOWN"})
-        self.assertEqual(state.validate_state(st), [])
 
 
 if __name__ == "__main__":

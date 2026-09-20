@@ -77,21 +77,12 @@ STALE_TICK_MS = NOW_MS - 4 * 60 * 60 * 1000      # 4 小时前：陈旧
 NEAR_TICK_MS = NOW_MS - 90 * 60 * 1000           # 90 分钟前：折算后仍新鲜
 
 
-def make_unit(uid, status):
-    """构造一个通过 §61 契约校验的最小 work unit dict（test_recovery 同款）。"""
-    return {"id": uid, "objective": "fixture unit %s" % uid,
-            "status": status, "depends_on": [], "executor": "main",
-            "ownership": ["src/a.py"],
-            "verification": ["python3 -m unittest -h"]}
-
-
-def save_task(repo, task_id=TID, status="executing", units=()):
-    """在临时仓库构造一个活动任务状态文件（test_recovery 同款构造）。"""
+def save_task(repo, task_id=TID, status="active"):
+    """在临时仓库构造一个活动任务状态文件（v2.4 状态层正门构造，
+    test_recovery_v24 v24_task 同款：new_task_state + save_state）。"""
     active = state.new_task_state(
         task_id, "advisory 冒烟测试目标", dict(ROUTE),
-        ownership_files=["src/a.py"],
-        verification_required=["python3 -m unittest -h"], status=status)
-    active["work_units"] = list(units)
+        repository_root=repo, status=status)
     state.save_state(repo, active)
     return active
 
@@ -281,7 +272,7 @@ class CoexistenceTest(AdvisoryCase):
     与仅 resume 时的逐字节回归红线。"""
 
     def test_resume_context_and_advisory_coexist(self):
-        save_task(self.repo, units=[make_unit("wu-run", "running")])
+        save_task(self.repo)
         self.write_state(last_tick_at=STALE_TICK_MS)
         result = self.run_hook()
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -298,7 +289,7 @@ class CoexistenceTest(AdvisoryCase):
     def test_resume_only_output_byte_identical(self):
         # 有 active 任务、无 clock state → additionalContext 与纯
         # recovery 渲染逐字节一致（零噪音回归红线，非空路径）
-        save_task(self.repo, units=[make_unit("wu-run", "running")])
+        save_task(self.repo)
         result = self.run_hook()
         self.assertEqual(result.returncode, 0, result.stderr)
         ctx = parse_single_line_json(result.stdout)[

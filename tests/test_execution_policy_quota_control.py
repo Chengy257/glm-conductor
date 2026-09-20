@@ -15,9 +15,7 @@
     缺键按默认解释 / 未知键忽略；
   - default_quota_control 容错读（缺块/形状非法/坏键按默认，合法值
     透传，全新拷贝）；
-  - setter（set_parallel/set_resume）不重置 quota_control；
-  - 经 state.validate_state 规则 8.7 聚合（execution_policy.quota_control
-    前缀）+ new_task_state 默认块。
+  - setter（set_parallel/set_resume）不重置 quota_control。
 
 仅 Python 3 标准库（unittest），零第三方依赖，零 I/O（纯函数为主）。
 
@@ -28,7 +26,7 @@
 import sys, unittest
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "plugins" / "glm-conductor"))
-from runtime import execution_policy, state
+from runtime import execution_policy
 
 TS = "2026-09-01T12:00:00+00:00"
 # §5.1 / D5 + D15-d 冻结默认原文（逐字段锚定）
@@ -105,13 +103,6 @@ class DefaultQuotaControlBlockTest(unittest.TestCase):
         self.assertIsNot(
             execution_policy.DEFAULT_EXECUTION_POLICY["quota_control"],
             execution_policy.DEFAULT_QUOTA_CONTROL)
-
-    def test_new_task_state_carries_default_block(self):
-        st = state.new_task_state("qc-task-1a2b3c", "阈值默认",
-                                  {"mode": "solo"})
-        self.assertEqual(st["execution_policy"]["quota_control"],
-                         FROZEN_DEFAULT_QUOTA_CONTROL)
-        self.assertEqual(state.validate_state(st), [])
 
 
 # —— validate_execution_policy：quota_control ——
@@ -282,17 +273,6 @@ class BridgeIntervalMinutesTest(unittest.TestCase):
             execution_policy.default_quota_control(policy)[
                 "bridge_interval_minutes"], 60)
 
-    def test_state_aggregation_reports_bad_interval_with_prefix(self):
-        st = state.new_task_state("qc-task-1a2b3c", "间隔越界",
-                                  {"mode": "solo"})
-        st["execution_policy"]["quota_control"] = {
-            "bridge_interval_minutes": 1441}
-        errors = state.validate_state(st)
-        self.assertTrue(any(
-            e.startswith(
-                "execution_policy.quota_control.bridge_interval_minutes")
-            for e in errors))
-
 
 # —— default_quota_control 容错读 ——
 
@@ -409,34 +389,6 @@ class SetterPreservesQuotaControlTest(unittest.TestCase):
         execution_policy.set_parallel_authorization(
             policy, max_workers=3, source="user", confirmed_at=TS)
         self.assertEqual(json.dumps(policy, sort_keys=True), snapshot)
-
-
-# —— state.validate_state 规则 8.7 聚合（execution_policy. 前缀） ——
-
-class StateAggregationTest(unittest.TestCase):
-
-    def test_invalid_quota_control_reported_with_prefix(self):
-        st = state.new_task_state("qc-task-1a2b3c", "聚合前缀",
-                                  {"mode": "solo"})
-        st["execution_policy"]["quota_control"] = {
-            "pressure_percent": 20, "draining_percent": 20}
-        errors = state.validate_state(st)
-        self.assertTrue(any(
-            e.startswith("execution_policy.quota_control") for e in errors))
-
-    def test_state_without_quota_control_is_valid(self):
-        # legacy / §23.1：execution_policy 存在但缺 quota_control 键合法
-        st = state.new_task_state("qc-task-1a2b3c", "缺块合法",
-                                  {"mode": "solo"})
-        del st["execution_policy"]["quota_control"]
-        self.assertEqual(state.validate_state(st), [])
-
-    def test_custom_threshold_state_valid(self):
-        st = state.new_task_state("qc-task-1a2b3c", "自定义阈值",
-                                  {"mode": "solo"})
-        st["execution_policy"]["quota_control"] = {
-            "pressure_percent": 40.0, "draining_percent": 25.0}
-        self.assertEqual(state.validate_state(st), [])
 
 
 if __name__ == "__main__":

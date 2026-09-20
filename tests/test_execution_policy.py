@@ -620,17 +620,17 @@ class EffectiveWorkerBudgetTest(unittest.TestCase):
 class CliPolicyTest(unittest.TestCase):
     """CLI 骨架契约：成功/拒绝路径与退出码（0/2/1）。
 
-    夹具故意以「构造后删除 execution_policy 键」落一个 legacy state
-    （缺键合法，R7），验证 show 展示默认块不写盘、set-* 以默认块为底
-    创建完整块。
+    夹具为不含 execution_policy 块的任务 state（v2.4 new_task_state
+    构造缺省即缺键——缺键合法，R7），验证 show 展示默认块不写盘、
+    set-* 以默认块为底创建完整块。
     """
 
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
         self.repo = self._tmp.name
-        st = state.new_task_state(TID, "策略 CLI 夹具任务", {"mode": "solo"})
-        del st["execution_policy"]  # legacy 形态（缺键合法）
+        st = state.new_task_state(TID, "策略 CLI 夹具任务", {"mode": "solo"},
+                                  repository_root=self.repo)
         state.save_state(self.repo, st)
 
     def test_show_legacy_returns_default_block_without_writing(self):
@@ -713,8 +713,8 @@ class CliPolicyTest(unittest.TestCase):
         for auto_resume, expected in plan:
             with tempfile.TemporaryDirectory() as tmp:
                 st = state.new_task_state(
-                    TID, "策略 CLI 缺省窗口", {"mode": "solo"})
-                del st["execution_policy"]
+                    TID, "策略 CLI 缺省窗口", {"mode": "solo"},
+                    repository_root=tmp)
                 state.save_state(tmp, st)
                 code, _payload = run_cli(
                     "policy-set-resume", tmp, TID, auto_resume)
