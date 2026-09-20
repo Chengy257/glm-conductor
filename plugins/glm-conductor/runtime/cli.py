@@ -185,6 +185,50 @@
         import 调用；输出冻结键集、失败 JSON 面 {"status":
         "error" | "not_plannable", ...} 与退出码逐字节不变，
         键集与语义明细见该模块 docstring。
+    v24-compile <dag-json> [--task-ref <id>] [--out <path>]
+        v2.4 Phase 1 原生 Workflow 编译入口（P1-F，unit U6；只生成源
+        码，绝不自动执行——执行是主会话经宿主 CreateWorkflow 的事）。
+        读入 DAG JSON 文件（顶层对象：task_context 含 task_ref / goal /
+        repository 三个非空字符串；nodes 为静态节点数组），依次走
+        runtime.work_unit.validate_node（逐节点形状）、
+        runtime.dependency.graph_errors（全图：重复 id / 缺失依赖 /
+        自依赖 / 环）、runtime.ownership.plan_stages（编译期阶段规划，
+        歧义 / 冲突即拒）、runtime.workflow.compiler.compile_workflow
+        （确定性 TS 源）。成功：缺省把 TS 源打到 stdout（多行纯文本，
+        wake-prompt 纯文本同款的单行 JSON 契约显式例外；显式 UTF-8）；
+        --out <path> 时源码落盘（UTF-8 / LF），stdout 只打一行 JSON
+        摘要 {ok, stages, nodes, out}。--task-ref <id> 覆盖 DAG JSON
+        内的 task_context.task_ref。校验失败（DAG JSON 不可读 / 不可
+        解析 / 非对象 / 节点形状 / 依赖图 / ownership 冲突 /
+        task_context 缺键）→ 退出码 2，stdout 单行 JSON
+        {"ok": false, "errors": [...]}——全部错误一次报出（错误消息
+        含涉事节点 id）。
+    writer-acquire <repo_root> <task_id> [--run-id <id>]
+    writer-release <repo_root> <task_id> [--run-id <id>] [--force]
+    writer-show <repo_root>
+        v2.4 Phase 1 仓库写者守卫操作面（P1-E/F，unit U5/U6，
+        runtime.writer_guard 薄壳）。acquire 为 repo_root 取仓库级写
+        预约（一个 Git 仓库至多一个活跃 Conductor 写 Workflow；持久
+        记录 .glm-conductor/writer_guard.json；无任何按时间过期逻辑）；
+        release 幂等释放（非持有者被拒并报当前持有者）；--force 为
+        运维 inspect 之后的显式清除路径——先 inspect 取当前持有者、
+        再以持有者自身 task_id 释放（writer_guard 不设绕过持有者的
+        旁路），stdout 输出被清除的持有者四字段信息
+        {ok, forced, released, cleared_holder, conflict}；show 只读
+        输出 {holder: <四字段 dict|null>}（manifest-show 的
+        {"manifest": ...} 同款包裹形态）。三个子命令均打单行 JSON；
+        结果 ok=false（acquire 冲突 / release 非持有者拒绝）→ 退出码
+        1，成功 → 0。id 全由调用方供给（本 CLI 不造 id）；不接
+        state.json 与 task_manager（Phase 2 的事）。
+    v24-record-run <task_ref> <run-id> [--artifact <path>]
+        v2.4 Phase 1 run 关联记录入口（P1-D/F，unit U4/U6，
+        runtime.workflow.adapter.record_run 薄壳）：把「任务 ↔ 原生
+        Workflow run」的 id 关联落为 .glm-conductor/workflow-runs/ 下
+        单一 JSON 记录（目录相对当前工作目录——调用方须在目标仓库根
+        运行本命令）。stdout 直出落盘记录 dict（task_ref /
+        workflow_run_id / created_at + 可选 artifact_path）；结构非法
+        （空 id 等，WorkflowRunError）→ 退出码 2。零状态镜像：绝不落
+        任何子代理运行时状态（F6 冻结结果）。
 
 输出与退出码契约：
     stdout 恒为单行 JSON（json.dumps(..., ensure_ascii=True)，中文以
@@ -272,7 +316,12 @@ USAGE = (
     "quota-clock-bind <repo_root> <automation_id> [--db <path>] | "
     "quota-clock-tick <repo_root> | "
     "quota-clock-status <repo_root> | "
-    "host-check [--db <path>]")
+    "host-check [--db <path>] | "
+    "v24-compile <dag-json> [--task-ref <id>] [--out <path>] | "
+    "writer-acquire <repo_root> <task_id> [--run-id <id>] | "
+    "writer-release <repo_root> <task_id> [--run-id <id>] [--force] | "
+    "writer-show <repo_root> | "
+    "v24-record-run <task_ref> <run-id> [--artifact <path>]")
 
 # policy-set-resume 的 max_quota_windows 缺省推导表（§5.4 耦合的
 # 最小合法值：until_done 取下界 1，保守不放大）
@@ -943,6 +992,178 @@ def _manifest_show(repo_root, task_id) -> int:
 # 偏移常量语义（park=365 天 / retry=5 分钟）见 commands/wake.py 冻结注释。
 
 
+# —— v2.4 Phase 1（P1-F，unit U6）：新路径 CLI 与守卫接线 ——
+#
+# 本节为纯追加薄壳：校验 / 规划 / 编译 / 记账语义全部在
+# runtime.work_unit / runtime.dependency / runtime.ownership /
+# runtime.workflow（compiler / adapter）与 runtime.writer_guard 内，
+# 这里只做 DAG JSON 读入、argv 解析、JSON 输出与退出码映射。
+# 不接 state.json 与 task_manager（Phase 2 的事）；生成源绝不自动
+# 执行（执行是主会话经宿主 CreateWorkflow 的事）；路由词汇（技能 /
+# 命令面）属 Phase 4，本节只是 Phase 1 冒烟期入口。
+
+def _v24_compile(dag_json_path, task_ref=None, out_path=None) -> int:
+    """v24-compile：DAG JSON → 校验 → ownership 阶段规划 → 确定性 TS
+    源（runtime.workflow.compiler.compile_workflow 薄壳）。
+
+    管线（顺序固定，前置错误聚合一次报出）：
+      1. 读入 DAG JSON 文件（顶层对象：task_context + nodes）；不可读 /
+         不可解析 / 顶层非对象 → {"ok": false, "errors": [...]}，退出码 2；
+      2. 逐节点 work_unit.validate_node + 全图 dependency.graph_errors，
+         全部错误聚合（不短路）→ 有错退出码 2；
+      3. ownership.plan_stages（歧义 / 冲突即拒）→ 拒绝退出码 2；
+      4. compiler.compile_workflow 只生成源码字符串——绝不执行；
+      5. 输出：--out 给出时源码落盘（UTF-8 / LF），stdout 单行 JSON
+         摘要 {ok, stages, nodes, out}；缺省把 TS 源打到 stdout（多行
+         纯文本，显式 UTF-8——生成源含中文）。
+
+    --task-ref 给出时覆盖 DAG JSON 内的 task_context.task_ref
+    （task_context 缺失 / 非对象时以覆盖值起底，goal / repository 缺键
+    照常由编译器校验拒绝）。
+    """
+    from runtime import dependency, ownership, work_unit  # 函数内 import
+    from runtime.workflow import compiler  # 函数内 import：monkeypatch 友好
+
+    def rejected(errors):
+        _emit({"ok": False, "errors": errors})
+        return 2
+
+    # 1) 读入 DAG JSON
+    try:
+        with open(dag_json_path, "r", encoding="utf-8") as handle:
+            dag = json.load(handle)
+    except OSError as exc:
+        return rejected(["v24-compile：无法读取 DAG JSON %r：%s"
+                         % (dag_json_path, exc)])
+    except ValueError as exc:  # json.JSONDecodeError 是 ValueError 子类
+        return rejected(["v24-compile：DAG JSON 解析失败（%s）：%s"
+                         % (dag_json_path, exc)])
+    if not isinstance(dag, dict):
+        return rejected(["v24-compile：DAG JSON 顶层必须是 JSON 对象，"
+                         "得到 %s" % type(dag).__name__])
+    nodes = dag.get("nodes")
+    task_context = dag.get("task_context")
+    if task_ref is not None:
+        if isinstance(task_context, dict):
+            task_context = dict(task_context)
+        else:
+            task_context = {}
+        task_context["task_ref"] = task_ref
+
+    # 2) 节点形状（work_unit.validate_node）+ 全图（dependency.
+    #    graph_errors）——聚合全部错误，一次报出
+    errors = []
+    if isinstance(nodes, list):
+        for node in nodes:
+            errors.extend(work_unit.validate_node(node))
+        errors.extend(dependency.graph_errors(nodes))
+    else:
+        errors.append("v24-compile：nodes 必须是数组，得到 %s"
+                      % type(nodes).__name__)
+    if errors:
+        return rejected(errors)
+
+    # 3) ownership 编译期阶段规划（歧义 / 冲突即拒，绝不猜测）
+    try:
+        stages = ownership.plan_stages(nodes)
+    except (ownership.OwnershipConflictError, ownership.OwnershipError,
+            ValueError) as exc:
+        return rejected(["v24-compile：ownership 阶段规划拒绝：%s" % exc])
+
+    # 4) 编译（只生成源码字符串；形状 / 图 / task_context 错误在此聚合；
+    #    绝不自动执行生成源）
+    try:
+        source = compiler.compile_workflow(nodes, task_context)
+    except (compiler.WorkflowCompileError,
+            ownership.OwnershipConflictError) as exc:
+        return rejected(["v24-compile：%s" % exc])
+
+    # 5) 输出
+    if out_path is not None:
+        with open(out_path, "w", encoding="utf-8", newline="\n") as handle:
+            handle.write(source)
+        _emit({"ok": True, "stages": len(stages), "nodes": len(nodes),
+               "out": out_path})
+    else:
+        _force_utf8_stdout()  # 生成源含中文：显式 UTF-8（wake-prompt 同款）
+        sys.stdout.write(source)
+    return 0
+
+
+def _writer_acquire(repo_root, task_id, run_id=None) -> int:
+    """writer-acquire：为 task_id 取 repo_root 的仓库级写预约
+    （writer_guard.acquire 薄壳）。冲突（ok=false，conflict 报当前
+    持有者三键）→ 退出码 1；成功 → 0；空 / 非字符串 id（结构非法，
+    WriterGuardError）→ 参数值非法口径，退出码 2。"""
+    from runtime import writer_guard  # 函数内 import：monkeypatch 友好
+    try:
+        result = writer_guard.acquire(repo_root, task_id,
+                                      workflow_run_id=run_id)
+    except writer_guard.WriterGuardError as exc:
+        raise ValueError("writer-acquire：%s" % exc) from exc
+    _emit(result)
+    return 0 if result["ok"] else 1
+
+
+def _writer_release(repo_root, task_id, run_id=None, force=False) -> int:
+    """writer-release：释放 repo_root 的写预约（writer_guard.release
+    薄壳）。非持有者被拒（ok=false + conflict 报当前持有者）→ 退出码
+    1；无预约幂等成功（released=false，退出码 0）。
+
+    --force 为运维 inspect 之后的显式清除路径：writer_guard 不设绕过
+    持有者的旁路——这里先 inspect 取当前持有者，再以持有者自身
+    task_id 释放；stdout 输出被清除的持有者四字段信息
+    {ok, forced: true, released, cleared_holder, conflict}（无预约时
+    cleared_holder=null 的幂等成功，退出码 0）。"""
+    from runtime import writer_guard  # 函数内 import：monkeypatch 友好
+    try:
+        if force:
+            holder = writer_guard.inspect(repo_root)
+            if holder is None:  # 幂等：无预约无可清除
+                _emit({"ok": True, "forced": True, "released": False,
+                       "cleared_holder": None, "conflict": None})
+                return 0
+            result = writer_guard.release(repo_root, holder["task_id"])
+            _emit({"ok": result["ok"], "forced": True,
+                   "released": result["released"],
+                   "cleared_holder": holder,
+                   "conflict": result["conflict"]})
+            return 0 if result["ok"] else 1
+        result = writer_guard.release(repo_root, task_id,
+                                      workflow_run_id=run_id)
+    except writer_guard.WriterGuardError as exc:
+        raise ValueError("writer-release：%s" % exc) from exc
+    _emit(result)
+    return 0 if result["ok"] else 1
+
+
+def _writer_show(repo_root) -> int:
+    """writer-show：只读展示 repo_root 当前写预约（writer_guard.inspect
+    薄壳）。输出 {holder: <四字段 dict|null>}（manifest-show 的
+    {"manifest": ...} 同款包裹形态）；inspect 永不抛（损坏记录
+    fail-open 视同无预约）——恒退出码 0。"""
+    from runtime import writer_guard  # 函数内 import：monkeypatch 友好
+    _emit({"holder": writer_guard.inspect(repo_root)})
+    return 0
+
+
+def _v24_record_run(task_ref, run_id, artifact=None) -> int:
+    """v24-record-run：落「任务 ↔ 原生 Workflow run」id 关联记录
+    （runtime.workflow.adapter.record_run 薄壳）。记录目录
+    .glm-conductor/workflow-runs/ 相对当前工作目录（调用方须在目标
+    仓库根运行本命令）；stdout 直出落盘记录 dict；零子代理状态镜像。
+    结构非法（空 / 非字符串 id，WorkflowRunError）→ 参数值非法口径，
+    退出码 2。"""
+    from runtime.workflow import adapter  # 函数内 import：monkeypatch 友好
+    try:
+        record = adapter.record_run(task_ref, run_id,
+                                    artifact_path=artifact)
+    except adapter.WorkflowRunError as exc:
+        raise ValueError("v24-record-run：%s" % exc) from exc
+    _emit(record)
+    return 0
+
+
 def _dispatch(args) -> int:
     """argv 分发；子命令 / 参数个数错误抛 _UsageError（退出码 2）。"""
     if not args:
@@ -1205,6 +1426,94 @@ def _dispatch(args) -> int:
             db_path = rest[1]
         from runtime.commands import host  # 函数内 import：monkeypatch 友好
         return host.host_check(db_path=db_path)
+    if cmd == "v24-compile":
+        # 位置参数 <dag-json> + 旗标对（--task-ref <id> / --out <path>，
+        # 各至多一次、顺序不限）→ 一、三或五个参数
+        if len(rest) not in (1, 3, 5):
+            raise _UsageError(
+                "v24-compile 需要 <dag-json> [--task-ref <id>] "
+                "[--out <path>] 一、三或五个参数。" + USAGE)
+        task_ref = None
+        out_path = None
+        index = 1
+        while index < len(rest):
+            if index + 1 >= len(rest):
+                raise _UsageError(
+                    "v24-compile 的旗标 %r 缺少取值。" % rest[index]
+                    + USAGE)
+            flag, value = rest[index], rest[index + 1]
+            if flag == "--task-ref" and task_ref is None:
+                task_ref = value
+            elif flag == "--out" and out_path is None:
+                out_path = value
+            else:
+                raise _UsageError(
+                    "v24-compile 的可选参数只接受 --task-ref <id> 与 "
+                    "--out <path>（各至多一次）。" + USAGE)
+            index += 2
+        return _v24_compile(rest[0], task_ref=task_ref, out_path=out_path)
+    if cmd == "writer-acquire":
+        if len(rest) not in (2, 4):
+            raise _UsageError(
+                "writer-acquire 需要 <repo_root> <task_id> "
+                "[--run-id <id>] 两或四个参数。" + USAGE)
+        run_id = None
+        if len(rest) == 4:
+            if rest[2] != "--run-id":
+                raise _UsageError(
+                    "writer-acquire 的可选参数只接受 --run-id <id>。"
+                    + USAGE)
+            run_id = rest[3]
+        return _writer_acquire(rest[0], rest[1], run_id=run_id)
+    if cmd == "writer-release":
+        if len(rest) < 2 or len(rest) > 5:
+            raise _UsageError(
+                "writer-release 需要 <repo_root> <task_id> "
+                "[--run-id <id>] [--force] 两到五个参数。" + USAGE)
+        run_id = None
+        force = False
+        index = 2
+        while index < len(rest):
+            flag = rest[index]
+            if flag == "--force":
+                if force:
+                    raise _UsageError(
+                        "writer-release 的 --force 至多出现一次。" + USAGE)
+                force = True
+                index += 1
+            elif flag == "--run-id":
+                if index + 1 >= len(rest):
+                    raise _UsageError(
+                        "writer-release 的 --run-id 需要恰一个取值。"
+                        + USAGE)
+                if run_id is not None:
+                    raise _UsageError(
+                        "writer-release 的 --run-id 至多出现一次。" + USAGE)
+                run_id = rest[index + 1]
+                index += 2
+            else:
+                raise _UsageError(
+                    "writer-release 的可选参数只接受 --run-id <id> 与 "
+                    "--force。" + USAGE)
+        return _writer_release(rest[0], rest[1], run_id=run_id, force=force)
+    if cmd == "writer-show":
+        if len(rest) != 1:
+            raise _UsageError(
+                "writer-show 需要 <repo_root> 一个参数。" + USAGE)
+        return _writer_show(rest[0])
+    if cmd == "v24-record-run":
+        if len(rest) not in (2, 4):
+            raise _UsageError(
+                "v24-record-run 需要 <task_ref> <run-id> "
+                "[--artifact <path>] 两或四个参数。" + USAGE)
+        artifact = None
+        if len(rest) == 4:
+            if rest[2] != "--artifact":
+                raise _UsageError(
+                    "v24-record-run 的可选参数只接受 --artifact <path>。"
+                    + USAGE)
+            artifact = rest[3]
+        return _v24_record_run(rest[0], rest[1], artifact=artifact)
     raise _UsageError("未知子命令 %r。" % cmd + USAGE)
 
 
