@@ -6,8 +6,10 @@
     以 ZCode 插件钩子（hooks/hooks.json 声明，matcher
     "startup|clear|compact"）挂在 SessionStart 事件上：新会话启动 /
     compact / clear 时，查 runtime.recovery 的恢复发现（纯本地：
-    state.json + events.jsonl + 原生档案只读 adapter），把存在未完成
-    任务时的 resume context 文本（§8.3 形态，头部逐字
+    state.json 只读；v2.4 P2-E 起为任务级最小恢复摘要——每任务仅
+    task id / goal / repository / status / route / workflow run id /
+    quota 等待态 / 下一安全动作，v2.3 遗留任务一行式，无任何单元级
+    对账），把存在未完成任务时的 resume context 文本（头部逐字
     "GLM CONDUCTOR RESUME CONTEXT"）以 additionalContext 注入新会话，
     使主会话无需依赖模型记忆即可续作——连续性缺口 R2 的机械修复。
 
@@ -19,22 +21,24 @@
 §8.2 纯本地红线：
     本钩子不调模型、不联网、不执行 implementation、不消耗 quota、
     无 git subprocess——只调 recovery.build_recovery_summary /
-    render_resume_context 两个本地读取面函数（timeoutMs 5000 内完成）。
+    render_resume_context 两个本地读取面函数（timeoutMs 5000 内完成；
+    v2.4 P2-E：两函数签名与 v2.3 一致，恢复渲染细节归 runtime.recovery
+    的 v2.4 重写，本钩子只换注入文本内容、不动调用形状）。
     git 操作不做：恢复建议里提示由模型后续执行。
 
 stdin 纪律：
     SessionStart 事件输入（source matcher 值等）不消费——事件发生即
     工作。stdin 读取只做容错（空串 / 非法 JSON / 读取异常一律不影响
-    流程，与 pre_tool_use.read_payload 同口径）。
+    流程，与 v2.3 钩子外壳的 read_payload 同口径）。
 
-fail-open 契约（与 pre_tool_use 一致）：
+fail-open 契约（与既有钩子外壳一致）：
     本钩子属恢复提示层，全路径 fail-open：任何内部异常（含 runtime
     模块不可用、stdin 异常）都不得阻塞会话启动——一律向 stderr 输出
     一行 "ENFORCEMENT DEGRADED: session_start failed: ..." 后 exit 0。
 
 repo_root 口径：
     ZCODE_PROJECT_DIR 优先（ZCode 钩子进程注入），缺失回退当前工作
-    目录——与 pre_tool_use 同口径。
+    目录——与 stop_gate 同口径。
 
 v2.3.1 增补（unit w1-session-advisory）：
     main() 在恢复发现之外追加只读 Quota Clock advisory
@@ -58,7 +62,9 @@ v2.3.1 增补（unit w1-session-advisory）：
 
 来源：
     v2.1 设计（已蒸馏入 docs/architecture.md）；v2.3.1 计划 P1.1/P1.2
-    （SessionStart Quota Clock advisory，unit w1-session-advisory）。
+    （SessionStart Quota Clock advisory，unit w1-session-advisory）；
+    v2.4 Phase 2 P2-E（W5 恢复简化：仅恢复渲染路径随 runtime.recovery
+    重写换面，Quota Clock advisory 块原样保留——Phase 3 才删）。
 """
 
 import json
@@ -68,7 +74,7 @@ import time
 from pathlib import Path
 
 # 接线插件根以复用 runtime.recovery（钩子脚本与 runtime/ 同插件，
-# 与 pre_tool_use / stop_gate 一致）
+# 与 stop_gate 一致）
 PLUGIN_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PLUGIN_ROOT))
 
