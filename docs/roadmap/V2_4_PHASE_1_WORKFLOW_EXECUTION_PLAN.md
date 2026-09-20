@@ -326,3 +326,40 @@ Ownership scopes are disjoint between units → safe parallelism inside the work
 - Deletion of dispatcher/wave/lease/hooks registrations (Phase 2) — only the twin relocation.
 - `visual-implementer` migration (stays Custom Subagent exception).
 - Full test-suite regression (Phase 4 only), any `git push`, any conductor-task accounting.
+
+## 9. Phase 1 exit record (2026-09-21, main-session acceptance)
+
+Implementation: one native Workflow (`dwfrun-d12e8b04`, all implementers GLM-5.3-Flash),
+6/6 units done, every unit gate passed round 1. Two ownership escalations were adjudicated
+by the main session (validator check-2 role-split required-keys; validator check-14 twin
+retargeting) and one live-smoke hotfix was dispatched to a Flash unit (compiler ask emission:
+free-function → actor-method call form; caught only by live submission, unit string tests
+could not see it).
+
+Independent re-verification by main session (all green):
+
+- targeted collection: 464 tests OK across the 12 modules (`test_agent_model_binding`,
+  `test_static_node`, `test_dag_semantics`, `test_ownership`, `test_ownership_stages`,
+  `test_work_unit`, `test_dependency`, `test_state`, `test_workflow_compiler`,
+  `test_writer_guard`, `test_cli_v24` + validator/smoke below);
+- `scripts/validate_plugin.py` 15/15; `scripts/smoke_plugin_load.py` 0 failures;
+- hooks `py_compile` ×4 OK; full import chain (legacy twins + new modules) OK;
+- live smokes ×3 via `v24-compile` → CreateWorkflow (Flash): minimal 1-node, parallel
+  disjoint 2-node (single stage), staged dependency 2-node (two stages) — each returned the
+  complete six-field NodeResult per node, zero repo changes;
+- writer guard live mutual exclusion via CLI: acquire → conflicting acquire reports holder
+  task/run ids → release → idempotent re-release;
+- compile-time rejection observed live (malformed ownership pattern refused with node id).
+
+Commits (local only): `65678a3` U1, `ea027de` U2, `619298d` U3, `03dca08` U4 (incl. hotfix),
+`455e93f` U5, `4759aa0` U6.
+
+Exit gate checklist (spec §10): delegate/full reaches Native Workflow — PASS (3 live runs);
+structured node results — PASS; no dispatcher/wave/permit/lease on the new path — PASS;
+ownership conflicts cannot parallelize — PASS (deterministic serialization + ambiguity
+fail-closed, unit tests + live rejection); repo writer guard mutual exclusion — PASS (live);
+no per-unit execution state persisted — PASS (adapter stores run-id JSON only); reviewer
+roles startable — STATIC PASS (model field removed → session inheritance; live launch proof
+deferred to Phase 4 P4-E per the documented default, requires cache refresh + fresh session).
+
+**Phase 1 exit gate: PASSED. Phase 2 authorized to proceed.**
