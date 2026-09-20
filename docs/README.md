@@ -16,6 +16,7 @@
   - [Phase 3 — Quota Resume & Clock Extraction](roadmap/V2_4_PHASE_3_QUOTA_RESUME_EXTRACTION_SPEC.md) — bounded task resume / native Scheduled Task / removal of quota control plane / Global Clock extraction inventory.
   - [Phase 4 — Integration & Release](roadmap/V2_4_PHASE_4_INTEGRATION_RELEASE_SPEC.md) — repository-wide consistency cleanup / docs-skills rewrite / test-suite re-baseline / one final full regression.
   - [Phase 1 Workflow Execution Plan](roadmap/V2_4_PHASE_1_WORKFLOW_EXECUTION_PLAN.md) — Phase 1 的单元级执行计划（2026-09-21）：会话实施纪律（until_done 续航 / 每 phase 一个 native Workflow / Flash 实施 / 仅本地提交 / 定向测试）、legacy twin 导入安全决策、单元规格 U1-U6、首个 workflow 拓扑与门。
+  - [Phase 2 Workflow Execution Plan](roadmap/V2_4_PHASE_2_WORKFLOW_EXECUTION_PLAN.md) — Phase 2 的单元级执行计划（2026-09-21，Phase 1 出垒后）：状态重置/change_id/任务生命周期/完成守卫/恢复简化/遗留退役六单元规格、state 20 消费者兼容约束、Phase-3 保留清单、删除面与测试重置清单。
 
 以下文档用于正在进行的宿主兼容性实验与下一版本 re-baseline 审查。v2.4 target architecture 已单独冻结，但在代码落地前仍**不修改** `architecture.md` 的当前 2.3.x 真相。
 
