@@ -19,9 +19,9 @@
          （visual-implementer / glm-reviewer /
          visual-reviewer），对应 agents/<agent>.md 必须存在；`/glm-conductor:
          <name>` 斜杠命令引用形式不算 agent 引用。flash-implementer 已
-         在 v2.4 Phase 2（W6）退役删除——技能文本中的历史引用获得显式
-         豁免（技能全面重写在 Phase 4），本检查不再要求其 agent 文件
-         存在；
+         在 v2.4 Phase 2（W6）退役删除，其在 Phase 4（P4-C，R4）技能
+         重写后的历史引用已清零，退役豁免同步移除——plugins/ 内任何
+         `glm-conductor:flash-implementer` 引用现在直接 FAIL；
       5. 命名一致性：plugins/、marketplace.json、README.md、
          docs/architecture.md 中不得出现旧名 `glm-advisor`；
       6. 禁词：同上范围内不得出现 `升级信号` / `上报升级` / `升级路由`；
@@ -78,16 +78,27 @@
          stop_gate.py、tests/ 下的 test_state_v24.py /
          test_journal.py / test_ownership.py 均存在且非空；runtime/state.py
          必含 TASK_ID_KEYS / CONTINUITY_ID（legacy 归一证据）/
-         TERMINAL_STATUSES，runtime/journal.py 必含 RECOMMENDED_EVENTS /
+         TERMINAL_STATUSES / detect_legacy_markers /
+         LEGACY_STATE_GUIDANCE / DEFAULT_QUOTA_RESUME（v2.4 P4-A 起
+         改锚遗留检测与 quota_resume 词汇，替代已退役的
+         record_verification / record_review / visual_evidence 锚），
+         runtime/journal.py 必含 RECOMMENDED_EVENTS /
          events.jsonl，runtime/ownership.py 必含 classify_paths /
-         git_touched_files，hooks/stop_gate.py 必含 gate_blocked /
-         gate_passed / gate_exhausted（Layer A 记账词汇）；
+         git_touched_files，hooks/stop_gate.py 必含 COMPLETION_CHECKS /
+         evaluate_completion / LEGACY_STATE_GUIDANCE / task_completed
+         （v2.4 四查完成守卫词汇——gate_* 记账词随 v2.3 完成门退役，
+         P4-A 起改锚）；
          skills/continuity/SKILL.md 必含 state.json / events.jsonl /
-         task_created / Quota-Aware Scheduling / GLM_CONDUCTOR_QUOTA_API_KEY，
+         waiting_quota / quota_resume / GLM_CONDUCTOR_QUOTA_API_KEY，
          skills/continuity/references/long-horizon.md 必含
          state.json / events.jsonl，skills/orchestration/SKILL.md 必含
-         state.json / route_selected，skills/enforcement/SKILL.md 必含
-         ENFORCEMENT DEGRADED / gate_exhausted / Layer A / Layer B；
+         state.json / route_selected / SELECTIVE ROUTE / v24-compile /
+         writer-acquire，skills/enforcement/SKILL.md 必含
+         ENFORCEMENT DEGRADED / change_id / writer_guard / review-record
+         （v2.4 P4-C 起随技能全面重写改锚活词汇——v2.3 执行面词
+         task_fingerprint / 租约 / gate_exhausted / Layer A / Layer B /
+         verification_stale / review_stale / task_created /
+         Quota-Aware Scheduling 一并退役）；
          runtime/quota/ 下的 parser / provider / _http / zai / bigmodel /
          credentials / report 七模块、commands/quota.md 与
          tests/ 下四个 test_quota*.py 均存在且非空，parser 必含
@@ -97,10 +108,11 @@
          ALLOWED_HOSTS / malformed，credentials 必含
          GLM_CONDUCTOR_QUOTA_API_KEY / builtin:bigmodel-coding-plan，
          report 必含 --json / unavailable；
-     15. enforcement 审查 receipt 权威标记：skills/enforcement/SKILL.md
-         必含 `run_review` 或 `review-record`（v2.1 M6——Stop 完成门审查
-         检查「fresh ship review receipt 唯一权威」语义在用户侧技能的
-         同步锚定，防止文档回退到 state.review 手写口径）。
+     15. enforcement 审查记录路径锚定：skills/enforcement/SKILL.md
+         必含 `review-record`（v2.4 P4-A 重锚——审查裁决经 `review-record`
+         子命令落为任务级 review 记录（runtime.task.record_review，
+         新鲜度锚定 change_id）；v2.3 的 durable review receipt /
+         run_review 调用真实性链已随执行面退役）。
 
     扫描范围说明：检查 5/6/7/8（及 8 内的旧名负向检查）的扫描范围是显式
     列表——plugins/ 全部文件 + marketplace.json + README.md +
@@ -160,14 +172,11 @@ REVIEWER_AGENTS = ("glm-reviewer", "visual-reviewer")
 SKILL_REQUIRED_KEYS = ("name", "description")
 
 # 整改规范点名的契约 agent（v2.4 Phase 2 W6 起 flash-implementer 退役
-# 移除）；与 plugins/ 内实际引用取并集后逐一要求存在
+# 移除）；与 plugins/ 内实际引用取并集后逐一要求存在。
+# v2.4 Phase 4（P4-C，R4）：技能全面重写后历史引用清零，原 RETIRED_AGENTS
+# 豁免已移除——任何 flash-implementer 引用回到 plugins/ 即 FAIL（防回潮）。
 CANONICAL_AGENTS = (
     "visual-implementer", "glm-reviewer", "visual-reviewer")
-
-# 检查 4 的显式退役豁免（TODO(Phase 4)：技能全面重写时清理这些历史
-# 引用后移除本豁免）：flash-implementer 的 agent 文件已随 v2.3 执行面
-# 删除，技能文本中的历史引用不再要求文件存在
-RETIRED_AGENTS = ("flash-implementer",)
 
 # agent 引用；`/glm-conductor:<name>`（斜杠命令引用，如 /glm-conductor:quota）
 # 指向 commands/<name>.md 而非 agents/<name>.md，用负向后顾排除
@@ -279,23 +288,34 @@ TEST_REQUIRED_FILES = (
 COMMAND_REQUIRED_FILES = (QUOTA_COMMAND,)
 STATE_REQUIRED_MARKERS = (
     "TASK_ID_KEYS", "CONTINUITY_ID", "TERMINAL_STATUSES",
-    "record_verification", "record_review", "visual_evidence")
+    "detect_legacy_markers", "LEGACY_STATE_GUIDANCE",
+    "DEFAULT_QUOTA_RESUME")
 JOURNAL_REQUIRED_MARKERS = ("RECOMMENDED_EVENTS", "events.jsonl")
 OWNERSHIP_REQUIRED_MARKERS = ("classify_paths", "git_touched_files")
+# v2.4 Phase 4（P4-A）：完成门记账词（gate_blocked / gate_passed /
+# gate_exhausted）与逐命令证据词（evaluate_task / verification_stale /
+# review_stale）已随 v2.3 完成门退役——锚点改标 stop_gate.py 的
+# v2.4 四查完成守卫词汇。
 STOP_GATE_REQUIRED_MARKERS = (
-    "gate_blocked", "gate_passed", "gate_exhausted",
-    "evaluate_task", "verification_stale", "review_stale")
+    "COMPLETION_CHECKS", "evaluate_completion",
+    "LEGACY_STATE_GUIDANCE", "task_completed")
+# v2.4 Phase 4（P4-C，R4）：技能契约标记随技能全面重写同步改锚——
+# 旧锚中的 v2.3 执行面词汇（task_fingerprint / 租约 / 工作单元与任务图 /
+# gate_exhausted / Layer A / Layer B / verification_stale / review_stale /
+# task_created / Quota-Aware Scheduling）已随执行面退役，改锚 v2.4 活
+# 词汇：路由与原生 Workflow 编排面（SELECTIVE ROUTE / v24-compile /
+# writer-acquire）、任务级生命周期与恢复面（waiting_quota / quota_resume）、
+# 完成守卫面（writer_guard / change_id / review-record）。
 SKILL_CONTRACT_MARKERS = (
     (CONTINUITY_SKILL,
-     ("state.json", "events.jsonl", "task_created", "task_fingerprint",
-      "Quota-Aware Scheduling", "GLM_CONDUCTOR_QUOTA_API_KEY")),
+     ("state.json", "events.jsonl", "waiting_quota", "quota_resume",
+      "GLM_CONDUCTOR_QUOTA_API_KEY")),
     (LONG_HORIZON, ("state.json", "events.jsonl")),
-    (ORCHESTRATION_SKILL, ("state.json", "route_selected", "task_fingerprint",
-     "ROUTING PREFLIGHT", "工作单元与任务图", "租约")),
+    (ORCHESTRATION_SKILL, ("state.json", "route_selected", "SELECTIVE ROUTE",
+     "v24-compile", "writer-acquire")),
     (ROLE_CONTRACTS, ("TASK CONTEXT PACK", "FILES AND OWNERSHIP")),
     (ENFORCEMENT_SKILL,
-     ("ENFORCEMENT DEGRADED", "gate_exhausted", "Layer A", "Layer B",
-      "verification_stale", "review_stale")),
+     ("ENFORCEMENT DEGRADED", "change_id", "writer_guard", "review-record")),
 )
 
 
@@ -477,15 +497,8 @@ def check_4_agent_refs(results):
                    % (len(refs), ", ".join(sorted(refs)) or "（无）"))
     required = sorted(set(refs) | set(CANONICAL_AGENTS))
     for name in required:
-        # v2.4 Phase 2（W6）退役豁免：flash-implementer 已删除，技能文本
-        # 中的历史引用显式豁免（TODO(Phase 4)：技能全面重写在 Phase 4，
-        # 届时引用清零后可移除 RETIRED_AGENTS 豁免）
-        if name in RETIRED_AGENTS and not os.path.isfile(
-                os.path.join(AGENTS_DIR, name + ".md")):
-            details.append(
-                "SKIP: agents/%s.md 已退役（v2.4 W6 删除）；历史引用豁免"
-                "——TODO(Phase 4)：技能全面重写清理引用" % name)
-            continue
+        # v2.4 Phase 4（P4-C，R4）：技能重写后历史引用清零，RETIRED_AGENTS
+        # 豁免移除——任何已退役 agent 名的引用一律按缺失文件 FAIL（防回潮）
         agent_path = os.path.join(AGENTS_DIR, name + ".md")
         if os.path.isfile(agent_path):
             details.append("PASS: agents/%s.md 存在" % name)
@@ -1046,15 +1059,17 @@ def check_14_runtime_state(results):
     results.append((14, title, ok, details))
 
 
-def check_15_enforcement_receipt(results):
-    """检查 15：enforcement 技能锚定审查 receipt 权威语义（v2.1 M6）。
+def check_15_enforcement_review_record(results):
+    """检查 15：enforcement 技能锚定任务级审查记录路径（v2.4 P4-A 重锚）。
 
-    Stop 完成门的审查检查已升级为「fresh ship review receipt 唯一权威」
-    （receipt 由 `review-record` 子命令落盘）；
-    用户侧技能必须同步该口径——缺 `run_review` 与 `review-record` 任一
-    关键词即 FAIL（文档回退到 state.review 手写口径的机械防线）。
+    v2.4 的审查裁决经 `review-record` 子命令落为任务级 review 记录
+    （runtime.task.record_review，先验证后评审，新鲜度锚定 change_id）；
+    v2.3 的 durable review receipt / run_review 调用真实性链已退役。
+    用户侧 enforcement 技能必须同步该口径——缺 `review-record`
+    关键词即 FAIL（文档回退到已退役 receipt 口径或手写 review 的
+    机械防线）。
     """
-    title = "enforcement 审查 receipt 权威标记（run_review / review-record）"
+    title = "enforcement 审查记录路径锚定（review-record）"
     details = []
     ok = True
     text = read_text(ENFORCEMENT_SKILL)
@@ -1063,16 +1078,13 @@ def check_15_enforcement_receipt(results):
         details.append("FAIL: %s 不存在或无法读取，无法确认标记" % shown)
         results.append((15, title, False, details))
         return
-    hits = [marker for marker in ("run_review", "review-record")
-            if marker in text]
-    if hits:
+    if "review-record" in text:
         details.append(
-            "PASS: %s 含审查 receipt 权威标记（%s）"
-            % (shown, " / ".join(hits)))
+            "PASS: %s 含审查记录路径标记（review-record）" % shown)
     else:
         details.append(
-            "FAIL: %s 缺少审查 receipt 权威标记（run_review / "
-            "review-record 均未出现——receipt 唯一权威语义未同步）" % shown)
+            "FAIL: %s 缺少审查记录路径标记（review-record 未出现——"
+            "任务级审查记录语义未同步）" % shown)
         ok = False
     results.append((15, title, ok, details))
 
@@ -1092,7 +1104,7 @@ CHECKS = (
     check_12_version_consistency,
     check_13_hooks_manifest,
     check_14_runtime_state,
-    check_15_enforcement_receipt,
+    check_15_enforcement_review_record,
 )
 
 
