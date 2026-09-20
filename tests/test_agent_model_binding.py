@@ -1,20 +1,19 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""agents/*.md 模型绑定格式测试（unit v232-agent-model-binding）。
+"""agents/*.md 模型绑定格式测试（unit v232-agent-model-binding，v2.4 P1-A 修订）。
 
-ZCode 3.12.3（2026-09-16 起安装）重构模型管理：provider 体系由
-builtin:bigmodel-coding-plan 切换为 account:<套餐标识>，agent
-frontmatter 的裸模型 ID（model: GLM-5.3-Flash）不再可解析，宿主
-不报错、静默回退主会话模型（2026-09-17 至 09-18 生产实测 428 次
-flash 系派发全部落在旗舰 GLM-5.3 上，含 visual 系失去多模态判定
-的结构性风险）。本测试机械锚定 v2.3.2 起的 provider 全限定写法：
+背景（v2.4 Phase 1，W0 §13.1 实测）：agent frontmatter 的 provider 全限定
+model 字段（account:<套餐标识>/<模型>）在未配置该 provider 的宿主上会让
+普通 Agent 面以 account-connection-unavailable 硬失败（不回退），两个
+reviewer 代理因此无法启动。v2.4 起两类角色采用不同契约：
 
-  - 四个 agent 的 model 字段必须形如 account:<套餐标识>/<模型>
-    （裸 ID 即回归）；
-  - 各角色模型后缀对照 role-contracts.md 的「模型」行：
-    flash-implementer / visual-implementer / visual-reviewer →
-    /GLM-5.3-Flash（实施 + 多模态），glm-reviewer → /GLM-5.3
-    （纯文本审查）。
+  - reviewer（glm-reviewer / visual-reviewer）删除 frontmatter model 行，
+    改为继承宿主/会话模型以保证任何宿主可启动；模型身份不再是持久任务
+    状态轴（诊断时可记录实际运行模型）——frontmatter 出现 model 字段即
+    回归，报文件与字段值；
+  - 实施者（flash-implementer / visual-implementer）保留 provider 全限定
+    写法（角色路由依赖 GLM-5.3-Flash），model 字段必须形如
+    account:<套餐标识>/<模型> 且以 /GLM-5.3-Flash 结尾（角色后缀）。
 """
 
 import os
@@ -26,12 +25,10 @@ AGENTS_DIR = os.path.join(
     "plugins", "glm-conductor", "agents",
 )
 
-EXPECTED_MODEL_SUFFIX = {
-    "flash-implementer": "/GLM-5.3-Flash",
-    "visual-implementer": "/GLM-5.3-Flash",
-    "visual-reviewer": "/GLM-5.3-Flash",
-    "glm-reviewer": "/GLM-5.3",
-}
+REVIEWERS = ("glm-reviewer", "visual-reviewer")
+
+IMPLEMENTERS = ("flash-implementer", "visual-implementer")
+IMPLEMENTER_MODEL_SUFFIX = "/GLM-5.3-Flash"
 
 QUALIFIED_MODEL_RE = re.compile(r"^account:[^/\s]+/\S+$")
 
@@ -41,6 +38,8 @@ def _parse_frontmatter_model(path):
 
     不引入 YAML 依赖：frontmatter 由 `---` 包裹、字段为单行
     `key: value`，与 scripts/validate_plugin.py 的解析假设一致。
+    model 字段缺失时返回 None——对 reviewer 这是 v2.4 P1-A 起的合法态
+    （继承宿主/会话模型），是否合法由调用方按角色断言。
     """
     with open(path, "r", encoding="utf-8") as fh:
         lines = fh.read().splitlines()
@@ -53,27 +52,39 @@ def _parse_frontmatter_model(path):
         if stripped.startswith("model:"):
             value = stripped[len("model:"):].strip().strip('"').strip("'")
             return value
-    raise AssertionError("model 字段缺失: %s" % path)
+    return None
 
 
 class AgentModelBindingTest(unittest.TestCase):
-    def test_all_agents_use_provider_qualified_model(self):
-        for name in sorted(EXPECTED_MODEL_SUFFIX):
+    def test_reviewers_have_no_model_field(self):
+        for name in REVIEWERS:
             path = os.path.join(AGENTS_DIR, "%s.md" % name)
             self.assertTrue(os.path.isfile(path), "%s.md 缺失" % name)
             value = _parse_frontmatter_model(path)
+            self.assertIsNone(
+                value,
+                "%s 的 frontmatter 含 model 字段（值 %s）：v2.4 P1-A 起 "
+                "reviewer 必须继承宿主/会话模型；provider 全限定绑定在未"
+                "配置该 provider 的宿主上会 account-connection-unavailable "
+                "硬失败" % (path, value))
+
+    def test_implementers_provider_qualified_flash_suffix(self):
+        for name in IMPLEMENTERS:
+            path = os.path.join(AGENTS_DIR, "%s.md" % name)
+            self.assertTrue(os.path.isfile(path), "%s.md 缺失" % name)
+            value = _parse_frontmatter_model(path)
+            self.assertIsNotNone(
+                value,
+                "%s 的 model 字段缺失：实施者必须保留 provider 全限定"
+                "模型绑定" % name)
             self.assertRegex(
                 value, QUALIFIED_MODEL_RE,
                 "%s 的 model 必须是 provider 全限定 account:<套餐>/<模型>；"
                 "裸 ID 在 ZCode 3.12.3+ 会静默回退主会话模型" % name)
-
-    def test_role_model_suffixes(self):
-        for name, suffix in sorted(EXPECTED_MODEL_SUFFIX.items()):
-            path = os.path.join(AGENTS_DIR, "%s.md" % name)
-            value = _parse_frontmatter_model(path)
             self.assertTrue(
-                value.endswith(suffix),
-                "%s 的 model 应以 %s 结尾，实际 %s" % (name, suffix, value))
+                value.endswith(IMPLEMENTER_MODEL_SUFFIX),
+                "%s 的 model 应以 %s 结尾，实际 %s"
+                % (name, IMPLEMENTER_MODEL_SUFFIX, value))
 
 
 if __name__ == "__main__":

@@ -7,8 +7,12 @@
     检查项编号与整改规范对应：
       1. JSON 解析：marketplace.json 与
          plugins/glm-conductor/.zcode-plugin/plugin.json 均为合法 JSON 且为对象；
-      2. Agent frontmatter：plugins/glm-conductor/agents/*.md 必含
+      2. Agent frontmatter：plugins/glm-conductor/agents/*.md 必填字段按
+         角色区分——flash-implementer / visual-implementer 必含
          name / description / model / thoughtLevel / tools；
+         glm-reviewer / visual-reviewer 必含
+         name / description / thoughtLevel / tools 且不得含 model 字段
+         （v2.4 P1-A 起 reviewer 继承宿主/会话模型）；
       3. Skill frontmatter：plugins/glm-conductor/skills/*/SKILL.md 必含
          name / description；
       4. 引用 agent 存在：plugins/ 内出现的 `glm-conductor:<agent>` 引用
@@ -144,6 +148,11 @@ OPERATIONS = os.path.join(
     SKILLS_DIR, "orchestration", "references", "operations.md")
 
 AGENT_REQUIRED_KEYS = ("name", "description", "model", "thoughtLevel", "tools")
+# v2.4 P1-A：reviewer 删除 frontmatter model 行（继承宿主/会话模型，规避
+# account-connection-unavailable 硬失败），必填集不含 model 且字段出现即
+# FAIL——与 tests/test_agent_model_binding.py 的断言互为镜像
+REVIEWER_REQUIRED_KEYS = ("name", "description", "thoughtLevel", "tools")
+REVIEWER_AGENTS = ("glm-reviewer", "visual-reviewer")
 SKILL_REQUIRED_KEYS = ("name", "description")
 
 # 整改规范点名的四个契约 agent；与 plugins/ 内实际引用取并集后逐一要求存在
@@ -227,6 +236,10 @@ FINGERPRINT_PY = os.path.join(RUNTIME_DIR, "fingerprint.py")
 POLICY_PY = os.path.join(RUNTIME_DIR, "policy.py")
 WORK_UNIT_PY = os.path.join(RUNTIME_DIR, "work_unit.py")
 DEPENDENCY_PY = os.path.join(RUNTIME_DIR, "dependency.py")
+# v2.4 P1-B：legacy WorkUnit/dependency 契约随 twin 搬迁至 legacy_* 模块，
+# 检查 14 的旧契约标记同步改指向；新静态模块只做最小存在性断言
+LEGACY_UNIT_PY = os.path.join(RUNTIME_DIR, "legacy_unit.py")
+LEGACY_DEPENDENCY_PY = os.path.join(RUNTIME_DIR, "legacy_dependency.py")
 DISPATCHER_PY = os.path.join(RUNTIME_DIR, "dispatcher.py")
 RECONCILE_PY = os.path.join(RUNTIME_DIR, "reconcile.py")
 LEASE_PY = os.path.join(RUNTIME_DIR, "lease.py")
@@ -407,7 +420,7 @@ def check_1_json(results):
 
 
 def check_2_agent_frontmatter(results):
-    """检查 2：agents/*.md frontmatter 必填字段。"""
+    """检查 2：agents/*.md frontmatter 必填字段（必填集按角色区分；reviewer 禁含 model 字段）。"""
     title = "Agent frontmatter 必填字段（agents/*.md）"
     details = []
     ok = True
@@ -424,9 +437,18 @@ def check_2_agent_frontmatter(results):
             details.append("FAIL: %s: %s" % (shown, error))
             ok = False
             continue
-        missing = [key for key in AGENT_REQUIRED_KEYS if not meta.get(key)]
+        agent_name = os.path.splitext(os.path.basename(path))[0]
+        required = (REVIEWER_REQUIRED_KEYS if agent_name in REVIEWER_AGENTS
+                    else AGENT_REQUIRED_KEYS)
+        missing = [key for key in required if not meta.get(key)]
         if missing:
             details.append("FAIL: %s 缺少必填字段: %s" % (shown, ", ".join(missing)))
+            ok = False
+        elif agent_name in REVIEWER_AGENTS and "model" in meta:
+            details.append(
+                "FAIL: %s 含 model 字段（值 %s）：v2.4 P1-A 起 reviewer "
+                "继承宿主/会话模型，model 行必须删除"
+                % (shown, meta.get("model") or "（空）"))
             ok = False
         else:
             details.append("PASS: %s（name=%s）" % (shown, meta.get("name")))
@@ -1010,8 +1032,10 @@ def check_14_runtime_state(results):
         (OWNERSHIP_PY, OWNERSHIP_REQUIRED_MARKERS),
         (FINGERPRINT_PY, FINGERPRINT_REQUIRED_MARKERS),
         (POLICY_PY, POLICY_REQUIRED_MARKERS),
-        (WORK_UNIT_PY, WORK_UNIT_REQUIRED_MARKERS),
-        (DEPENDENCY_PY, DEPENDENCY_REQUIRED_MARKERS),
+        (LEGACY_UNIT_PY, WORK_UNIT_REQUIRED_MARKERS),
+        (LEGACY_DEPENDENCY_PY, DEPENDENCY_REQUIRED_MARKERS),
+        (WORK_UNIT_PY, ("NODE_REQUIRED_KEYS",)),
+        (DEPENDENCY_PY, ("graph_errors",)),
         (DISPATCHER_PY, DISPATCHER_REQUIRED_MARKERS),
         (RECONCILE_PY, RECONCILE_REQUIRED_MARKERS),
         (LEASE_PY, LEASE_REQUIRED_MARKERS),
