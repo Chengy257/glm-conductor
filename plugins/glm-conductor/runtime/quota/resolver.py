@@ -16,7 +16,7 @@
                           CACHE_TTL_FRESH_SECONDS（300 秒）→ 直接采信
                           缓存 status，绝不发网络；
         2. provider fetch 缓存缺失 / 过期 / force_refresh → 解析凭证并
-                          经 provider 抓取 → scheduler.evaluate 四态 →
+                          经 provider 抓取 → parser.evaluate 四态 →
                           原子写缓存 → 采信 provider 结果；
         3. stale cache    provider 链路任何一环失败（无凭证 / 网络 /
                           解析 / 写盘）→ 回退本地缓存（不论多旧）；
@@ -68,7 +68,7 @@
     三方依赖，`python3 -S` 可运行。provider 装配照抄 runtime/quota/
     report.py（_PROVIDER_ORDER + 逐个探测、任一成功即用；report.py
     本身不改，允许少量重复，见 _PROVIDER_ORDER 处注释）。风格对齐
-    runtime/quota/scheduler.py。
+    runtime/quota/parser.py。
 
 来源：
     v2.1 设计（已蒸馏入 docs/architecture.md：Runtime Quota 集成，
@@ -84,9 +84,10 @@ from datetime import datetime, timezone
 from runtime import durable_io
 from runtime.quota.bigmodel import BigModelQuotaProvider
 from runtime.quota.credentials import resolve_credential
-from runtime.quota.parser import QUOTA_STATUSES
+# v2.4 Phase 3 P3-A：evaluate（§28 四态评估）的规范落点为 parser
+# （自 scheduler.py 行为保持移入，scheduler 已删除）。
+from runtime.quota.parser import QUOTA_STATUSES, evaluate
 from runtime.quota.provider import QuotaProviderError
-from runtime.quota.scheduler import evaluate
 # v2.2.1 WU-221-C2（行为保持抽取）：本地 _parse_iso_utc 副本与
 # runtime.quota.time_utils 的规范实现逐字相同（逐实现比对），改经
 # 共享落点 import；_normalize_now / _format_iso_ms_z 为本模块专属
@@ -135,7 +136,7 @@ def _normalize_now(now):
     """归一 now 注入参数：None → 当前 UTC；datetime / ISO 串 → 时刻。
 
     now 仅供测试注入当前时刻使用；非法输入 → ValueError（中文，
-    对齐 scheduler.plan_resume 的参数校验口径）。
+    对齐 parser.plan_resume 的参数校验口径）。
     """
     if now is None:
         return datetime.now(timezone.utc)
@@ -404,7 +405,7 @@ def resolve_quota_status(repo_root, *, now=None, force_refresh=False,
       2. provider fetch：凭证已在层级判定前解析（WU-221-B1：全流程
          唯一一次 resolve_credential，同一次结果供身份指纹）→
          _build_providers 按 report.py 装配逐个探测（一轮，绝不重试）
-         → 成功即 scheduler.evaluate(snapshot)["status"] → 原子写缓存
+         → 成功即 parser.evaluate(snapshot)["status"] → 原子写缓存
          {"provider", "fetched_at", "snapshot", "status",
          "provider_identity_hash"}（末键 WU-221-B1 唯一新增，非秘密
          16-hex）→ ("provider", status)；任何异常（无凭证 /

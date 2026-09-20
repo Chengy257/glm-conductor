@@ -29,7 +29,7 @@
 
 依赖：
     仅 Python 3.7 标准库（argparse / json / math / datetime），
-    零第三方依赖。风格对齐 runtime/quota/scheduler.py。
+    零第三方依赖。风格对齐 runtime/quota/parser.py。
 
 运行：
     python3 report.py [--json]
@@ -53,13 +53,16 @@ sys.path.insert(0, str(PLUGIN_ROOT))
 from runtime.quota.bigmodel import BigModelQuotaProvider
 from runtime.quota.credentials import (ENV_VAR, describe_modes,
                                        resolve_credential)
+# v2.4 Phase 3 P3-A：evaluate / plan_resume（§28 / §29-§33）的规范
+# 落点为 parser（自 scheduler.py 行为保持移入，scheduler 已删除）。
+from runtime.quota.parser import evaluate, plan_resume
 from runtime.quota.provider import QuotaProviderError
-from runtime.quota.scheduler import evaluate, plan_resume
 # v2.2.1 WU-221-C2（行为保持抽取）：本地 _parse_iso_utc 副本与
 # runtime.quota.time_utils 的规范实现逐字相同（逐实现比对），改经
 # 共享落点 import；_normalize_now 为本模块专属变体（错误文案锚定
-# format_duration_delta），原地保留；_is_number 与 scheduler 的实现
-# 逐字相同（真副本，非专属变体），作为接缝外的数值域通用守卫原地保留。
+# format_duration_delta），原地保留；_is_number 与 parser.evaluate
+# 的实现逐字相同（真副本，非专属变体），作为接缝外的数值域通用
+# 守卫原地保留。
 from runtime.quota.time_utils import _parse_iso_utc
 from runtime.quota.zai import ZaiQuotaProvider
 

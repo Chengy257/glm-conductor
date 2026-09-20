@@ -14,10 +14,10 @@
     v2.2.1 WU-221-C2 行为保持抽取：前三个函数体自
     runtime.quota.scheduler 逐字移入，_utc_now_iso 自
     runtime.quota.accounting 逐字移入（仅取时刻行按本模块的
-    from-import 风格改写，语义逐字等价）；原模块经 re-import 保持
-    全部既有解析点（runtime.quota.scheduler._parse_iso_utc /
-    _format_iso_z / _normalize_now、runtime.quota.accounting.
-    _utc_now_iso，及其余经 scheduler re-export 的消费方）零变化。
+    from-import 风格改写，语义逐字等价）。v2.4 Phase 3 P3-A 起
+    scheduler / accounting 控制面模块已删除，本模块成为这些时间
+    原语对存活消费方（parser.evaluate / parser.plan_resume /
+    window_math / resolver / report）的唯一规范来源。
 
     同名近亲（本单元逐实现比对后判定为「非重复、不合并」，各自
     留驻原模块——微差即非重复，错误合并才是失败模式）：
@@ -32,7 +32,7 @@
 依赖：
     仅 Python 3.7 标准库（datetime），零第三方依赖，零 I/O；
     不 import 任何 runtime 模块——时间原语是 quota 依赖图的最底层
-    （window_math / scheduler / accounting 均可向下依赖本模块，
+    （window_math / parser / resolver / report 均可向下依赖本模块，
     本模块绝不反向）。
 """
 
