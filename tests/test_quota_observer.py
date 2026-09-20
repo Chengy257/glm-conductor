@@ -481,16 +481,8 @@ class ObserveNextCheckAtTest(unittest.TestCase):
         self.assertEqual(result["next_check_at"], "2026-08-31T05:05:00Z")
 
 
-# —— 纯度锚：quota/* 包纪律（不 import runtime.state / task_manager） ——
-
-class PurityTest(unittest.TestCase):
-
-    def test_observer_module_has_no_state_or_task_manager_bindings(self):
-        """observer 模块命名空间不含 state / task_manager 绑定
-        （§16.2 纯决策；quota/* 包纪律的机械锚）。"""
-        self.assertFalse(hasattr(observer, "state"))
-        self.assertFalse(hasattr(observer, "task_manager"))
-
+# （v2.4 W6：PurityTest 的 observer/state/task_manager 纯度锚随执行面
+# 退役移除——纪律面由 quota 包自身在 Phase 3 收口。）
 
 # —— 4：resolve_quota_detail（明细入口，四 source 路径） ——
 
@@ -655,9 +647,7 @@ class ResolveQuotaDetailTest(unittest.TestCase):
 # —— 5：CLI quota-observe / quota-phase ——
 
 TID = "observer-task-1a2b3c"
-ROUTE = {"mode": "delegate", "delegability": "high",
-         "assurance": "standard", "executor": "flash-implementer",
-         "continuity": "foreground"}
+ROUTE = {"mode": "delegate", "assurance": "standard"}
 VERIFY_CMD = "python3 -m unittest tests.test_quota_observer"
 RESET = "2026-09-01T00:00:00Z"
 
@@ -731,64 +721,21 @@ class QuotaObserveCliTest(CliFixture):
         self.assertTrue(payload["wake_required"])
         self.assertTrue(payload["next_check_at"].endswith("Z"))
 
-    def test_task_bridge_armed_suppresses_wake_required(self):
-        """真实 state 装配：continuation.wake_bridge.status=armed →
-        wake_required=False（bridge 装配被观测到）。"""
-        self.make_task()
-        st = state.load_state(self.repo, TID)
-        st["continuation"]["wake_bridge"]["status"] = "armed"
-        state.save_state(self.repo, st)
-        windows = [win("five_hour", 15, RESET)]  # DRAINING
-        with mock.patch.object(quota_resolver, "resolve_quota_detail",
-                               return_value=fake_detail("AVAILABLE",
-                                                        windows)):
-            code, payload = run_cli("quota-observe", str(self.repo), TID)
-        self.assertEqual(code, 0)
-        self.assertEqual(payload["execution_phase"], "DRAINING")
-        self.assertTrue(payload["wake_recommended"])   # 相 + reset + active
-        self.assertFalse(payload["wake_required"])     # bridge armed
-
-    def test_waiting_task_not_active(self):
-        """waiting_quota 任务不在执行态族 → task_active=False →
-        wake_recommended=False（DRAINING 义务仍在 → required=True）。"""
-        self.make_task(status="waiting_quota")
-        windows = [win("five_hour", 15, RESET)]
-        with mock.patch.object(quota_resolver, "resolve_quota_detail",
-                               return_value=fake_detail("AVAILABLE",
-                                                        windows)):
-            code, payload = run_cli("quota-observe", str(self.repo), TID)
-        self.assertEqual(code, 0)
-        self.assertFalse(payload["wake_recommended"])
-        self.assertTrue(payload["wake_required"])
-
-    def test_missing_task_exit_1_state_checked_before_resolver(self):
+    def test_task_form_retired_runtime_error_exit_1(self):
+        # v2.4 W6：task 侧装配（执行态族折算）随执行面退役——给定
+        # task_id 即 RuntimeError 退出码 1；resolver 不被触达
         with mock.patch.object(quota_resolver, "resolve_quota_detail") as fake:
             code, payload = run_cli("quota-observe", str(self.repo),
                                     "ghost-task")
         self.assertEqual(code, 1)
-        self.assertIn("不存在", payload["error"])
-        fake.assert_not_called()  # 任务缺失先于 resolver（不发起查询）
+        self.assertIn("已退役", payload["error"])
+        fake.assert_not_called()  # 退役明示先于 resolver（不发起查询）
 
     def test_usage_errors_exit_2(self):
         code, _ = run_cli("quota-observe")
         self.assertEqual(code, 2)
         code, _ = run_cli("quota-observe", str(self.repo), TID, "extra")
         self.assertEqual(code, 2)
-
-    def test_real_resolver_no_cache_no_credential_fail_open(self):
-        """真实 resolver 接线（非 mock 伪证）：无缓存 + 无凭证 →
-        UNKNOWN → fail-open PRESSURE、wake 双 False、退出码 0。"""
-        self.make_task()
-        with mock.patch.object(quota_resolver, "resolve_credential",
-                               return_value=(None, None)):
-            code, payload = run_cli("quota-observe", str(self.repo), TID)
-        self.assertEqual(code, 0)
-        self.assertEqual(payload["provider_status"], "UNKNOWN")
-        self.assertEqual(payload["execution_phase"], "PRESSURE")
-        self.assertIsNone(payload["remaining_percent"])
-        self.assertFalse(payload["wake_recommended"])
-        self.assertFalse(payload["wake_required"])
-        self.assertTrue(payload["next_check_at"].endswith("Z"))
 
     def test_utf8_raw_reason_not_escaped(self):
         """ensure_ascii=False：中文 reason 原文可读，无 \\uXXXX 转义。"""
@@ -805,47 +752,13 @@ class QuotaObserveCliTest(CliFixture):
 class QuotaPhaseCliTest(CliFixture):
     """quota-phase：决策 dict 原样直出（与 control 直调全等）/ 1 / 2。"""
 
-    def test_phase_matches_direct_evaluation(self):
-        """输出 == 同输入直调 evaluate_task_quota_phase（薄壳锚：
-        state 的 policy max_workers / 阈值 / bridge / 执行态全部装配）。"""
-        st = self.make_task()  # executing + 默认 policy（max_workers=2）
-        windows = [win("five_hour", 80, RESET)]
-        with mock.patch.object(quota_resolver, "resolve_quota_detail",
-                               return_value=fake_detail("AVAILABLE",
-                                                        windows)):
-            code, payload = run_cli("quota-phase", str(self.repo), TID)
-        self.assertEqual(code, 0)
-        expected = control.evaluate_task_quota_phase(
-            provider_status="AVAILABLE", windows=windows,
-            quota_control=execution_policy.default_quota_control(
-                st["execution_policy"]),
-            max_workers=st["execution_policy"]["parallelism"]["max_workers"],
-            task_active=True, wake_bridge_status="none")
-        self.assertEqual(payload, expected)  # 原样直出（含中文 reason）
-        self.assertEqual(payload["dispatch_budget"], 2)  # policy 预算已装配
-
-    def test_phase_empty_snapshot_fails_open(self):
-        """snapshot 缺失（source=none 层）→ 空窗口 fail-open PRESSURE
-        预算 1、不虚构 wake_at。"""
-        self.make_task()
-        detail = {"source": "none", "status": "UNKNOWN", "snapshot": None,
-                  "fetched_at": None}
-        with mock.patch.object(quota_resolver, "resolve_quota_detail",
-                               return_value=detail):
-            code, payload = run_cli("quota-phase", str(self.repo), TID)
-        self.assertEqual(code, 0)
-        self.assertEqual(set(payload), FROZEN_DECISION_KEYS)
-        self.assertEqual(payload["execution_phase"], "PRESSURE")
-        self.assertEqual(payload["dispatch_budget"], 1)
-        self.assertIsNone(payload["wake_at"])
-        self.assertIn("fail-open", payload["reason"])
-
-    def test_phase_missing_task_exit_1(self):
+    def test_phase_task_form_retired_runtime_error_exit_1(self):
+        # v2.4 W6：task 侧装配随执行面退役（同 quota-observe）
         with mock.patch.object(quota_resolver, "resolve_quota_detail") as fake:
             code, payload = run_cli("quota-phase", str(self.repo),
                                     "ghost-task")
         self.assertEqual(code, 1)
-        self.assertIn("不存在", payload["error"])
+        self.assertIn("已退役", payload["error"])
         fake.assert_not_called()
 
     def test_phase_usage_errors_exit_2(self):
@@ -853,18 +766,6 @@ class QuotaPhaseCliTest(CliFixture):
         self.assertEqual(code, 2)
         code, _ = run_cli("quota-phase", str(self.repo), TID, "extra")
         self.assertEqual(code, 2)
-
-    def test_phase_utf8_raw_reason_not_escaped(self):
-        self.make_task()
-        windows = [win("five_hour", 80, RESET)]
-        with mock.patch.object(quota_resolver, "resolve_quota_detail",
-                               return_value=fake_detail("AVAILABLE",
-                                                        windows)):
-            code, text = run_cli_text("quota-phase", str(self.repo), TID)
-        self.assertEqual(code, 0)
-        self.assertIn("额度", text)
-        self.assertNotIn("\\u", text)
-
 
 if __name__ == "__main__":
     unittest.main()

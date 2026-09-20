@@ -56,8 +56,8 @@
 依赖：
     仅 Python 3 标准库（json / os / time / datetime）+ runtime.
     durable_io（v2.2.1 WU-221-A2 起原子写委托），零第三方依赖；
-    不 import runtime.state / runtime.task_manager / quota 包（会话
-    事实缓存是独立 durable 面，与任务账本零耦合）。
+    不 import runtime.state / quota 包（会话事实缓存是独立 durable
+    面，与任务账本零耦合）。
 
 来源：
     v2.2 设计（已蒸馏入 docs/architecture.md：Activation Transport &

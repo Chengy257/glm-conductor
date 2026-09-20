@@ -14,35 +14,28 @@
     _clear_quota_interrupt_origin / _reconcile_running_unit）、C5b
     resume 面订阅资格裁决（_resume_subscription_gate）与消费段
     representative_boundary_id 派生（_consumption_boundary_id）。
-    v2.2.1 WU-221-C1（行为保持抽取）自 runtime.task_manager 原文抽取
+    v2.2.1 WU-221-C1（行为保持抽取）自 v2.3 执行面事务层原文抽取
     （行为保持：同 journal 事件形状与写序、同幂等语义、同错误口径，
-    函数体逐字未改，仅 import 适配）。
-
-    事务编排体留守 runtime.task_manager：resume_from_quota /
-    _resume_consumption / handle_quota_exhausted 的函数体经 task_manager
-    模块名字空间解析其协作调用（测试 monkeypatch 面契约：tests 对
-    task_manager.mark_activation_epoch / register_quota_subscription /
-    record_quota_boundary_consumed / migrate_quota_window_accounting 的
-    patch 必须被这些编排体看到）；本模块只承载上述被编排体调用的
-    规划 / 对账 / 裁决 / 派生层。
+    函数体逐字未改，仅 import 适配）。v2.4 Phase 2（W6）起原事务编排
+    体（resume_from_quota / _resume_consumption / handle_quota_exhausted）
+    随 v2.3 执行面删除；本模块作为 Phase 3 前的规范落点继续存在，
+    其调用面在 Phase 3 一并收口。
 
 依赖方向（冻结，防循环）：
-    task_manager → 本模块 → continuity.subscription，绝不反向——本
-    模块禁止 import runtime.task_manager。与抽取域共用、原属
-    task_manager 的 TaskManagerError / _require_state / _continuity_view
-    / _current_provider_identity_hash 以 runtime.quota.accounting
-    （v2.2.1 WU-221-C1 规范落点）为家；_cache_identity_usable /
-    _epoch_context_after_refresh / _reconcile_activation_journal /
-    evaluate_subscription_eligibility 以 runtime.continuity.subscription
-    为家；_bridge_boundary 以 runtime.continuity.wake_bridge 为家——
-    均 import 复用同一对象（单一规范落点，不复制）；上层经 re-import
-    使既有 task_manager.<名字> 解析点（cli / hooks / tests）全部解析
-    到同一对象。
+    上层（cli / hooks）→ 本模块 → continuity.subscription，绝不反向。
+    与抽取域共用、原属执行面事务层的 TaskManagerError / _require_state
+    / _continuity_view / _current_provider_identity_hash 以
+    runtime.quota.accounting（v2.2.1 WU-221-C1 规范落点）为家；
+    _cache_identity_usable / _epoch_context_after_refresh /
+    _reconcile_activation_journal / evaluate_subscription_eligibility
+    以 runtime.continuity.subscription 为家；_bridge_boundary 以
+    runtime.continuity.wake_bridge 为家——均 import 复用同一对象
+    （单一规范落点，不复制）。
 
     仅标准库依赖；其余为 runtime 一方模块（journal / state /
     execution_policy / continuity.subscription / continuity.wake_bridge
-    / quota.accounting；quota.scheduler / quota.resolver / runtime.
-    reconcile 保持函数内 import——monkeypatch 友好，与抽取前一致）。
+    / quota.accounting；quota.scheduler / quota.resolver 保持函数内
+    import——monkeypatch 友好，与抽取前一致）。
     Python 3.7 兼容语法（仓库下限）。
 """
 
@@ -256,16 +249,15 @@ def quota_wake_prompt(repo_root, task_id) -> str:
         "   python3 plugins/glm-conductor/runtime/cli.py quota-resolve "
         "--force-refresh '%s'"
         % repo_root,
-        "2. 调用 runtime.task_manager.resume_from_quota(repo_root=r'%s', "
-        "task_id='%s')（内部同样强制刷新额度并对中断单元做恢复对账）："
+        "2. 调用恢复编排 quota-resume（repo_root=r'%s'，task_id='%s'）"
+        "（内部同样强制刷新额度并对中断单元做恢复对账）："
         % (repo_root, task_id),
         "   - AVAILABLE / PRESSURE → 任务转回 executing、waiting_quota "
         "单元按中断来源恢复（ready 来源直回 ready；running 来源先 "
-        "reconcile 四分：干净重派回 ready、成果可复用直达 verifying、"
+        "对账四分：干净重派回 ready、成果可复用直达 verifying、"
         "有进度回 ready 待主会话组装进度包续作、人工裁决保持等待），"
-        "按账本就绪顺序经 prepare_dispatch / "
-        "prepare_dispatch_wave 继续（遵守 orchestration 纪律：SELECTIVE "
-        "ROUTE、permit 门与租约时序不得绕过）；",
+        "按账本就绪顺序继续派发（遵守 orchestration 纪律：SELECTIVE "
+        "ROUTE 不得绕过）；",
         "   - EXHAUSTED / UNKNOWN → 零转态保守等待：不得派发、不得再建"
         "唤醒，按 recovery 摘要重排或降级 SessionStart 恢复。",
         "",
@@ -446,52 +438,13 @@ def _clear_quota_interrupt_origin(unit) -> None:
 def _reconcile_running_unit(repo_root, task_id, uid):
     """对 running 中断单元做四分对账 → (落点状态, unit_recovery 条目)。
 
-    调 runtime.reconcile.reconcile_agent_run（纯读对账，RB-21-01：
-    resume 链禁止盲目 waiting_quota→ready——worker 现场可能有残留），
-    按 classification 决定落点：
-      - redispatch_clean → "ready"（无执行内容无残留，全新派发）；
-      - reuse_result → "verifying"（agent 成果可复用，经 §62 演进的
-        waiting_quota→verifying 新边直达验证；条目带
-        action_required="recover_agent_result"，主会话须先捞取成果）；
-      - resume_with_progress → "ready"（有进度无完整证据；条目透传
-        evidence 证据句柄，主会话组装 Previous Progress Package 随新
-        规格续派——编排纪律，runtime 不机械阻止）；
-      - manual_ruling（及未知分类，防御）→ "waiting_quota"（保持等待，
-        禁止自动猜测；条目透传 rationale）。
-
-    fail-closed：reconcile 异常（求值失败 / 环境问题）→ 按 manual_ruling
-    处理（rationale 注明 reconcile error 与异常类型名），绝不让异常炸掉
-    整个 resume。
+    v2.4 Phase 2（W6）：对账后端（agent run 四分对账，RB-21-01）随
+    v2.3 执行面退役——调用即 RuntimeError（fail-closed 口径由调用方
+    按 manual_ruling 兜住，绝不让异常炸掉整个 resume）。
     """
-    try:
-        from runtime import reconcile  # 函数内 import：monkeypatch 友好
-        report = reconcile.reconcile_agent_run(repo_root, task_id, uid)
-    except Exception as exc:
-        return "waiting_quota", {
-            "classification": "manual_ruling",
-            "rationale": ["reconcile error: %s" % type(exc).__name__]}
-    classification = (report.get("classification")
-                      if isinstance(report, dict) else None)
-    if classification == "redispatch_clean":
-        return "ready", {"classification": classification}
-    if classification == "reuse_result":
-        return "verifying", {
-            "classification": classification,
-            "action_required": "recover_agent_result",
-            "evidence": report.get("evidence")}
-    if classification == "resume_with_progress":
-        return "ready", {
-            "classification": classification,
-            "evidence": report.get("evidence")}
-    # manual_ruling 与未知分类（防御保留位）：保持 waiting_quota
-    entry = {"classification":
-             classification if isinstance(classification, str)
-             and classification else "manual_ruling"}
-    rationale = (report.get("rationale")
-                 if isinstance(report, dict) else None)
-    if rationale is not None:
-        entry["rationale"] = rationale
-    return "waiting_quota", entry
+    raise RuntimeError(
+        "v2.3 执行面已退役（agent run 对账随执行运行时删除），"
+        "Phase 3 删除本模块")
 
 
 def _resume_subscription_gate(repo_root, task_id, st) -> dict:

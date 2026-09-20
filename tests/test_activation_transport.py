@@ -47,8 +47,12 @@ from pathlib import Path
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "plugins" / "glm-conductor"))
-from runtime import activation_transport, cli, execution_policy, journal, \
-    scheduler_facts, state, task_manager
+from runtime import activation_transport, cli, execution_policy, journal, scheduler_facts, state
+from runtime.continuity import resume as _cr
+from runtime.continuity import subscription as _cs
+from runtime.quota import accounting as _qa
+from runtime.continuity import subscription as _cs
+from runtime.quota import accounting as _qa
 
 TID = "transport-test-1a2b3c"
 SESSION = "sess-transport-1"
@@ -66,11 +70,12 @@ FACT_FIELDS = ["origin", "create", "update", "pause", "delete",
                "automation_ids", "updated_at"]
 
 
-def make_state(**kwargs):
-    """构造默认合法的完整状态 dict（solo 路由过全部不变量）。"""
+def make_state(repo, **kwargs):
+    """构造默认合法的完整状态 dict（solo 路由；v2.4 必填仓库根绑定）。"""
     task_id = kwargs.pop("task_id", TID)
     return state.new_task_state(
-        task_id, "v2.2 C6 transport 夹具任务", {"mode": "solo"}, **kwargs)
+        task_id, "v2.2 C6 transport 夹具任务", {"mode": "solo"},
+        repository_root=repo, **kwargs)
 
 
 class TransportCase(unittest.TestCase):
@@ -80,10 +85,10 @@ class TransportCase(unittest.TestCase):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         self.repo = tmp.name
-        state.save_state(self.repo, make_state())
+        state.save_state(self.repo, make_state(self.repo))
 
     def arm(self, task_id=TID, automation_id="auto-t1"):
-        return task_manager.arm_wake_bridge(
+        return _wb_arm(
             self.repo, task_id, automation_id=automation_id,
             boundary_id="five_hour:%s" % ARM_ISO, reset_at=ARM_ISO,
             wake_at=ARM_ISO, next_wake_at=ARM_ISO,
@@ -121,84 +126,6 @@ class TransportVocabularyTest(unittest.TestCase):
                          activation_transport.TRANSPORT_KINDS)
         self.assertEqual(execution_policy.DEFAULT_ACTIVATION_TRANSPORT,
                          activation_transport.STABLE_TRANSPORT)
-
-
-class TransportStatusTest(TransportCase):
-    """activation_transport_status：冻结十二键 + armed 语义 + 容错读。"""
-
-    def test_frozen_twelve_keys(self):
-        result = activation_transport.activation_transport_status(
-            self.repo, TID)
-        self.assertEqual(sorted(result.keys()),
-                         sorted(TRANSPORT_STATUS_KEYS))
-
-    def test_default_task_not_armed_with_reasons(self):
-        result = activation_transport.activation_transport_status(
-            self.repo, TID)
-        self.assertEqual(result["transport"], "recurring_bridge")
-        self.assertIs(result["stable"], True)
-        self.assertIs(result["armed"], False)
-        self.assertEqual(result["bridge_status"], "none")
-        self.assertEqual(result["scheduler_origin"], "unknown")
-        self.assertEqual(result["scheduler_create"], "unknown")
-        self.assertTrue(result["reasons"])  # 未武装必须有可读原因
-
-    def test_armed_after_wake_bridge_arm(self):
-        self.arm()
-        result = activation_transport.activation_transport_status(
-            self.repo, TID)
-        self.assertIs(result["armed"], True)
-        self.assertEqual(result["bridge_status"], "armed")
-        self.assertEqual(result["automation_id"], "auto-t1")
-        self.assertEqual(result["current_boundary_id"],
-                         "five_hour:%s" % ARM_ISO)
-        self.assertEqual(result["next_wake_at"], ARM_ISO)
-        self.assertEqual(result["bridge_interval_minutes"], 60)
-        self.assertEqual(result["reasons"], [])
-
-    def test_fired_still_armed_reusable_bridge_statuses(self):
-        # fired ∈ REUSABLE_BRIDGE_STATUSES：recurring 桥触发后仍在役
-        self.arm()
-        task_manager.record_bridge_fired(self.repo, TID)
-        result = activation_transport.activation_transport_status(
-            self.repo, TID)
-        self.assertIs(result["armed"], True)
-        self.assertEqual(result["bridge_status"], "fired")
-
-    def test_cancelled_by_reconcile_is_missing(self):
-        # §22.5：对账降级（deleted → cancelled）后 transport missing
-        self.arm()
-        task_manager.reconcile_wake_bridge_from_host(
-            self.repo, TID, host_status="deleted")
-        result = activation_transport.activation_transport_status(
-            self.repo, TID)
-        self.assertIs(result["armed"], False)
-        self.assertEqual(result["bridge_status"], "cancelled")
-        self.assertTrue(result["reasons"])
-
-    def test_transport_reads_policy_optional_key(self):
-        st = state.load_state(self.repo, TID)
-        st["execution_policy"]["activation_transport"] = "probe_then_hold"
-        state.save_state(self.repo, st)
-        result = activation_transport.activation_transport_status(
-            self.repo, TID)
-        self.assertEqual(result["transport"], "probe_then_hold")
-        self.assertIs(result["stable"], False)
-        # 实验 transport 也是未武装理由之一（reasons 逐条点名）
-        self.assertTrue(result["reasons"])
-
-    def test_scheduler_context_mirror(self):
-        task_manager.observe_scheduler_context(
-            self.repo, TID, origin="interactive", create="allowed")
-        result = activation_transport.activation_transport_status(
-            self.repo, TID)
-        self.assertEqual(result["scheduler_origin"], "interactive")
-        self.assertEqual(result["scheduler_create"], "allowed")
-
-    def test_missing_task_raises_task_manager_error(self):
-        with self.assertRaises(task_manager.TaskManagerError):
-            activation_transport.activation_transport_status(
-                self.repo, "ghost-task-0000000")
 
 
 class ArmTransportTest(TransportCase):
@@ -242,48 +169,7 @@ class ArmTransportTest(TransportCase):
                 boundary_id="five_hour:%s" % ARM_ISO,
                 reset_at=ARM_ISO, wake_at=ARM_ISO)
 
-    def test_stable_delegates_to_arm_wake_bridge_unchanged(self):
-        result = activation_transport.arm_transport(
-            self.repo, TID, transport="recurring_bridge",
-            automation_id="auto-t1",
-            boundary_id="five_hour:%s" % ARM_ISO,
-            reset_at=ARM_ISO, wake_at=ARM_ISO, next_wake_at=ARM_ISO,
-            bridge_interval_minutes=60)
-        self.assertEqual(result["status"], "armed")
-        self.assertEqual(result["automation_id"], "auto-t1")
-        self.assertEqual(result["bridge_interval_minutes"], 60)
-        # 零改写委托：同参重放命中 arm_wake_bridge 的幂等闸（同一条
-        # 状态机，不是本模块复制的第二套记账）
-        direct = task_manager.arm_wake_bridge(
-            self.repo, TID, automation_id="auto-t1",
-            boundary_id="five_hour:%s" % ARM_ISO,
-            reset_at=ARM_ISO, wake_at=ARM_ISO, next_wake_at=ARM_ISO,
-            bridge_interval_minutes=60)
-        self.assertTrue(direct["idempotent"])
-        # 恰一条 armed 事件（委托产出；重放零新增）
-        self.assertEqual(
-            len([e for e in self.task_events()
-                 if e["event"] == "wake_bridge_armed"]), 1)
 
-    def test_stable_conflict_semantics_propagate(self):
-        self.arm()
-        with self.assertRaises(task_manager.TaskManagerError):
-            # 同 boundary 不同 automation 身份 → D15-a 拒绝（委托透传）
-            activation_transport.arm_transport(
-                self.repo, TID, transport="recurring_bridge",
-                automation_id="auto-other",
-                boundary_id="five_hour:%s" % ARM_ISO,
-                reset_at=ARM_ISO, wake_at=ARM_ISO)
-
-    def test_stable_param_gates_propagate(self):
-        with self.assertRaises(ValueError):
-            activation_transport.arm_transport(
-                self.repo, TID, transport="recurring_bridge",
-                automation_id="auto-t1", boundary_id="five_hour:%s" % ARM_ISO,
-                reset_at="not-a-time", wake_at=ARM_ISO)
-
-
-# —— ② scheduler_facts ——
 
 class SchedulerFactsTest(unittest.TestCase):
 
@@ -464,8 +350,8 @@ class ExecutionPolicyTransportKeyTest(unittest.TestCase):
     def test_state_roundtrip_with_transport_key(self):
         repo = self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(repo.cleanup)
-        st = make_state()
-        st["execution_policy"]["activation_transport"] = "probe_then_hold"
+        st = make_state(repo.name)
+        st["execution_policy"] = {"activation_transport": "probe_then_hold"}
         state.save_state(repo.name, st)
         loaded = state.load_state(repo.name, TID)
         self.assertEqual(
@@ -493,76 +379,52 @@ def run_cli(argv):
 
 class CliTransportTest(TransportCase):
 
-    def test_wake_reconcile_deleted_downgrades(self):
-        self.arm()
-        code, out, _err = run_cli(
-            ["wake-reconcile", self.repo, TID, "deleted"])
-        self.assertEqual(code, 0)
-        payload = json.loads(out.strip())
-        self.assertEqual(payload["bridge_status_before"], "armed")
-        self.assertEqual(payload["bridge_status"], "cancelled")
-        self.assertIs(payload["reconciled"], True)
-        # §22.5 降级留痕：恰一条 wake_bridge_reconciled（automation_id
-        # / observed_at 随事件保留——不得显示为 active transport）
-        events = [e for e in self.task_events()
-                  if e["event"] == "wake_bridge_reconciled"]
-        self.assertEqual(len(events), 1)
-        self.assertEqual(events[0]["to_status"], "cancelled")
-        self.assertEqual(events[0]["automation_id"], "auto-t1")
-
-    def test_wake_reconcile_active_confirms_zero_write(self):
-        self.arm()
-        code, out, _err = run_cli(
-            ["wake-reconcile", self.repo, TID, "active"])
-        self.assertEqual(code, 0)
-        payload = json.loads(out.strip())
-        self.assertEqual(payload["bridge_status"], "armed")
-        self.assertIs(payload["reconciled"], False)
-        self.assertEqual(payload["activation_transport"], "armed")
-
-    def test_wake_reconcile_observed_at_passthrough(self):
-        code, out, _err = run_cli(
-            ["wake-reconcile", self.repo, TID, "unknown",
-             "2026-09-02T08:00:00Z"])
-        self.assertEqual(code, 0)
-        self.assertEqual(
-            json.loads(out.strip())["observed_at"], "2026-09-02T08:00:00Z")
-
-    def test_wake_reconcile_bad_host_status_exit_2(self):
-        code, out, _err = run_cli(
-            ["wake-reconcile", self.repo, TID, "flying"])
-        self.assertEqual(code, 2)
-        self.assertIn("error", json.loads(out.strip()))
-
-    def test_wake_reconcile_missing_task_exit_1(self):
+    def test_wake_reconcile_retired_error_face_exit_1(self):
+        # v2.4 W6：对账编排退役——错误 JSON 面与退出码语义不变
         code, out, _err = run_cli(
             ["wake-reconcile", self.repo, "ghost-task-0000000", "active"])
         self.assertEqual(code, 1)
-        self.assertIn("error", json.loads(out.strip()))
+        self.assertIn("已退役", json.loads(out.strip())["error"])
 
     def test_wake_reconcile_usage_error_exit_2(self):
         code, out, _err = run_cli(["wake-reconcile", self.repo])
         self.assertEqual(code, 2)
 
-    def test_transport_status_frozen_keys_and_reasons(self):
-        code, out, _err = run_cli(["transport-status", self.repo, TID])
-        self.assertEqual(code, 0)
-        payload = json.loads(out.strip())
-        self.assertEqual(sorted(payload.keys()),
-                         sorted(TRANSPORT_STATUS_KEYS))
-        self.assertFalse(payload["armed"])
-        self.assertTrue(payload["reasons"])
-
-    def test_transport_status_missing_task_exit_1(self):
-        code, out, _err = run_cli(
-            ["transport-status", self.repo, "ghost-task-0000000"])
-        self.assertEqual(code, 1)
-        self.assertIn("error", json.loads(out.strip()))
-
     def test_usage_string_synced(self):
         self.assertIn("wake-reconcile <repo_root> <task_id> <host_status> "
                       "[observed_at]", cli.USAGE)
         self.assertIn("transport-status <repo_root> <task_id>", cli.USAGE)
+
+
+# —— v2.4 Phase 2（W6）：执行面退役锚定 ——
+
+def _wb_arm(repo_root, task_id, *, automation_id, boundary_id, reset_at,
+            wake_at, next_wake_at, bridge_interval_minutes):
+    """arm 装置改指 wake_bridge 规范落点（v2.4 W6 起该记账编排已随
+    v2.3 执行面退役——对 v2.4 state 调用即 AttributeError/退化，供
+    仍可运行的参数闸用例之外的退役锚定参考）。"""
+    from runtime.continuity import wake_bridge as _wb
+    return _wb.arm_wake_bridge(
+        repo_root, task_id, automation_id=automation_id,
+        boundary_id=boundary_id, reset_at=reset_at, wake_at=wake_at,
+        next_wake_at=next_wake_at,
+        bridge_interval_minutes=bridge_interval_minutes)
+
+
+class RetiredRuntimeAnchorTest(TransportCase):
+    """activation_transport 求值面与 wake-reconcile 编排已随 v2.3 执行
+    面退役：调用即 RuntimeError（错误 JSON / 退出码语义不变）。"""
+
+    def test_status_face_retired_runtime_error(self):
+        code, out, _err = run_cli(["transport-status", self.repo, TID])
+        self.assertEqual(code, 1)
+        self.assertIn("已退役", json.loads(out.strip())["error"])
+
+    def test_wake_reconcile_retired_runtime_error(self):
+        code, out, _err = run_cli(
+            ["wake-reconcile", self.repo, TID, "deleted"])
+        self.assertEqual(code, 1)
+        self.assertIn("已退役", json.loads(out.strip())["error"])
 
 
 # —— ⑧ reviewer 留账吸收 ——
@@ -572,64 +434,51 @@ class ResidualFixesTest(TransportCase):
     def test_resume_subscription_gate_dead_param_removed(self):
         # 死参数 provider_status 移除：签名收敛为 (repo_root, task_id, st)
         params = list(inspect.signature(
-            task_manager._resume_subscription_gate).parameters)
+            _cr._resume_subscription_gate).parameters)
         self.assertEqual(params, ["repo_root", "task_id", "st"])
 
-    def test_resume_chain_smoke_after_param_removal(self):
-        # resume 链冒烟：任务走合法迁移链到 waiting_quota，显式
-        # AVAILABLE 唤醒 → 恢复（订阅门对未注册任务零介入——参数移除
-        # 零行为变化的佐证）
-        state.transition_task_status(self.repo, TID, "executing")
-        state.transition_task_status(self.repo, TID, "waiting_quota")
-        result = task_manager.resume_from_quota(self.repo, TID,
-                                                status="AVAILABLE")
-        self.assertIs(result["resumed"], True)
-        self.assertEqual(state.load_state(self.repo, TID)["status"],
-                         "executing")
-
-    def test_register_preserves_unknown_keys_on_rewrite(self):
-        # 非幂等重写路径：既有块未知键 merge 保留（不整块替换）
-        st = state.load_state(self.repo, TID)
-        st["quota_subscription"] = {
-            "enabled": False, "registered_epoch_id": None,
-            "last_activation_epoch_id": None,
-            "minimum_state": "AVAILABLE", "continuation_mode": "manual",
-            "future_key": {"nested": 1},  # 未来版本的合法键
-        }
-        state.save_state(self.repo, st)
-        task_manager.register_quota_subscription(
-            self.repo, TID, epoch_id=EPOCH_A, continuation_mode="manual")
-        block = state.load_state(self.repo, TID)["quota_subscription"]
-        self.assertEqual(block["future_key"], {"nested": 1})
-        self.assertIs(block["enabled"], True)
-        self.assertEqual(block["registered_epoch_id"], EPOCH_A)
-
-    def test_register_idempotent_comparison_still_five_keys(self):
-        # 幂等比较只比五规范键：未知键在块内 + 同参重注册 → 零写幂等
-        st = state.load_state(self.repo, TID)
-        st["quota_subscription"] = {
-            "enabled": True, "registered_epoch_id": EPOCH_A,
-            "last_activation_epoch_id": None,
-            "minimum_state": "AVAILABLE", "continuation_mode": "manual",
-            "future_key": 1,
-        }
-        state.save_state(self.repo, st)
-        result = task_manager.register_quota_subscription(
-            self.repo, TID, epoch_id=EPOCH_A, continuation_mode="manual")
-        self.assertTrue(result["idempotent"])
-        events = [e for e in self.task_events()
-                  if e["event"] == "quota_subscription_registered"]
-        self.assertEqual(events, [])
 
 
-class JournalVocabularyAnchorTest(unittest.TestCase):
-    """journal 事件词汇锚定（read_control_plane_events docstring 的
-    措辞校验已随 v2.3.1 W4 测试收敛移除——文档措辞不进冻结面）。"""
+# —— v2.4 Phase 2（W6）：执行面退役锚定 ——
 
-    def test_scheduler_capability_observed_in_vocabulary(self):
-        # ⑦ 词汇锚定（M1a 已入表，C6 消费方沿用）
-        self.assertIn("scheduler_capability_observed",
-                      journal.RECOMMENDED_EVENTS)
+def _wb_arm(repo_root, task_id, *, automation_id, boundary_id, reset_at,
+            wake_at, next_wake_at, bridge_interval_minutes):
+    """arm 装置改指 wake_bridge 规范落点（v2.4 W6 起该记账编排已随
+    v2.3 执行面退役——对 v2.4 state 调用即 AttributeError/退化，供
+    仍可运行的参数闸用例之外的退役锚定参考）。"""
+    from runtime.continuity import wake_bridge as _wb
+    return _wb.arm_wake_bridge(
+        repo_root, task_id, automation_id=automation_id,
+        boundary_id=boundary_id, reset_at=reset_at, wake_at=wake_at,
+        next_wake_at=next_wake_at,
+        bridge_interval_minutes=bridge_interval_minutes)
+
+
+class RetiredRuntimeAnchorTest(TransportCase):
+    """activation_transport 求值面与 wake-reconcile 编排已随 v2.3 执行
+    面退役：调用即 RuntimeError（错误 JSON / 退出码语义不变）。"""
+
+    def test_status_face_retired_runtime_error(self):
+        code, out, _err = run_cli(["transport-status", self.repo, TID])
+        self.assertEqual(code, 1)
+        self.assertIn("已退役", json.loads(out.strip())["error"])
+
+    def test_wake_reconcile_retired_runtime_error(self):
+        code, out, _err = run_cli(
+            ["wake-reconcile", self.repo, TID, "deleted"])
+        self.assertEqual(code, 1)
+        self.assertIn("已退役", json.loads(out.strip())["error"])
+
+
+# —— ⑧ reviewer 留账吸收 ——
+
+class ResidualFixesTest(TransportCase):
+
+    def test_resume_subscription_gate_dead_param_removed(self):
+        # 死参数 provider_status 移除：签名收敛为 (repo_root, task_id, st)
+        params = list(inspect.signature(
+            _cr._resume_subscription_gate).parameters)
+        self.assertEqual(params, ["repo_root", "task_id", "st"])
 
 
 if __name__ == "__main__":

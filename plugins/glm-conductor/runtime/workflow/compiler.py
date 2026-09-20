@@ -45,7 +45,7 @@
 依赖：
     仅 Python 3 标准库（json）+ runtime.work_unit / runtime.dependency /
     runtime.ownership / runtime.workflow.persona（均为 Phase 1 新静态面；
-    禁止导入 legacy twins 与 dispatcher 家族）。
+    禁止导入任何 v2.3 执行面模块，已全部退役）。
 
 来源：
     docs/roadmap/V2_4_PHASE_1_NATIVE_SEMANTIC_CORE_SPEC.md §5（compiler.py）

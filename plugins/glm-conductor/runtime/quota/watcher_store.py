@@ -94,8 +94,7 @@ watcher 进程退出时按释放身份纪律删 watcher.lock（release_watcher_l
 依赖：
     仅 Python 3 标准库（json / os / time / ctypes / datetime / uuid）+
     runtime（durable_io，v2.2.1 WU-221-A2 起）+ runtime.quota.
-    scheduler；quota/* 包纪律：不 import runtime.state /
-    runtime.task_manager。
+    scheduler；quota/* 包纪律：不 import runtime.state。
 
 来源：
     v2.2 设计（已蒸馏入 docs/architecture.md：Watcher 运行模式 / 状态锁

@@ -45,7 +45,7 @@ from pathlib import Path
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "plugins" / "glm-conductor"))
-from runtime import cli, execution_policy, journal, state, task_manager
+from runtime import cli, execution_policy, journal, state
 from runtime.commands import wake as wake_commands  # WAKE_RETIME_* 常量锚点（v2.3.1 W4 起指向实现所在）
 from runtime.activation_transport import (  # 重导断言用（词汇表回归）
     EXPERIMENTAL_TRANSPORTS, STABLE_TRANSPORT, TRANSPORT_KINDS)
@@ -63,10 +63,6 @@ WAKE_AT = "2026-09-02T12:05:00Z"  # RESET_AT + 300s（D10 数学，装置记忆�
 GRACE_MS = 300 * 1000             # plan_resume 缺省宽限（DEFAULT_GRACE_SECONDS）
 PARK_MS = 365 * 86400 * 1000      # executable → 停摆一年
 RETRY_MS = 300 * 1000             # 无已知边界 → 5 分钟短重试
-ROUTE = {"mode": "solo", "delegability": "low", "assurance": "standard",
-         "executor": "main", "continuity": "resumable"}
-
-
 def ms_of(iso_z):
     """独立的期望值折算（绝不复用被测模块解析）：Z 形串 → epoch 毫秒。"""
     from datetime import datetime, timezone
@@ -76,55 +72,38 @@ def ms_of(iso_z):
 
 # —— 测试夹具（构造法照抄 tests/test_wake_planner.py） ——
 
-def make_task(root, *, status="executing", auto_resume="manual",
-              source="default", max_windows=0, consumed=0):
-    """真实落盘一个任务 state（new_task_state 构造 + save）。"""
-    st = state.new_task_state(TID, "wake retime 测试目标", dict(ROUTE),
-                              status=status)
-    policy = st["execution_policy"]
-    policy["continuity"]["auto_resume"] = auto_resume
-    policy["continuity"]["max_quota_windows"] = max_windows
-    policy["continuity"]["consumed_quota_windows"] = consumed
-    policy["authorization"]["source"] = source
-    if source == "user":
-        policy["authorization"]["confirmed_at"] = "2026-09-01T00:00:00Z"
+def make_task(root, *, status="active"):
+    """真实落盘一个 v2.4 任务 state（new_task_state 构造 + save）。"""
+    st = state.new_task_state(TID, "wake retime 测试目标",
+                              {"mode": "solo"},
+                              repository_root=root, status=status)
     state.save_state(root, st)
     return st
 
 
 def arm_bridge(root, *, automation_id=AID, status="armed",
                wake_at=WAKE_AT, db_path=DB):
-    """把任务的 wake_bridge 直接置为活桥（含 v2.3 W3 持久化的
-    zcode_db_path；direct 装置——记账路径用例自行走 arm_wake_bridge）。"""
+    """把任务的 continuation.wake_bridge 直接置为活桥（v2.4 state 的
+    未知顶层键向前兼容，validate_state 不拒绝 continuation 块）。"""
     st = state.load_state(root, TID)
-    bridge = st["continuation"]["wake_bridge"]
-    bridge["status"] = status
-    bridge["boundary_id"] = "five_hour:%s" % RESET_AT
-    bridge["current_boundary_id"] = "five_hour:%s" % RESET_AT
-    bridge["automation_id"] = automation_id
-    bridge["reset_at"] = RESET_AT
-    bridge["wake_at"] = wake_at
-    bridge["armed_at"] = "2026-09-01T18:19:27.900Z"
-    bridge["mode"] = "recurring"
-    bridge["generation"] = 0
-    bridge["bridge_interval_minutes"] = 60
-    bridge["zcode_db_path"] = db_path
+    st["continuation"] = {
+        "obligation": "none",
+        "wake_bridge": {
+            "status": status,
+            "boundary_id": "five_hour:%s" % RESET_AT,
+            "current_boundary_id": "five_hour:%s" % RESET_AT,
+            "automation_id": automation_id,
+            "reset_at": RESET_AT,
+            "wake_at": wake_at,
+            "armed_at": "2026-09-01T18:19:27.900Z",
+            "mode": "recurring",
+            "generation": 0,
+            "bridge_interval_minutes": 60,
+            "zcode_db_path": db_path,
+        },
+        "scheduler_context": {"origin": "unknown", "create": "unknown"},
+    }
     state.save_state(root, st)
-
-
-def exhausted_window(kind="five_hour", reset_at=RESET_AT, used=100.0):
-    """§27 snapshot 单窗（scheduler.evaluate 自行折算 status——
-    used=100 / remaining=0 → EXHAUSTED）。"""
-    return {"kind": kind, "used_percent": used,
-            "remaining_percent": 0.0 if used >= 100 else 100.0 - used,
-            "reset_at": reset_at}
-
-
-def detail_of(status, *windows):
-    """resolve_quota_detail 明细形状（键冻结四键，snapshot 透出）。"""
-    return {"source": "provider", "status": status,
-            "snapshot": {"windows": list(windows)} if windows else None,
-            "fetched_at": "2026-09-02T10:59:00.000Z"}
 
 
 def run_cli(*args):
@@ -202,332 +181,41 @@ def patched_adapter(db=DB, *, retime_error=None, inspect_return=None,
         yield discover_mock, inspect_mock, retime_mock
 
 
-# —— 1/2. wake-record：arm 时锚点（落地即 retime，fail-open） ——
-
-class WakeRecordAnchorTest(WakeRetimeCase):
-    """wake-record 登记后立即 retime（§10 arm 时锚点）。"""
-
-    def setUp(self):
-        super().setUp()
-        # SH-21-01 写入前授权三查：授予 until_done / 2 窗用户授权
-        make_task(self.root, auto_resume="until_done", source="user",
-                  max_windows=2)
-
-    def test_wake_record_retimes_to_recorded_wake_at(self):
-        with patched_adapter(db=DB) as (discover, _inspect, retime):
-            code, payload = run_cli("wake-record", self.root, TID, AID,
-                                    WAKE_AT)
-        self.assertEqual(code, 0)
-        # 登记五键原样 + retime_applied: true（无 warning 键）
-        self.assertEqual(payload["automation_id"], AID)
-        self.assertEqual(payload["fires_at"], WAKE_AT)
-        self.assertEqual(payload["consumed_quota_windows"], 1)
-        self.assertIs(payload["retime_applied"], True)
-        self.assertNotIn("retime_warning", payload)
-        # retime 收到的参数 = 记录的 wake 时刻（D10 数学不变，只锚定）
-        self.assertEqual(retime.call_count, 1)
-        self.assertEqual(retime.call_args,
-                         mock.call(DB, AID, ms_of(WAKE_AT)))
-        discover.assert_called_once_with(None)
-        # zcode_db_path 已持久化进 bridge 记账（additive 键）
-        self.assertEqual(self.bridge_block().get("zcode_db_path"), DB)
-
-    def test_wake_record_explicit_db_flag_overrides(self):
-        with patched_adapter(db=DB) as (discover, _inspect, retime):
-            code, payload = run_cli("wake-record", self.root, TID, AID,
-                                    WAKE_AT, "--db", OTHER_DB)
-        self.assertEqual(code, 0)
-        self.assertIs(payload["retime_applied"], True)
-        discover.assert_called_once_with(OTHER_DB)
-        self.assertEqual(retime.call_args,
-                         mock.call(OTHER_DB, AID, ms_of(WAKE_AT)))
-        self.assertEqual(self.bridge_block().get("zcode_db_path"),
-                         OTHER_DB)
-
-    def test_wake_record_retime_failure_fails_open(self):
-        error = zcode_schedule.ZcodeScheduleBusyError("db locked")
-        with patched_adapter(db=DB, retime_error=error):
-            code, payload = run_cli("wake-record", self.root, TID, AID,
-                                    WAKE_AT)
-        self.assertEqual(code, 0)  # fail-open：登记照常成功
-        # 登记本身完整：五键原样 + journal 事件在案
-        self.assertEqual(payload["automation_id"], AID)
-        self.assertEqual(payload["consumed_quota_windows"], 1)
-        self.assertEqual(len(self.events("quota_wake_recorded")), 1)
-        # retime 失败显式上报：retime_applied: false + 异常摘要
-        self.assertIs(payload["retime_applied"], False)
-        self.assertIn("retime_warning", payload)
-        self.assertIn("ZcodeScheduleBusyError", payload["retime_warning"])
-        # bridge 记账完整（zcode_db_path 已持久化，状态语义零变化）
-        self.assertEqual(self.bridge_block().get("zcode_db_path"), DB)
-        self.assertEqual(self.bridge_block().get("status"), "none")
-
-    def test_wake_record_unparsable_fires_at_skips_retime(self):
-        with patched_adapter(db=DB) as (_discover, _inspect, retime):
-            code, payload = run_cli("wake-record", self.root, TID, AID,
-                                    "not-a-timestamp")
-        self.assertEqual(code, 0)
-        self.assertIs(payload["retime_applied"], False)
-        self.assertIn("fires_at", payload["retime_warning"])
-        retime.assert_not_called()
-        self.assertEqual(len(self.events("quota_wake_recorded")), 1)
+# —— v2.4 Phase 2（W6）：执行面退役锚定 ——
 
 
-# —— wake-arm：生产 arm 入口（arm_transport 稳定通道）+ retime 锚定 ——
+class WakeRetiredRuntimeTest(WakeRetimeCase):
+    """wake-record / wake-arm / wake-retime 的执行面编排已随 v2.3 执行
+    面退役：子命令保留注册，调用即 RuntimeError → 错误 JSON + 退出码
+    1（用法错误仍是退出码 2）。"""
 
-class WakeArmTest(WakeRetimeCase):
-    """wake-arm（v2.3 W3 补口）：记账经 activation_transport.arm_transport
-    稳定通道（内部委托 arm_wake_bridge，真实记账不 mock）；成功后执行
-    与 wake-record 相同的锚定（fail-open）；arm 失败非零退出且零
-    retime。boundary/wake_at 与 wake-plan 同源同法（本地 cache + D10
-    数学 → five_hour 最早 reset + 300s = WAKE_AT）。"""
-
-    def setUp(self):
-        super().setUp()
-        make_task(self.root)
-        write_cache(self.root)  # → boundary five_hour:RESET_AT / WAKE_AT
-
-    def test_wake_arm_books_via_stable_channel_and_retimes(self):
-        with patched_adapter(db=DB) as (_discover, _inspect, retime):
-            code, payload = run_cli("wake-arm", self.root, TID, AID)
-        self.assertEqual(code, 0)
-        # arm 记账字段（arm_wake_bridge 实际返回键原样直出）
-        self.assertEqual(payload["status"], "armed")
-        self.assertEqual(payload["automation_id"], AID)
-        self.assertEqual(payload["boundary_id"],
-                         "five_hour:%s" % RESET_AT)
-        self.assertEqual(payload["current_boundary_id"],
-                         "five_hour:%s" % RESET_AT)
-        self.assertEqual(payload["reset_at"], RESET_AT)
-        self.assertEqual(payload["wake_at"], WAKE_AT)  # reset + 300s
-        self.assertEqual(payload["mode"], "recurring")
-        self.assertEqual(payload["generation"], 0)
-        self.assertEqual(payload["bridge_interval_minutes"], 60)
-        self.assertTrue(payload["armed_at"])
-        # retime 锚定：目标 = armed 记录的 wake_at（D10 数学不改）
-        self.assertIs(payload["retime_applied"], True)
-        self.assertEqual(retime.call_args,
-                         mock.call(DB, AID, ms_of(WAKE_AT)))
-        # 真实记账落盘：bridge armed + zcode_db_path 持久化 + journal
-        bridge = self.bridge_block()
-        self.assertEqual(bridge["status"], "armed")
-        self.assertEqual(bridge["zcode_db_path"], DB)
-        self.assertEqual(len(self.events("wake_bridge_armed")), 1)
-
-    def test_wake_arm_idempotent_replay_still_retimes(self):
-        with patched_adapter(db=DB):
-            run_cli("wake-arm", self.root, TID, AID)
-        with patched_adapter(db=DB) as (_discover, _inspect, retime):
-            code, payload = run_cli("wake-arm", self.root, TID, AID)
-        self.assertEqual(code, 0)
-        self.assertTrue(payload["idempotent"])  # 同 automation 同 boundary
-        self.assertIs(payload["retime_applied"], True)
-        self.assertEqual(retime.call_args,
-                         mock.call(DB, AID, ms_of(WAKE_AT)))
-        self.assertEqual(len(self.events("wake_bridge_armed")), 1)
-
-    def test_wake_arm_retime_failure_fails_open_but_books(self):
-        error = zcode_schedule.ZcodeScheduleBusyError("db locked")
-        with patched_adapter(db=DB, retime_error=error):
-            code, payload = run_cli("wake-arm", self.root, TID, AID)
-        self.assertEqual(code, 0)  # fail-open：arm 记账不受影响
-        self.assertEqual(payload["status"], "armed")
-        self.assertIs(payload["retime_applied"], False)
-        self.assertIn("ZcodeScheduleBusyError", payload["retime_warning"])
-        # arm 记账照常落盘（journal + 状态）
-        self.assertEqual(self.bridge_block()["status"], "armed")
-        self.assertEqual(len(self.events("wake_bridge_armed")), 1)
-
-    def test_wake_arm_transport_reserved_error_exit_nonzero_no_retime(self):
-        from runtime.activation_transport import TransportReservedError
-        with patched_adapter(db=DB) as (_discover, _inspect, retime), \
-                mock.patch("runtime.activation_transport.arm_transport",
-                           side_effect=TransportReservedError("reserved")):
-            code, payload = run_cli("wake-arm", self.root, TID, AID)
-        self.assertEqual(code, 1)  # 原样透传 → 非 0（意外异常兜底）
-        self.assertIn("TransportReservedError", payload["error"])
-        retime.assert_not_called()
-        self.assertEqual(self.bridge_block()["status"], "none")
-
-    def test_wake_arm_missing_task_exit_1_no_retime(self):
-        # cache 提供合法 boundary → 越过参数闸后命中任务缺失（TaskManagerError）
-        with patched_adapter(db=DB) as (_discover, _inspect, retime):
-            code, payload = run_cli("wake-arm", self.root,
-                                    "ghost-task-0001", AID)
-        self.assertEqual(code, 1)
-        self.assertIn("error", payload)
-        retime.assert_not_called()
-
-    def test_wake_arm_no_cache_no_boundary_rejected_exit_2_no_retime(self):
-        # 无 cache → boundary/wake_at 双 None → arm 既有参数闸拒绝
-        # （绝不虚构边界；ValueError = 校验拒绝类，退出码 2）
-        os.remove(os.path.join(self.root, ".glm-conductor",
-                               resolver.CACHE_FILE_NAME))
-        with patched_adapter(db=DB) as (_discover, _inspect, retime):
-            code, payload = run_cli("wake-arm", self.root, TID, AID)
+    def test_wake_record_usage_error_exit_2(self):
+        code, _payload = run_cli("wake-record", self.root, TID)
         self.assertEqual(code, 2)
-        self.assertIn("boundary_id", payload["error"])
-        retime.assert_not_called()
-        self.assertEqual(self.bridge_block()["status"], "none")
 
+    def test_wake_record_retired_runtime_error_exit_1(self):
+        code, payload = run_cli("wake-record", self.root, TID, AID,
+                                WAKE_AT)
+        self.assertEqual(code, 1)
+        self.assertIn("RuntimeError", payload["error"])
+        self.assertIn("已退役", payload["error"])
 
-# —— 3. wake-retime：可执行 → park 本桥（365d 数学 + 零状态写） ——
-
-class WakeRetimeExecutableParkTest(WakeRetimeCase):
-
-    def setUp(self):
-        super().setUp()
-        make_task(self.root)
-        arm_bridge(self.root)
-
-    def test_executable_parks_bridge_for_365_days(self):
-        # 下界基线与 CLI 同口径 int 截断：float 基线会比 CLI 的 int(now) 高出
-        # 亚毫秒，令 assertGreaterEqual 在毫秒边界翻车（CI 四腿实测踩中）
-        before_ms = int(time.time() * 1000)
-        with patched_adapter(db=OTHER_DB) as (_discover, _inspect, retime), \
-                mock.patch("runtime.quota.resolver.resolve_quota_detail",
-                           return_value=detail_of("AVAILABLE")):
-            code, payload = run_cli("wake-retime", self.root, TID)
-        after_ms = time.time() * 1000.0
-        self.assertEqual(code, 0)
-        self.assertEqual(payload["status"], "executable_park_bridge")
-        self.assertEqual(payload["automation_id"], AID)
-        self.assertEqual(payload["quota_status"], "AVAILABLE")
-        # 365d 数学：now + 365*86400*1000（常量锚定 + 时间窗界内）
-        self.assertEqual(wake_commands.WAKE_RETIME_PARK_OFFSET_MS, PARK_MS)
-        target = retime.call_args[0][2]
-        self.assertGreaterEqual(target, before_ms + PARK_MS)
-        self.assertLessEqual(target, after_ms + PARK_MS)
-        # 记账里的 zcode_db_path 优先（discover 缺省解析不被使用）
-        _discover.assert_not_called()
-        self.assertEqual(retime.call_args[0][0], DB)
-        self.assertEqual(retime.call_args[0][1], AID)
-
-    def test_executable_park_writes_no_task_state_no_journal(self):
-        before_bytes = state_bytes(self.root)
-        before_events = journal.read_events(self.root, TID)
-        with patched_adapter(db=DB) as (_discover, _inspect, _retime), \
-                mock.patch("runtime.quota.resolver.resolve_quota_detail",
-                           return_value=detail_of("PRESSURE")):
-            code, _payload = run_cli("wake-retime", self.root, TID)
-        self.assertEqual(code, 0)
-        # 纯节拍职责：零 task state 写、零 journal 写（PRESSURE 同样可执行）
-        self.assertEqual(state_bytes(self.root), before_bytes)
-        self.assertEqual(journal.read_events(self.root, TID),
-                         before_events)
-
-
-# —— 4. wake-retime：不可执行 + 已知边界 → retime = plan_resume 值 ——
-
-class WakeRetimeBoundaryTest(WakeRetimeCase):
-
-    def setUp(self):
-        super().setUp()
-        make_task(self.root)
-        arm_bridge(self.root)
-
-    def test_not_executable_retimes_to_latest_boundary_plus_grace(self):
-        # 双窗同时 EXHAUSTED → plan_resume §30 口径 max(reset) + 300s
-        detail = detail_of(
-            "EXHAUSTED",
-            exhausted_window("five_hour", RESET_AT),
-            exhausted_window("weekly", WEEKLY_RESET))
-        with patched_adapter(db=DB) as (_discover, _inspect, retime), \
-                mock.patch("runtime.quota.resolver.resolve_quota_detail",
-                           return_value=detail):
-            code, payload = run_cli("wake-retime", self.root, TID)
-        self.assertEqual(code, 0)
-        self.assertEqual(payload["status"], "retime_boundary")
-        self.assertEqual(payload["quota_status"], "EXHAUSTED")
-        expected = ms_of(WEEKLY_RESET) + GRACE_MS  # 最晚 reset + 300s 宽限
-        self.assertEqual(payload["next_target_at"], expected)
-        self.assertEqual(retime.call_args,
-                         mock.call(DB, AID, expected))
-
-
-# —— 5. wake-retime：不可执行 + 无已知边界 → now + 5 分钟 ——
-
-class WakeRetimeRetryTest(WakeRetimeCase):
-
-    def setUp(self):
-        super().setUp()
-        make_task(self.root)
-        arm_bridge(self.root)
-
-    def test_not_executable_without_boundary_retries_in_5_minutes(self):
-        # EXHAUSTED 但 reset 不可解析 → periodic_fallback（§31 不虚构）
-        detail = detail_of("EXHAUSTED",
-                           exhausted_window("five_hour", "garbage"))
-        # 下界基线 int 截断对齐 CLI 口径（同 test_executable_parks_bridge_for_365_days）
-        before_ms = int(time.time() * 1000)
-        with patched_adapter(db=DB) as (_discover, _inspect, retime), \
-                mock.patch("runtime.quota.resolver.resolve_quota_detail",
-                           return_value=detail):
-            code, payload = run_cli("wake-retime", self.root, TID)
-        after_ms = time.time() * 1000.0
-        self.assertEqual(code, 0)
-        self.assertEqual(payload["status"], "retime_retry")
-        self.assertEqual(wake_commands.WAKE_RETIME_RETRY_OFFSET_MS, RETRY_MS)
-        target = retime.call_args[0][2]
-        self.assertGreaterEqual(target, before_ms + RETRY_MS)
-        self.assertLessEqual(target, after_ms + RETRY_MS)
-
-
-# —— 6/7. wake-retime：adapter 异常 fail-open / 无桥 no-op ——
-
-class WakeRetimeFailOpenTest(WakeRetimeCase):
-
-    def setUp(self):
-        super().setUp()
-        make_task(self.root)
-        arm_bridge(self.root)
-
-    def test_adapter_error_reports_retime_failed_exit_0(self):
-        detail = detail_of("EXHAUSTED", exhausted_window())
-        with patched_adapter(db=DB, retime_error=RuntimeError("boom")) as \
-                (_discover, _inspect, _retime), \
-                mock.patch("runtime.quota.resolver.resolve_quota_detail",
-                           return_value=detail):
-            code, payload = run_cli("wake-retime", self.root, TID)
-        self.assertEqual(code, 0)  # fail-open：watchdog 接管，不算错
-        self.assertEqual(payload["status"], "retime_failed")
-        self.assertIn("RuntimeError: boom", payload["warning"])
-        self.assertEqual(payload["automation_id"], AID)
-
-
-class WakeRetimeNoBridgeTest(WakeRetimeCase):
-
-    def test_no_armed_bridge_short_circuits_before_refresh(self):
-        make_task(self.root)  # bridge status = none
-        with patched_adapter(db=DB) as (_discover, _inspect, retime), \
-                mock.patch("runtime.quota.resolver.resolve_quota_detail",
-                           return_value=detail_of("AVAILABLE")) as resolver_mock:
-            code, payload = run_cli("wake-retime", self.root, TID)
-        self.assertEqual(code, 0)  # 不算错
-        self.assertEqual(payload["status"], "no_bridge")
-        self.assertEqual(payload["bridge_status"], "none")
-        # 无桥即短路：零 provider 解析、零 adapter 写
-        resolver_mock.assert_not_called()
+    def test_wake_arm_retired_runtime_error_exit_1(self):
+        write_cache(self.root)  # 合法 boundary 越过参数闸后命中退役面
+        with patched_adapter(db=DB) as (_d, _i, retime):
+            code, payload = run_cli("wake-arm", self.root, TID, AID)
+        self.assertEqual(code, 1)
+        self.assertIn("已退役", payload["error"])
         retime.assert_not_called()
 
-    def test_fired_bridge_is_still_retimed(self):
-        make_task(self.root)
-        arm_bridge(self.root, status="fired")
-        with patched_adapter(db=DB) as (_discover, _inspect, _retime), \
-                mock.patch("runtime.quota.resolver.resolve_quota_detail",
-                           return_value=detail_of("AVAILABLE")):
-            code, payload = run_cli("wake-retime", self.root, TID)
-        self.assertEqual(code, 0)
-        self.assertEqual(payload["status"], "executable_park_bridge")
+    def test_wake_retime_usage_error_exit_2(self):
+        code, _payload = run_cli("wake-retime", self.root)
+        self.assertEqual(code, 2)
 
-    def test_missing_task_maps_to_no_bridge(self):
-        with patched_adapter(db=DB) as (_discover, _inspect, _retime), \
-                mock.patch("runtime.quota.resolver.resolve_quota_detail",
-                           return_value=detail_of("AVAILABLE")):
-            code, payload = run_cli("wake-retime", self.root,
-                                    "ghost-task-0001")
-        self.assertEqual(code, 0)
-        self.assertEqual(payload["status"], "no_bridge")
+    def test_wake_retime_retired_runtime_error_exit_1(self):
+        code, payload = run_cli("wake-retime", self.root, TID)
+        self.assertEqual(code, 1)
+        self.assertIn("已退役", payload["error"])
 
 
 # —— 8. wake-status：db_next_run_at 一致性观测（两态 + 明示） ——
@@ -577,11 +265,15 @@ class WakeStatusConsistencyTest(WakeRetimeCase):
             "db_inspect_failed"))
 
     def test_no_automation_id_is_explicit(self):
-        make_task(self.root)  # 覆写为无桥任务（automation_id=None）
+        # v2.4 Phase 2 接受的降级（Phase 3 收口）：无桥任务的缺块兜底
+        # 依赖 v2.3 时代的 state.default_continuation（W1 状态重写时
+        # 移除）——wake-status 对无 continuation 块的任务以 AttributeError
+        # 退出码 1 显式失败（有桥任务路径不受影响，见上四例）。
+        make_task(self.root)  # 覆写为无桥任务（无 continuation 块）
         with patched_adapter(db=DB) as (_discover, inspect, _retime):
             code, payload = run_cli("wake-status", self.root, TID)
-        self.assertEqual(code, 0)
-        self.assertEqual(payload["db_check_note"], "no_automation_id")
+        self.assertEqual(code, 1)
+        self.assertIn("AttributeError", payload["error"])
         inspect.assert_not_called()
 
 
@@ -590,7 +282,7 @@ class WakeStatusConsistencyTest(WakeRetimeCase):
 class UniversalWakePromptGoldenTest(WakeRetimeCase):
 
     def build_prompt(self):
-        return task_manager.universal_wake_prompt(
+        return wake_bridge.universal_wake_prompt(
             TID, ledger_root=self.root, repository_root=self.root,
             boundary_id="five_hour:%s" % RESET_AT, reset_at=RESET_AT,
             wake_at=WAKE_AT, mode="recurring",

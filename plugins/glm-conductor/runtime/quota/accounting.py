@@ -5,20 +5,19 @@
 职责：
     §15.1 resume-time 窗口消费记账（record_quota_boundary_consumed）与
     §22.6 存量窗口记账保守迁移（migrate_quota_window_accounting）的规范
-    定义落点。v2.2.1 WU-221-C1 自 runtime.task_manager 原文抽取（行为
+    定义落点。v2.2.1 WU-221-C1 自 v2.3 执行面事务层原文抽取（行为
     保持：同 journal 事件形状与写序、同幂等语义、同错误口径，函数体
-    逐字未改，仅 import 适配）；本模块只承载记账域，不做派发事务编排。
+    逐字未改，仅 import 适配）；本模块只承载记账域，不做派发事务编排
+    （原编排体已随 v2.3 执行面退役，v2.4 Phase 2 W6；本模块为 Phase 3
+    前的规范落点）。
 
 依赖方向（冻结，防循环）：
-    task_manager → 本模块，绝不反向——本模块禁止 import
-    runtime.task_manager。故与抽取域共用、原属 task_manager 的以下名字
-    按「单一规范落点 + 上层 re-export」以本模块为家（上层经顶部
-    re-import 使既有 task_manager.<名字> 解析点全部解析到同一对象）：
-      - TaskManagerError：事务边界异常（抽取域须抛出；全仓既有 import
-        方继续经 runtime.task_manager 取到同一类对象）；
+    上层（cli / hooks / continuity 包）→ 本模块，绝不反向。与抽取域
+    共用、原属执行面事务层的以下名字按「单一规范落点」以本模块为家：
+      - TaskManagerError：事务边界异常（抽取域须抛出）；
       - _utc_now_iso / _require_state / _continuity_view /
-        _current_provider_identity_hash：纯容错读助手（零 task_manager
-        内部依赖，仅依赖 runtime.state / runtime.execution_policy /
+        _current_provider_identity_hash：纯容错读助手（零执行面内部
+        依赖，仅依赖 runtime.state / runtime.execution_policy /
         runtime.quota.identity）。
 
     仅标准库依赖（datetime）；其余为 runtime 一方模块（journal /
@@ -32,15 +31,15 @@ from runtime.execution_policy import consumed_quota_windows
 from runtime.execution_policy import default_execution_policy
 # v2.2.1 WU-221-C2（行为保持抽取）：_utc_now_iso 的规范定义已移至
 # runtime.quota.time_utils（毫秒精度 Z 形式，语义稳定的时间格式化原语）；
-# 本行 re-import 保持既有解析点（task_manager / continuity.wake_bridge /
+# 本行 re-import 保持既有解析点（continuity.wake_bridge /
 # continuity.resume / continuity.subscription 的
 # `from runtime.quota.accounting import _utc_now_iso` 等）零变化。
 from runtime.quota.time_utils import _utc_now_iso
 
 
 class TaskManagerError(Exception):
-    """task_manager 事务边界违背（单元缺失/状态不符/租约丢失/决策未批准
-    /RB-1 完成证据缺失或不可判定）。"""
+    """quota 连续性事务边界违背（单元缺失/状态不符/租约丢失/决策未批准
+    /RB-1 完成证据缺失或不可判定；名字沿用抽取域历史口径）。"""
 
 
 def _require_state(repo_root, task_id, api) -> dict:
@@ -118,8 +117,8 @@ def record_quota_boundary_consumed(repo_root, task_id, *, epoch_id,
     §15.1 消费事务点冻结）。
 
     消费点唯一合法位置 = §15.1 冻结的 Resume Controller resume commit
-    point：新 executable epoch 已确认、authorization / window budget /
-    reconcile 均通过、Resume Controller 成功接受该 epoch 并准备把任务
+    point：新 executable epoch 已确认、授权 / 窗口预算 /
+    恢复闭合对账均通过、Resume Controller 成功接受该 epoch 并准备把任务
     从 waiting_quota 恢复为执行态的那个 commit point。本 API 只提供
     记账，绝不接线 resume_from_quota（接线与调用时序归 Resume
     Controller 工作单元）；§22.1 不消费清单（bridge fire / create /
@@ -144,7 +143,7 @@ def record_quota_boundary_consumed(repo_root, task_id, *, epoch_id,
       本次目标值）→ save_state 投影 → append committed
       （quota_boundary_consumed）——epoch 身份先于一切可变投影存在。
       committed 缺席而同 epoch pending 在案（= 上一进程已过授权、事务
-      中断在 pending 之后）→ 恢复闭合（reconcile），且此分支必须先于
+      中断在 pending 之后）→ 恢复闭合，且此分支必须先于
       授权三查：pending 是授权已通过的持久证据，恢复闭合不重查预算
       （否则 state 已投影 + 预算恰好耗尽时该事务永远无法闭合）——
       state.consumed == target_consumed → 投影已落，只补 committed 事件
@@ -272,7 +271,7 @@ def record_quota_boundary_consumed(repo_root, task_id, *, epoch_id,
             "resume_started_at": recorded_started_at,
             "idempotent": True,
         }
-    # RH-03 恢复闭合（reconcile，先于授权三查）：committed 缺席而同
+    # RH-03 恢复闭合（先于授权三查）：committed 缺席而同
     # epoch pending 在案 → 上一进程已过授权、事务中断在 pending 之后
     # （write-ahead 的持久证据）——按 pending 冻结的 target_consumed 与
     # state 投影对账，不重查预算、绝不二次 +1。pending 证据自身矛盾

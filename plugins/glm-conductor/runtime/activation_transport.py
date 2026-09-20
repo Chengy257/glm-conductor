@@ -8,10 +8,10 @@ wu-22-C6 ①）。
     receives a new turn」——产生 Session execution opportunity 的职责单独
     抽象为 Activation Transport。本模块是该抽象的 v1 正式接口面：
 
-      transport.arm(...)      → arm_transport（stable 委托
-                                task_manager.arm_wake_bridge，零改写；
-                                实验 kind 一律 TransportReservedError
-                                绝不落 arm——预留即预留，不半实现）
+      transport.arm(...)      → arm_transport（stable 委托执行面 arm
+                                编排（已随 v2.3 执行面退役）；实验 kind
+                                一律 TransportReservedError 绝不落
+                                arm——预留即预留，不半实现）
       transport.status(...)   → activation_transport_status（冻结返回键；
                                 **C8 Stop 门 activation transport armed
                                 检查的接口面**——本单元不改 stop_gate.py）
@@ -43,17 +43,20 @@ wu-22-C6 ①）。
 纪律（本模块的硬边界）：
     - 参数校验先于任何 I/O：transport 词汇闸、实验 kind 的
       TransportReservedError 都发生在任何读盘之前（缺任务 + 实验 kind →
-      TransportReservedError 而非 TaskManagerError）；
-    - §22.5：本模块绝不制造 armed——armed 只来自既有 arm_wake_bridge
-      显式路径（stable 委托）；观测面（scheduler 观测、对账）不在此；
-    - runtime 根模块可 import task_manager（与 quota 包不 import
-      state/task_manager 的纪律不冲突）；
+      TransportReservedError 而非执行面异常）；
+    - §22.5：本模块绝不制造 armed——armed 只来自显式 arm 记账路径
+      （stable 委托）；观测面（scheduler 观测、对账）不在此；
     - 零网络、零宿主 Cron* 调用。
 
+v2.4 Phase 2（W6，P2-F）退役面：stable 委托的执行面 arm 编排、
+    armed 判定的可复用桥状态词汇与任务存在闸原语随 v2.3 执行面删除
+    ——arm_transport 的 stable 路径与 activation_transport_status 的
+    求值调用即 RuntimeError（v2.3 执行面已退役，Phase 3 删除本模块）。
+
 依赖：
-    runtime.task_manager / runtime.execution_policy（延迟 import 面；
-    execution_policy 的可选顶层键 activation_transport 是 transport
-    身份的事实源，容错缺省 recurring_bridge）。
+    runtime.execution_policy（延迟 import 面；execution_policy 的
+    可选顶层键 activation_transport 是 transport 身份的事实源，容错
+    缺省 recurring_bridge）。
 
 来源：
     v2.2 设计（已蒸馏入 docs/architecture.md：Activation Transport 抽象
@@ -87,70 +90,22 @@ class TransportReservedError(RuntimeError):
 
 
 def _continuation_views(st):
-    """容错取 (wake_bridge 视图, scheduler_context 视图)（复用
-    task_manager 的容错读原语，legacy 缺块按默认块兜底）。"""
-    from runtime import task_manager
-    bridge = task_manager._bridge_view(st)
-    context = task_manager._scheduler_context_view(st)
-    return bridge, context
+    """容错取 (wake_bridge 视图, scheduler_context 视图)——原复用执行面
+    的容错读原语（已随 v2.3 执行面退役），调用即 RuntimeError。"""
+    raise RuntimeError(
+        "v2.3 执行面已退役（continuation 容错读原语随执行运行时删除），"
+        "Phase 3 删除本模块")
 
 
 def activation_transport_status(repo_root, task_id) -> dict:
     """transport.status：activation transport 事实面（冻结返回键）。
 
-    返回恰含 TRANSPORT_STATUS_KEYS 十二键：
-      - task_id：回显；
-      - transport：execution_policy 顶层可选键 activation_transport 的
-        容错读（缺 / 坏形状 → stable 默认 recurring_bridge，绝不抛）；
-      - stable：transport == STABLE_TRANSPORT（bool）；
-      - armed：bridge_status ∈ task_manager.REUSABLE_BRIDGE_STATUSES
-        （armed / fired——WB-04 幂等认可的「活桥」族）；§22.5 语义：
-        只认显式 arm 路径落下的记账，对账降级（cancelled / stale）
-        即 missing；
-      - bridge_status / next_wake_at / current_boundary_id /
-        automation_id / bridge_interval_minutes：continuation.wake_bridge
-        的容错视图键（legacy 缺块按默认块——status="none" 等）；
-      - scheduler_origin / scheduler_create：continuation.scheduler_
-        context 的 origin / create 容错视图（缺省 "unknown"）；
-      - reasons：中文原因列表（armed 且 stable 时为空）——未武装 /
-        实验 transport 的未满足项逐条点名，C8 / dogfood 面直接可读。
-
-    任务缺失 → task_manager.TaskManagerError。纯读：零写、零事件、
-    零宿主调用（本函数是 C8 Stop 门 armed 检查的接口面，只读事实）。
+    v2.4 Phase 2（W6）：求值依赖的任务存在闸原语与可复用桥状态词汇
+    随 v2.3 执行面退役——调用即 RuntimeError（Phase 3 删除本模块）。
     """
-    from runtime import execution_policy, task_manager
-    st = task_manager._require_state(repo_root, task_id,
-                                     "activation_transport_status")
-    transport = execution_policy.activation_transport(
-        st.get("execution_policy"))
-    bridge, context = _continuation_views(st)
-    bridge_status = bridge.get("status")
-    reasons = []
-    if bridge_status not in task_manager.REUSABLE_BRIDGE_STATUSES:
-        reasons.append(
-            "wake_bridge.status=%r 不在可复用桥状态（%s）——transport "
-            "未武装（re-arm 只走 arm_wake_bridge 显式路径，§22.5）"
-            % (bridge_status,
-               "/".join(task_manager.REUSABLE_BRIDGE_STATUSES)))
-    if transport != STABLE_TRANSPORT:
-        reasons.append(
-            "transport=%r 为实验预留传输（%s）——arm 一律 "
-            "TransportReservedError，v1 无可武装实现"
-            % (transport, "/".join(EXPERIMENTAL_TRANSPORTS)))
-    return {
-        "task_id": task_id,
-        "transport": transport,
-        "stable": transport == STABLE_TRANSPORT,
-        "armed": bridge_status in task_manager.REUSABLE_BRIDGE_STATUSES,
-        "bridge_status": bridge_status,
-        "next_wake_at": bridge.get("next_wake_at"),
-        "current_boundary_id": bridge.get("current_boundary_id"),
-        "automation_id": bridge.get("automation_id"),
-        "bridge_interval_minutes": bridge.get("bridge_interval_minutes"),
-        "scheduler_origin": context.get("origin"),
-        "scheduler_create": context.get("create"),
-        "reasons": reasons,
-    }
+    raise RuntimeError(
+        "v2.3 执行面已退役（armed 判定与任务闸原语随执行运行时删除），"
+        "Phase 3 删除本模块")
 
 
 def arm_transport(repo_root, task_id, *, transport, automation_id,
@@ -163,17 +118,11 @@ def arm_transport(repo_root, task_id, *, transport, automation_id,
          消息）——拼错的 kind 是调用方 bug，不是「预留」；
       2. 实验 kind 闸：∈ EXPERIMENTAL_TRANSPORTS → TransportReservedError
          （§C6：实验传输绝不落 arm——本闸先于任务存在性检查，缺任务 +
-         实验 kind → TransportReservedError 而非 TaskManagerError）；
-      3. stable（recurring_bridge）→ 零改写委托
-         task_manager.arm_wake_bridge（§17：M5 主路径保留——记账语义、
-         冲突语义、幂等语义、journal 事件全部由该 API 承担，本模块
-         不复制不包装）。其 ValueError / TaskManagerError 自然上抛。
-
-    其余参数（automation_id / boundary_id / reset_at / wake_at /
-    next_wake_at / bridge_interval_minutes / mode）原样透传，校验归
-    arm_wake_bridge（先于 I/O 的同款纪律）。
+         实验 kind → TransportReservedError 而非执行面异常）；
+      3. stable（recurring_bridge）→ 原为零改写委托执行面 arm 编排
+         （§17：M5 主路径保留）——该编排已随 v2.3 执行面退役（W6），
+         调用即 RuntimeError（Phase 3 删除本模块）。
     """
-    from runtime import task_manager
     if transport not in TRANSPORT_KINDS:
         raise ValueError(
             "arm_transport：transport %r 不在合法取值内（%s）"
@@ -185,8 +134,6 @@ def arm_transport(repo_root, task_id, *, transport, automation_id,
             "本闸恒拒，不半实现不静默降级）"
             % (transport, "/".join(EXPERIMENTAL_TRANSPORTS),
                STABLE_TRANSPORT))
-    return task_manager.arm_wake_bridge(
-        repo_root, task_id, automation_id=automation_id,
-        boundary_id=boundary_id, reset_at=reset_at, wake_at=wake_at,
-        next_wake_at=next_wake_at,
-        bridge_interval_minutes=bridge_interval_minutes, mode=mode)
+    raise RuntimeError(
+        "v2.3 执行面已退役（arm 记账编排随执行运行时删除），"
+        "Phase 3 删除本模块")

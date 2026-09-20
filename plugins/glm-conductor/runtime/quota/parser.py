@@ -34,8 +34,7 @@ status 纪律：
 
 依赖：
     仅 Python 3 标准库（datetime / math），零第三方依赖，
-    `python3 -S` 可运行。风格对齐 runtime/state.py /
-    runtime/fingerprint.py。
+    `python3 -S` 可运行。风格对齐 runtime/state.py。
 
 来源：
     v2.0 设计（已蒸馏入 docs/architecture.md：V2/V3 解析兼容 /

@@ -9,8 +9,8 @@
       2. 目录结构完整：skills/*/SKILL.md 存在；agents/ 存在时须全为 .md
          且非空；hooks/hooks.json 可解析且每个 process 钩子指向的脚本
          文件真实存在（${ZCODE_PLUGIN_ROOT} 展开）；
-      3. runtime 包在跑批 Python 下可真实 import（runtime.task_manager）；
-      4. 该模块至少一个纯函数行为符合冻结语义（_is_worker_cap）。
+      3. runtime 包在跑批 Python 下可真实 import（runtime.task）；
+      4. 该模块至少一个纯函数行为符合冻结语义（relevant_paths）。
     零网络、零模型调用、零状态写副作用；stdlib-only，Python 3.7 兼容。
 
 边界：
@@ -113,15 +113,15 @@ def smoke_structure():
 def smoke_runtime_import():
     sys.path.insert(0, str(PLUGIN_ROOT))
     try:
-        import runtime.task_manager as task_manager
+        import runtime.task as task
     except Exception as exc:  # 装载失败必须显式 FAIL，不允许静默
-        check(False, "runtime.task_manager 可 import (%s)" % exc)
+        check(False, "runtime.task 可 import (%s)" % exc)
         return
-    check(True, "runtime.task_manager 可 import")
-    check(task_manager._is_worker_cap(4) is True,
-          "task_manager._is_worker_cap(4) is True（纯函数装载后可用）")
-    check(task_manager._is_worker_cap(True) is False,
-          "task_manager._is_worker_cap(True) is False（bool 不充当槽位数）")
+    check(True, "runtime.task 可 import")
+    check(task.relevant_paths({}) == [],
+          "task.relevant_paths({}) == []（纯函数装载后可用：空形状容错）")
+    check(task.relevant_paths({"dag": "junk"}) == [],
+          "task.relevant_paths({'dag': 'junk'}) == []（形状异常容错）")
 
 
 def main():

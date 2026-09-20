@@ -496,8 +496,7 @@ class FixedTmpBanTest(unittest.TestCase):
     # 单写者固定 .tmp 保留（记录在案：docs/architecture.md §7.6 分类
     # 表），按相对 runtime 根的全 posix 路径匹配
     SINGLE_WRITER_ALLOWLIST = frozenset((
-        "state.py", "dispatch_wave.py", "lease.py",
-        "provenance.py", "resume_manifest.py",
+        "state.py",
     ))
     # durable_io.py：唯一临时名常量文件（全仓唯一），按文件名放行
     UNIQUE_TEMP_MODULE_BASENAME = "durable_io.py"

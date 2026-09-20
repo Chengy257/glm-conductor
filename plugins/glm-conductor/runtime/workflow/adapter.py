@@ -40,8 +40,8 @@
     超长名截断 + 摘要后缀保唯一。
 
 依赖：
-    仅 Python 3 标准库 + runtime.durable_io；不导入 legacy twins 与
-    dispatcher 家族；不启动任何 Workflow。
+    仅 Python 3 标准库 + runtime.durable_io；不导入任何 v2.3 执行面
+    模块（已全部退役）；不启动任何 Workflow。
 
 来源：
     docs/roadmap/V2_4_PHASE_1_NATIVE_SEMANTIC_CORE_SPEC.md §5（adapter.py）

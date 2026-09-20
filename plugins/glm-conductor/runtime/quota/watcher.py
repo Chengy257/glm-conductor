@@ -91,9 +91,8 @@ journal（task 面接线归 C5+）。
       §36-§38；不可逆指纹，用于 §6 单实例锁身份）；v2.2.1
       WU-221-B1 起派生落点 runtime/quota/identity.py（本模块
       re-export，语义零变化）；
-    - quota/* 包纪律：不 import runtime.state / runtime.task_manager；
-      executing 族词汇以本地冻结常量镜像（tests 与
-      task_manager.QUOTA_WAIT_TASK_STATUSES 对齐锚定）。
+    - quota/* 包纪律：不 import runtime.state / execution_policy；
+      executing 族词汇以本地冻结常量镜像（tests 锚定）。
 
 依赖：
     仅 Python 3 标准库 + runtime.quota.scheduler / observer / epoch /
@@ -129,8 +128,8 @@ from runtime.quota.watcher_store import WATCHER_MODES
 # 可观察但不 prime）
 ACTIVE_AUTO_RESUME_MODES = ("auto_once", "until_done")
 
-# §7 executing 族（与 task_manager.QUOTA_WAIT_TASK_STATUSES 同词汇；
-# quota 包纪律禁 import task_manager，镜像对齐由测试锚定）
+# §7 executing 族（v2.3 执行态族的本地冻结镜像；quota 包纪律禁
+# import 执行面，镜像对齐由测试锚定）
 EXECUTING_FAMILY_STATUSES = ("executing", "joining", "verifying",
                              "reviewing")
 

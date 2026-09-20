@@ -96,7 +96,7 @@ class GraphErrorsTest(unittest.TestCase):
         errors = dependency.graph_errors(graph)
         self.assertIn("nodes[0] 必须是 JSON 对象", errors)
         # id 非法的节点只报 id：节点无法定位，其 depends_on 不再展开
-        # （与 legacy_dependency 同语义）
+        # （沿用 v2.3 遗留实现同语义）
         self.assertIn("nodes[1].id 必须是非空字符串", errors)
         self.assertNotIn("nodes[1].depends_on[0] 必须是非空字符串", errors)
         self.assertIn("nodes[2].depends_on[0] 必须是非空字符串", errors)

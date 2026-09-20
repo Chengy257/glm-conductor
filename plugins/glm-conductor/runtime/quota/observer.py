@@ -38,7 +38,7 @@
 
 依赖：
     仅 Python 3.7 标准库 + runtime.quota.control / runtime.quota.scheduler；
-    quota/* 包纪律：不 import runtime.state / runtime.task_manager。
+    quota/* 包纪律：不 import runtime.state。
 
 来源：
     v2.2 设计（已蒸馏入 docs/architecture.md：Adaptive Quota Heartbeat /

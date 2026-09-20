@@ -32,10 +32,8 @@ sys.executable）/ §C3（复用 observer / resolver / epoch，不复制额度
        （只落哈希不落凭证 §37）
     6  CLI quota-watcher：status / stop / once / 用法错 / start 派生
        argv 用 sys.executable（mock Popen，不真实派生子进程）
-    7  EXECUTING_FAMILY_STATUSES 镜像锚定：与
-       task_manager.QUOTA_WAIT_TASK_STATUSES 逐值一致（quota 包禁
-       import task_manager 的词汇镜像，对齐由本测试锚定；测试侧跨包
-       import 读常量断言）
+    7  （v2.4 W6 移除：EXECUTING_FAMILY_STATUSES 的权威常量随执行面
+       退役，镜像锚定测试一并移除；本地冻结常量保留）
     8  watcher.lock 集成（v2.2.1 WU-221-A2）：run acquire 建锁 / 第二
        run 确定型冲突且锁不动 / graceful stop 释放身份删锁 + stopped
        终态 / max_ticks 退出释放 / heartbeat 刷新使锁保持新鲜（advisory）
@@ -653,22 +651,6 @@ class QuotaWatcherCliTest(RepoFixture):
         self.assertEqual(code, 0)
         record = watcher_store.read_watcher_state(self.repo)
         self.assertEqual(record["generation"], 2)  # 接管 +1
-
-
-# —— 7：词汇镜像锚定（quota 包禁 import task_manager，对齐由测试背书） ——
-
-class ExecutingFamilyMirrorAnchorTest(unittest.TestCase):
-    """watcher.EXECUTING_FAMILY_STATUSES 是
-    task_manager.QUOTA_WAIT_TASK_STATUSES 的本地冻结镜像（quota/*
-    包纪律禁 import runtime.task_manager，watcher.py 模块 docstring
-    「镜像对齐由测试锚定」的声称）——本测试即锚：两常量必须逐值
-    （含顺序与长度）一致，任一侧词汇漂移即刻红。测试侧跨包 import
-    读权威常量断言，运行时侧镜像常量不动。"""
-
-    def test_executing_family_matches_task_manager_quota_wait_statuses(self):
-        from runtime import task_manager
-        self.assertEqual(watcher.EXECUTING_FAMILY_STATUSES,
-                         task_manager.QUOTA_WAIT_TASK_STATUSES)
 
 
 # —— 8：watcher.lock 集成（v2.2.1 WU-221-A2：锁与观察状态分离） ——

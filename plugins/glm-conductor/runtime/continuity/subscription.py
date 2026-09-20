@@ -12,22 +12,19 @@
     _reconcile_activation_journal 崩溃窗口对账、_subscription_active
     订阅态谓词）＋ 三方共用的直接读者缓存身份闸
     _cache_identity_usable（v2.2.1 WU-221-B2 QuotaIdentity）。v2.2.1
-    WU-221-C1（行为保持抽取）自 runtime.task_manager 原文抽取（行为
+    WU-221-C1（行为保持抽取）自 v2.3 执行面事务层原文抽取（行为
     保持：同 journal 事件形状与写序、同幂等语义、同错误口径，函数体
-    逐字未改，仅 import 适配）。转态编排（handle_quota_exhausted）与
-    resume 事务编排（resume_from_quota / _resume_consumption）仍留在
-    runtime.task_manager——其内部调用须经 task_manager 模块名字空间
-    解析（测试 monkeypatch 面契约），本模块只承载订阅域本身。
+    逐字未改，仅 import 适配）。原事务编排（handle_quota_exhausted /
+    resume_from_quota / _resume_consumption）已随 v2.3 执行面退役
+    （v2.4 Phase 2 W6），本模块只承载订阅域本身（Phase 3 收口）。
 
 依赖方向（冻结，防循环）：
-    task_manager / continuity.resume → 本模块，绝不反向——本模块禁止
-    import runtime.task_manager（continuity.resume 单向 import 本模块，
-    故本模块亦不得 import continuity.resume）。与抽取域共用、原属
-    task_manager 的 TaskManagerError / _require_state / _continuity_view
-    / _current_provider_identity_hash 以 runtime.quota.accounting
-    （v2.2.1 WU-221-C1 规范落点）为家，经 import 复用同一对象（单一
-    规范落点，不复制）；上层经 re-import 使既有 task_manager.<名字>
-    解析点（cli / hooks / tests）全部解析到同一对象。
+    continuity.resume → 本模块，绝不反向（continuity.resume 单向
+    import 本模块，故本模块亦不得 import continuity.resume）。与抽取
+    域共用、原属执行面事务层的 TaskManagerError / _require_state /
+    _continuity_view / _current_provider_identity_hash 以
+    runtime.quota.accounting（v2.2.1 WU-221-C1 规范落点）为家，经
+    import 复用同一对象（单一规范落点，不复制）。
 
     仅标准库依赖；其余为 runtime 一方模块（journal / state /
     quota.accounting；quota.epoch / quota.resolver 保持函数内 import
@@ -415,7 +412,7 @@ def evaluate_subscription_eligibility(repo_root, task_id, *,
 
     纯函数纪律：只读 state.json，零转态、零写、零事件、零网络——
     派发 / 恢复的编排方在 resume 决策前调用，结果只供裁决。**不做
-    authorization / budget / reconcile**（§14 执行面流水线中授权 / 预算
+    授权 / 预算 / 对账判定**（§14 执行面流水线中授权 / 预算
     / 对账各归其位，接线归 C7），本函数只回答订阅本身的资格。
     （v2.2.1 WU-221-B2 注：current_provider_identity_hash 缺省 None 时
     经共享模块派生当前指纹——resolve_credential 是纯本地读取，零网络

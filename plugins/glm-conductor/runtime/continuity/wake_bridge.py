@@ -18,10 +18,8 @@
     动作归主会话）。
 
 依赖方向（冻结，防循环）：
-    task_manager → 本模块，绝不反向——本模块禁止 import
-    runtime.task_manager；上层经 re-import 使既有 task_manager.<名字>
-    解析点（activation_transport / cli / hooks / tests）全部解析到
-    同一对象。与抽取域共用、原属 task_manager 的 TaskManagerError /
+    上层（activation_transport / cli / hooks）→ 本模块，绝不反向。
+    与抽取域共用、原属 v2.3 执行面事务层的 TaskManagerError /
     _utc_now_iso / _require_state / _continuity_view 以
     runtime.quota.accounting（v2.2.1 WU-221-C1 规范落点）为家，经
     import 复用同一对象（单一规范落点，不复制）。
@@ -212,7 +210,7 @@ def universal_wake_prompt(task_id, *, ledger_root, repository_root=None,
         "7. 额度可执行 且 execution_policy.continuity.auto_resume ∈ "
         "{auto_once, until_done} 且 authorization.source=user？→ "
         "python3 plugins/glm-conductor/runtime/cli.py quota-resume . %s"
-        " → 对账 reconcile（running 中断单元四分：clean→ready / "
+        " → 中断对账（running 中断单元四分：clean→ready / "
         "result→verifying / progress→ready / manual_ruling→保持，勿盲目"
         "重派）→ 按依赖续派下一安全单元（不重放已完成工作）→ journal 记 "
         "wake_bridge_fired" % task_id,
@@ -222,7 +220,7 @@ def universal_wake_prompt(task_id, *, ledger_root, repository_root=None,
         "零提交；本地提交不擅自 push（除常设授权）",
         "",
         "恒久保护（Always preserve）：ownership / verification / "
-        "review / lease / permit / reconcile / quota-window budget。"
+        "review / 租约 / 许可 / 对账 / quota-window budget。"
         "不得为同一 reset boundary 创建第二座 wake——除非旧桥已确认"
         "失效；只复用或 retarget 本 bridge（reuse or retarget the "
         "existing bridge only）。",

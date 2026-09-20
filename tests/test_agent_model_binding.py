@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""agents/*.md 模型绑定格式测试（unit v232-agent-model-binding，v2.4 P1-A 修订）。
+"""agents/*.md 模型绑定格式测试（unit v232-agent-model-binding，v2.4 P1-A/W6 修订）。
 
 背景（v2.4 Phase 1，W0 §13.1 实测）：agent frontmatter 的 provider 全限定
 model 字段（account:<套餐标识>/<模型>）在未配置该 provider 的宿主上会让
@@ -11,9 +11,14 @@ reviewer 代理因此无法启动。v2.4 起两类角色采用不同契约：
     改为继承宿主/会话模型以保证任何宿主可启动；模型身份不再是持久任务
     状态轴（诊断时可记录实际运行模型）——frontmatter 出现 model 字段即
     回归，报文件与字段值；
-  - 实施者（flash-implementer / visual-implementer）保留 provider 全限定
-    写法（角色路由依赖 GLM-5.3-Flash），model 字段必须形如
+  - 实施者 visual-implementer 保留 provider 全限定写法（视觉角色路由
+    依赖 GLM-5.3-Flash），model 字段必须形如
     account:<套餐标识>/<模型> 且以 /GLM-5.3-Flash 结尾（角色后缀）。
+
+W6（v2.4 Phase 2 P2-F）：flash-implementer 已随 v2.3 执行面退役删除，
+不再在本测试覆盖面内——标准实施路由由主会话经原生 Workflow 承担，
+不再绑定单一实施者代理（TODO(Phase 4)：技能与 agent 面全面重写时
+再定实施者代理契约）。
 """
 
 import os
@@ -27,7 +32,7 @@ AGENTS_DIR = os.path.join(
 
 REVIEWERS = ("glm-reviewer", "visual-reviewer")
 
-IMPLEMENTERS = ("flash-implementer", "visual-implementer")
+IMPLEMENTERS = ("visual-implementer",)
 IMPLEMENTER_MODEL_SUFFIX = "/GLM-5.3-Flash"
 
 QUALIFIED_MODEL_RE = re.compile(r"^account:[^/\s]+/\S+$")

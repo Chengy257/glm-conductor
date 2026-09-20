@@ -6,7 +6,7 @@
     Work Unit 在 v2.4 里退化为「静态节点」：只声明编译期事实
     （目标、依赖、所有权、接口面），不再携带任何运行时状态。
     状态 / 转换表 / 重试记账 / 结果历史 / 验证生命周期等运行时
-    语义全部移除（v2.4 Phase 2 起 dispatcher 退役，节点在编译期
+    语义全部移除（v2.4 Phase 2 起执行面退役，节点在编译期
     被规划进 Workflow 拓扑，不存在运行中改状态的通道）。本模块
     是纯数据层（零 I/O、零网络、零第三方依赖）：
       - 构造：new_node() 构造静态节点 dict（可选字段缺省空列表）；
@@ -19,15 +19,15 @@
         缺省空列表，local_check 允许为空——静态声明无「必填非空」
         语义，是否执行归编译后的 Workflow 侧）。
 
-不提供（v2.3 遗留面，已随 legacy_unit.py 搬迁）：
+不提供（v2.3 遗留面，随 v2.3 执行面一并退役，W6 已删除）：
     status / WU_TRANSITIONS / transition / attempt / record_attempt /
     result / verification 及任何改写这些字段的兼容 setter——本模块
     的 dict 里根本没有这些键，也不接受向其回填。
 
 依赖：
-    零导入（连标准库都不需要）。与 legacy_unit.py（v2.3 遗留实现，
-    仅供 legacy 执行路径消费，Phase 2 随 dispatcher 删除）无任何
-    导入关系；Phase 1 新代码（U4 workflow 编译器等）禁止导入 twin。
+    零导入（连标准库都不需要）；与 v2.3 遗留实现（已随执行面删除）
+    无任何导入关系；Phase 1 新代码（U4 workflow 编译器等）禁止导入
+    任何执行面模块。
 
 来源：
     docs/roadmap/V2_4_PHASE_1_NATIVE_SEMANTIC_CORE_SPEC.md §3
@@ -42,7 +42,7 @@ NODE_REQUIRED_KEYS = ("id", "objective", "depends_on", "ownership")
 NODE_OPTIONAL_KEYS = ("interfaces", "constraints", "local_check")
 
 
-# —— 内部消息助手（与 legacy_unit 的错误消息风格一致） ——
+# —— 内部消息助手（沿用 v2.3 遗留实现的错误消息风格） ——
 
 def _str_list_errors(path, value):
     """校验「字符串数组」：值必须是 list 且每项为非空 str。"""

@@ -138,7 +138,7 @@ runtime/execution_policy.py 的 quota_control.primer_enabled
     runtime.execution_policy / runtime.journal /
     runtime.quota.{_http, credentials, epoch, provider, resolver,
     scheduler}；quota/* 包纪律：不 import runtime.state /
-    runtime.task_manager。跨模块私有 import（scheduler 的
+    execution_policy。跨模块私有 import（scheduler 的
     _format_iso_z / _normalize_now）是 quota 包既定惯例。
 
 来源：
@@ -200,9 +200,9 @@ PRIMER_RESULT_KEYS = (
 PRIME_AUTHORIZED_RESULT_KEYS = PRIMER_RESULT_KEYS + ("reason",)
 
 # 任务 state 文件相对布局（prime_authorized 的 policy 读取面；与
-# runtime.state / task_manager 的 <repo_root>/.glm-conductor/tasks/
+# runtime.state 的 <repo_root>/.glm-conductor/tasks/
 # <task_id>/state.json 布局同源命名。quota 包纪律禁止 import
-# runtime.state / runtime.task_manager（模块 docstring「依赖」节），
+# runtime.state（模块 docstring「依赖」节），
 # 故按 watcher.determine_mode 同款惯例本地声明常量 + json 直读）
 TASK_STATE_DIR_PARTS = (".glm-conductor", "tasks")
 TASK_STATE_FILE_NAME = "state.json"
@@ -403,7 +403,7 @@ def authorize_prime(policy_view) -> dict:
 
     参数：
       - policy_view：execution_policy 形状的 dict（容错读模式参照
-        task_manager._continuity_view：缺块 / 坏块 / 非 dict 一律按保守
+        quota.accounting._continuity_view：缺块 / 坏块 / 非 dict 一律按保守
         拒绝解释，绝不抛错、绝不 fail-open——理由见模块 docstring
         「fail-closed 不对称」节）。读取口径：
           * primer.enabled ← quota_control.primer_enabled
@@ -761,7 +761,7 @@ def _load_task_policy(repo_root, task_id):
     ——授权方向 fail-closed（理由同模块 docstring「fail-closed 不对称」
     节）：policy 缺块 / 坏块一律按保守拒绝解释，绝不 fail-open 放行。
 
-    纪律：quota 包不 import runtime.state / runtime.task_manager——
+    纪律：quota 包不 import runtime.state——
     布局常量本地声明（TASK_STATE_DIR_PARTS / TASK_STATE_FILE_NAME，
     与任务侧布局同源命名），json 直读（watcher.determine_mode 同款
     惯例）。只读、零写入。

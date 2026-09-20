@@ -22,7 +22,8 @@
         pressure_percent / draining_percent 两个百分比阈值（默认 35/20
         冻结供测试），default_quota_control() 容错读供 v2.2 控制回路
         （wu-22-02 control.py）消费。
-    本模块不接线任何 hook / task_manager 消费方（那是 M2+ 的事）。
+    本模块不接线任何 hook 消费方（授权写入口是 M2+ 的 policy-set
+    CLI 面）。
 
 冻结 schema（计划 §3，逐字段；新增字段走版本演进，不在本层放宽）：
     {
@@ -87,8 +88,9 @@ activation_transport 可选顶层键（v2.2 C6，修正计划 §16/§C6）：
 
 window 预算记账（v2.1 §14，wu-21-11）：
     continuity.consumed_quota_windows 是可选键（已消耗的自动续跑窗口
-    预算计数，task_manager.record_quota_wake 在主会话 CronCreate 成功
-    后递增——C1a 起该入口为 v2.1 legacy：v2.2 persistent path 禁止
+    预算计数，唤醒记账入口（record_quota_wake，v2.3 执行面已退役）
+    在主会话 CronCreate 成功后递增——C1a 起该入口为 v2.1 legacy：v2.2
+    persistent path 禁止
     调用，arm/fire/create 不消费窗口预算，消费点 = resume commit
     point，C1b 落地）：缺键完全合法（按 0 解释——validate 容错缺省，
     默认块不含该键，legacy / 新任务形状不变）；存在时必须是 >= 0 的
@@ -181,8 +183,8 @@ DEFAULT_EXECUTION_POLICY = {
 
 # v2.2 C6（修正计划 §16/§C6）：顶层可选键 activation_transport 的冻结
 # 四值词汇（recurring_bridge 唯一 stable，其余三个实验预留）。独立声明
-# 不 import runtime.activation_transport（后者 import task_manager，
-# 反向依赖成环）；与 activation_transport.TRANSPORT_KINDS 的对齐由测试
+# 不 import runtime.activation_transport（反向依赖成环）；与
+# activation_transport.TRANSPORT_KINDS 的对齐由测试
 # 锚定（tests.test_activation_transport）。
 ACTIVATION_TRANSPORTS = ("recurring_bridge", "probe_then_hold",
                          "self_retiming", "session_injector")
@@ -677,7 +679,7 @@ def consumed_quota_windows(policy) -> int:
     state 不炸消费方，形状纠错归 validate_execution_policy）。
     纯函数：只读入参、零 I/O。剩余窗口预算 =
     max(0, continuity.max_quota_windows - 本函数返回值)，由消费方
-    （task_manager 的授权矩阵 / recovery 渲染）自行折算。
+    （授权矩阵 / recovery 渲染面）自行折算。
     """
     continuity = (policy.get("continuity")
                   if isinstance(policy, dict) else None)
@@ -801,7 +803,7 @@ def effective_worker_budget(policy, quota_status) -> int:
       - PRESSURE → 1；UNKNOWN → 1；EXHAUSTED → 0；
       - quota_status 非法（不在 runtime.quota.parser.QUOTA_STATUSES
         词汇内）或未来未映射的新状态 → 0（保守）。
-    纯函数：零 I/O、不改入参。消费方（M2+ 的 hooks / dispatcher）
+    纯函数：零 I/O、不改入参。消费方（M2+ 的 hooks 派发面）
     在派发前用本函数求值，不再自行解释 quota 状态。
     """
     if quota_status not in QUOTA_STATUSES:

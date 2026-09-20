@@ -18,10 +18,10 @@
       - 影响分析：downstream() 计算直接 + 间接依赖某节点的传递闭包
         （编译器可用；不用也不影响其余接口）。
 
-不提供（v2.3 遗留面，已随 legacy_dependency.py 搬迁）：
+不提供（v2.3 遗留面，随 v2.3 执行面一并退役，W6 已删除）：
     ready_units / deps_satisfied 等基于 status 的运行时就绪函数——
     静态节点没有 status，「依赖 completed 才可 ready」的运行时推导
-    随 dispatcher 语义一起退役，本模块不做任何状态读取。
+    随执行面语义一起退役，本模块不做任何状态读取。
 
 容错读键：
     nodes 为静态节点 dict 列表（或任意含 id / depends_on 的 dict）；
@@ -32,14 +32,13 @@
 
 依赖：
     仅 Python 3 标准库（heapq），零第三方依赖，`python3 -S` 可运行。
-    不导入 runtime 其他模块（与 runtime.work_unit.py /
-    legacy_dependency.py 均无导入关系，无循环导入）。
+    不导入 runtime 其他模块（与 runtime.work_unit.py 无导入关系，
+    无循环导入）。
 
 来源：
     docs/roadmap/V2_4_PHASE_1_NATIVE_SEMANTIC_CORE_SPEC.md §3
     + docs/roadmap/V2_4_PHASE_1_WORKFLOW_EXECUTION_PLAN.md U2
-    （算法沿用 v2.3 legacy_dependency 的 Kahn / DFS 实现并裁剪
-    状态语义）。
+    （算法沿用 v2.3 遗留实现的 Kahn / DFS 实现并裁剪状态语义）。
 """
 
 import heapq

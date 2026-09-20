@@ -14,7 +14,7 @@
         逐节展开，随节点经 ask 下发。
 
 语义来源：
-    从 agents/flash-implementer.md 迁移语义：只执行所给有界 objective；
+    自 v2.3 实施者代理定义迁移语义：只执行所给有界 objective；
     尊重 ownership / interfaces / constraints；不重新设计架构；模糊处
     返回 reassessment 重估请求而非自行决策；诚实运行可选 local_check；
     返回结构化实施结果。不迁移宿主会话专用的旧词法——本模块文本与

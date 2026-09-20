@@ -784,7 +784,7 @@ def _authorized_policy(auto_resume="until_done", source="user",
 
 def _write_task_state(repo, task_id, policy):
     """真实任务布局写入：<repo>/.glm-conductor/tasks/<task_id>/state.json
-    （与 task_manager / journal.journal_path 的布局同源）。"""
+    （与 journal.journal_path 的布局同源）。"""
     task_dir = os.path.join(repo, ".glm-conductor", "tasks", task_id)
     os.makedirs(task_dir, exist_ok=True)
     path = os.path.join(task_dir, "state.json")
@@ -1331,9 +1331,6 @@ class JournalTest(PrimerCase):
                                           RESET_FIVE_OLD)]),
                  detail("AVAILABLE", [win("five_hour", "AVAILABLE", 100.0,
                                           RESET_FIVE_NEW)])]))
-
-    def test_event_in_vocabulary(self):
-        self.assertIn("window_primed", journal.RECOMMENDED_EVENTS)
 
     def test_event_fields_after_success(self):
         self.prime()

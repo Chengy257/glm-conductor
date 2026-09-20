@@ -35,9 +35,9 @@ v2.4 Phase 1 追加（P1-C 编译期阶段规划）：
     runtime.dependency）规划为 ownership 两两不相交的并行阶段；
     scopes_overlap() 判定两个 scope 的路径语言是否相交（完备判定，
     两端都可用 glob）；OwnershipConflictError 报告歧义 / 非法模式。
-    既有路径语义函数原样保留（Stop 完成门与 lease.py 依赖不变）；
+    既有路径语义函数原样保留（Stop 完成门依赖不变）；
     plan_stages 对 runtime.work_unit / runtime.dependency 采用函数内
-    懒导入（先例：runtime/fingerprint.py），保持既有导入区不动。
+    懒导入，保持既有导入区不动。
 
 依赖：
     仅 Python 3 标准库（re / subprocess），零第三方依赖，
@@ -531,8 +531,8 @@ def plan_stages(nodes) -> "list[list[str]]":
         → OwnershipConflictError（消息点名节点 id 与 scope 原文；
         预检在任何分组发生之前完成，单节点图同样拦截）。
     """
-    # 懒导入：保持本文件既有导入区与模块级依赖不动（先例：
-    # runtime/fingerprint.py 对 runtime.ownership 的函数内导入）
+    # 懒导入：保持本文件既有导入区与模块级依赖不动（v2.3 时代
+    # 的既定先例）
     from runtime import dependency, work_unit
     if not isinstance(nodes, list):
         raise ValueError(

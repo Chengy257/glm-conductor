@@ -4,9 +4,9 @@
 
 职责：
     把「派发前到底信哪个额度状态」固化为一个纯入口
-    resolve_quota_status()，供 task_manager 的 prepare API（v2.1 起
-    quota_status 缺省 None 时触发——**绝不默认 AVAILABLE**）与后续
-    恢复链（wu-21-11）消费。v2.2 M3（wu-22-03）追加明细入口
+    resolve_quota_status()，供派发前闸与恢复链（wu-21-11 起；
+    v2.4 Phase 2 W6 起消费方仅存 quota 观测面）消费——
+    quota_status 缺省 None 时触发（**绝不默认 AVAILABLE**）。v2.2 M3（wu-22-03）追加明细入口
     resolve_quota_detail()（status 之外透出 §27 snapshot 与
     fetched_at，供 observer 观测面消费）——两入口共享同一份层级
     实现（_resolve_quota），禁止复制出第二份抓取流程。
