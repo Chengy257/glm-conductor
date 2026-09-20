@@ -1,194 +1,194 @@
-# GLM Conductor 核心概念
+# GLM Conductor 核心概念（v2.4）
 
-> **GLM Conductor 是面向 ZCode GLM Coding Agent 的确定性编排、执行保障与额度感知长任务连续性层。**
+> **GLM Conductor 是面向 ZCode GLM Coding Agent 的轻量语义编排层：GLM Conductor owns semantic orchestration and acceptance; ZCode owns execution orchestration.**
 >
-> 本文描述系统**现在是什么**：三个支柱与一条稳定边界，不叙述演化过程。每个机制陈述都可在 [architecture.md](architecture.md)（唯一架构真相源）与插件技能文档（`plugins/glm-conductor/skills/`）中核对。
+> 本文是概念词典：逐条定义 v2.4 的核心概念——是什么、长什么样、权威落点在哪。每个词条都可在 [architecture.md](architecture.md)（唯一架构真相源）与 `plugins/glm-conductor/runtime/` 代码中核对；运行面操作契约见插件技能文档。不叙述演化过程，不收录已删除的 v2.3 概念（退役对照见 architecture.md §21）。
 
-GLM Conductor 是 ZCode 插件，为 GLM 双模型体系（GLM-5.3 主会话 + GLM-5.3-Flash 子智能体）提供编排运行时。三个支柱相互独立、组合使用：
+两个真相域是全部概念的坐标系：
 
-| 支柱 | 回答的问题 |
-| --- | --- |
-| 选择性路由编排（Selective Orchestration） | 谁实施、如何验证、是否需要独立终审 |
-| 运行时强制层（Mechanical Execution Assurance） | 哪些契约由运行时确定性保证，而非依赖模型自觉 |
-| 额度感知连续性（Durable Quota-Aware Continuity） | 长任务跨会话、跨额度窗口中断后如何安全恢复 |
+- **静态语义真相**（Conductor 持有）：任务 / DAG / ownership / change_id / 授权——本词典的七条主词条；
+- **执行运行时真相**（ZCode 持有）：Workflow run 的生命周期、并行、重试、恢复——Conductor 绝不镜像，只保存 run id 关联。
 
 ---
 
-## 1. 选择性路由编排（Selective Orchestration）
+## 1. 任务（Task）
 
-主会话（GLM-5.3）始终担任唯一架构师：需求与歧义解决、架构与路由判断、任务分解、实施规格编写、完整 diff 检查与验证重跑、路由重估决策、最终验收。子智能体只能实施或审查，不得成为新的编排者——子智能体内不能再派生子智能体，结构天然扁平。
+**是什么**：一次有目标、有验收的编排单元，是 Conductor 唯一的有状态概念。
 
-### 双轴路由
+- **标识**：`task_id`（TASK_ID）机械唯一——语义前缀 + 随机十六进制后缀（如 `redesign-settings-page-7f3a2c`），格式约束 `^[A-Za-z0-9][A-Za-z0-9-]*$`；生成即唯一，恢复期间绝不重新生成
+- **形态**：`<账本根>/.glm-conductor/tasks/<task-id>/` 下恰两个文件——`state.json`（状态真相源）+ `events.jsonl`（append-only 溯源）
+- **状态（七态）**：`active / waiting_quota / waiting_user / blocked / completed / cancelled / failed`；后三者是终态，**终态不得静默重开**（显式重开只能走 `reopen_task`，落 journal 记录）；状态迁移按 `TASK_TRANSITIONS` 矩阵逐次校验，矩阵外迁移被拒
+- **phase**（可选）：`planning / workflow / validating / reviewing`——纯描述性标注，无转换矩阵，不参与任何强制
+- **route**：`mode`（四路线）必填 + `assurance`（standard / high）可选——assurance=high 使完成守卫追加独立评审义务
+- **权威落点**：`runtime/state.py`（schema / 转换表 / 发现四分类 / 遗留检测）；`runtime/task.py`（生命周期 API）
 
-路由由两个独立轴共同决定，先分别回答、再查矩阵——不存在按风险单向递进的模型：
+**相邻**：任务发现按 active / terminal / corrupt / orphaned 四分类（损坏 state.json 不会被解释成"没有任务"）。v2.3 遗留任务只检测、不迁移——按 `LEGACY_STATE_GUIDANCE` 报告后由用户在 2.3.x 下收尾或显式放弃。
 
-- **轴 A — Delegability（可委派性）**：剩余实施是否足够有界、规格足够完备，可以委派？目标 / 文件边界 / 接口 / 约束 / 验证均明确且架构已定 → high；架构未定、root cause 未知、实质歧义、判断密集 → low
-- **轴 B — Assurance（保障等级）**：实施通过主会话验证后，一次全新上下文的独立终审是否有实质价值？影响面有限、回归风险可控 → standard；宽影响面、高回归风险、破坏性行为、大规模用户可见变更 → high
+路由四路线（`route.mode` 词汇，Delegability × Assurance 查表）：
 
-| Delegability | Assurance | Route | 实施 | 独立审查 |
+| Delegability | Assurance | mode | 实施 | 独立评审 |
 | --- | --- | --- | --- | --- |
 | low | standard | `solo` | GLM-5.3 主会话 | 否 |
-| high | standard | `delegate` | 实施者子智能体 | 否 |
+| high | standard | `delegate` | Native Workflow | 否 |
 | low | high | `audit` | GLM-5.3 主会话 | 是 |
-| high | high | `full` | 实施者子智能体 | 是 |
+| high | high | `full` | Native Workflow | 是 |
 
-语义要点：`delegate` 不是比 `solo` 更高一级的路线——两者只是实施者不同（主会话实施 vs Flash 实施）；`audit` = 主会话实施 + 独立终审；`full` = 委派实施 + 独立终审。
-
-### SELECTIVE ROUTE 声明
-
-在任何 Agent 工具调用之前，主会话必须输出一次五字段声明（外加基于证据的 reason）：
+events.jsonl 示意（一行一事件，任务级词汇恰十名）：
 
 ```
-SELECTIVE ROUTE
-mode: solo | delegate | audit | full
-delegability: low | high
-assurance: standard | high
-executor: main | flash-implementer | visual-implementer
-continuity: foreground | resumable | idle
-reason: <简明的、基于证据的理由>
+{"event": "route_selected", "mode": "full", "assurance": "high"}
+{"event": "workflow_started", "workflow_run_id": "<run id>"}
+{"event": "validation_recorded", "status": "passed", "change_id": "sha256:…"}
 ```
 
-- **executor 是独立的能力维度，不是第五种 route**：标准编码任务 → `flash-implementer`；视觉 / 交互任务 → `visual-implementer`（亲自读截图判定）。
-- **assurance: high 时按任务模态引入全新上下文的只读审查者**：文本任务 → `glm-reviewer`（`GLM REVIEW`）；视觉任务 → `visual-reviewer`（`VISUAL REVIEW`）。裁决只有三种：`ship` / `fix-first` / `rethink`；任何修复使先前裁决失效，复审必须换全新审查者。
-- **路由可双向重估（ROUTE REASSESSMENT）**：路由变化必须来自新观察到的证据，可上调也可下调；实施者的重估信号、审查者的 rethink 均为有效证据。无新证据不得变更路由。
+## 2. DAG（规范实施 DAG）
 
-### 委派契约与工作单元
+**是什么**：委派任务的实施蓝图——把"剩余实施"分解为一张静态有向无环图，一次 Native Workflow run 执行整张图。
 
-- 委派使用**五段式实施规格**：OBJECTIVE / FILES AND OWNERSHIP / INTERFACES / CONSTRAINTS / VERIFICATION。实施者返回 IMPLEMENTATION REPORT——报告只是声明（implementation claim），验证证据（verification evidence）只存在于主会话亲自检查的 diff 与亲自重跑的命令输出中。
-- 大任务分解为 **Work Unit**：每个单元必须有界到能接收一份完整规格，且必填 ownership 与 verification（无文件范围或无验证的单元不可派发）；单元间依赖用 `depends_on` 表达（同任务内引用、禁止环）。
-- 派发准入由运行时纯决策器（`plan_dispatch`）把关：quota 四态闸 → ownership 不相交 → 租约闸（防并发写冲突）→ worker 预算。默认串行；有界并行上限 4（experimental），并行资格 = ownership 声明可并行 **且** 无外来活跃租约冲突。
-- 派发生命周期走事务边界：`prepare_dispatch`（决策 + 获取租约 + 签发 dispatch permit）→ `commit_dispatch`（单元转 running）→ `finish_unit`（终态 + 释放租约）；崩溃窗口有确定性恢复对账（`reconcile`：按仓库证据分类，绝不盲目重放——仓库状态始终权威于运行时记录）。
-- 路由矩阵一致性、executor 绑定与审查义务由运行时在 state 保存时机械校验（`validate_route_invariants`）——手写 state 漏写审查标志也无法绕过独立终审。
+- 形态：state 顶层 `dag` 数组（节点列表，可为空）；依赖用 `depends_on` 表达，只引用同 DAG 内的节点
+- 校验：重复 id / 缺失依赖 / 自依赖 / 环（报全部环成员）在保存与编译前聚合拒绝
+- 排序：确定性拓扑序与层级（第 i 层 = 依赖全部落在更早层级的节点）；同一图任何输入顺序给出相同输出
+- 执行单位：**一个可委派 DAG ↔ 一次 Workflow run**（典型投影：阶段 1: A‖B → 阶段 2: C‖D → 阶段 3: E）；图在运行中不可变——要改蓝图就重估路由、开新 run
+- **权威落点**：`runtime/dependency.py`（纯图校验与排序，零 I/O）
+
+示例：三个节点、两层的 DAG（`parser` 与 `types` 无相互依赖 → 同层可并行；`ui` 依赖两者 → 下一层）：
+
+```yaml
+dag:
+  - { id: parser, depends_on: [],              ownership: ["src/parser/**"] }
+  - { id: types,  depends_on: [],              ownership: ["src/types/**"] }
+  - { id: ui,     depends_on: [parser, types], ownership: ["src/ui/**"] }
+# 层级投影：阶段 1: parser, types → 阶段 2: ui
+```
+
+## 3. 节点（静态节点 / NodeResult）
+
+**是什么**：DAG 的顶点——一份**静态节点声明**：描述"要做什么"，不携带任何"执行到哪了"。v2.3 时代 Work Unit 的运行时面（status / attempt / 重试史 / 单元验证 / receipts / 租约）在 v2.4 不存在。
+
+- **必填四键**：`id`（DAG 内唯一）、`objective`（有界目标）、`depends_on`（依赖）、`ownership`（非空的仓库相对 scope 列表——无文件范围的节点不可编译）
+- **可选三键**：`interfaces`（须保持兼容的接口面）、`constraints`（额外约束）、`local_check`（可选本地检查——廉价的节点健康闸：只确立"本节点健康到足以让依赖方继续"，永不替代主会话任务级验收；纯文档节点可以没有）
+- **结果契约（NodeResult）**：worker 对每个节点返回恰六字段；`reassessment` 非空即路由重估请求，交回主会话裁决
+- **权威落点**：`runtime/work_unit.py`（构造 + 校验，纯数据层零导入）；结果接口由 `runtime/workflow/compiler.py` 生成进 Workflow 源码
+
+```json
+// NodeResult：worker 返回的结构化实施结果（恰六字段）
+{ "node_id": "parser",
+  "status": "complete",          // "complete" | "partial" | "blocked"
+  "changes": ["src/parser/lexer.ts"],
+  "local_checks": ["pytest tests/parser -q — 12 passed"],
+  "reassessment": "",            // 非空 = 路由重估请求
+  "gaps": [] }
+```
+
+## 4. Ownership（路径所有权）
+
+**是什么**：谁能改哪些文件——v2.4 并发安全的唯一机制（宿主对同一文件的并发写是 silent last-writer-wins，编译期检查是唯一冲突屏障；无运行时锁）。
+
+- **scope 语法**：精确文件（`src/auth.ts`）；目录前缀（裸路径 `src/auth` 等价 `src/auth/**`）；段级 glob（`**` 跨段，`*` / `?` 不跨段）。拒绝隐式扩张：`src/auth` 不覆盖 `src/authentication.ts`
+- **编译期（Workflow 启动前）**：`plan_stages` 把节点规划为"组内 scope 两两不相交"的并行阶段——层内贪心装箱；scope **明确重叠**的候选被**确定性串行**（排进同层级后续组），不是错误；模式非法或**歧义**（覆盖仓库根 / 一切路径，如 `**`）以 `OwnershipConflictError` **编译期拒绝**——冲突即拒，绝不猜测
+- **任务级终局（验收前）**：`实际改动路径 ⊆ union(DAG ownership)`——由完成守卫查 2 强制；越界路径逐条点名
+- **仓库级（粗粒度兜底）**：**一仓库至多一个活跃 Conductor 写 Workflow**——`writer_guard` 单条持久预约（`.glm-conductor/writer_guard.json` 四字段），永不自动过期（无 TTL / 心跳）；释放只有两条路：任务终态自动释放，或 `writer-show` inspect 后 `writer-release --force` 显式清除
+- **权威落点**：`runtime/ownership.py`（匹配 / `git_touched_files` / `plan_stages`）；`runtime/writer_guard.py`
+
+```json
+// .glm-conductor/writer_guard.json：仓库级写预约（恰四字段）
+{ "repo_identity": "C:\\work\\demo",
+  "task_id": "redesign-settings-page-7f3a2c",
+  "workflow_run_id": "<run id>",
+  "created_at": "2026-09-21T08:30:00.000Z" }
+```
+
+## 5. change_id（任务级变更标识）
+
+**是什么**：v2.4 唯一的新鲜度原语——「基线修订 + 相关路径集的归一化内容状态」的确定性摘要（`"sha256:" + 64 位十六进制`）。
+
+- **语义**：任何相关文件增 / 删 / 内容变化 / 相关文件集变化 / 基线变化都会改变标识；CRLF→LF 归一；`.glm-conductor/` 记账路径剔除（编排器写自己的账本不使自己过时）；与输入顺序无关
+- **相关路径集**：`task.relevant_paths` = dag 全节点 ownership scope 并集——记录侧与守卫侧**同调同一派生、同一实现**，标识才可比（单一实现红线，禁止旁路重算）
+- **三处共用**：验证记录（`validation.change_id`）、评审记录（`review.change_id`）、完成守卫新鲜度比对。"任何修复使先前验证 / 评审失效"由此自动成立；唯一恢复路径是重做并记录新值，禁止回写旧值"续命"
+- **权威落点**：`runtime/change_id.py`（`compute_change_id`）
+
+摘要输入的三行结构（域分隔，防跨域撞摘要）：
+
+```
+glm-conductor/change-id/1        ← 域分隔前缀
+base <git rev-parse HEAD>        ← 基线修订（unborn 仓库为 "-"）
+file <归一路径>\0<sha256:…|missing>   ← 每个相关路径一行（排序去重后）
+```
+
+## 6. 完成守卫（四查）
+
+**是什么**：把"完成"变成显式受守卫的操作的 Stop 钩子（`hooks/stop_gate.py`）——同一套判定经 `evaluate_completion(repo_root, task_id)` 可导入调用。`finalizing` 完成请求态不存在：收尾发生在守卫全绿路径上。
+
+- **触发域**：仅 `status == "active"` 的 v2.4 任务；停泊态（waiting_quota / waiting_user / blocked）是有意的停止点、一律放行；v2.3 遗留任务放行并附处置指引；corrupt / orphaned 仅 stderr 提示；无活跃任务静默放行
+- **四查（按序，首败即返）**：
+  1. **writer_guard**：仓库无其他任务的活跃写预约（持有者是自己放行——完成门即释放点）；
+  2. **ownership**：git 实际改动 ⊆ dag ownership 并集；
+  3. **validation**：有 `passed` 记录且 change_id 等于当前值（否则"缺失"或"过期"）；
+  4. **review**：assurance=high 时须有 `ship` 裁决且 change_id 等于当前值（fix-first / rethink 永不满足完成）。
+- **输出**：失败 → stdout 单行 block JSON（恰好一条最严重、可操作的中文理由）；全过 → 就地 `task.complete`（`completed` + 释放写者守卫 + `task_completed` 事件）并放行
+- **失败语义**：求值期结构性错误（非 git 仓库等）按任务隔离降级放行（stderr 可见）；钩子自身崩溃 fail-open。越界改动不被阻止发生（Workflow 子 actor 不触发钩子——宿主事实），但不可能静默通过完成守卫
+- **权威落点**：`hooks/stop_gate.py`
+
+```json
+// block 决策：stdout 单行 JSON，ZCode 据此请求模型续跑（reason 即续跑指令）
+{"decision": "block", "reason": "完成被阻断：验证记录已过期——验证后任务相关文件又有变化（任务 …）。\n…\n请重新验证并经 runtime.task.record_validation 刷新记录，再请求完成。"}
+```
+
+## 7. quota_resume（有界配额恢复授权）
+
+**是什么**：任务在 provider 额度耗尽后恢复执行的最小授权与记账块——有界、须授权、只数"真正开始的恢复"。无 epoch / 订阅 / 激活记账 / 边界消费证明（v2.3 概念已不存在）。
+
+- **形状**：state 顶层恰四键 `{mode, max_resumes, resume_count, automation_id}`，初始 `{manual, 0, 0, null}`；预算不变量 `resume_count <= max_resumes` 保存时强制
+- **mode**：`manual`（默认）/ `auto`——auto 只能由显式 `authorize_quota_resume(max_resumes)` 落盘授权，绝不推断；`max_resumes=1` 即一次性恢复，`N` 即有界多窗
+- **等待**：额度耗尽 → `enter_waiting_quota`（七态中的 waiting_quota；`workflow_run_id` 保留；最近观测记入 `last_observation` 供诊断）
+- **定时唤醒决策**（`scheduled_activation_decision`，幂等五步）：非 waiting_quota → `no-op`；观测 EXHAUSTED/UNKNOWN → `remain-waiting`（绝不虚构可用性）；未授权 → `waiting-user`；预算耗尽 → `waiting-user` 且恰一次转 `waiting_user`；可用 + 已授权 + 预算有余 → `resume-authorized`（计数仅暂存）
+- **确认落账**：宿主 resume 调用**真正被接受后**才调 `confirm_resume_started`——`resume_count +1` + 转回 active + `quota_resume_confirmed` 事件；未确认的决策绝不消耗预算
+- **激活基底**：原生 ZCode Scheduled Task（宿主能力）；重复唤醒是安全 no-op；没装任何外部时钟一切照常工作
+- **权威落点**：`runtime/task.py`；额度观测面 `runtime/quota/`（只读：AVAILABLE / PRESSURE / EXHAUSTED / UNKNOWN 四态，lite 套餐无周窗是合法形态）
+
+```
+（auto 授权 + max_resumes=1 的决策时间线）
+额度耗尽 → waiting_quota
+唤醒 → 观测 EXHAUSTED          → remain-waiting
+唤醒 → 观测 AVAILABLE、manual  → waiting-user（未授权）
+用户 authorize_quota_resume(1) → mode=auto
+唤醒 → 可用、auto、预算有余     → resume-authorized（计数暂存 1）
+宿主 resume 被接受 → confirm_resume_started → resume_count=1、active
+唤醒 → 观测 EXHAUSTED          → 预算 1/1 耗尽 → waiting-user
+```
 
 ---
 
-## 2. 运行时强制层（Mechanical Execution Assurance）
+## 支撑词条（速查）
 
-关键运行时契约由插件钩子（`hooks/`）与运行时模块（`runtime/`，纯标准库 python3）确定性执行——状态在文件里，证据绑定指纹，完成必须过门。
-
-### 状态层
-
-active task 在专属目录维护机器可读状态：
-
-```
-.glm-conductor/tasks/<task-id>/
-├── checkpoint.md     # 导航状态（叙述性恢复依据，不是真相源）
-├── state.json        # 强制状态源（goal、route 五字段、ownership、verification、review、status 等）
-├── events.jsonl      # 执行溯源（append-only，一行一事件）
-└── visual-evidence/
-```
-
-- **创建 state.json 即受完成门跟踪**（status 非终态即 active）；普通短任务不创建状态文件，零干预。
-- 状态迁移按生命周期转换表逐次校验：进入 `finalizing` 即请求完成；`completed` 只能由完成门在全绿路径上原子提交——任何公共写入路径都无法直接把任务写成 completed。
-- `.glm-conductor/` 是本地运行时账本，不算仓库改动（完成门对其豁免）；在 Git 仓库中优先写入本地排除文件 `.git/info/exclude`，绝不静默污染 `git diff`。
-
-### Stop 完成门（四重检查）
-
-活动任务在主会话 turn 结束时（Stop 钩子）按固定顺序接受四重检查，任一失败即 block（报文自带可行动的恢复指引）：
-
-1. **ownership**：git 实际改动 ⊆ 声明的 `ownership.files`——越界改动不被阻止发生（子会话不触发钩子），但不可能静默通过完成门
-2. **验证**：`verification.required` 全部完成，且证据指纹与当前指纹一致（否则 `verification_stale`）
-3. **审查**：最新 review receipt 的 verdict = `ship` 且指纹新鲜（`review_missing` / `review_rejected` / `review_stale`）——**fresh ship review receipt 是审查证据的唯一权威**，state 手写字段不被采信
-4. **视觉证据**：每张截图的字节 sha256 与记录一致（否则 `visual_stale`）
-
-配套机制：
-
-- **证据指纹（fingerprint）**：验证 / 审查证据经 `task_fingerprint`（基线修订 + 相关文件集归一化内容状态的 sha256）绑定到记录时的仓库状态；完成门用**同一入口**重算当前指纹并比对。任何记录之后的编辑都会使证据判 stale——「任何修复使先前验证 / 审查失效」由此自动强制。stale 的唯一恢复路径是重跑验证 / 重新审查并记录新指纹，禁止回写旧指纹。
-- **durable receipts**：`verify-unit` / `verify-task` / `review-record`（runtime CLI）让 runtime 亲自执行验证命令、绑定同刻指纹落盘 receipt（runner = `glm-conductor-runtime`），把「跑过」从声明固化为机械事实；手工伪造的 receipt 文件不被完成门采信。
-- **续行有界（gate_exhausted）**：连续 block 达上限后放行是循环安全机制，不是完成许可——任务不进入 completed，模型必须向用户报告 blocked 状态。
-
-### 派发面强制
-
-- **dispatch permit 门**：存在活动任务时，实施者类型子智能体（`flash-implementer` / `visual-implementer`）的派发必须携带有效 permit marker（`GLM_CONDUCTOR_DISPATCH=<permit_id>`）——无 marker / 伪造 / 过期 / 已消费（重放）一律 deny。permit 一次性，launch 成功后由钩子自动消费并记 `agent_launched`（runtime-observed 生命周期）。
-- **Layer B 派发注入**：每次子代理派发前向主会话注入 ownership 契约提醒（提示级，提高合规但不构成强制；确定性强制只在完成门）。
-- **Bash 策略门控**：表驱动规则把主会话命令分类 allow / ask / deny——破坏性命令（`rm` 带 r/f 标志、`git reset --hard`、`git clean -f`、force push）在活动任务期间恒拒；`git push` / 模式迁移 / 发布操作 / 权限变更在 assurance:high 时需向用户确认。
-
-### 失败语义
-
-分层设计：**派发面 fail-open（降级必须可见：stderr `ENFORCEMENT DEGRADED` + journal 记账）+ 完成面 fail-closed**——绕过派发门的任务最终无法合法 completed。状态损坏不会被解释成「没有任务」：任务发现按 active / terminal / orphaned / corrupt 四分类，高保障任务的 state 损坏会 fail-closed 拦截并给出重建指引（从 events.jsonl 与 checkpoint 证据重建，仓库状态权威）。
-
----
-
-## 3. 额度感知连续性（Durable Quota-Aware Continuity）
-
-连续性是与路由正交的生命周期维度，不是第五种 route。
-
-### 生命周期模式与两层默认
-
-| 模式 | 适用 | 行为 |
+| 词条 | 一句话定义 | 落点 |
 | --- | --- | --- |
-| `foreground` | 当前会话内可完成的普通任务 | 交互默认，不创建任何 continuation |
-| `resumable` | 可能跨会话 / 跨额度窗口中断的长任务 | 里程碑后写 checkpoint + 安排唤醒，唤醒后先检查再恢复 |
-| `idle` | 非紧急、可无人值守、验证可自动完成 | 交给 ZCode 原生闲时任务 |
+| Native Workflow | ZCode 原生工作流：并行 / 后台 / 重试 / 恢复的执行基底 | 宿主 CreateWorkflow / GetWorkflowRun |
+| Workflow 编译器 | 静态 DAG → TS Workflow 源的确定性翻译；只产码绝不执行 | `runtime/workflow/compiler.py`（CLI `v24-compile`） |
+| persona | 文本工人唯一权威人设；宿主不读插件 agent 定义，须内嵌进生成源 | `runtime/workflow/persona.py` |
+| run 关联单据 | 任务 ↔ Workflow run 的 id 关联；零状态镜像 | `runtime/workflow/adapter.py` |
+| 评审者（glm-reviewer / visual-reviewer） | 全新上下文只读 Custom Subagent，assurance=high 在主验证后独立终审；frontmatter 无 model 字段（继承宿主/会话模型） | `plugins/glm-conductor/agents/` |
+| 视觉例外 | visual-implementer 保持 Custom Subagent 通道（多模态截图反馈契约），非第二文本实施路径 | agents/visual-implementer.md |
+| 主会话验证 | Workflow 结束后主会话亲自查 diff、跑有限集成命令、记录 passed/failed | `runtime/task.record_validation` |
+| journal 词汇 | 任务级恰十事件：route_selected / workflow_started / workflow_reassessed / validation_recorded / review_recorded / waiting_quota / quota_resume_confirmed / task_completed / task_failed / task_cancelled | `runtime/journal.py` |
+| 遗留任务检测 | 只读识别 v2.3 state（work_units / permits / leases / receipts / 阶段态），绝不迁移 | `runtime/state.py` |
+| SessionStart 注入 | 新会话发现未完成任务即注入最小恢复摘要（纯本地，无任务时安静） | `hooks/session_start.py` + `runtime/recovery.py` |
 
-两层默认语义：`foreground` 是普通短任务（未创建 durable task）的交互默认；一旦创建 durable task，runtime 保守默认 `resumable + manual + max_quota_windows=0`——**可恢复，但没有自动跨窗授权**。`resumable` 不等于 automatic resume：自动续跑必须显式授权（见「授权续跑」）。
+## 稳定边界（诚实边界）
 
-### 状态与恢复基元
+- 主会话是唯一编排者；不引入第二套任务运行时 / Workflow 引擎 / 权限引擎 / 溯源系统 / 调度平台 / 额度控制平面
+- 额度只决定"何时恢复"，不决定"谁做"，不是路由轴；原生插件级 quota API 不存在，绝不虚构
+- Global Quota Clock 是独立伴随项目：Conductor 的正确性不依赖它，等待额度任务凭原生 Scheduled Task 路径自恢复
+- Workflow 子 actor 不触发钩子（宿主事实）：写前拦截不可实现——确定性强制落在编译期与完成守卫两端
+- `.glm-conductor/` 是本地运行时账本，不算仓库改动；优先写入 `.git/info/exclude`
 
-- **CONTINUITY CHECKPOINT**：导航状态，不是仓库真相源——**repository > checkpoint**，冲突时以仓库为准，绝不为恢复 checkpoint 回滚仓库新改动。每次重新激活后执行固定恢复步骤（检查目标 → 读 checkpoint → 检查仓库状态与 diff → 判断先前变更与目标完成度 → 从 NEXT ACTION 恢复），恢复执行前必须重新输出 SELECTIVE ROUTE 声明。
-- **SessionStart 恢复注入**：新会话自动发现未完成任务并注入恢复上下文——纯本地、零网络、零 quota 消耗；无论自动化配置如何，它始终是兜底恢复语义。
+## 常见误读（与七词条直接相关）
 
-### 额度观察：两个四态
-
-- **provider 四态**（额度状态）：`AVAILABLE / PRESSURE / EXHAUSTED / UNKNOWN`——经 provider 监控端点查询（凭证零落盘），解析层级为 新鲜缓存 → provider → 陈旧缓存 → UNKNOWN，**绝不默认 AVAILABLE、绝不重试网络**；凭证不可得时回退周期性存活探针。
-- **execution phase 四态**（任务执行相位）：`NORMAL / PRESSURE / DRAINING / BLOCKED`——与 provider 状态是两个维度（最小编余 ≤ 20% 即 DRAINING，即使 provider 报 AVAILABLE）。DRAINING 禁开新实施波次，只许收尾白名单动作（join / verify / review / checkpoint / wake）；BLOCKED 连收尾一并冻结。查询：`quota-phase` / `quota-observe`。
-
-### Quota Epoch 与订阅
-
-- **epoch 身份** = 窗口多重集 `(kind, reset_at)` 的确定性指纹，`epoch_id = "glm:" + 前 16 位十六进制`——不含状态与百分比（provider 状态翻转是消费状态变化，不是新 epoch；窗口滚动 = reset_at 变化 = 新 epoch）。有意义的恢复触发是「新的可执行 epoch 出现」，不是定时器触发。
-- **窗口物化**：下一个 reset_at 只在新窗口内发生真实模型调用时才物化——纯查询绝不推进它。
-- **额度订阅（quota subscription）**：任务订阅 quota 而非拥有额度时钟；同一 epoch 的激活恰记一次，恢复门顺序冻结为 evaluate → 转态 → mark（同 epoch 重复唤醒零转态零重复激活）。
-- **窗口预算消费**：唯一合法消费点 = resume commit point（转态落盘之后）；arm / fire / create automation 一律不消费。预算（`consumed_quota_windows ≥ max_quota_windows`）耗尽后任务转 `waiting_user`，此后不得再创建任何自动化唤醒。
-
-### 授权续跑（authorized resume）
-
-额度 EXHAUSTED 走确定性转态链（CLI `quota-exhausted`，执行态任务与单元转 `waiting_quota`），按 `execution_policy.continuity.auto_resume` 四态裁决：
-
-| auto_resume | 授权要求 | EXHAUSTED 行为 |
-| --- | --- | --- |
-| `manual`（默认） | — | 不建自动化；SessionStart 兜底提示 |
-| `notify` | — | 只产出提醒文本，不自动恢复 |
-| `auto_once` | `authorization.source = user` | 一次性唤醒，烧穿 1 个窗口预算后停 |
-| `until_done` | `authorization.source = user` | 逐窗续跑，直至完成或预算耗尽 |
-
-恢复首步恒为 `quota-resume`（内部强制刷新额度；AVAILABLE / PRESSURE → 任务转回 executing、按账本就绪续作；EXHAUSTED / UNKNOWN → 零转态保守等待，不派发、不重建唤醒）。CLI 退出码 0 / 1 / 2 / 3——3 = durable-but-degraded（转态可能已落盘，幂等重跑安全）。
-
-### 激活传输与观察面
-
-- **Persistent Wake Bridge**：`wake-plan` 纯计算裁决 → 主会话执行宿主 CronCreate → `arm` 记账（runtime 自身绝不调用宿主 `Cron*`，宿主事实由会话侧供给，如 `wake-reconcile` 显式传入观测结论）。一任务 ↔ 一常驻桥。**`recurring_bridge` 是唯一 stable 传输**；其余传输词仅预留，arm 一律被拒绝。完成时桥接清理是会话侧单次尝试动作（绝不重试）。
-- **Quota Watcher（可选，默认不运行）**：`quota-watcher start|status|stop|once`——本地 poll-only 常驻进程，零模型调用。v2.3 起它是纯观察/诊断加速面（**不**维护额度时钟，窗口延续职责已移交 Global Quota Clock）；不是正确性前提，不运行时刷新点查询照常工作。
-- **Global Quota Clock（额度连续性主路径）**：每个 provider 身份一个持久时钟——周期做低成本模型调用以观察/物化下个额度窗口并向真实 reset 自校时（每小时 recurring 网格仅 watchdog 兜底）；建议放置在专用低成本 Flash 会话（插件只能建议与诊断，不验证会话专用性）。窗口物化的生产路径是 Scheduled Clock Tick，不是 primer。
-- **Window Primer（默认关闭）**：新窗口需一次最小模型调用才物化；primer 是 runtime 唯一的 control-plane 模型调用面，三重授权闸 fail-closed（`primer_enabled` 默认 false + 自动续跑档位 + 用户授权来源）。授权闸之外绝不自行预调用——那是一次真实消耗额度的模型调用。
-- **Stop 门 continuity health**：休眠交接域的任务（`waiting_quota` / `waiting_user`，或 PRESSURE / DRAINING 相位下的 resumable 自动续跑任务）在四重检查之前先核查三件套——handoff durable（checkpoint + resume manifest）、当期 epoch 订阅已注册、激活传输已 armed。
-
----
-
-## 4. 稳定边界（Stable Boundaries）
-
-以下契约冻结。除非出现需要窄兼容扩展的可证明正确性缺陷，发布不改变它们：
-
-- **插件身份**：插件名与安装路径不变。
-- **公开 CLI**：runtime CLI 子命令名（`python3 plugins/glm-conductor/runtime/cli.py <subcommand>`）与文档化退出码语义不变（通用 0 = 成功 / 1 = 运行期拒绝 / 2 = 用法错；`quota-resume` 另有 3 = durable-but-degraded）。
-- **状态与日志可读性**：既有任务 state 文件、journal 与既有 quota 事件保持可读；旧记录绝不破坏性重写，迁移幂等，缺失新元数据时保守降级而非崩溃。
-- **epoch_id 格式**：`glm:<16 位十六进制>` 不变；更高层的身份概念只以可选字段扩展，读者兼容新旧记录。
-- **激活传输**：`recurring_bridge` 是唯一 stable transport；预留传输保持预留。
-- **并发语义**：默认 worker 限额与并发语义不变（默认串行，有界并行硬上限 4）。
-- **primer 默认关**：Window Primer 默认结构性关闭。
-- **单一控制器**：主会话是唯一编排者；不引入多控制器、跨机分布式锁或第二套调度实现。
-- **SessionStart 回退**：automation 不可用时恢复语义始终回退 SessionStart 注入——自动化永远是加速器，不是正确性前提。
-
-同样固定的诚实边界（系统**不做**什么）：
-
-- 原生插件级 quota API（`getQuotaRemaining` 等）不存在，绝不虚构；不硬编码 5 小时重置；额度观察只作为证据使用，不作为路由轴、不据此自动换模型。
-- 子会话不触发钩子：写前拦截不可实现——越界改动不被阻止发生，但不可能静默通过完成门。
-- 审查独立性来自全新上下文与只读隔离，不宣称跨模型独立。
-- 连续性编排基于 ZCode 本地会话生命周期机制，不是独立的云调度器或后台守护进程（桌面客户端需保持运行、机器需保持唤醒）。
-
----
+- "delegate = 自动派发多个子代理跑单元"——不是：`delegate/full` 是一次 Native Workflow run 执行整个静态 DAG，派发调度归宿主，Conductor 不发单元级派发指令；"completed 可以直接写进 state.json"——不能：公共写入路径过不了终态转换门，完成的唯一提交点是完成守卫全绿路径；
+- "验证记录手工填一个 change_id 即可通过"——不行：守卫用同一实现现算比对，伪造值必然失配（过期报文给出两侧值）；"auto 授权后预算随新窗口刷新"——不刷新：`resume_count` 只增不减，提高预算须再次显式 `authorize_quota_resume` 且不得低于已用计数。
 
 ## 延伸阅读
 
-- [architecture.md](architecture.md)——唯一架构真相源：运行时行为、状态模型、强制层与额度连续性的权威技术描述。
-- 技能文档（运行面操作契约，含 `references/` 模板与判据）：`plugins/glm-conductor/skills/orchestration/SKILL.md`、`plugins/glm-conductor/skills/enforcement/SKILL.md`、`plugins/glm-conductor/skills/continuity/SKILL.md`。
-- [仓库根 README](../README.md)——项目入口与安装使用。
-- 文档索引：[docs/README.md](README.md)。
+- [architecture.md](architecture.md)——唯一架构真相源：十四个主题（路由矩阵、静态 DAG、编译器边界、宿主执行状态、ownership 冲突、写者守卫、七态、change_id、主验证、评审者路径、完成守卫、视觉例外、最小配额恢复、Global Clock 拆离）的权威技术描述。
+- 技能文档（运行面操作契约）：`plugins/glm-conductor/skills/orchestration/SKILL.md`、`skills/enforcement/SKILL.md`、`skills/continuity/SKILL.md`。
+- 排障手册：[troubleshooting.md](troubleshooting.md)；文档索引：[docs/README.md](README.md)；项目入口：[仓库根 README](../README.md)。

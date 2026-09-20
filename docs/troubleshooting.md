@@ -1,132 +1,132 @@
-# GLM Conductor 故障排查（Troubleshooting）
+# GLM Conductor 故障排查（v2.4）
 
 > 面向用户的排障手册：按「现象 → 判定 → 处置」组织，只写结论性行为事实；每条事实标注实现模块路径供核对。架构全貌见 [architecture.md](architecture.md)，概念入门见 [core-concepts.md](core-concepts.md)。
+>
+> runtime CLI 统一入口是 `plugins/glm-conductor/runtime/cli.py`（本文以 `<cli>` 代指；安装后以实际插件缓存路径为准）。用可用的 Python 3 解释器执行（Windows 无 `python3` 启动器时用 `python`）。v2.4 的 CLI 子命令仅：`quota-resolve` / `v24-compile` / `writer-acquire` / `writer-release` / `writer-show` / `v24-record-run` / `review-record`；额度诊断另有独立脚本 `runtime/quota/report.py`。查询本文未列出的子命令（permit / lease / wave / clock / bridge / policy / verify-* / host-check 等）没有意义——那些面连同后端已不存在。
 
-运行时 CLI 的统一入口是 `runtime/cli.py`（本文以 `<cli>` 代指 `<插件目录>/plugins/glm-conductor/runtime/cli.py`，安装后以实际插件缓存路径为准）；用可用的 Python 3 解释器执行（Windows 无 `python3` 启动器时用 `python`）。
+## 1. 额度诊断：report.py 双模式与套餐口径
 
-## 1. host 兼容性：`host-check` 判定与处置
+**何时用**：任务停在 `waiting_quota` / `waiting_user` 不动；恢复决策反复 `remain-waiting`；想确认当前额度窗口与 reset 时间。
 
-**何时用**：ZCode 升级之后，或怀疑调度类功能（定时唤醒 / Quota Clock tick）异常时——当前适配器依赖的宿主库结构是观察到的宿主行为而非契约 API，宿主升级可能使其漂移。
-
-**怎么跑**：
+**怎么跑**（只读诊断，退出码恒 0——不是闸门，不要据退出码拦截）：
 
 ```
-python <cli> host-check
+python <插件根>/runtime/quota/report.py            # 文本：人读
+python <插件根>/runtime/quota/report.py --json     # 机器可读（供编排决策）
 ```
 
-全程只读（四类纯读语句，绝不写宿主库、绝不以写试写——`runtime/host/zcode_schedule.py` 的 `probe_host_compatibility`），恒输出单行 JSON 并返回 0。
+**输出解读**：各窗口（`5-hour` / `weekly`）的 used / remaining / reset、`status:`（`AVAILABLE` / `PRESSURE` / `EXHAUSTED` / `UNKNOWN`）与 `plan:`（continue / checkpoint / resume_at / periodic_fallback）恢复建议。三种诊断态：
 
-**输出解读**（键集冻结，全键恒在）：
+文本输出示意（正常态）：
 
-| 键 | 含义 | 排障关注点 |
+```
+GLM Coding Plan Quota Report  (2026-09-21 08:30 UTC)
+provider: bigmodel
+  5-hour : used 62%  remaining 38%  resets 2026-09-21 15:04 (+6h34m)
+  status : AVAILABLE
+  plan   : continue
+```
+
+1. **正常报告**——窗口明细 + status + plan；
+2. **探测失败**——每 provider 一行错误分类（auth / unavailable / malformed / network / unknown，不含 key 与响应体）；
+3. **unavailable**——未找到凭证，按输出中的配置指引处理（环境变量 `GLM_CONDUCTOR_QUOTA_API_KEY` 优先；已登录 ZCode 的 `~/.zcode/v2/config.json` provider 配置为文档化回退）。
+
+**lite 套餐口径**：周窗（weekly）是**可选窗**——lite 套餐实测只有 5 小时窗，解析层容忍 weekly 缺席且绝不假设双窗必然存在（`runtime/quota/parser.py`；按语义字段判窗：unit=3/number=5 → five_hour，unit=6/number=1 → weekly）。lite 用户看到"只有 5-hour 一行"是正常形态，不是故障。
+
+**运行时解析**：`python <cli> quota-resolve <repo_root> [--force-refresh]` 输出四级层级解析结果（新鲜缓存 ≤300s → provider → 陈旧缓存 → `UNKNOWN`，绝不默认 AVAILABLE；`--force-refresh` 跳过缓存强制走 provider）——`runtime/quota/resolver.py`。四态的恢复语义（完成守卫不消费额度；四态只喂给 quota_resume 决策链）：
+
+| status | 含义 | `scheduled_activation_decision` 行为 |
 | --- | --- | --- |
-| `support_status` | 总判定：`supported` / `unsupported` | `unsupported` 才需要行动 |
-| `database_found` | 宿主库文件存在（默认 `~/.zcode/v2/tasks-index.sqlite`） | false → ZCode 未在此机器使用过 / 路径非默认（可用 `--db <path>` 或环境变量 `GLM_CONDUCTOR_ZCODE_DB` 显式指向） |
-| `database_readable` | 只读方式打开成功 | false 且文件存在 → 库损坏或权限问题，`issues` 有明细 |
-| `schema` | `compatible` / `incompatible` | incompatible → automations 表或必需列缺失 |
-| `missing_columns` | 缺失的必需列名清单 | 适配器必需列集 = `automation_id` / `recurring` / `enabled` / `lifecycle_status` / `next_run_at` |
-| `next_run_at_type_ok` | `next_run_at` 存储类型抽样是否为 integer/null | false → 宿主改了存储类型 |
-| `runs_table_ok` | automation_runs 表可达性（咨询性，不影响 support 判定） | 缺失仅损失「最近 runs」诊断信息 |
-| `issues` | 人类可读问题明细 | 逐条对应上列判定 |
-| `write_capability_required` | 恒 `next_run_at only`——适配器唯一生产写能力 | 佐证写边界（见下） |
+| `AVAILABLE` / `PRESSURE` | 可用（PRESSURE 是余量压力，仍可恢复） | 已授权且有预算 → `resume-authorized` |
+| `EXHAUSTED` | 耗尽 | `remain-waiting` |
+| `UNKNOWN` | 数据不可得（无凭证 / 网络失败 / 无缓存） | `remain-waiting`——绝不虚构可用性 |
+
+**窗口机制口径**：reset_at 时刻窗口恢复 100%（周窗优先）；下一个 reset_at 只在新窗口内发生模型调用时才物化——纯查询绝不推进它（`runtime/quota/window_math.py` / `time_utils.py`）。
+
+## 2. v2.3 遗留任务：检测与处置
+
+**现象**：恢复摘要 / 完成守卫报「v2.3 遗留任务：请在 2.3.x 下收尾或显式放弃（v2.4 不自动迁移、不伪造 v2.4 完成证据）」；或 `load_task` / 生命周期操作被拒绝并携带同一句指引。恢复注入中遗留任务渲染为一行式（`runtime/recovery.py`）：
+
+```
+[v2.3] refactor-auth-9c1d2e — v2.3 遗留任务：请在 2.3.x 下收尾或显式放弃
+                            （v2.4 不自动迁移、不伪造 v2.4 完成证据）
+    Next:    explicitly retire legacy task
+```
+
+**判定**：v2.4 只读检测、绝不迁移（`runtime/state.py` 的 `detect_legacy_task` / `is_legacy_state`）。命中以下任一标记即 v2.3 遗留：
+
+- 顶层集合键 `work_units` / `permits` / `leases` / `receipts`；
+- `work_units[i]` 内的 `permit` / `lease` / `receipt` 运行时字段；
+- `status` 是非空字符串但不在 v2.4 七态词汇内（v2.3 阶段态，如 `finalizing`）。
 
 **处置**：
 
-- `supported` → 无需任何动作。
-- `unsupported` → 插件的调度写入会在前置闸上安全失败并报错（绝不带病写——`ZcodeScheduleSchemaError`，`runtime/host/zcode_schedule.py`）；请勿手工修改宿主库，等待适配新宿主版本的插件更新；在修复前，连续性恢复始终有 SessionStart 注入兜底（自动化是加速器，不是正确性前提）。
+1. 该任务若还想完成 → 切回 v2.3.x 插件版本收尾（v2.3.x 可经 Git 历史 / tag 随时找回）；
+2. 不再需要 → 显式放弃：归档 / 删除 `.glm-conductor/tasks/<task-id>/` 任务目录（仓库真实改动以 git 为准，与任务账本无关）；
+3. 之后照常在 v2.4 下重建任务——**不要**手工把遗留 state.json 改写成 v2.4 形态（缺 v2.4 必填键的文件 `validate_state` 照常报错，伪造完成证据不会被完成守卫采信）。
 
-## 2. 子智能体模型静默回退：agent 模型绑定与宿主 provider 格式
+## 3. 写者守卫残留：`writer-show` 确认 + `--force` 清除
 
-**现象**：派发实施者 / 审查者后，用量与行为显示它们实际运行在主会话的旗舰模型（GLM-5.3）上；视觉系角色「看不见」截图（旗舰为纯文本模型）；用量记录里 flash 系 agent 的模型与 provider 和主会话完全一致。
+**现象**：完成守卫查 1 拦截：「仓库写者守卫正被其他任务持有」，但报出的持有任务其实早已消亡（会话崩溃、任务目录被手工删除等）；或新委派 `writer-acquire` 冲突。
 
-**背景事实**：ZCode 3.12.3（2026-09-16 起）重构模型管理，provider 体系由 `builtin:bigmodel-coding-plan` 切换为 `account:<套餐标识>`（个体 Coding Plan 为 `account:bigmodel-individual-coding-plan`）。此后 agent 定义 frontmatter 中的**裸模型 ID（如 `model: GLM-5.3-Flash`）不再可解析，宿主不报错、静默回退到主会话模型**。自 v2.3.2 起四个 agent 定义（`plugins/glm-conductor/agents/*.md`）一律使用 provider 全限定写法：
-
-```
-model: "account:bigmodel-individual-coding-plan/GLM-5.3-Flash"
-```
-
-**判定**（两步）：
-
-1. 核对实际派发模型：读 `~/.zcode/cli/db/db.sqlite` 的 `model_usage` 表，按 `query_source='subagent'` 行核对 `agent` × `model_id` × `provider_id`（`~/.zcode/cli/rollout/model-io-sess_*.jsonl` 的逐请求 `"model"` 字段亦可）。
-2. 核对定义快照时点：agent 定义只在**会话启动时快照**，运行中会话不热加载——修复定义后必须由新会话派发才生效。
-
-**处置**：
-
-- 修复定义：把 `agents/<agent>.md` 的 `model` 改为 provider 全限定 `account:<套餐标识>/<模型>`（本插件默认面向个体 Coding Plan；其他套餐 / 接入方式的用户请按宿主 Settings → Subagents 模型下拉所示的实际 ID 调整前缀；`tests/test_agent_model_binding.py` 机械锚定本格式）。
-- 生效：新开会话后再派发，回到第 1 步核对命中。
-
-## 3. Quota Clock 失联：诊断与恢复路径
-
-**现象**：额度窗口不再被自动观察/物化、周期 tick 不再出现（此前设置过 Quota Clock）。
-
-**第一步——权威诊断**：
+**判定**：先看当前持有者：
 
 ```
-python <cli> quota-clock-status <repo_root>
+python <cli> writer-show <repo_root>
 ```
 
-只读汇总 clock 绑定健康（`runtime/commands/quota_clock.py`），重点看 `health` / `reasons` / `needs_replacement` / `suggestion`。
+输出 `{holder: {repo_identity, task_id, workflow_run_id, created_at} | null}`。`writer-acquire` 的冲突返回同口径的持有者信息（`{"ok": false, "conflict": {…持有者三键…}}`，零写入）。守卫**永不自动过期**——无 TTL / generation / heartbeat（`runtime/writer_guard.py` 规格），`created_at` 只是诊断信息，残留记录无论多旧都照样冲突。
 
-**判定（needs_replacement 两极，`runtime/quota/clock.py` 的 `needs_replacement_from_reasons`）**：
+**处置**（按优先级）：
 
-- `needs_replacement: true`（reasons 含 `db_row_missing`——宿主 automation 行已消失，或 `db_inspect_failed`——宿主库不可查）→ clock 已无法继续服务，走下方恢复路径。
-- `needs_replacement: false`（仅有 `target_mismatch` / `tick_stale` / `runtime_path_missing`）→ 这些只是 advisory：按 `suggestion`「await next tick」等待；`runtime_path_missing`（插件升级后旧路径失真）会在下次 tick 自动回写自愈。
-
-**恢复路径（needs_replacement=true 时，`recovery_guidance` 同文）**：
-
-1. 新建一个独立的专用 ZCode 交互会话，选用低成本 Flash 类模型（automation 的 model 即发起会话的模型；clock automation 建议放在专用会话，避免周期 tick 打断主编码会话）。
-2. 在该会话内为 clock 创建一个新的 recurring ZCode automation。
-3. 显式执行替换绑定：
+1. 持有任务还活着 → 等它收尾（终态收尾 `task.complete` / `fail` / `cancel` 自动释放守卫），或在该任务内走完完成守卫；
+2. 持有任务确已消亡（目录已删 / 用户确认放弃）→ 显式清除：
 
 ```
-python <cli> quota-clock-bind <repo_root> <new_automation_id>
+python <cli> writer-release <repo_root> <holder_task_id> --force
 ```
 
-**死绑定自动替换说明**：bind 遇到「已绑定其它 automation」的冲突时，会只读复核旧 automation 的宿主库行；确认该行已消失（verified dead binding）才自动放行改绑，成功输出的 JSON 会多出 `replaced_dead_binding: <旧 automation_id>` 键（仅此路径出现）。旧绑定行仍存活时照样拒绝改绑（`ClockStateConflictError`，保护活绑定）；本插件**不做隐式迁移或自动 rebind**——新 automation_id 始终由你显式提供（`runtime/commands/quota_clock.py` + `runtime/quota/clock_store.py` 的锁内 TOCTOU 复核）。
+`--force` 是"inspect 之后由操作者显式清除"的运维通道：以**持有者自身的 task_id** 执行释放（守卫模块本身不设绕过持有者的旁路），stdout 报出被清除的持有者四字段信息。正常（非残留）释放不要带 `--force`。
 
-## 4. 「clock 已停摆但 status 报 healthy」——awaiting_first_tick 语义注记
+## 4. reviewer 模型继承：评审者跑在哪个模型上
 
-`last_tick_at` 缺失或非数值会被判为**首绑未 tick**（`awaiting_first_tick: true`，healthy、只提示等待下一次 tick，不触发 replace 建议）——这是为修复「新绑定立刻报 unhealthy」的自相矛盾而定的语义（`runtime/commands/quota_clock.py` 与 `hooks/session_start.py` 同口径镜像）。
+**背景事实**：两个评审者 agent（`agents/glm-reviewer.md` / `agents/visual-reviewer.md`）的 frontmatter **没有 `model` 字段**——这是 v2.4 的刻意设计：宿主实测表明，单模型宿主上不可解析的固定 model id 会让评审者确定性无法启动（普通 Agent 面直接硬失败）；去掉 model 字段后评审者**继承宿主 / 当前会话的模型**，绑定因此宿主可移植（`scripts/validate_plugin.py` 检查 2 机械锚定：reviewer 出现 model 字段即 FAIL）。
 
-**已知误判形态**：曾正常 tick 过的 clock，若 state 文件中的 `last_tick_at` 单键损坏或丢失（手工编辑、磁盘故障等），status 会误判为「首绑未 tick」而报 healthy——停摆被健康标签掩盖。
+**含义与排查**：
 
-**处置**：怀疑停摆但 status 报 healthy 时，先打开 state 文件核对：
+- 评审者与主会话同模型是**预期行为**，不是回退故障；独立性的来源是**全新上下文 + 只读工具白名单**，不是跨模型；
+- 视觉评审（`visual-reviewer`）需要多模态能力：在纯文本主会话模型下派发视觉评审会无法真正读图——此时按视觉例外的 fail-closed 纪律停止视觉通道并告知用户，不得用文本推测界面正常；
+- 对照：`visual-implementer`（实施者，非评审者）**保留** provider 全限定 `model: "account:…/GLM-5.3-Flash"` 字段——它走 Custom Subagent 通道，不适用上述继承机制；
+- agent 定义只在会话启动时快照：修改 agents 定义后须**新开会话**再派发才生效。
 
-```
-~/.glm-conductor/quota-clocks/<provider_identity_hash>.json
-```
+| agent | model 字段 | 实际模型 | 通道 |
+| --- | --- | --- | --- |
+| glm-reviewer | 无 | 继承宿主 / 会话模型 | 原生 Custom Subagent |
+| visual-reviewer | 无 | 继承宿主 / 会话模型（须多模态） | 原生 Custom Subagent |
+| visual-implementer | `account:…/GLM-5.3-Flash`（全限定） | 固定 Flash 多模态 | 原生 Custom Subagent（视觉例外） |
+| 文本 worker（delegate/full） | 无 agent 定义 | persona 内嵌进生成源 | Native Workflow |
 
-检查 `last_tick_at` 是否为合理的 epoch 毫秒数值（对比当前时间与 clock 周期）。数值明显过旧或键缺失而 clock 实际长期未 tick → 按 §3 的恢复路径替换绑定。
+## 5. 「hook 不拦 Workflow 子代理」：宿主事实与含义
 
-## 5. SessionStart advisory：触发条件与语义
+**宿主事实**（W0 复验，2026-09-20 在当前构建上确认）：ZCode Native Workflow 的子 actor **不触发插件钩子**——workflow 子代理在活动任务存在时零 hook 可见痕迹。这是宿主结构性事实，不是配置问题，插件侧不可修复。
 
-**触发条件**（启发式，只读 state 文件、绝不打开任何数据库——`hooks/session_start.py` 的 `render_clock_advisory`）：Quota Clock 已绑定（用户级 state 文件存在且可识别），且 `last_tick_at` 落后当前时刻超过 **2 × fallback_interval_minutes**（缺省 60 分钟，即阈值 2 小时）。首绑未 tick 不触发；state 缺失 / tick 新鲜 / 任何内部异常一律静默（fail-open，绝不阻塞会话启动、零噪音）。
+**含义（v2.4 因此这样设计）**：
 
-**语义**：advisory 只是提示，不执行任何 bind / replace / 迁移、零写入；文本含恢复指引、会话专用性声明（专用会话放置 `not_mechanically_verifiable`——插件无会话探测能力）与权威诊断指路。
+- **写前拦截在主实施路径上不可实现**——v2.3 式的派发 permit 门 / Agent 注入 / Bash 策略钩子已删除（只覆盖主会话 Bash 的策略钩子留着会暗示主路径并不享有的覆盖面）；
+- 确定性强制收敛到**两端**：编译期（ownership 阶段规划 + 一仓库一写者守卫）与终局（完成守卫四查）。越界改动**会被发生**，但不可能静默通过完成守卫——查 2 逐条点名越界路径；
+- 因此"worker 改了不该改的文件"的正确处置是：修复 / 撤销改动 → 重跑主验证（diff 变了 change_id 必变，旧验证自动过期）→ 重新过完成守卫；
+- 钩子（SessionStart / Stop）只对**主会话**生效且依赖 `python3` 在 PATH；钩子自身故障 fail-open（stderr 报 `ENFORCEMENT DEGRADED` 后放行，绝不卡死会话）——看到该报文说明守卫本轮没干活，属降级可见，不是放行许可；
+- 需要权限约束时，用宿主原生权限设施 + worker 约束（节点的 `interfaces` / `constraints` 声明与 persona 纪律），不要试图恢复派发面钩子。
 
-**收到 advisory 后**：运行 `quota-clock-status <repo_root>` 做权威 DB 级诊断（`needs_replacement` 只在那里判定），再按 §3 处置。
-
-## 6. 状态存储位置对照（排障先找对文件）
+## 6. 状态文件位置速查（排障先找对文件）
 
 | 状态 | 位置 | 说明 |
 | --- | --- | --- |
-| Quota Watcher 观察状态 | 仓库级 `<repo>/.glm-conductor/quota/watcher.json`（另有 `watcher.log`、互斥凭据 `watcher.lock`） | 观察面按仓库隔离（`runtime/quota/watcher_store.py`） |
-| provider 额度缓存 | 仓库级 `<repo>/.glm-conductor/quota-cache.json` | 标准化快照缓存，不含凭证（`runtime/quota/resolver.py`） |
-| 控制面事件 | 仓库级 `<repo>/.glm-conductor/quota/events.jsonl` | append-only（`runtime/journal.py`） |
-| Global Quota Clock state | **用户级** `~/.glm-conductor/quota-clocks/<provider_identity_hash>.json` | clock 是 provider 身份（账号）级，一个身份一个 state，多仓库共享（`runtime/quota/clock_store.py`） |
-| 宿主 automation 库 | 用户级 `~/.zcode/v2/tasks-index.sqlite` | ZCode 所有物；只经适配器访问，**勿手工编辑**（`runtime/host/zcode_schedule.py`） |
+| 任务状态 | `<repo>/.glm-conductor/tasks/<task-id>/state.json` | 七态 schema 真相源（`runtime/state.py`） |
+| 任务事件 | `<repo>/.glm-conductor/tasks/<task-id>/events.jsonl` | append-only，任务级十事件词汇（`runtime/journal.py`） |
+| 写者守卫 | `<repo>/.glm-conductor/writer_guard.json` | 仓库级单条预约（§3） |
+| run 关联 | `<repo>/.glm-conductor/workflow-runs/run-<task_ref 编码>.json` | 任务 ↔ Workflow run 的 id 关联（`runtime/workflow/adapter.py`） |
+| 额度缓存 | `<repo>/.glm-conductor/quota-cache.json` | 标准化快照，绑定 provider 身份指纹，不含凭证（`runtime/quota/resolver.py`） |
+| 钩子清单 | `plugins/glm-conductor/hooks/hooks.json` | 仅 SessionStart + Stop 两钩子（安装 / 更新后的新会话生效） |
 
-排障时最容易找错的是最后两行：watcher / 缓存 / 事件在**仓库级** `.glm-conductor/` 下，clock state 与宿主库在**用户级** home 目录下。
-
-## 7. 告警盲区（advisory 的结构性边界）
-
-SessionStart advisory 是 state 文件启发式：宿主库中的 automation 行丢失（`db_row_missing`）对它**结构性不可感知**（advisory 按设计不打开数据库），只能靠「tick 停止刷新 last_tick_at → 超过 2×fallback 阈值」间接收敛——因此从行丢失到告警存在**最长 2×fallback 间隔的延迟**，且 advisory 本身无法区分「停摆」与「宿主行丢失」这两种处置紧迫度不同的形态。
-
-DB 级诊断（`needs_replacement` / `placement` / `recovery_guidance`）权威归属 `quota-clock-status`——advisory 文本中的指路即此意。对告警时效有要求的场景，可让常驻 Quota Watcher 保持运行（它是观察面，不是正确性前提）。
-
-## 8. 安全边界速查
-
-- **插件不做 OS 电源操作**：睡眠/唤醒/关机等电源操作是用户本人权限，插件与代理严禁代为执行（适用于 runtime、技能/代理行为与一切附属脚本）。
-- **睡眠/唤醒跨窗行为未验证**：连续性设计不依赖它——时钟靠 recurring watchdog 网格自愈、恢复兜底归 SessionStart 注入；机器长期睡眠时定时触发不可依赖，这是如实记录的边界，不是已修复的缺陷。
-- **一会话一 automation**：同一会话已有 scheduled task 时，宿主会直接拒绝再创建——这是宿主硬规则（创建时拒绝），不是插件缺陷。
-- **写边界**：适配器对宿主库的唯一写操作是改写单个 automation 的 `next_run_at` 单列（事务化 + 写后读回验证），其余一切宿主变更被机械禁止（`tests/test_zcode_schedule.py` 的 ForbiddenSqlTest 锚定）。
+全部在**仓库级** `.glm-conductor/` 下（建议写入 `.git/info/exclude` 本地排除）；该目录是编排器自身账本——不算仓库改动，也永不参与 change_id。账本根的定位口径：钩子进程优先 `ZCODE_PROJECT_DIR`，缺失回退当前工作目录——手工排障时以 `.glm-conductor/tasks/` 所在目录为准。Workflow run 的进行中状态不在上表：那是宿主自有事实，用 ZCode 的 run 观测面查询，Conductor 只存 run id。
