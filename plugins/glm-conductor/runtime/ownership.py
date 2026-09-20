@@ -30,6 +30,15 @@
     声明」，绝不做目录展开或猜测式放宽；未命中即 out_of_scope，
     Layer A 据此拦截完成门（touched ⊆ owned? no → BLOCK）。
 
+v2.4 Phase 1 追加（P1-C 编译期阶段规划）：
+    plan_stages() 把已校验静态节点（runtime.work_unit / 
+    runtime.dependency）规划为 ownership 两两不相交的并行阶段；
+    scopes_overlap() 判定两个 scope 的路径语言是否相交（完备判定，
+    两端都可用 glob）；OwnershipConflictError 报告歧义 / 非法模式。
+    既有路径语义函数原样保留（Stop 完成门与 lease.py 依赖不变）；
+    plan_stages 对 runtime.work_unit / runtime.dependency 采用函数内
+    懒导入（先例：runtime/fingerprint.py），保持既有导入区不动。
+
 依赖：
     仅 Python 3 标准库（re / subprocess），零第三方依赖，
     `python3 -S` 可运行。风格对齐 runtime/state.py / runtime/journal.py。
@@ -281,3 +290,296 @@ def _parse_porcelain_z(text: str) -> "list[str]":
             if not (path == ".glm-conductor" or path.startswith(".glm-conductor/")):
                 touched.append(path)
     return touched
+
+
+# —— v2.4 编译期阶段规划（Phase 1 工作包 P1-C；本节纯追加，上方语义不动） ——
+#
+# 背景（W0 F9）：宿主对同一文件的并发写是 silent last-writer-wins，
+# 启动前这道编译期检查是唯一冲突屏障。本节只做确定性规划：
+#   - 同一阶段（组）内成员的 ownership scope 两两不相交，可安全并行；
+#   - scope 重叠的候选被确定性串行（排进同层级的后续组），绝不猜测；
+#   - 歧义或非法 pattern 直接抛 OwnershipConflictError，编译期失败。
+# 不引入任何锁、租约、运行时预约（仓库级写守卫是 U5 的独立设施），
+# 不新建 per-node 锁——产物是纯静态的阶段列表，供 U4 Workflow 编译器
+# 按组展开为 phase / Promise.all。
+
+class OwnershipConflictError(Exception):
+    """ownership 编译期冲突 / 歧义错误（规划拒绝，绝不猜测）。
+
+    两个节点的 scope 重叠本身不是错误——重叠候选被确定性串行化；
+    本错误只用于两类编译期失败，消息点名涉事节点 id 与出问题的
+    scope 原文：
+      - pattern 编译失败（非法模式，附带底层 OwnershipError 原文）；
+      - pattern 语义上匹配仓库根或一切路径（如 "**" / "*" / 空串），
+        所有权声明覆盖一切、意图歧义，以编译期失败取代猜测。
+    """
+
+
+# 段级 NFA 的边统一为三元组 (kind, payload, target)：
+#   ("eps", None, target)     ε-转移，不消耗输入；
+#   ("seg", matcher, target)  消耗一个完整路径段，段内字符序列须被
+#                             matcher（字符级迷你 NFA）接受。
+# 字符级迷你 NFA：{"start", "accept", "edges"}；edges: {state: [(guard, target)]}。
+# guard 恰好消耗一个段内字符（"*" 的「零或多字符」用自环表达）：
+#   ("lit", ch)   字面量字符（与 _translate_segment 的 re.escape 对应）；
+#   ("any1",)     任意单字符（"?"，段内不含 "/"）；
+#   ("anystar",)  任意段内字符串（"*"，含空串；语义为当前状态自环）。
+
+
+def _segment_matcher(seg: str) -> dict:
+    """把单个模式段翻译为字符级迷你 NFA（语义同 _translate_segment）。"""
+    edges = {0: []}
+    state = 0
+    for ch in seg:
+        if ch == "*":
+            # 段内任意字符串（含空串）：当前状态自环，不前进
+            edges[state].append((("anystar",), state))
+        else:
+            nxt = state + 1
+            edges[nxt] = []
+            if ch == "?":
+                edges[state].append((("any1",), nxt))
+            else:
+                edges[state].append((("lit", ch), nxt))
+            state = nxt
+    return {"start": 0, "accept": state, "edges": edges}
+
+
+# 「任意单段」匹配器（供 "**" 段自环复用；合法路径段非空，与
+# _GLOBSTAR 在合法路径域上等价）
+_SEG_ANY = _segment_matcher("*")
+
+
+def _char_guard_conj(guard_a, guard_b):
+    """两个字符级守卫的合取：同时满足的单字符集合；空集返回 None。
+
+    合取在此守卫代数上封闭：anystar 吸收一切；any1 ∧ lit = lit；
+    any1 ∧ any1 = any1；lit ∧ lit 仅在字符相等时保留。
+    """
+    kind_a, kind_b = guard_a[0], guard_b[0]
+    if kind_a == "anystar":
+        return guard_b
+    if kind_b == "anystar":
+        return guard_a
+    if kind_a == "any1" and kind_b == "any1":
+        return ("any1",)
+    if kind_a == "any1":
+        return guard_b
+    if kind_b == "any1":
+        return guard_a
+    if guard_a[1] == guard_b[1]:
+        return guard_a
+    return None
+
+
+def _char_matchers_intersect(matcher_a, matcher_b) -> bool:
+    """两个字符级迷你 NFA 是否接受同一字符序列（积自动机 BFS）。"""
+    seen = set()
+    stack = [(matcher_a["start"], matcher_b["start"])]
+    while stack:
+        pair = stack.pop()
+        if pair in seen:
+            continue
+        seen.add(pair)
+        state_a, state_b = pair
+        if state_a == matcher_a["accept"] and state_b == matcher_b["accept"]:
+            return True
+        for guard_a, target_a in matcher_a["edges"].get(state_a, ()):
+            for guard_b, target_b in matcher_b["edges"].get(state_b, ()):
+                if _char_guard_conj(guard_a, guard_b) is None:
+                    continue
+                if (target_a, target_b) not in seen:
+                    stack.append((target_a, target_b))
+    return False
+
+
+def _pattern_segment_nfa(pattern) -> dict:
+    """把 ownership 模式编译为段级 NFA（整条仓库相对路径 = 段序列）。
+
+    语言语义与 compile_pattern 在合法路径域上完全对齐：
+      - 非法模式先经 compile_pattern 校验（OwnershipError 原样上抛）；
+      - 纯字面量模式兼具 exact + 目录前缀双语义（编译规则 5）→
+        等价于段序列 + 隐式尾随 "**"；
+      - "**" 段 = 零或多段（四种位置在段级语言上统一；分隔符吸收
+        差异只体现为字符级正则形态，不影响语言）；
+      - 歧义模式（编译结果匹配空相对路径 ""，即仓库根本身——如
+        "**" / "*" / "**/**" 折叠后）抛 OwnershipConflictError：
+        所有权声明覆盖一切，重叠判定失去意义，拒绝猜测。
+    """
+    compiled = compile_pattern(pattern)
+    if compiled.match(""):
+        raise OwnershipConflictError(
+            "歧义 ownership 模式（语义上匹配仓库根或一切路径）：%r"
+            % (pattern,))
+    normalized = normalize_path(pattern)
+    segments = normalized.split("/")
+    # 折叠相邻双星（与 compile_pattern 同规则："**/**" 等价单个 "**"）
+    folded = []
+    for seg in segments:
+        if seg == "**" and folded and folded[-1] == "**":
+            continue
+        folded.append(seg)
+    if not any(ch in normalized for ch in "*?"):
+        # 纯字面量：exact + 目录前缀双语义 = 段序列 + 隐式尾随 "**"
+        folded = folded + ["**"]
+    edges = {0: []}
+    counter = [0]
+
+    def new_state() -> int:
+        counter[0] += 1
+        edges[counter[0]] = []
+        return counter[0]
+
+    current = 0
+    for seg in folded:
+        nxt = new_state()
+        if seg == "**":
+            # 零段：ε 直达；多段：任意单段自环
+            edges[current].append(("eps", None, nxt))
+            edges[current].append(("seg", _SEG_ANY, current))
+        else:
+            edges[current].append(("seg", _segment_matcher(seg), nxt))
+        current = nxt
+    return {"start": 0, "accept": current, "edges": edges}
+
+
+def _eps_closure(states, edges) -> set:
+    """段级 NFA 的 ε-闭包（states 为状态可迭代集合）。"""
+    closure = set(states)
+    stack = list(closure)
+    while stack:
+        state = stack.pop()
+        for kind, _payload, target in edges.get(state, ()):
+            if kind == "eps" and target not in closure:
+                closure.add(target)
+                stack.append(target)
+    return closure
+
+
+def _segment_nfas_overlap(nfa_a, nfa_b) -> bool:
+    """两个段级 NFA 是否接受同一路径（积自动机 BFS，同步消耗段）。
+
+    对本模块的段级 glob 语言是完备判定而非启发式：返回 False 当且
+    仅当不存在任何路径同时被两个模式覆盖。子集积构造保证终止。
+    """
+    start = (_eps_closure((nfa_a["start"],), nfa_a["edges"]),
+             _eps_closure((nfa_b["start"],), nfa_b["edges"]))
+    seen = set()
+    stack = [start]
+    while stack:
+        closure_a, closure_b = stack.pop()
+        key = (frozenset(closure_a), frozenset(closure_b))
+        if key in seen:
+            continue
+        seen.add(key)
+        if nfa_a["accept"] in closure_a and nfa_b["accept"] in closure_b:
+            return True
+        moves_a = [(payload, target)
+                   for state in closure_a
+                   for kind, payload, target in nfa_a["edges"].get(state, ())
+                   if kind == "seg"]
+        moves_b = [(payload, target)
+                   for state in closure_b
+                   for kind, payload, target in nfa_b["edges"].get(state, ())
+                   if kind == "seg"]
+        for matcher_a, target_a in moves_a:
+            for matcher_b, target_b in moves_b:
+                if _char_matchers_intersect(matcher_a, matcher_b):
+                    stack.append((
+                        _eps_closure((target_a,), nfa_a["edges"]),
+                        _eps_closure((target_b,), nfa_b["edges"])))
+    return False
+
+
+def scopes_overlap(scope_a, scope_b) -> bool:
+    """两个 ownership scope 的路径语言是否相交（完备判定，不猜测）。
+
+    覆盖：精确同文件、文件对目录前缀、目录对目录前缀、glob 重叠
+    （复用 compile_pattern 的段级语义，两端都可用 glob）。按路径段
+    边界判定——"src/auth" 不覆盖 "src/authentication.ts"，"*.py"
+    不与 "src/**" 相交（前者只命中单段路径）。
+
+    错误：
+      - 任一模式非法（空路径段、非字符串等）→ OwnershipError 原样
+        上抛（结构性错误，与 match_path / classify_paths 同一约定）；
+      - 任一模式歧义（匹配仓库根或一切路径，如 "**" / "*"）→
+        OwnershipConflictError（plan_stages 会先行预检并附上节点 id；
+        本函数被直接调用时消息只含两个 scope 原文）。
+    """
+    return _segment_nfas_overlap(
+        _pattern_segment_nfa(scope_a), _pattern_segment_nfa(scope_b))
+
+
+def plan_stages(nodes) -> "list[list[str]]":
+    """确定性阶段规划：同阶段成员 ownership 两两不相交（P1-C）。
+
+    算法三句：
+      1. 先做静态校验（work_unit.validate_node 逐节点 +
+         dependency.graph_errors 全图），任一错误聚合抛 ValueError；
+      2. 取 dependency.stage_levels 的确定性层级，层序即阶段大序，
+         跨层依赖保持权威（不因 ownership 重叠重排层级）；
+      3. 每层内按 id 升序遍历节点，贪心放进第一个与既有成员 scope
+         两两无重叠的组，放不进则新开一组——组序列即该层内的
+         确定性串行顺序。
+
+    返回 list[list[str]]：每组是一个可并行阶段（成员 scope 两两
+    不相交），组间顺序即执行顺序；同一输入两次调用输出全等。
+
+    错误：
+      - 节点形状或依赖图不合法 → ValueError（聚合中文错误消息）；
+      - 任一 ownership scope 编译失败或歧义（匹配仓库根 / 一切路径）
+        → OwnershipConflictError（消息点名节点 id 与 scope 原文；
+        预检在任何分组发生之前完成，单节点图同样拦截）。
+    """
+    # 懒导入：保持本文件既有导入区与模块级依赖不动（先例：
+    # runtime/fingerprint.py 对 runtime.ownership 的函数内导入）
+    from runtime import dependency, work_unit
+    if not isinstance(nodes, list):
+        raise ValueError(
+            "plan_stages：nodes 必须是数组，得到 %s" % type(nodes).__name__)
+    validation = []
+    for node in nodes:
+        validation.extend(work_unit.validate_node(node))
+    validation.extend(dependency.graph_errors(nodes))
+    if validation:
+        raise ValueError(
+            "plan_stages：节点声明校验失败（共 %d 项）：%s"
+            % (len(validation), "；".join(validation)))
+    by_id = {}
+    for node in nodes:
+        by_id[node["id"]] = node  # id 唯一性已由 graph_errors 保证
+    levels = dependency.stage_levels(nodes)
+
+    # 编译期 scope 预检：按规划顺序逐节点编译全部 scope，非法 / 歧义
+    # 在任何分组发生之前失败（fail-fast 于整图；单节点无配对同样拦截）
+    for level in levels:
+        for node_id in sorted(level):
+            for pattern in by_id[node_id]["ownership"]:
+                try:
+                    _pattern_segment_nfa(pattern)
+                except OwnershipConflictError as exc:
+                    raise OwnershipConflictError(
+                        "节点 %r 的 ownership 模式歧义：%s"
+                        % (node_id, exc)) from exc
+                except OwnershipError as exc:
+                    raise OwnershipConflictError(
+                        "节点 %r 的 ownership 模式编译失败：%s"
+                        % (node_id, exc)) from exc
+
+    # 层内贪心装箱：按 id 升序，放入第一个无重叠组，否则新开一组
+    stages = []
+    for level in levels:
+        groups = []  # 每组 {"ids": [...], "scopes": [...]}（成员 scope 平铺）
+        for node_id in sorted(level):
+            scopes = list(by_id[node_id]["ownership"])
+            for group in groups:
+                if not any(scopes_overlap(scope, existing)
+                           for scope in scopes
+                           for existing in group["scopes"]):
+                    group["ids"].append(node_id)
+                    group["scopes"].extend(scopes)
+                    break
+            else:
+                groups.append({"ids": [node_id], "scopes": scopes})
+        stages.extend(group["ids"] for group in groups)
+    return stages
