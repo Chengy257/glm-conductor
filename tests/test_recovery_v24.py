@@ -153,17 +153,17 @@ def run_hook(stdin_text, project_dir):
 
     显式 UTF-8 解码 + errors="replace"（test_recovery 先例）；ZCODE_
     PROJECT_DIR 指向被检仓库；GLM_CONDUCTOR_HOME 注入一次性空目录
-    （隔离本机真实 clock state，保证「完全静默」断言不依赖运行机器
-    的用户级状态）。
+    （隔离本机用户级状态，保证「完全静默」断言不依赖运行机器的
+    用户目录——v2.4 P3-D 起钩子已无额度时钟读取面，本注入纯为
+    隔离惯例保留）。
     """
-    from runtime.quota import clock_store
     with tempfile.TemporaryDirectory(prefix="gc-recovery-v24-home-") as home:
         return subprocess.run(
             [sys.executable, str(SESSION_START)],
             input=stdin_text, text=True, capture_output=True,
             encoding="utf-8", errors="replace",
             env=dict(os.environ, ZCODE_PROJECT_DIR=str(project_dir),
-                     **{clock_store.GLM_CONDUCTOR_HOME_ENV: home}))
+                     **{"GLM_CONDUCTOR_HOME": home}))
 
 
 def parse_single_line_json(text):

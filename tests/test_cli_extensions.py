@@ -1,22 +1,18 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""CLI 扩展子命令测试（v2.4 Phase 2 W6 收敛版）。
+"""CLI 扩展子命令测试（v2.4 Phase 3 P3-D/E 收敛版）。
 
 v2.3 执行面（permits / permit-show / permit-consume / agent-runs /
 wave-prepare / wave-show / manifest-show / verify-unit / verify-task）
-的用例已随对应子命令退役删除；review-record 用例改按新契约
-（runtime.task.record_review 任务级审查记录）；quota-exhausted /
-quota-resume / wake-record / wake-prompt 的执行面编排已退役——只保留
-用法闸与「调用即 RuntimeError 退役明示」的降级锚定用例。存活命令：
+的用例已随对应子命令退役删除（v2.4 W6）；v2.4 P3-D/E 控制面收口：
+quota-exhausted / quota-resume / wake-record / wake-prompt 等子命令
+连同其后端整体移除，其退役降级锚定用例一并删除。存活命令：
 
   1. quota-resolve：monkeypatch 假 resolver（零网络）→ JSON 四键原样
      直出；--force-refresh 透传；未知旗标 / 参数个数 → 2；resolver
      契约外异常 → 兜底 1；
   2. review-record：审查块 JSON 直出（note→findings 透传）；verdict
-     词汇非法 → 2；先验证后评审顺序闸 / 任务缺失 → 1；
-  3. quota-exhausted / quota-resume：参数个数 / status 词汇闸 → 2；
-     退役 RuntimeError → 1（错误 JSON 含退役说明）；
-  4. wake-record / wake-prompt：参数个数 → 2；退役 RuntimeError → 1。
+     词汇非法 → 2；先验证后评审顺序闸 / 任务缺失 → 1。
 
 零网络纪律：凡涉 resolver 的用例一律 monkeypatch；scratch 目录全部
 tempfile.TemporaryDirectory，绝不触碰真实账本。仅 Python 3.7 标准库。
@@ -238,69 +234,6 @@ class ReviewRecordCliTest(GitCliFixture):
         code, _payload = run_cli("review-record", str(self.repo), TID,
                                  "glm-reviewer", "ship", "note", "extra")
         self.assertEqual(code, 2)
-
-
-# —— 3. quota-exhausted / quota-resume（退役面） ——
-
-class QuotaRetiredCliTest(TempDirFixture):
-    """quota-exhausted / quota-resume：用法闸仍在（2），执行面编排
-    退役 → RuntimeError 错误 JSON（1）。"""
-
-    def test_quota_exhausted_usage_error_exit_2(self):
-        code, _payload = run_cli("quota-exhausted", str(self.repo))
-        self.assertEqual(code, 2)
-
-    def test_quota_exhausted_retired_runtime_error_exit_1(self):
-        code, payload = run_cli("quota-exhausted", str(self.repo), TID)
-        self.assertEqual(code, 1)
-        self.assertIn("RuntimeError", payload["error"])
-        self.assertIn("已退役", payload["error"])
-
-    def test_quota_resume_invalid_status_exit_2(self):
-        code, payload = run_cli("quota-resume", str(self.repo), TID, "MEGA")
-        self.assertEqual(code, 2)
-        self.assertIn("quota-resume", payload["error"])
-
-    def test_quota_resume_usage_error_exit_2(self):
-        code, _payload = run_cli("quota-resume", str(self.repo))
-        self.assertEqual(code, 2)
-
-    def test_quota_resume_retired_runtime_error_exit_1(self):
-        code, payload = run_cli("quota-resume", str(self.repo), TID,
-                                "AVAILABLE")
-        self.assertEqual(code, 1)
-        self.assertIn("RuntimeError", payload["error"])
-        self.assertIn("已退役", payload["error"])
-
-
-# —— 4. wake-record / wake-prompt（退役面） ——
-
-class WakeRetiredCliTest(TempDirFixture):
-    """wake-record / wake-prompt：用法闸仍在（2），记账编排退役 →
-    RuntimeError 错误 JSON（1）。"""
-
-    def test_wake_record_usage_error_exit_2(self):
-        code, _payload = run_cli("wake-record", str(self.repo), TID,
-                                 "aut-wake-x")
-        self.assertEqual(code, 2)
-
-    def test_wake_record_retired_runtime_error_exit_1(self):
-        code, payload = run_cli("wake-record", str(self.repo), TID,
-                                "aut-wake-0001", "2026-09-01T00:00:00Z")
-        self.assertEqual(code, 1)
-        self.assertIn("RuntimeError", payload["error"])
-        self.assertIn("已退役", payload["error"])
-
-    def test_wake_prompt_usage_error_exit_2(self):
-        code, _payload = run_cli("wake-prompt", str(self.repo))
-        self.assertEqual(code, 2)
-
-    def test_wake_prompt_retired_runtime_error_exit_1(self):
-        # 纯文本成功路径已随执行面退役：错误 JSON 面 + 退出码 1
-        code, payload = run_cli("wake-prompt", str(self.repo), TID)
-        self.assertEqual(code, 1)
-        self.assertIn("RuntimeError", payload["error"])
-        self.assertIn("已退役", payload["error"])
 
 
 if __name__ == "__main__":

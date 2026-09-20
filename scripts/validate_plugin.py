@@ -89,9 +89,11 @@
          state.json / route_selected，skills/enforcement/SKILL.md 必含
          ENFORCEMENT DEGRADED / gate_exhausted / Layer A / Layer B；
          runtime/quota/ 下的 parser / provider / _http / zai / bigmodel /
-         scheduler / credentials / report 八模块、commands/quota.md 与
-         tests/ 下五个 test_quota*.py 均存在且非空，scheduler 必含
-         evaluate / plan_resume / PRESSURE / EXHAUSTED，_http 必含
+         credentials / report 七模块、commands/quota.md 与
+         tests/ 下四个 test_quota*.py 均存在且非空，parser 必含
+         evaluate / plan_resume / PRESSURE / EXHAUSTED（v2.4 P3-A 起
+         scheduler 已删除，评估/规划纯函数移入 parser，标记随架构
+         同步改锚），_http 必含
          ALLOWED_HOSTS / malformed，credentials 必含
          GLM_CONDUCTOR_QUOTA_API_KEY / builtin:bigmodel-coding-plan，
          report 必含 --json / unavailable；
@@ -255,26 +257,24 @@ QUOTA_PROVIDER_PY = os.path.join(QUOTA_DIR, "provider.py")
 QUOTA_HTTP_PY = os.path.join(QUOTA_DIR, "_http.py")
 QUOTA_ZAI_PY = os.path.join(QUOTA_DIR, "zai.py")
 QUOTA_BIGMODEL_PY = os.path.join(QUOTA_DIR, "bigmodel.py")
-QUOTA_SCHEDULER_PY = os.path.join(QUOTA_DIR, "scheduler.py")
 QUOTA_CREDENTIALS_PY = os.path.join(QUOTA_DIR, "credentials.py")
 QUOTA_REPORT_PY = os.path.join(QUOTA_DIR, "report.py")
 QUOTA_COMMAND = os.path.join(
     REPO_ROOT, "plugins", "glm-conductor", "commands", "quota.md")
 TEST_QUOTA_PARSER = os.path.join(TESTS_DIR, "test_quota_parser.py")
 TEST_QUOTA_ADAPTERS = os.path.join(TESTS_DIR, "test_quota_adapters.py")
-TEST_QUOTA_SCHEDULER = os.path.join(TESTS_DIR, "test_quota_scheduler.py")
 TEST_QUOTA_CREDENTIALS = os.path.join(TESTS_DIR, "test_quota_credentials.py")
 TEST_QUOTA_REPORT = os.path.join(TESTS_DIR, "test_quota_report.py")
 ORCHESTRATION_SKILL = os.path.join(SKILLS_DIR, "orchestration", "SKILL.md")
 RUNTIME_REQUIRED_FILES = (
     RUNTIME_INIT, STATE_PY, JOURNAL_PY, OWNERSHIP_PY,
     QUOTA_PARSER_PY, QUOTA_PROVIDER_PY, QUOTA_HTTP_PY, QUOTA_ZAI_PY,
-    QUOTA_BIGMODEL_PY, QUOTA_SCHEDULER_PY, QUOTA_CREDENTIALS_PY,
+    QUOTA_BIGMODEL_PY, QUOTA_CREDENTIALS_PY,
     QUOTA_REPORT_PY, WORK_UNIT_PY, DEPENDENCY_PY)
 LAYER_REQUIRED_FILES = (STOP_GATE_PY,)
 TEST_REQUIRED_FILES = (
     TEST_STATE, TEST_JOURNAL, TEST_OWNERSHIP,
-    TEST_QUOTA_PARSER, TEST_QUOTA_ADAPTERS, TEST_QUOTA_SCHEDULER,
+    TEST_QUOTA_PARSER, TEST_QUOTA_ADAPTERS,
     TEST_QUOTA_CREDENTIALS, TEST_QUOTA_REPORT)
 COMMAND_REQUIRED_FILES = (QUOTA_COMMAND,)
 STATE_REQUIRED_MARKERS = (
@@ -1019,7 +1019,10 @@ def check_14_runtime_state(results):
         (WORK_UNIT_PY, ("NODE_REQUIRED_KEYS",)),
         (DEPENDENCY_PY, ("graph_errors",)),
         (STOP_GATE_PY, STOP_GATE_REQUIRED_MARKERS),
-        (QUOTA_SCHEDULER_PY,
+        # v2.4 Phase 3 P3-A：scheduler.py 已删除，evaluate / plan_resume
+        # （§28/§29-§33）行为保持移入 parser.py——四个 §28 词汇标记随
+        # 架构同步改锚（总计划规则 12）；标记全在 parser.py 锚定。
+        (QUOTA_PARSER_PY,
          ("evaluate", "plan_resume", "PRESSURE", "EXHAUSTED")),
         (QUOTA_HTTP_PY, ("ALLOWED_HOSTS", "malformed")),
         (QUOTA_CREDENTIALS_PY,

@@ -476,9 +476,10 @@ class FixedTmpBanTest(unittest.TestCase):
     确定性），凡代码行出现固定临时名构造字面量（`.tmp"`——tmp 路径 +
     双引号收尾；v2.2.1 a5 rider 起连同单引号形态 `'.tmp'` 一并扫描，
     全仓现存零单引号命中——加宽后 offender 集合与原先逐行一致）的文
-    件必须属于单写者保留白名单；四个已迁移写方（quota/resolver.py、
-    quota/watcher_store.py、quota/primer.py、scheduler_facts.py）绝不
-    出现，且各自含 durable_io 接线证据。durable_io.py 自身的唯一临时
+    件必须属于单写者保留白名单；已迁移写方（quota/resolver.py）绝不
+    出现固定 .tmp 字面量，且含 durable_io 接线证据（v2.4 Phase 3 控
+    制面收口：其余三个已迁移写方文件已删除，锚点相应移除）。
+    durable_io.py 自身的唯一临时
     名字面量（TEMP_MARKER 的 ".durable-tmp." 前缀 + "%s%d.%s.tmp" 唯一
     化格式串）合法，按文件名显式放行——该文件绝不构造固定 <path>.tmp
     名。单写者白名单按**全相对路径**匹配（a5 rider：同名文件出现在
@@ -489,9 +490,6 @@ class FixedTmpBanTest(unittest.TestCase):
     RUNTIME_PARTS = Path("plugins") / "glm-conductor" / "runtime"
     MIGRATED_WRITERS = (
         "quota/resolver.py",
-        "quota/watcher_store.py",
-        "quota/primer.py",
-        "scheduler_facts.py",
     )
     # 单写者固定 .tmp 保留（记录在案：docs/architecture.md §7.6 分类
     # 表），按相对 runtime 根的全 posix 路径匹配
