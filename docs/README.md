@@ -11,6 +11,10 @@
 
 - [V2_4_NATIVE_WORKFLOW_REBASELINE_SPEC.md](reviews/V2_4_NATIVE_WORKFLOW_REBASELINE_SPEC.md) — **v2.4 target architecture 的冻结规格**：Native Workflow 接管 execution orchestration；Conductor 收敛为 routing / canonical DAG / ownership / task-level acceptance / bounded quota resume；Global Quota Clock 独立为 companion project。该文档是 v2.4 实施目标的权威来源，但在 v2.4 落地前不替代当前 2.3.x 的 `architecture.md`。
 - [V2_4_NATIVE_WORKFLOW_IMPLEMENTATION_PLAN.md](roadmap/V2_4_NATIVE_WORKFLOW_IMPLEMENTATION_PLAN.md) — v2.4 实施交付计划：W0 两项宿主复验 + 4 个较大实施阶段；阶段内只做针对性测试，最终集成门只跑一次全量回归。
+  - [Phase 1 — Native Semantic Core](roadmap/V2_4_PHASE_1_NATIVE_SEMANTIC_CORE_SPEC.md) — static DAG / Workflow compiler / ownership-safe parallelism / repository writer guard / reviewer model-binding remediation.
+  - [Phase 2 — State & Assurance Retirement](roadmap/V2_4_PHASE_2_STATE_ASSURANCE_RETIREMENT_SPEC.md) — task-level state / change_id / minimal validation-review / completion guard / removal of legacy execution runtime.
+  - [Phase 3 — Quota Resume & Clock Extraction](roadmap/V2_4_PHASE_3_QUOTA_RESUME_EXTRACTION_SPEC.md) — bounded task resume / native Scheduled Task / removal of quota control plane / Global Clock extraction inventory.
+  - [Phase 4 — Integration & Release](roadmap/V2_4_PHASE_4_INTEGRATION_RELEASE_SPEC.md) — repository-wide consistency cleanup / docs-skills rewrite / test-suite re-baseline / one final full regression.
 
 以下文档用于正在进行的宿主兼容性实验与下一版本 re-baseline 审查。v2.4 target architecture 已单独冻结，但在代码落地前仍**不修改** `architecture.md` 的当前 2.3.x 真相。
 
