@@ -33,7 +33,7 @@
 v2.4 顶层概念（schema 权威清单）：
     task_id / goal / repository / route / dag / status / phase（可选
     描述性标注）/ workflow_run_id（可空，委派运行启动前为 null）/
-    validation / review / quota_resume（Phase 3 定稿语义的占位块）。
+    validation / review / quota_resume（P3-B 定稿的配额恢复授权块）。
     validation 与 review 是任务级唯一记录（无逐单元证据）。
 
 durable status 恰为七态：
@@ -117,8 +117,11 @@ VALIDATION_STATUSES = ("passed", "failed")
 # 任务级 review.verdict 词汇（P2-C 最小审查记录；v2.3 的
 # not-required / missing / stale 等裁决词汇随之退役）
 REVIEW_VERDICTS = ("ship", "fix-first", "rethink")
-# quota_resume.mode 词汇（占位块 Phase 3 定稿；当前仅 manual）
-QUOTA_RESUME_MODES = ("manual",)
+# quota_resume.mode 词汇（P3-B 定稿：manual 默认 / auto 显式授权）。
+# auto 不需要附加字段——授权由显式 authorize_quota_resume 调用记录，
+# 不做推断；词汇外值（v2.3 的 manual/notify/auto_once/until_done
+# 四模式词）一律拒绝
+QUOTA_RESUME_MODES = ("manual", "auto")
 
 # 顶层状态转换表：键 = 旧 status，值 = 允许的直接后继（终态无表项 =
 # 不接受任何转换——终态不得静默重开，显式重开只能走 reopen_task）。
@@ -162,11 +165,12 @@ LEGACY_STATE_GUIDANCE = (
     "（v2.4 不自动迁移、不伪造 v2.4 完成证据）")
 
 
-# —— quota_resume 占位块（Phase 3 定稿语义前的冻结初始形状） ——
+# —— quota_resume 块（P3-B 定稿语义） ——
 
-# v2.4 顶层 quota_resume 占位块的冻结初始形状（恰为四键；Phase 3
-# 定稿额度续跑语义。模块常量只读，default_quota_resume() 每次返回
-# 全新拷贝，防止调用方改动波及本常量）
+# v2.4 顶层 quota_resume 块的冻结初始形状（恰为四键；P3-B 定稿额度
+# 续跑授权语义。模块常量只读，default_quota_resume() 每次返回全新
+# 拷贝，防止调用方改动波及本常量。auto 不需要附加字段；诊断性的
+# 最近观测（enter_waiting_quota 记入）不在本常量内——缺省即无观测）
 DEFAULT_QUOTA_RESUME = {
     "mode": "manual",
     "max_resumes": 0,
@@ -176,11 +180,12 @@ DEFAULT_QUOTA_RESUME = {
 
 
 def default_quota_resume() -> dict:
-    """返回 quota_resume 占位块的全新拷贝。
+    """返回 quota_resume 块的全新拷贝。
 
     每次调用构造新 dict，调用方改写返回值不影响模块常量
     DEFAULT_QUOTA_RESUME；形状恰为 mode="manual" / max_resumes=0 /
-    resume_count=0 / automation_id=None（Phase 3 定稿前的占位初始态）。
+    resume_count=0 / automation_id=None（P3-B 定稿初始态：未授权、
+    零预算——恢复只能走显式授权 + 调用方确认通道）。
     """
     return dict(DEFAULT_QUOTA_RESUME)
 
@@ -442,12 +447,16 @@ def _validate_review(review):
 
 
 def _validate_quota_resume(block):
-    """校验 quota_resume 占位块（Phase 3 定稿前的形状闸）。
+    """校验 quota_resume 块（P3-B 定稿授权语义的收口闸）。
 
     键（存在才校验，缺键按 DEFAULT_QUOTA_RESUME 默认解释；未知键
-    忽略）：mode ∈ QUOTA_RESUME_MODES（当前仅 manual）；max_resumes /
-    resume_count 为 >= 0 的整数（bool 拒绝——bool 是 int 子类，
-    True/False 不得充当计数）；automation_id 为 null 或非空 str。
+    忽略——enter_waiting_quota 记入的诊断观测键照此透传）：
+      - mode ∈ QUOTA_RESUME_MODES（manual / auto）；
+      - max_resumes / resume_count 为 >= 0 的整数（bool 拒绝——bool
+        是 int 子类，True/False 不得充当计数）；
+      - 交叉不变量：resume_count 不得大于 max_resumes（两侧均为合法
+        非负整数时才比对，形状错误已各自单独报告，不重复报）；
+      - automation_id 为 null 或非空 str。
     """
     if not isinstance(block, dict):
         return ["quota_resume 必须是 JSON 对象"]
@@ -455,12 +464,24 @@ def _validate_quota_resume(block):
     if "mode" in block and block["mode"] not in QUOTA_RESUME_MODES:
         errors.append(_enum_error("quota_resume.mode", block["mode"],
                                   QUOTA_RESUME_MODES))
+
+    def _valid_count(value):
+        return (not isinstance(value, bool) and isinstance(value, int)
+                and value >= 0)
+
     for key in ("max_resumes", "resume_count"):
         if key in block:
             value = block[key]
-            if isinstance(value, bool) or not isinstance(value, int) \
-                    or value < 0:
+            if not _valid_count(value):
                 errors.append("quota_resume.%s 必须是 >= 0 的整数" % key)
+    resume_count = block.get("resume_count")
+    max_resumes = block.get("max_resumes")
+    if _valid_count(resume_count) and _valid_count(max_resumes) \
+            and resume_count > max_resumes:
+        errors.append(
+            "quota_resume.resume_count %d 不得大于 quota_resume."
+            "max_resumes %d（预算不变量：resume_count <= max_resumes）"
+            % (resume_count, max_resumes))
     if "automation_id" in block and block["automation_id"] is not None:
         value = block["automation_id"]
         if not isinstance(value, str) or value == "":
@@ -541,7 +562,7 @@ def validate_state(state) -> "list[str]":
     if "review" in state:
         errors.extend(_validate_review(state["review"]))
 
-    # quota_resume（Phase 3 定稿前的占位块）
+    # quota_resume（P3-B 定稿授权块：manual/auto + 预算不变量）
     if "quota_resume" in state:
         errors.extend(_validate_quota_resume(state["quota_resume"]))
 
@@ -611,7 +632,7 @@ def new_task_state(task_id, goal, route, *, repository_root, dag_nodes=(),
             "change_id": None,
             "findings": None,
         },
-        # quota_resume 占位块（Phase 3 定稿语义前的冻结初始形状）
+        # quota_resume 块（P3-B 定稿初始形状：manual 未授权零预算）
         "quota_resume": default_quota_resume(),
     }
     if phase is not None:

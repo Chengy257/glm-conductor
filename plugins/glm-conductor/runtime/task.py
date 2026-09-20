@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""GLM Conductor v2.4 任务生命周期层（task lifecycle，Phase 2 工作包 P2-A/C，单元 W3）。
+"""GLM Conductor v2.4 任务生命周期层（task lifecycle，Phase 2 W3 + Phase 3 单元 Q1）。
 
 职责：
     v2.4 任务生命周期的唯一编排入口：在 W1 的 v2.4 状态层
@@ -44,10 +44,26 @@
     set_phase(repo_root, task_id, phase)
         描述性 phase 标注（∈ planning/workflow/validating/reviewing；
         None = 清除标注——phase 无 null 空档）。
-    enter_waiting_quota(repo_root, task_id) / exit_waiting_quota(...)
+    enter_waiting_quota(repo_root, task_id, quota_view=None) /
+    exit_waiting_quota(...)
         额度等待进出：迁移到 waiting_quota / active，各落一条
         waiting_quota 事件（direction: enter / exit）；无实际迁移
-        （原状态即目标）时不落事件。
+        （原状态即目标）时不落事件、不写盘。enter 可选携带 quota_view
+        （归一化配额观测 dict）——实际进入等待时把最近一次观测
+        （status/reset_at/observed_at）记入 quota_resume 供诊断。
+    authorize_quota_resume(repo_root, task_id, max_resumes)
+        显式用户授权自动恢复（P3-B）：置 quota_resume.mode=auto 并落
+        预算 max_resumes；要求任务处于 waiting_quota 或 active；
+        max_resumes 不得小于已用 resume_count。授权由本调用的落盘
+        记录，不做任何推断。
+    scheduled_activation_decision(repo_root, task_id, quota_view)
+        定时轮次的幂等决策原语（P3-C）：四action 封闭词汇
+        （no-op / remain-waiting / waiting-user / resume-authorized），
+        绝不虚构可用性；resume-authorized 只暂存计数，绝不落账。
+    confirm_resume_started(repo_root, task_id)
+        暂存计数落账：宿主 resume 调用真正被接受后由调用方调用——
+        resume_count +1、任务转回 active（workflow 阶段）、落
+        quota_resume_confirmed 事件。未确认的决策绝不消耗预算。
     complete(repo_root, task_id) / fail(...) / cancel(...)
         终态收尾：迁移到 completed / failed / cancelled + 任务级
         journal 事件（task_completed / task_failed / task_cancelled）
@@ -55,15 +71,17 @@
         守卫属其它任务时不误删）。同终态重放放行（事件与释放幂等），
         跨终态迁移一律拒绝。
 
-journal 词汇（TASK_JOURNAL_EVENTS，恰九名，绝不多不少）：
+journal 词汇（TASK_JOURNAL_EVENTS，恰十名，绝不多不少）：
     route_selected / workflow_started / workflow_reassessed /
     validation_recorded / review_recorded / waiting_quota /
-    task_completed / task_failed / task_cancelled。
+    quota_resume_confirmed / task_completed / task_failed /
+    task_cancelled。
     workflow_reassessed 是声明的词汇名（路由重估由主会话记录），
-    本模块 API 面无生产者。本模块追加的事件名绝不出此表；也绝不
-    经由 state.transition_task_status 迁移状态（其 status_changed
-    事件不在任务级词汇内）——状态门用 state.TASK_TRANSITIONS +
-    state.save_state 自己走。
+    本模块 API 面无生产者。quota_resume_confirmed 是 P3-C 唯一新增
+    名（暂存恢复计数落账 + 转回 active 的事实记录）。本模块追加的
+    事件名绝不出此表；也绝不经由 state.transition_task_status 迁移
+    状态（其 status_changed 事件不在任务级词汇内）——状态门用
+    state.TASK_TRANSITIONS + state.save_state 自己走。
 
 变更标识的相关路径集（W4 完成守卫共用的同一派生）：
     relevant_paths(task_state) = dag 全节点 ownership scope 并集
@@ -83,19 +101,24 @@ journal 词汇（TASK_JOURNAL_EVENTS，恰九名，绝不多不少）：
 来源：
     docs/roadmap/V2_4_PHASE_2_WORKFLOW_EXECUTION_PLAN.md W3（单元规格）
     + docs/roadmap/V2_4_PHASE_2_STATE_ASSURANCE_RETIREMENT_SPEC.md
-    §3（单一 change_id 新鲜度）与 §4（最小验证 / 审查记录）。
+    §3（单一 change_id 新鲜度）与 §4（最小验证 / 审查记录）
+    + docs/roadmap/V2_4_PHASE_3_WORKFLOW_EXECUTION_PLAN.md Q1（授权
+    与等待/恢复生命周期单元规格）
+    + docs/roadmap/V2_4_PHASE_3_QUOTA_RESUME_EXTRACTION_SPEC.md
+    §3（P3-B 最小恢复授权）与 §4（P3-C 等待/恢复生命周期）。
 """
 
 from runtime import change_id, journal, state, writer_guard
 from runtime.workflow import adapter as workflow_adapter
 
-# —— 任务级 journal 事件词汇（恰九名；本模块追加的事件名绝不出此表） ——
+# —— 任务级 journal 事件词汇（恰十名；本模块追加的事件名绝不出此表） ——
 
-# 词汇精确口径（W3 规格）：route_selected / workflow_started /
-# workflow_reassessed / validation_recorded / review_recorded /
-# waiting_quota / task_completed / task_failed / task_cancelled。
-# 无宿主子代理生命周期词汇（implementation_started / unit_finished /
-# dispatch_* / lease_* / reviewer_invoked 等一律不入表）。
+# 词汇精确口径（W3 规格 + P3-C 恰一新增）：route_selected /
+# workflow_started / workflow_reassessed / validation_recorded /
+# review_recorded / waiting_quota / quota_resume_confirmed /
+# task_completed / task_failed / task_cancelled。
+# 无宿主子代理生命周期词汇（implementation_started / dispatch_* /
+# lease_* / reviewer_invoked 等一律不入表）。
 TASK_JOURNAL_EVENTS = (
     "route_selected",
     "workflow_started",
@@ -103,10 +126,22 @@ TASK_JOURNAL_EVENTS = (
     "validation_recorded",
     "review_recorded",
     "waiting_quota",
+    "quota_resume_confirmed",
     "task_completed",
     "task_failed",
     "task_cancelled",
 )
+
+# quota_view 归一化观测的 status 词汇（P3-A 定稿的归一化答案恰此
+# 四态；与 quota.parser.QUOTA_STATUSES 同词汇，但本模块自带常量、
+# 不导入 quota 包——观测核心收缩后任务层不依赖其内部模块）。
+# AVAILABLE / PRESSURE 视为可用；EXHAUSTED 视为耗尽；UNKNOWN 绝不
+# 虚构可用性。
+QUOTA_VIEW_STATUSES = ("AVAILABLE", "PRESSURE", "EXHAUSTED", "UNKNOWN")
+
+# scheduled_activation_decision 的 action 封闭词汇（恰四值）
+SCHEDULED_ACTIVATION_ACTIONS = (
+    "no-op", "remain-waiting", "waiting-user", "resume-authorized")
 
 
 # —— 内部助手 ——
@@ -440,18 +475,59 @@ def set_phase(repo_root, task_id, phase) -> dict:
     return st
 
 
-# —— 额度等待进出 ——
+# —— 额度等待进出 / 恢复授权与定时唤醒决策（P3-B/C） ——
 
-def enter_waiting_quota(repo_root, task_id) -> dict:
+def _validate_quota_view(quota_view) -> dict:
+    """校验归一化配额观测 dict（结构性错误 ValueError，先于一切写盘）。
+
+    quota_view 必须是 dict 且 status ∈ QUOTA_VIEW_STATUSES（恰四态）；
+    reset_at / source / observed_at 为诊断字段，本层不校验形状、按
+    原样透传（归一化口径由产生方 resolver/report 负责）。返回原 dict
+    （仅经形状确认，绝不改写）。
+    """
+    if not isinstance(quota_view, dict):
+        raise ValueError(
+            "quota_view 必须是归一化观测 JSON 对象（含 status/reset_at/"
+            "source/observed_at），得到 %s" % type(quota_view).__name__)
+    status = quota_view.get("status")
+    if status not in QUOTA_VIEW_STATUSES:
+        raise ValueError(
+            "quota_view.status %r 不在合法取值内（%s）"
+            % (status, ", ".join(QUOTA_VIEW_STATUSES)))
+    return quota_view
+
+
+def enter_waiting_quota(repo_root, task_id, quota_view=None) -> dict:
     """迁移到 waiting_quota 并落 waiting_quota 事件（direction: enter）。
 
-    原状态已是 waiting_quota（无实际迁移）时只返回现状、不重复落事件；
-    迁移合法性归 TASK_TRANSITIONS（终态与词汇外来源自然被拒）。
+    原状态已是 waiting_quota（无实际迁移）时只返回现状：不重复落
+    事件、也不刷新观测（重入安全）；迁移合法性归
+    TASK_TRANSITIONS（终态与词汇外来源自然被拒）。
+
+    quota_view（可选）：归一化配额观测 dict（status ∈
+    QUOTA_VIEW_STATUSES + reset_at/source/observed_at，宿主从
+    resolver/report 获得）。实际进入等待时把最近一次观测的
+    status/reset_at/observed_at 三键记入 quota_resume.last_observation
+    供诊断（P3-C：诊断字段不参与授权与预算判定；source 不落盘——
+    单元规格只要求三键）。quota_view 形状非法 → ValueError（零副作用）。
     """
+    if quota_view is not None:
+        _validate_quota_view(quota_view)
     st = _load_v24_state(repo_root, task_id)
     old_status = st.get("status")
     st = set_status(repo_root, task_id, "waiting_quota")
     if old_status != "waiting_quota":
+        if quota_view is not None:
+            block = st.get("quota_resume")
+            if not isinstance(block, dict):
+                block = state.default_quota_resume()
+                st["quota_resume"] = block
+            block["last_observation"] = {
+                "status": quota_view.get("status"),
+                "reset_at": quota_view.get("reset_at"),
+                "observed_at": quota_view.get("observed_at"),
+            }
+            state.save_state(repo_root, st)
         journal.append_event(
             repo_root, task_id,
             {"event": "waiting_quota", "direction": "enter"})
@@ -472,6 +548,185 @@ def exit_waiting_quota(repo_root, task_id) -> dict:
         journal.append_event(
             repo_root, task_id,
             {"event": "waiting_quota", "direction": "exit"})
+    return st
+
+
+def authorize_quota_resume(repo_root, task_id, max_resumes) -> dict:
+    """显式授权自动恢复（P3-B）：mode=auto + 预算，返回更新后的状态。
+
+    - max_resumes 必须是 >= 0 的整数（bool 拒绝——bool 是 int 子类）；
+    - 要求任务处于 waiting_quota 或 active（其余状态含终态一律拒绝
+      ——授权不改变任务状态，只落授权与预算两键）；
+    - max_resumes 不得小于已用 resume_count（落盘态必须满足预算
+      不变量 resume_count <= max_resumes）；
+    - quota_resume 缺失 / 非 dict（手写盘面异常）→ 按默认块重建后
+      落两键（state.save_state 的全量校验兜底其余形状）；
+    - 授权由本调用的显式落盘记录（mode=auto），绝不推断；auto 不
+      需要附加字段；本函数不追加 journal 事件（授权事实在 state），
+      也绝不重置已用计数（新 provider 窗口不自动重置预算）。
+    """
+    if isinstance(max_resumes, bool) or not isinstance(max_resumes, int) \
+            or max_resumes < 0:
+        raise ValueError(
+            "authorize_quota_resume：max_resumes 必须是 >= 0 的整数，"
+            "得到 %r" % (max_resumes,))
+    st = _load_v24_state(repo_root, task_id)
+    status = st.get("status")
+    if status not in ("waiting_quota", "active"):
+        raise ValueError(
+            "authorize_quota_resume：任务 %s 处于 %r，授权要求任务处于"
+            " waiting_quota 或 active" % (task_id, status))
+    block = st.get("quota_resume")
+    if not isinstance(block, dict):
+        block = state.default_quota_resume()
+        st["quota_resume"] = block
+    if max_resumes < block.get("resume_count", 0):
+        raise ValueError(
+            "authorize_quota_resume：max_resumes %d 不得小于已用 "
+            "resume_count %r（预算不变量：resume_count <= max_resumes）"
+            % (max_resumes, block.get("resume_count", 0)))
+    block["mode"] = "auto"
+    block["max_resumes"] = max_resumes
+    state.save_state(repo_root, st)
+    return st
+
+
+def scheduled_activation_decision(repo_root, task_id, quota_view) -> dict:
+    """定时轮次的幂等恢复决策原语（P3-C），返回决策 dict（绝不含糊）。
+
+    quota_view：归一化配额观测 dict（status ∈ QUOTA_VIEW_STATUSES +
+    reset_at/source/observed_at；由调用方从 resolver/report 获得）。
+    返回 dict 恒含 action（SCHEDULED_ACTIVATION_ACTIONS 恰四值）与
+    reason（人读中文），判定顺序固定、每步幂等：
+
+      1. 任务不处于 waiting_quota（含终态 / 已在 waiting_user）→
+         {"action": "no-op"}——重复唤醒安全，绝不改写任何状态；
+      2. 观测 EXHAUSTED 或 UNKNOWN → {"action": "remain-waiting"}——
+         绝不虚构可用性，任务原地继续等待；
+      3. mode 非 auto（manual 未授权）→ {"action": "waiting-user"}——
+         等用户显式授权，不改状态；
+      4. 预算耗尽（resume_count >= max_resumes）→ {"action":
+         "waiting-user"}，且恰一次把任务转 waiting_user（迁移本身
+         不落 journal——任务级词汇无通用状态名；幂等性由第 1 步保证：
+         再次唤醒时任务已非 waiting_quota → no-op）；
+      5. 可用（AVAILABLE/PRESSURE）且已授权且预算有余 → {"action":
+         "resume-authorized", "workflow_run_id", "resume_count_after"}。
+         resume_count_after = 现计数 + 1 只暂存在返回值里：本函数
+         绝不写盘计数，未确认的决策绝不消耗预算，确认前重复决策
+         恒返回同一暂存值——落账只能经 confirm_resume_started。
+
+    结构性拒绝（ValueError，先于一切写盘）：任务缺失 / v2.3 遗留 /
+    quota_view 形状非法；第 5 步前置条件 workflow_run_id 缺失（无
+    关联 run 可恢复——虚构 resume-authorized 即虚构可用性）。
+    绝不引入 epoch/subscription/accounting 概念。
+    """
+    _validate_quota_view(quota_view)
+    st = _load_v24_state(repo_root, task_id)
+    status = st.get("status")
+    if status != "waiting_quota":
+        return {
+            "action": "no-op",
+            "reason": "任务状态为 %r，非 waiting_quota（重复唤醒安全，"
+                      "不采取任何动作）" % (status,)}
+    view_status = quota_view.get("status")
+    if view_status in ("EXHAUSTED", "UNKNOWN"):
+        reason = ("额度观测为 %s，继续等待" % view_status
+                  if view_status == "EXHAUSTED" else
+                  "额度观测为 UNKNOWN，不虚构可用性，继续等待")
+        return {"action": "remain-waiting", "reason": reason}
+    block = st.get("quota_resume")
+    if not isinstance(block, dict):
+        block = {}
+    if block.get("mode") != "auto":
+        return {
+            "action": "waiting-user",
+            "reason": "quota_resume.mode=%r（未授权自动恢复），等用户"
+                      "显式 authorize_quota_resume" % (block.get("mode"),)}
+    resume_count = block.get("resume_count", 0)
+    max_resumes = block.get("max_resumes", 0)
+    if resume_count >= max_resumes:
+        _ensure_transition_allowed(st, "waiting_user",
+                                   "scheduled_activation_decision")
+        st["status"] = "waiting_user"
+        state.save_state(repo_root, st)
+        return {
+            "action": "waiting-user",
+            "reason": "自动恢复预算已耗尽（resume_count=%d >= "
+                      "max_resumes=%d），任务转 waiting_user 等用户处理"
+                      % (resume_count, max_resumes)}
+    workflow_run_id = st.get("workflow_run_id")
+    if not isinstance(workflow_run_id, str) or workflow_run_id == "":
+        raise ValueError(
+            "scheduled_activation_decision：任务 %s 无关联 "
+            "workflow_run_id，无 run 可恢复，拒绝给出 resume-authorized"
+            % task_id)
+    return {
+        "action": "resume-authorized",
+        "workflow_run_id": workflow_run_id,
+        "resume_count_after": resume_count + 1,
+        "reason": "额度可用（%s）且已授权、预算有余（%d/%d）；计数仅"
+                  "暂存，宿主 resume 调用被接受后请调 "
+                  "confirm_resume_started 落账"
+                  % (view_status, resume_count, max_resumes),
+    }
+
+
+def confirm_resume_started(repo_root, task_id) -> dict:
+    """暂存恢复计数落账并转回 active（workflow 阶段），返回更新后的状态。
+
+    P3-C 确认通道：仅在宿主 resume 调用真正被接受后由调用方调用。
+    三件事（顺序固定）：
+      1. resume_count +1（暂存计数唯一落账点）；
+      2. 任务 waiting_quota → active，phase 标注 workflow（恢复的
+         即 workflow 执行阶段）；
+      3. 落 quota_resume_confirmed 事件（含 resume_count /
+         max_resumes / workflow_run_id）。
+    结构性拒绝（ValueError，先于一切写盘）：任务不处于 waiting_quota
+    （含重复确认——确认后任务已 active，二次确认无暂存决策可落账，
+    绝不重复消耗预算）/ mode 非 auto（未授权）/ 计数形状异常 /
+    预算已耗尽（resume_count >= max_resumes，落账必破预算不变量）。
+    """
+    st = _load_v24_state(repo_root, task_id)
+    status = st.get("status")
+    if status != "waiting_quota":
+        raise ValueError(
+            "confirm_resume_started：任务 %s 处于 %r，非 waiting_quota"
+            "——无暂存恢复决策可落账（重复确认安全：确认后任务已转"
+            " active）" % (task_id, status))
+    block = st.get("quota_resume")
+    if not isinstance(block, dict) or block.get("mode") != "auto":
+        raise ValueError(
+            "confirm_resume_started：任务 %s 的 quota_resume.mode=%r，"
+            "未授权自动恢复，拒绝落账"
+            % (task_id,
+               block.get("mode") if isinstance(block, dict) else None))
+
+    def _bad_count(value):
+        return isinstance(value, bool) or not isinstance(value, int) \
+            or value < 0
+
+    resume_count = block.get("resume_count")
+    max_resumes = block.get("max_resumes")
+    if _bad_count(resume_count) or _bad_count(max_resumes):
+        raise ValueError(
+            "confirm_resume_started：任务 %s 的 quota_resume 计数形状"
+            "非法（resume_count=%r / max_resumes=%r），拒绝落账"
+            % (task_id, resume_count, max_resumes))
+    if resume_count >= max_resumes:
+        raise ValueError(
+            "confirm_resume_started：任务 %s 预算已耗尽（resume_count="
+            "%d >= max_resumes=%d），无暂存决策可落账"
+            % (task_id, resume_count, max_resumes))
+    block["resume_count"] = resume_count + 1
+    st["status"] = "active"
+    st["phase"] = "workflow"
+    state.save_state(repo_root, st)
+    journal.append_event(
+        repo_root, task_id,
+        {"event": "quota_resume_confirmed",
+         "resume_count": resume_count + 1,
+         "max_resumes": max_resumes,
+         "workflow_run_id": st.get("workflow_run_id")})
     return st
 
 

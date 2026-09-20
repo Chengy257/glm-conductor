@@ -21,7 +21,8 @@
     - complete 释放写者守卫：complete / fail / cancel 三终态均释放
       （writer_guard.inspect 归 None）；他任务持有的守卫绝不误删；
       无守卫幂等；同终态重放安全；
-    - journal 词汇精确：TASK_JOURNAL_EVENTS 恰九名；全生命周期事件名
+    - journal 词汇精确：TASK_JOURNAL_EVENTS 恰十名（Phase 3 Q1 恰增
+      quota_resume_confirmed）；全生命周期事件名
       逐条不多不少落在词汇内，无宿主子代理生命周期词汇；
     - record_workflow_run：state + adapter.record_run 双镜像 +
       workflow_started 事件；非法 id / 终态拒绝；
@@ -525,12 +526,13 @@ class TestTerminalAndGuard(LifecycleCase):
 class TestJournalVocabulary(LifecycleCase):
 
     def test_vocabulary_constant_exact(self):
-        """TASK_JOURNAL_EVENTS 恰九名，不多不少、无宿主子代理词汇。"""
+        """TASK_JOURNAL_EVENTS 恰十名，不多不少、无宿主子代理词汇。"""
         self.assertEqual(task.TASK_JOURNAL_EVENTS, (
             "route_selected", "workflow_started", "workflow_reassessed",
             "validation_recorded", "review_recorded", "waiting_quota",
+            "quota_resume_confirmed",
             "task_completed", "task_failed", "task_cancelled"))
-        self.assertEqual(len(set(task.TASK_JOURNAL_EVENTS)), 9)
+        self.assertEqual(len(set(task.TASK_JOURNAL_EVENTS)), 10)
         for term in _HOST_CHILD_TERMS:
             self.assertNotIn(term, task.TASK_JOURNAL_EVENTS)
 
