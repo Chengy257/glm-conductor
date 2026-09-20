@@ -44,7 +44,6 @@ from pathlib import Path
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "plugins" / "glm-conductor"))
-from runtime import journal, state
 from runtime.quota import resolver
 from runtime.quota.provider import QuotaProviderError
 

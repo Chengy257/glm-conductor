@@ -28,7 +28,6 @@ skipTest（CI 有 git，正常执行）。纯归一原语用例始终执行。
     cd <repo_root> && python3 -X utf8 -m unittest tests.test_change_id -v
 """
 
-import hashlib
 import os
 import re
 import shutil
