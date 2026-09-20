@@ -4,6 +4,23 @@
 > **Audience:** local coding agent / GPT-5.6 Luna implementation handoff.  
 > **Testing rule:** targeted tests at phase boundaries; one full regression at the final gate. Do not repeatedly run the complete legacy suite.
 
+## 0. Current implementation status
+
+- **Phase 0:** COMPLETE — host evidence closure recorded in `docs/reviews/ZCODE_3_14_NATIVE_WORKFLOW_RESULTS.md §13`.
+- **Phase 1:** READY — execute `V2_4_PHASE_1_NATIVE_SEMANTIC_CORE_SPEC.md`.
+- **Phase 2:** planned — execute only after the Phase 1 exit gate.
+- **Phase 3:** planned — execute only after the Phase 2 exit gate.
+- **Phase 4:** planned — final integration/release gate after Phase 3.
+
+Phase-specific authoritative implementation specs:
+
+- `docs/roadmap/V2_4_PHASE_1_NATIVE_SEMANTIC_CORE_SPEC.md`
+- `docs/roadmap/V2_4_PHASE_2_STATE_ASSURANCE_RETIREMENT_SPEC.md`
+- `docs/roadmap/V2_4_PHASE_3_QUOTA_RESUME_EXTRACTION_SPEC.md`
+- `docs/roadmap/V2_4_PHASE_4_INTEGRATION_RELEASE_SPEC.md`
+
+The functioning-hook fresh-session follow-up noted by W0 is **non-blocking** for Phase 1. The W0 reviewer model-binding failure **is** a Phase-1 implementation requirement and is handled in P1-A.
+
 ## 1. Objective
 
 Implement the v2.4 complexity re-baseline by replacing legacy Conductor execution-runtime mechanics with ZCode native Workflow/Scheduled Task capabilities while preserving only Conductor-specific semantics.
