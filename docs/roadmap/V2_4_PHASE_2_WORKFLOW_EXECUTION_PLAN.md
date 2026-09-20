@@ -191,3 +191,51 @@ rounds/unit, honest failure reporting, artifact board + markdown report, no comm
    record a fresh-context reviewer run dispatched as a plain read-only Flash agent and
    document the substitution — Phase 4 restores the native reviewer smoke).
 4. Per-unit local commits + Phase 2 exit-gate record appended here.
+
+## 6. Phase 2 exit record (2026-09-21, main-session acceptance)
+
+Implementation: one native Workflow (`dwfrun-b0d55449`, all implementers GLM-5.3-Flash),
+6/6 units done, every unit gate round 1, final gate OK. Working-tree delta: +698/−29609
+production (W6 amend) plus test deletions/adjustments.
+
+Independent re-verification (all green): 406-test survivor gate + modified-survivor sweep;
+validator 15/15; smoke load 0 failures; hooks py_compile; post-deletion import chain;
+zero-residue grep for all deleted module names; hooks.json reduced to SessionStart+Stop.
+
+Acceptance-found defects and their fixes (two bounded Flash cleanup rounds, rule 12):
+- 5 test suites red because their subject is the removed v2.3 state machine
+  (test_state superseded by test_state_v24, test_wake_planner, test_quota_subscription,
+  test_boundary_consumption, test_state_continuation) — deleted;
+- 5 mixed suites (surviving subject + dead classes/fixtures: quota_control −2,
+  quota_scheduler −7-class, session_start_advisory fixture→v2.4, execution_policy ×2
+  fixture fixes, execution_policy_quota_control −5) — trimmed/fixed;
+- validator test anchor repointed to test_state_v24.
+Process notes: W6 commit initially staged incompletely (typo aborted the first git add) —
+repaired via amend, final history clean; the cached-2.3.2 Bash policy hook still gates this
+session's `rm` (expected until Phase 4 cache refresh).
+
+Live e2e evidence:
+- delegate chain: guard acquire → create_task → v24-compile → live Flash workflow (real
+  file change, porcelain + od verified local checks) → record run/validation → completion
+  guard. Two correct blocks observed live (ownership violation listing all out-of-scope
+  paths with node ids while the phase-2 tree was uncommitted; stale change_id after
+  commits landed) → re-validation → **allow → completed → guard released**.
+- full/high chain: same through review — native `glm-conductor:glm-reviewer` dispatched
+  fresh-context read-only from this session, VERDICT ship with independently reproduced
+  evidence; record_review accepted. Final allow transition NOT executed (main session
+  deleted the task evidence dirs one step early during cleanup); check-4 review-freshness
+  logic is covered by test_completion_guard and the definitive full-route smoke is
+  scheduled for Phase 4 P4-E. Honest gap, no workaround claimed.
+- writer-release --force live-proven with full cleared-holder reporting.
+
+Commits (local only): `21daa2e` W1, `ef8c595` W2, `d54a54b` W3, `19ccb7a` W4, `06bbd20` W5,
+W6 deletion sweep (amended), acceptance-cleanup commit.
+
+Exit gate checklist (spec §11): single Native Workflow substrate — PASS; no per-unit
+runtime state — PASS (grep zero); no permit/lease/receipt for completion — PASS (live);
+task-level change_id freshness — PASS (live stale detection); high-assurance fresh
+read-only reviewer — PASS (live native reviewer, ship verdict); legacy runtime removed —
+PASS (15 production modules + 2 hooks + flash-implementer, zero residue); only SessionStart
++ completion guard on hook path — PASS (hooks.json verified).
+
+**Phase 2 exit gate: PASSED. Phase 3 authorized to proceed.**
