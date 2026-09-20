@@ -1,5 +1,43 @@
 # Changelog
 
+## 2.4.0
+
+Native Workflow re-baseline. v2.4 is **not** an incremental release over the v2.3 runtime: it is a complexity re-baseline governed by one rule — *if ZCode owns an execution fact, Conductor must not model the same fact again.* GLM Conductor keeps semantic orchestration and acceptance (selective routing, canonical implementation DAG, ownership, task-level acceptance, high-assurance review); ZCode Native Workflows take over execution orchestration (run lifecycle, parallel scheduling, retries, background execution, resume mechanics).
+
+### New positioning (four pillars)
+
+1. **Selective routing** — `solo / delegate / audit / full` on two independent axes (Delegability × Assurance); no separate executor axis for text work.
+2. **Native Workflow execution** — `delegate`/`full` compile a canonical static DAG (`v24-compile`) into a ZCode Native Workflow run; Conductor persists no per-node runtime state.
+3. **Minimal deterministic assurance** — task-level `change_id` freshness, ownership scope, one-active-write-Workflow-per-repo writer guard, and a four-check Stop-hook completion guard.
+4. **Optional bounded quota resume** — `waiting_quota` with native Scheduled Task wake; `manual`/`auto` modes; every actual resume consumes one unit of a user-authorized `max_resumes` budget.
+
+The account-level **Global Quota Clock** is no longer a Conductor subsystem; it is planned as a separate future companion project (see `docs/roadmap/GLOBAL_QUOTA_CLOCK_EXTRACTION_INVENTORY.md`).
+
+### Removed
+
+- **Legacy execution runtime (Phase 2 W6)**: dispatcher, dispatch waves, permits, per-unit leases, agent-run ledger, reconcile, resume manifest, provenance/verification/review receipts, fingerprint module, task_manager, Bash policy hook, agent lifecycle hooks (PreToolUse/PostToolUse/PostToolUseFailure), and the `flash-implementer` text-executor agent. Working-tree delta for the W6 deletion sweep: **+698/−29,609 production lines** (phase-2 exit record).
+- **Quota control plane and continuity layer (Phase 3)**: quota watcher, quota epochs, subscriptions/accounting, Window Primer, Activation Transport, Task Wake Bridge, Global Quota Clock code, and the internal ZCode scheduler SQLite adapter. Net phase delta: **+~1k/−~34k lines** (phase-3 exit record).
+- **CLI subcommands retired with their backends**: `permits`, `permit-show`, `permit-consume`, `agent-runs`, `wave-prepare`, `wave-show`, `manifest-show`, `verify-unit`, `verify-task`, `policy-show`, `policy-set-parallel`, `policy-set-resume`, `quota-observe`, `quota-phase`, `quota-exhausted`, `quota-resume`, `wake-*`, `transport-status`, `quota-clock-*`, `host-check`.
+- **Cumulative v2.4 campaign delta** vs the pre-Phase-1 baseline (commit `0abd466`), measured from the working tree at this documentation pass (2026-09-21): **138 files, +11,034/−60,845 lines** — production `plugins/` +4,459/−23,189, `tests/` +5,705/−37,564 (dead-subject test suites deleted with their subsystems, per the re-baseline testing discipline). The closeout report records the final campaign figure.
+
+### Current shape
+
+- Runtime: 15 core modules + 11 quota observation modules (provider/parser/credentials/HTTP hardening retained for read-only resolution and diagnostics); hooks reduced to **SessionStart** (resume context) + **Stop** (completion guard); agents: `visual-implementer`, `glm-reviewer`, `visual-reviewer` (reviewers carry no pinned model — host/session inheritance, fixing the W0 single-model host hard-failure).
+- CLI surface: `quota-resolve`, `v24-compile`, `writer-acquire` / `writer-release [--force]` / `writer-show`, `v24-record-run`, `review-record`; quota diagnostics via `runtime/quota/report.py` (`/glm-conductor:quota`).
+
+### Retained semantics
+
+The selective routing matrix; ownership scope checks (compile-time conflict serialization + task-level union check); task-level acceptance by the main session; fresh-context read-only review for high-assurance routes; `visual-implementer` as the multimodal Custom Subagent exception; provider quota observation (four-state resolution, read-only) and bounded resume authorization; durable-I/O and journal primitives; SessionStart recovery context.
+
+### Migration notes
+
+- **v2.3 task states are not migrated.** v2.4 detects legacy task directories (seven-state v2.4 schema vs. v2.3 lifecycle; `runtime/state.py::detect_legacy_markers` with `LEGACY_STATE_GUIDANCE`) and refuses them with recovery guidance instead of converting them. Finish or explicitly retire active v2.3 tasks before upgrading; released v2.3.x remains recoverable through Git history and tags. No dual dispatch engines or unit state machines are maintained.
+- **Host requirement raised to ZCode 3.14+** (Native Workflow + native Scheduled Task). Two host limitations are documented as unverified rather than claimed: scheduled firing while the ZCode app is closed, and a live fresh-session reviewer launch proof (reviewer portability is fixed statically by the removed model pins).
+
+### Documentation
+
+README (EN + zh mirror), `plugin.json`, `marketplace.json`, `docs/README.md`, architecture/core-concepts/troubleshooting, and the three skills were re-baselined to the v2.4 surface. `docs/architecture.md` is the v2.4 current-truth source; `docs/reviews/V2_4_RETIRED_SURFACE_AUDIT.md` records the repository-wide retired-surface classification; `docs/roadmap/GLOBAL_QUOTA_CLOCK_EXTRACTION_INVENTORY.md` hands the clock off to the future companion project.
+
 ## 2.3.2
 
 宿主兼容性补丁（单主题）：ZCode 3.12.3（2026-09-16 起安装）重构模型管理后，agent 定义的模型绑定改为 provider 全限定 ID。
