@@ -97,7 +97,7 @@ import re
 from runtime.execution_policy import (default_execution_policy,
                                       validate_execution_policy)
 from runtime.quota.parser import QUOTA_STATUSES
-from runtime.work_unit import validate_work_unit
+from runtime.legacy_unit import validate_work_unit
 
 # —— 路径常量与定位 ——
 

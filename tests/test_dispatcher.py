@@ -41,7 +41,7 @@ import tempfile
 import unittest
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "plugins" / "glm-conductor"))
-from runtime import dependency
+from runtime import legacy_dependency as dependency  # v2.3 遗留 twin 指向
 from runtime import dispatcher
 from runtime import lease
 from runtime import ownership

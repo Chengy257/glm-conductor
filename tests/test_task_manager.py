@@ -119,7 +119,7 @@ from runtime import ownership
 from runtime import reconcile
 from runtime import state
 from runtime import task_manager
-from runtime import work_unit
+from runtime import legacy_unit as work_unit  # v2.3 遗留 twin 指向
 
 TID = "tm-task-1a2b3c"
 VERIFY_CMD = "python3 -m unittest tests.test_task_manager"

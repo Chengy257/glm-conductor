@@ -25,7 +25,7 @@ import sys, unittest
 import json
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "plugins" / "glm-conductor"))
-from runtime import work_unit
+from runtime import legacy_unit as work_unit  # v2.3 遗留 twin 指向
 from runtime import state
 
 

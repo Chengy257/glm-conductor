@@ -55,7 +55,7 @@ from runtime import provenance
 from runtime import reconcile
 from runtime import state
 from runtime import task_manager
-from runtime import work_unit
+from runtime import legacy_unit as work_unit  # v2.3 遗留 twin 指向
 
 TID = "prov-task-1a2b3c"
 ROUTE = {"mode": "delegate", "delegability": "high", "assurance": "standard",

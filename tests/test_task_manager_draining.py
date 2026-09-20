@@ -47,7 +47,7 @@ from runtime import journal
 from runtime import lease
 from runtime import state
 from runtime import task_manager
-from runtime import work_unit
+from runtime import legacy_unit as work_unit  # v2.3 遗留 twin 指向
 from runtime.quota import resolver
 
 TID = "draining-task-1a2b3c"

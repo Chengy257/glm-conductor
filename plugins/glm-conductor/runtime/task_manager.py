@@ -348,16 +348,16 @@ QuotaIdentity 复合身份（v2.2.1 WU-221-B2，六个记账面的统一升级�
     账本根注入）。
 """
 
-from runtime import dependency
 from runtime import dispatch_wave
 from runtime import dispatcher
 from runtime import journal
 from runtime import lease
+from runtime import legacy_dependency as dependency  # v2.3 遗留 twin 指向
+from runtime import legacy_unit as work_unit  # v2.3 遗留 twin 指向
 from runtime import ownership
 from runtime import reconcile
 from runtime import resume_manifest
 from runtime import state
-from runtime import work_unit
 from runtime.execution_policy import consumed_quota_windows  # noqa: F401 -- re-export（冻结公共表面，导入兼容契约）
 from runtime.execution_policy import default_execution_policy
 from runtime.execution_policy import default_quota_control

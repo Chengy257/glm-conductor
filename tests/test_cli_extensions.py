@@ -56,7 +56,7 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "plugins" / "glm-conductor"))
 from runtime import agent_run, cli, execution_policy, \
     journal, state
-from runtime import task_manager, work_unit
+from runtime import legacy_unit as work_unit, task_manager  # v2.3 遗留 twin 指向
 from runtime.quota import resolver as quota_resolver
 
 TID = "cliext-task-1a2b3c"

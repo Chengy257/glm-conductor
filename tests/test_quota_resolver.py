@@ -48,7 +48,7 @@ from pathlib import Path
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "plugins" / "glm-conductor"))
-from runtime import journal, lease, state, task_manager, work_unit
+from runtime import journal, lease, legacy_unit as work_unit, state, task_manager  # v2.3 遗留 twin 指向
 from runtime.quota import resolver
 from runtime.quota.provider import QuotaProviderError
 

@@ -80,7 +80,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "plugins" / "glm-conductor"))
 from runtime import agent_run
-from runtime import dependency
+from runtime import legacy_dependency as dependency  # v2.3 遗留 twin 指向
 from runtime import dispatcher
 from runtime import fingerprint as fingerprint_mod
 from runtime import journal as journal_mod
@@ -88,7 +88,7 @@ from runtime import lease as lease_mod
 from runtime import ownership
 from runtime import reconcile
 from runtime import state
-from runtime import work_unit
+from runtime import legacy_unit as work_unit  # v2.3 遗留 twin 指向
 
 TID = "recon-task-1a2b3c"
 # H2 夹具迁移：delegate 路由在规则 R4 下要求非空 ownership/verification，

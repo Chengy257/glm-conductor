@@ -41,7 +41,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "plugins" / "glm-conductor"))
 from runtime import dispatcher, execution_policy, journal, lease, state
-from runtime import task_manager, work_unit
+from runtime import legacy_unit as work_unit, task_manager  # v2.3 遗留 twin 指向
 
 TID = "par-task-1a2b3c"
 VERIFY_CMD = "python3 -m unittest tests.test_parallel_activation"

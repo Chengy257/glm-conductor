@@ -75,7 +75,7 @@ active 容错语义（本工作块锁定）：
     并行上限 2-4）+ v2 升级计划工作块 B8.3、B10.1。
 """
 
-from runtime import dependency
+from runtime import legacy_dependency as dependency  # v2.3 遗留 twin 指向
 from runtime import ownership
 from runtime.lease import DEFAULT_MAX_WORKERS_LIMIT
 from runtime.quota.parser import QUOTA_STATUSES
