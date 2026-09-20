@@ -360,9 +360,8 @@ def _writer_release(repo_root, task_id, run_id=None, force=False) -> int:
 
 def _writer_show(repo_root) -> int:
     """writer-show：只读展示 repo_root 当前写预约（writer_guard.inspect
-    薄壳）。输出 {holder: <四字段 dict|null>}（manifest-show 的
-    {"manifest": ...} 同款包裹形态）；inspect 永不抛（损坏记录
-    fail-open 视同无预约）——恒退出码 0。"""
+    薄壳）。输出 {holder: <四字段 dict|null>} 单键包裹形态；inspect
+    永不抛（损坏记录 fail-open 视同无预约）——恒退出码 0。"""
     from runtime import writer_guard  # 函数内 import：monkeypatch 友好
     _emit({"holder": writer_guard.inspect(repo_root)})
     return 0

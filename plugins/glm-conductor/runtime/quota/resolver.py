@@ -130,7 +130,7 @@ def _build_providers(api_key, timeout_seconds=None):
             for name, cls in _PROVIDER_ORDER]
 
 
-# —— 时间助手（对齐 scheduler.py / report.py 的口径） ——
+# —— 时间助手（口径与 report.py 一致；原同源的 scheduler.py 已删） ——
 
 def _normalize_now(now):
     """归一 now 注入参数：None → 当前 UTC；datetime / ISO 串 → 时刻。
@@ -154,27 +154,26 @@ def _normalize_now(now):
 
 def _format_iso_ms_z(moment):
     """aware datetime → UTC ISO8601 毫秒精度 Z 形式字符串（
-    "2026-08-31T05:00:00.123Z"，与 lease / permit 层时间字段同格式），
+    "2026-08-31T05:00:00.123Z"），
     作为 evaluated_at 与缓存 fetched_at 的落盘形式。"""
     moment = moment.astimezone(timezone.utc)
     return "%s.%03dZ" % (moment.strftime("%Y-%m-%dT%H:%M:%S"),
                          moment.microsecond // 1000)
 
 
-# —— provider 身份指纹（v2.2.1 WU-221-B1 缓存绑定） ——
+# —— provider 身份指纹（v2.2.1 WU-221-B1 缓存绑定；P3-D 起指纹派生
+#    单一真相源即本函数） ——
 
 def _provider_identity_hash(api_key):
     """凭证 → provider 身份指纹（16-hex，非秘密，可落盘 / 落日志）。
 
-    派生口径与 runtime.quota.identity.compute_provider_identity_hash
-    逐字一致（sha256("credential:<key>" / 无凭证占位 "none:") 前缀
-    截断 16 位十六进制——哈希不可逆，绝不含凭证材料本体，§37）。
-    此处以受锚定的内联复制而非调用共享函数：共享版入参是 environ
-    （函数体内自带一次 resolve_credential），而 _resolve_quota 在层
-    级判定前已持有同一次解析的 api_key——为指纹发起第二次凭证解析
-    是本单元规格明令避免的。两处口径的漂移由
+    派生口径（P3-D 后唯一真相源，即本函数）：sha256("credential:<key>"
+    / 无凭证占位 "none:") 前缀截断 16 位十六进制——哈希不可逆，绝不含
+    凭证材料本体，§37。内联于 resolver 的原因保持不变：_resolve_quota
+    在层级判定前已持有同一次解析的 api_key——为指纹发起第二次凭证
+    解析是本单元规格明令避免的。缓存指纹与本函数产出的一致性由
     tests/test_credentials_family.py 的锚定测试防守（断言缓存指纹
-    == 共享函数对同一身份 environ 的产出）。
+    == resolver._provider_identity_hash 对同一凭证的产出）。
     """
     material = "%s:%s" % ("none" if api_key is None else "credential",
                           api_key or "")
@@ -219,8 +218,8 @@ def _save_cache(path, payload) -> None:
     语唯一临时文件的 0o600 权限位（先前 umask 缺省约 0644——JSON 字
     节一致，仅文件权限位更收紧，对状态文件更安全）；父目录缺失由原
     语自动创建）。
-    多进程写者（主会话 resolve + watcher 强制刷新）经唯一临时名
-    绝不在固定 <path>.tmp 相撞；PermissionError（Windows AV / 目录
+    多进程写者（并行发起的 resolve / --force-refresh 调用）经唯一临时
+    名绝不在固定 <path>.tmp 相撞；PermissionError（Windows AV / 目录
     锁瞬态）按原语默认有界重试（5 次 × 0.1 秒——对本模块原「零重
     试」是严格改进，WU-221-A1 许可的既有有界重试行为保留），耗尽
     原样上抛——由调用方统一兜底降级（异常不外泄给

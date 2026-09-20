@@ -23,8 +23,8 @@
                created_at}}——报出冲突方（当前持有者）的 id；
         同 task 重复 acquire 幂等成功：workflow_run_id 非 None 时更新
         记录，传 None 时保留记录原值（避免无参重入意外清掉已知 run
-        id）；created_at 保持首次 acquire 时刻不变（预约创建时刻语义，
-        对齐 runtime/lease.py「重入不改 acquired_at」先例）。
+        id）；created_at 保持首次 acquire 时刻不变（预约创建时刻语义：
+        重入不改创建时刻）。
     release(repo_root, task_id, workflow_run_id=None) -> dict
         {"ok": ..., "released": bool, "conflict": ...}；
         幂等：无预约（缺失 / 归零 / 不可解析）→ ok 且 released=False；

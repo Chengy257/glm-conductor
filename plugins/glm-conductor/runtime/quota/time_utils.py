@@ -88,8 +88,8 @@ def _normalize_now(now):
 
 
 def _utc_now_iso() -> str:
-    """当前 UTC 时刻的 ISO-8601 字符串（毫秒精度 Z 形态，与 permit /
-    租约层时间字段同格式）——wave 记录 created_at / closed_at 落盘口径。"""
+    """当前 UTC 时刻的 ISO-8601 字符串（毫秒精度 Z 形态）——quota 缓存
+    fetched_at / 观测 evaluated_at 等落盘口径。"""
     moment = datetime.now(timezone.utc)
     return (moment.strftime("%Y-%m-%dT%H:%M:%S")
             + ".%03dZ" % (moment.microsecond // 1000))

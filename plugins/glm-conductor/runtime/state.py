@@ -52,11 +52,9 @@ v2.3 遗留面处置（本模块 v2.4 重基线明确退役的形态，只识别
     按缺键报错，绝不自动迁移、绝不伪造 v2.4 完成证据）。载入带这些
     标记的 state 时 is_legacy_state() 返回 True，消费方按
     LEGACY_STATE_GUIDANCE 报告「v2.3 任务：请在 2.3.x 下收尾或显式
-    放弃」。quota/continuity 等 Phase-3 才删的旧模块对本层新 schema
-    的运行时退化是被接受的（v2.4 路径不调用它们），但其模块仍在模块
-    作用域读取的词汇常量（QUOTA_SUBSCRIPTION_MINIMUM_STATES）保留于
-    本模块（仅常量、非 schema），保证导入图不断——该常量随 Phase 3
-    订阅面一并退役。
+    放弃」。（Phase 3 收口后 quota/continuity 等旧模块及其消费面
+    ——含曾为本模块保留的 QUOTA_SUBSCRIPTION_MINIMUM_STATES 词汇
+    常量——已整体删除，本模块不再为任何已删模块保留词汇。）
 
 路径布局：
     <repo_root>/.glm-conductor/tasks/<task-id>/state.json
@@ -188,14 +186,6 @@ def default_quota_resume() -> dict:
     零预算——恢复只能走显式授权 + 调用方确认通道）。
     """
     return dict(DEFAULT_QUOTA_RESUME)
-
-
-# v2.3 quota_subscription 词汇（Phase 3 随订阅面退役）：v2.4 schema
-# 无 quota_subscription 块，本常量仅为 runtime.continuity.subscription
-# 的模块作用域消费保留（删除即断其导入——违反「导入不许断」约束）；
-# v2.4 路径绝不读取它。
-QUOTA_SUBSCRIPTION_MINIMUM_STATES = (
-    "AVAILABLE", "PRESSURE", "DRAINING", "EXHAUSTED")
 
 
 # —— 路径定位 ——
@@ -737,7 +727,7 @@ def _transition_errors(previous, new_status):
             % (old_status, new_status, old_status, targets))
 
 
-def save_state(repo_root, state, *, task_id=None, _gate_commit=False) -> pathlib.Path:
+def save_state(repo_root, state, *, task_id=None) -> pathlib.Path:
     """校验并原子保存状态文件，返回最终路径。
 
     - validate_state 有错误 → ValueError（错误清单拼接）；
@@ -755,10 +745,10 @@ def save_state(repo_root, state, *, task_id=None, _gate_commit=False) -> pathlib
       UTF-8、ensure_ascii=False、缩进 2、固定 \n 换行，PermissionError
       有界重试；读方永不见撕裂文件。
 
-    _gate_commit 为 v2.3 完成门内部通道的保留形参：v2.4 已无
-    finalizing→completed 门内通道（completed 由完成门 API 直接落盘，
-    终态守卫转向「不得静默重开」），本参数无任何行为差异，仅为既有
-    调用方签名兼容而保留；其他调用方不得传。
+    （历史注：v2.3 曾有 finalizing→completed 的完成门内部提交通道
+    （save_state 的 _gate_commit 私有形参）；v2.4 已无该通道——
+    completed 由完成门 API 直接落盘，终态守卫转向「不得静默重开」，
+    该形参随 Phase 4 退役面审计一并移除。）
     """
     errors = validate_state(state)
     if errors:

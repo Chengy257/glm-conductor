@@ -6,10 +6,9 @@
     管理 v2 任务的本地执行日志 `.glm-conductor/tasks/<task-id>/events.jsonl`：
     append-only 追加、容错读取、尾部查询。用途是本地执行溯源
     （调试 / 恢复 / 审计），不是遥测。
-    v2.2 C5a（wu-22-C5a）起增设控制面 journal
-    `.glm-conductor/quota/events.jsonl`（与 watcher.json / primer.json
-    同层）：无任务上下文的控制面事件（quota_epoch_advanced、
-    window_primed 等）统一落此处，不再借用伪任务目录。
+    （v2.2 C5a 曾并设的控制面 journal `.glm-conductor/quota/events.jsonl`
+    及其 API 已随 Global Quota Clock 在 v2.4 Phase 3 P3-D 一并删除，
+    本模块只服务任务级 journal。）
 
 约束（§56）：
     - append-only：append_event 是本模块唯一写入口，只以追加模式（"a"）
@@ -43,13 +42,12 @@ JOURNAL_FILENAME = "events.jsonl"
 
 # 推荐事件名词汇表（文档性常量；append_event 不强制成员资格——
 # 未来阶段会新增事件名，保持开放式）。v2.4 Phase 2（W6）起收缩为
-# 任务级集：与 runtime/task.py 的 TASK_JOURNAL_EVENTS 恰九名一致，
+# 任务级集：与 runtime/task.py 的 TASK_JOURNAL_EVENTS 恰十名一致，
 # v2.3 宿主子代理生命周期镜像词（implementation_started /
 # dispatch_* / lease_recovered / unit_finished / reviewer_invoked 等）
 # 与完成门记账词（gate_blocked 等）随 v2.3 执行面退役一并移除；
-# quota 控制面事件（quota_epoch_advanced 等）落控制面 journal
-# （append_control_plane_event），不再入本表——其词汇随 quota/continuity
-# 包在 Phase 3 一并退役。
+# quota 控制面事件词汇（quota_epoch_advanced 等）连同控制面 journal
+# API 已在 Phase 3 随 quota/continuity 控制面收口一并删除。
 RECOMMENDED_EVENTS = (
     "route_selected",       # SELECTIVE ROUTE 声明（runtime.task.create_task）
     "workflow_started",     # 委派 Workflow run 关联（record_workflow_run）
@@ -57,6 +55,7 @@ RECOMMENDED_EVENTS = (
     "validation_recorded",  # 任务级验证记录（record_validation）
     "review_recorded",      # 任务级审查记录（record_review）
     "waiting_quota",        # 额度等待进出（enter/exit_waiting_quota）
+    "quota_resume_confirmed",  # 暂存恢复计数落账（P3-C，task.confirm_resume_started）
     "task_completed",       # 任务完成终态（task.complete）
     "task_failed",          # 任务失败终态（task.fail）
     "task_cancelled",       # 任务显式取消终态（task.cancel）
@@ -161,93 +160,3 @@ def tail_events(repo_root, task_id, n=20, *, event=None):
     if event is not None:
         events = [item for item in events if item.get("event") == event]
     return events[-n:]
-
-
-# —— 控制面 journal（v2.2 C5a，wu-22-C5a） ——
-
-# 控制面 journal 相对布局：<repo_root>/.glm-conductor/quota/events.jsonl
-# （与 watcher.json / primer.json 同层不同文件，互不越界）。控制面事件
-# 无任务上下文（quota epoch 推进先于任何具体任务存在），落在 quota
-# 目录而非 tasks/<伪任务>/——伪任务目录会被 discover_tasks 判为
-# orphaned 噪声、污染任务枚举（C4 reviewer P2 的正解落点）。
-CONTROL_PLANE_DIR_PARTS = (".glm-conductor", "quota")
-
-
-def control_plane_journal_path(repo_root):
-    """返回控制面 journal 路径 <repo_root>/.glm-conductor/quota/events.jsonl。"""
-    return (Path(repo_root) / CONTROL_PLANE_DIR_PARTS[0]
-            / CONTROL_PLANE_DIR_PARTS[1] / JOURNAL_FILENAME)
-
-
-def append_control_plane_event(repo_root, event, *, ts=None):
-    """向控制面 journal 追加一条事件，返回写入的完整事件 dict（含 ts）。
-
-    与 append_event 逐字同构（同一校验、同一单行 JSON 落盘格式、同一
-    ts 管理纪律），只是落点不同——本函数写
-    `.glm-conductor/quota/events.jsonl`，不触碰任何任务 journal；
-    append_event 的既有行为与签名零改动（两函数并存，互不委托）。
-    quota_epoch_advanced 等 §13 控制面事件经本函数落盘（QC-07：每
-    epoch 恰一条，落点 = 控制面）。
-
-    校验（结构性错误抛 JournalError，且在任何 I/O 之前完成）：
-      - event 必须是 dict 且含非空 str 的 "event" 键；
-      - event 不得含 "ts" 键（时间戳由本函数管理，调用方不得伪造）。
-
-    ts：缺省时自动生成 datetime.now(timezone.utc).isoformat(
-        timespec="milliseconds")；也可显式传入 ISO8601 字符串
-        （测试 / 回放用）。
-
-    写入：单行 JSON（UTF-8、ensure_ascii=False、键序保持插入序，
-    ts 为首键）+ "\\n"，目录不存在自动创建（parents=True）。
-    I/O 异常（OSError 等）自然向上抛，不吞。
-    """
-    if not isinstance(event, dict):
-        raise JournalError("event 必须是 dict，得到 %s" % type(event).__name__)
-    name = event.get("event")
-    if not isinstance(name, str) or not name:
-        raise JournalError('event 必须含非空 str 的 "event" 键')
-    if "ts" in event:
-        raise JournalError('event 不得自带 "ts" 键（时间戳由 append_control_plane_event 管理）')
-
-    if ts is None:
-        ts = datetime.now(timezone.utc).isoformat(timespec="milliseconds")
-
-    # 不改动调用方传入的 dict；ts 置首，其余键保持插入序
-    record = {"ts": ts}
-    record.update(event)
-
-    path = control_plane_journal_path(repo_root)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    # newline="\n"：Windows 下也不做换行翻译，保证文件恒为 "\n" 分隔的 jsonl
-    with path.open("a", encoding="utf-8", newline="\n") as fh:
-        fh.write(json.dumps(record, ensure_ascii=False) + "\n")
-    return record
-
-
-def read_control_plane_events(repo_root):
-    """按文件顺序读取控制面 journal 的全部事件，返回 dict 列表。
-
-    容错契约（**内容层**，与 read_events 的默认容错同风格）：文件不
-    存在返回 []；空白行跳过；坏行（JSON 解析失败或解析结果非 dict）
-    跳过——截断尾行常见于写入中断，不能让整个日志不可读。按 "\\n"
-    切分行（理由同 read_events：事件值中的 U+0085 / U+2028 / U+2029
-    是合法 JSON 单行内容，splitlines 会在这些字符处错误断行）；
-    errors="replace" 容忍尾部撕裂的多字节字符。坏内容不构成错误
-    （上述规则吞掉），但 **I/O 层异常不在容错面内**：OSError（权限
-    被拒 / 路径是目录 / 目录锁等）自然上抛——调用方自行兜底。
-    """
-    path = control_plane_journal_path(repo_root)
-    if not path.is_file():
-        return []
-    text = path.read_text(encoding="utf-8", errors="replace")
-    events = []
-    for line in text.split("\n"):
-        if not line.strip():
-            continue
-        try:
-            item = json.loads(line)
-        except ValueError:
-            continue
-        if isinstance(item, dict):
-            events.append(item)
-    return events

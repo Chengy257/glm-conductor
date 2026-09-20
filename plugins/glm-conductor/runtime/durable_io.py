@@ -34,10 +34,10 @@ JSON 状态，既有写方各自使用固定 <path>.tmp 临时名——两个写
       SECONDS 视同写入中轮询；mtime 探不到一律轮询重评，瞬态误判绝不
       送进接管仲裁）；
     - pid 存活判定（仅用于锁仲裁）：POSIX os.kill(pid, 0)；Windows
-      ctypes OpenProcess + GetExitCodeProcess 判 STILL_ACTIVE（与
-      quota.watcher_store 同纪律，零外部依赖、不引入 psutil）；探测失
-      败一律视为已死——锁面 fail-closed：宁可放行接管，不无限拒绝第二
-      进程。
+      ctypes OpenProcess + GetExitCodeProcess 判 STILL_ACTIVE（零外部
+      依赖、不引入 psutil——原对齐的 quota.watcher_store 已随控制面
+      删除，本模块独立声明）；探测失败一律视为已死——锁面
+      fail-closed：宁可放行接管，不无限拒绝第二进程。
 
 参数默认（关键字可覆盖）：stale_seconds=300.0、poll_interval=0.05、
 timeout_seconds=10.0、写重试 5 次 × 0.1 秒、读重读 3 次、废弃临时/孤儿
@@ -79,7 +79,7 @@ UNLINK_RETRY_ATTEMPTS = 10            # 锁文件删除与并发读句柄相撞�
 UNLINK_RETRY_INTERVAL_SECONDS = 0.01  # 锁文件删除重试间隔秒数（窗口微秒级）
 CORRUPT_LOCK_GRACE_SECONDS = 5.0      # 写一半残锁的龄期闸：未超龄按写入中轮询
 
-# Windows OpenProcess 探针常量（与 quota.watcher_store 数值一致、独立声明）
+# Windows OpenProcess 探针常量（本模块独立声明，不依赖任何已删模块）
 _PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
 _STILL_ACTIVE = 259
 
