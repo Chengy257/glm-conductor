@@ -116,3 +116,33 @@ rounds; the full-regression rerun inside a fix round follows the spec's bounded 
    firing unverified, CI authoritative for lint); release-readiness audit checklist
    (spec §7); final commits; report to user; campaign memory update; until_done
    automation self-delete (single CronDelete attempt).
+
+## 5. Phase 4 exit record (2026-09-21, main-session acceptance)
+
+Workflow `dwfrun-c6619e0f`: R1-R5 all done (R5 with zero test-file changes — inventory
+verified 25 surviving suites all map to live subjects). Full regression (the campaign's
+single run): **Ran 630 tests in 23.256s — OK**. Independent re-verification: validator
+15/15, smoke load 0 failures, 22-module survivor suite OK, README mirror 200/200 exact,
+all five README retired-term hits confirmed as negative/migration context, version
+metadata 2.4.0 across plugin.json/marketplace/CHANGELOG.
+
+Live smoke group:
+- full-route e2e: guard → task(full/high) → compile → Flash workflow (byte-verified
+  marker, porcelain-checked scope) → native glm-reviewer ship (line-anchored triple
+  verification) → validation + review recorded → **completion guard allow → completed →
+  guard released**. The Phase 2 gap (missing final allow transition) is closed.
+- resume lifecycle: sleepy workflow stopped mid-run (TaskStop) → `ResumeWorkflowRun`
+  same-id → unfinished ask re-dispatched live → completed with honest local checks.
+  The scheduled-fire half of the wake path is covered by frozen W0 §13.2 evidence +
+  this campaign's hourly wake automation (not re-proven this round; one-shot CronCreate
+  dispatch failed repeatedly and the limitation is documented, not papered over).
+- Housekeeping: accidental duplicate sleepy run stopped immediately; Windows reserved-name
+  `nul` junk file removed via \\?\ path.
+
+Commits (local only): `151c94c` R1, `8ddf50e` R2, `8bca90e` R3, `10ef29b` R4, plus this
+exit record and the closeout report. Campaign totals: 4 phase workflows + 3 acceptance
+Flash fix/cleanup dispatches + 2 e2e smokes + 1 resume smoke, ~24 local commits, zero
+push, zero full-regression runs before the single final one.
+
+**Phase 4 exit gate: PASSED. All four phase exit gates PASSED — v2.4 campaign complete;
+release-ready pending user-gated push, CI, and plugin cache refresh.**
