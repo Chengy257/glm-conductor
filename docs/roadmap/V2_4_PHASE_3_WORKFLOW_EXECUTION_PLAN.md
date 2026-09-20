@@ -166,3 +166,38 @@ Same gate/fix-loop discipline; board `phase3-units`; markdown report `phase3-rep
    needed for the API-level proof; the real scheduled-task wake path is the already-active
    until_done automation pattern).
 3. Per-unit local commits; Phase 3 exit-gate record appended here; proceed to Phase 4.
+
+## 6. Phase 3 exit record (2026-09-21, main-session acceptance)
+
+Implementation: workflow `dwfrun-b83e5466` superseded mid-run by `dwfrun-e7f693c2`
+(main-session gate-path typo in the report.py standalone gate fixed via AmendWorkflow —
+finished Q1/Q2/Q3 work imported as cache, zero re-payment; the rejected alternative was a
+repo-root forwarding shim, refused as production pollution). 4/4 units done, all gates
+round 1 on the revised run; two Q3 escalations adjudicated (validator scheduler-anchor
+sync per rule 12; word-check semantics: json mode asserts five_hour, text mode asserts
+5-hour:, weekly never fabricated on lite plans).
+
+Independent re-verification (all green): 21-module survivor suite; report.py standalone
+JSON run from plugin root; validator 15/15; smoke load 0 failures; post-deletion import
+chain; hooks py_compile; zero-residue grep (remaining hits are verbatim-migration
+provenance comments, docstring history notes, and skills/continuity content — the latter
+is Phase 4 rewrite scope). Q2 inventory reviewed: written before deletions with line-
+number citations and the anchor-provider-reset-at principle captured.
+
+Live decision-chain smoke (task API, no host Cron needed for the API-level proof):
+EXHAUSTED → remain-waiting; AVAILABLE+authorized → resume-authorized (staged count 1,
+correct run id); 3× unconfirmed decisions → resume_count still 0; confirm → count 1 +
+status active; budget exhausted → waiting_user exactly once; repeat → no-op; cancel clean.
+
+Commits (local only): `dc5281a` Q1, `86e95a0` Q2, `8b0e9de` Q3, `fea2652` Q4.
+Net this phase: +~1k/−~34k lines. Runtime reduced to 15 modules; quota package to 11
+observation modules; hooks unchanged at SessionStart+Stop (advisory block removed).
+
+Exit gate checklist (spec §9): no resident quota process — PASS; no epoch/subscription/
+accounting — PASS; no Global Clock in dependency graph — PASS; no scheduler SQLite write —
+PASS (host/ deleted); waiting task resumable via native scheduled path when authorized —
+PASS (decision primitive live-proven; host-side resume pattern exercised by this campaign's
+until_done automation); auto resume bounded and user-authorized — PASS; extraction
+inventory complete — PASS.
+
+**Phase 3 exit gate: PASSED. Phase 4 authorized to proceed.**
