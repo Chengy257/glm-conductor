@@ -192,4 +192,4 @@ MERGE_READY
 
 依据：FR-01 修复经红绿验证与双物理目录全终态回归（含完成门 A/B 两根决定性集成）；FR-02 以未弱化字面形态在真新鲜会话关闭（双角色启动、只读、契约遵循、视觉真实盲读图且与真值吻合）；FR-03 六面发布文档收敛一致；FR-04 定向束 125 + validator 15/15 + smoke + ruff + compileall + 唯一一次全量回归 682 全绿。本裁决**取代页首 OVERRIDE 的暂时覆盖**，恢复并重申 §9 的合并候选结论：`review/zcode-3.14-native-workflow` 可作为 v2.4.0 合并候选进入 `main`。
 
-**远端 CI 补记**：push 后追加。
+**远端 CI 补记**：push（`7b734b1..572735f`）触发 GitHub Actions run `35588939915`（validate-plugin，commit `572735f`）→ **success**：四路全绿——Static plugin validation × {ubuntu-latest, windows-latest} × {Python 3.8, Python 3.13}。FR-04 远端门关闭。
