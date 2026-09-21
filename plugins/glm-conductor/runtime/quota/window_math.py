@@ -5,24 +5,18 @@
 职责：
     承载窗口边界确定性时间数学（reset 锚定 + grace 相加的纯函数）的
     单一规范落点（canonical home）。v2.2.1 WU-221-C2 行为保持抽取：
-    _earliest_reset_plus 自 runtime.quota.control 逐字移入；control
-    经 re-import 保持既有解析点零变化（含 runtime.quota.epoch 既有的
-    `from runtime.quota.control import _earliest_reset_plus`——该
-    import 行不动，解析到的仍是同一函数对象，相关 docstring 记述
-    保持为真）。本模块不新增任何策略语义。
+    _earliest_reset_plus 自 runtime.quota.control 逐字移入；v2.4
+    Phase 3 P3-A 起 control / epoch 等控制面模块已删除，本函数保留
+    为窗口边界时间数学的规范实现（当前包内存活消费方为 resolver /
+    report 的调用链，历史解析点随宿主模块删除一并消亡）。本模块不
+    新增任何策略语义。
 
-    同域近亲（本单元逐实现比对后判定为「非重复、不合并」，各自
-    留驻原模块）：
-      - scheduler.plan_resume 的 max(reset)+grace 内联段与
-        epoch._executable_boundary_of_canonical：executable 边界
-        （§30 最晚多窗）的两处实现——§31 fail 语义不同（scheduler
-        逐窗 fail-fast 且 reason 带 kind 标注；epoch 静默跳过不可
-        解析窗），非逐字重复，不合并；
-      - epoch._validated_grace / _normalize_reset：epoch 单模块
-        使用，不满足「2+ 模块共用」门槛，留驻；
-      - continuity.wake_bridge._bridge_boundary：boundary-id 构造
-        （"<kind>:<reset_at>"，D10）——continuity.resume 经 import
-        复用同一对象（单一规范落点已成立），无重复副本可抽取。
+    同域近亲（v2.2.1 逐实现比对后判定为「非重复、不合并」）：
+      - parser.plan_resume 的 max(reset)+grace 内联段（原
+        scheduler.plan_resume，P3-A 行为保持移入 parser）：§30 最晚
+        多窗边界——§31 fail 语义不同（plan_resume 逐窗 fail-fast 且
+        reason 带 kind 标注；_earliest_reset_plus 静默跳过不可解析
+        窗），非逐字重复，不合并。
 
 依赖：
     仅 Python 3.7 标准库 + runtime.quota.time_utils（时间原语）；

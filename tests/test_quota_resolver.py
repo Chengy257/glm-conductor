@@ -26,13 +26,9 @@ test_wave_dispatch 缺省调用显式化后全绿，由全量 unittest 提供）
     7. force_refresh=True：fresh 缓存也走 provider；
     8. credential safety：返回 dict 与缓存文件序列化后不含凭证值与
        key/token 字样；
-    9. task_manager 集成：resolver 返回 EXHAUSTED → prepare_dispatch
-       抛 waiting_quota 口径 TaskManagerError + journal 有
-       quota_resolved 事件（status/source/evaluated_at 三键）；
-    10. task_manager 集成：显式 quota_status="AVAILABLE" → 零解析
-        （resolver mock 未被调用）零 quota_resolved 事件；
-    11. prepare_dispatch_wave：resolver UNKNOWN → worker_budget=1、
-        单单元 wave、wave 记录 quota_status 记解析后实际值。
+    （v2.4 Phase 2 W6：原 9/10/11 的派发接线集成用例以 v2.3 执行面
+    事务为被测主体，随执行运行时退役一并移除；resolver 的四级层级
+    与凭证安全契约不受影响。）
 
 运行：
     cd <repo_root> && python3 -m unittest tests.test_quota_resolver -v
@@ -48,7 +44,6 @@ from pathlib import Path
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "plugins" / "glm-conductor"))
-from runtime import journal, lease, state, task_manager, work_unit
 from runtime.quota import resolver
 from runtime.quota.provider import QuotaProviderError
 
@@ -335,136 +330,6 @@ class CredentialSafetyTest(ResolverTestBase):
         self.assertNotIn("secret detail", result["reason"])
 
 
-# —— 9/10/11. task_manager 接线集成 ——
-
-TID = "resolver-task-1a2b3c"
-VERIFY_CMD = "python3 -m unittest tests.test_quota_resolver"
-ROUTE = {"mode": "delegate", "delegability": "high",
-         "assurance": "standard", "executor": "flash-implementer",
-         "continuity": "foreground"}
-
-
-def wu(uid, owned, deps=()):
-    """构造 §61 形状的 ready 单元（真实 new_work_unit）。"""
-    return work_unit.new_work_unit(
-        uid, "resolver 目标 %s" % uid, executor="flash-implementer",
-        ownership=list(owned), verification=[VERIFY_CMD],
-        depends_on=list(deps), status="ready")
-
-
-def make_task(root, units, *, max_workers=2):
-    """落盘一个 scratch 任务 state（真实 new_task_state + save）。"""
-    st = state.new_task_state(
-        TID, "resolver 集成测试目标", dict(ROUTE),
-        ownership_files=("src/**",),
-        verification_required=(VERIFY_CMD,), status="executing")
-    st["work_units"] = list(units)
-    st["dispatch"] = {"max_workers": max_workers, "active": []}
-    state.save_state(root, st)
-    return st
-
-
-def events(root, name):
-    return [e for e in journal.read_events(root, TID)
-            if e.get("event") == name]
-
-
-class TaskManagerWiringTest(ResolverTestBase):
-
-    def _resolved(self, status, source="provider"):
-        return {"status": status, "source": source,
-                "evaluated_at": NOW_ISO, "reason": "测试注入"}
-
-    def test_prepare_dispatch_resolves_and_journals_quota_resolved(self):
-        # 9. resolver EXHAUSTED → waiting_quota 口径拒绝 + quota_resolved
-        make_task(self.root, [wu("u1", ("src/a/**",))])
-        with mock.patch.object(resolver, "resolve_quota_status",
-                               return_value=self._resolved("EXHAUSTED")):
-            with self.assertRaises(task_manager.TaskManagerError) as ctx:
-                task_manager.prepare_dispatch(self.root, TID, "u1")
-        self.assertIn("quota EXHAUSTED", str(ctx.exception))
-        # 解析事实入账（三键冻结），拒绝本身零其他事件
-        resolved_events = events(self.root, "quota_resolved")
-        self.assertEqual(len(resolved_events), 1)
-        self.assertEqual(resolved_events[0]["status"], "EXHAUSTED")
-        self.assertEqual(resolved_events[0]["source"], "provider")
-        self.assertEqual(resolved_events[0]["evaluated_at"], NOW_ISO)
-        # 决策未批准：零租约、零 permit、零派发事件
-        self.assertEqual(lease.lease_state(self.root, TID), {})
-        self.assertEqual(events(self.root, "dispatch_prepared"), [])
-        self.assertEqual(
-            [e["event"] for e in journal.read_events(self.root, TID)],
-            ["quota_resolved"])
-
-    def test_explicit_quota_status_skips_resolution(self):
-        # 10. 显式 quota_status="AVAILABLE" → 零解析、零事件（直通）
-        make_task(self.root, [wu("u1", ("src/a/**",))])
-        with mock.patch.object(resolver, "resolve_quota_status") as fake:
-            plan = task_manager.prepare_dispatch(self.root, TID, "u1",
-                                                 quota_status="AVAILABLE")
-        fake.assert_not_called()  # 零解析
-        self.assertEqual(events(self.root, "quota_resolved"), [])  # 零事件
-        self.assertEqual(plan["quota_status"], "AVAILABLE")
-        self.assertEqual(plan["dispatch"], ["u1"])
-        # 事件序不受影响（wu-21-10 之前的行为逐字保持）
-        self.assertEqual(
-            [e["event"] for e in journal.read_events(self.root, TID)],
-            ["dispatch_prepared", "dispatch_permit_created"])
-
-    def test_default_none_triggers_resolution_and_enters_plan(self):
-        # 9 补充：None 缺省触发解析，解析值进入决策链（UNKNOWN → 预算 1
-        # 不挂起，wu-21-09 语义）
-        make_task(self.root, [wu("u1", ("src/a/**",))])
-        with mock.patch.object(resolver, "resolve_quota_status",
-                               return_value=self._resolved(
-                                   "UNKNOWN", source="none")) as fake:
-            plan = task_manager.prepare_dispatch(self.root, TID, "u1")
-        fake.assert_called_once_with(self.root)
-        self.assertEqual(plan["quota_status"], "UNKNOWN")
-        self.assertEqual(plan["max_workers"], 1)  # §12：UNKNOWN → 预算 1
-        self.assertEqual(plan["dispatch"], ["u1"])
-        prepared = events(self.root, "dispatch_prepared")[0]
-        self.assertEqual(prepared["effective_max_workers"], 1)
-
-    def test_wave_resolves_unknown_to_budget_one(self):
-        # 11. wave + resolver UNKNOWN → worker_budget=1、单单元 wave、
-        #     wave 记录 quota_status 记解析后实际值
-        make_task(self.root, [wu("u1", ("src/a/**",)),
-                              wu("u2", ("src/b/**",))])
-        with mock.patch.object(resolver, "resolve_quota_status",
-                               return_value=self._resolved(
-                                   "UNKNOWN", source="cache_stale")):
-            result = task_manager.prepare_dispatch_wave(self.root, TID)
-        self.assertEqual(result["units"], ["u1"])  # 预算 1 只批 1 个
-        self.assertEqual(result["worker_budget"], 1)
-        self.assertEqual(result["deferred"],
-                         [{"id": "u2", "reason": "concurrency"}])
-        self.assertEqual(result["waiting_quota"], [])
-        st = state.load_state(self.root, TID)
-        wave = st["dispatch"]["waves"][0]
-        self.assertEqual(wave["quota_status"], "UNKNOWN")  # 解析后实际值
-        self.assertEqual(wave["worker_budget"], 1)
-        prepared = events(self.root, "dispatch_wave_prepared")[0]
-        self.assertEqual(prepared["worker_budget"], 1)
-        resolved_events = events(self.root, "quota_resolved")
-        self.assertEqual(len(resolved_events), 1)
-        self.assertEqual(resolved_events[0]["source"], "cache_stale")
-        # 只有被批成员持有租约
-        self.assertEqual(set(lease.lease_state(self.root, TID)),
-                         {"src/a/**"})
-
-    def test_wave_explicit_status_passthrough_zero_events(self):
-        # 10 补充（wave 面）：显式声明优先——零解析零事件，记录显式值
-        make_task(self.root, [wu("u1", ("src/a/**",))])
-        with mock.patch.object(resolver, "resolve_quota_status") as fake:
-            result = task_manager.prepare_dispatch_wave(
-                self.root, TID, quota_status="PRESSURE")
-        fake.assert_not_called()
-        self.assertEqual(events(self.root, "quota_resolved"), [])
-        self.assertEqual(
-            state.load_state(self.root, TID)["dispatch"]["waves"][0]
-            ["quota_status"], "PRESSURE")
-        self.assertEqual(result["units"], ["u1"])
 
 
 if __name__ == "__main__":

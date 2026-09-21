@@ -7,14 +7,27 @@
     检查项编号与整改规范对应：
       1. JSON 解析：marketplace.json 与
          plugins/glm-conductor/.zcode-plugin/plugin.json 均为合法 JSON 且为对象；
-      2. Agent frontmatter：plugins/glm-conductor/agents/*.md 必含
+      2. Agent frontmatter：plugins/glm-conductor/agents/*.md 必填字段按
+         角色区分——visual-implementer 必含
          name / description / model / thoughtLevel / tools；
+         glm-reviewer（文本审查者）必含
+         name / description / thoughtLevel / tools 且不得含 model 字段
+         （继承宿主/会话模型，v2.4 P1-A 起）；
+         visual-reviewer（视觉审查者）必含
+         name / description / model / thoughtLevel / tools，model 必须
+         匹配 provider 全限定 account:<套餐>/<模型> 且以 /GLM-5.3-Flash
+         结尾（v2.4 AF-02 起文本/视觉审查者绑定分治：视觉审查者必须
+         多模态 Flash 绑定，继承文本主模型会启动成功但丧失读图契约
+         能力，绑定不可用即 fail closed）；
       3. Skill frontmatter：plugins/glm-conductor/skills/*/SKILL.md 必含
          name / description；
       4. 引用 agent 存在：plugins/ 内出现的 `glm-conductor:<agent>` 引用
-         （flash-implementer / visual-implementer / glm-reviewer /
+         （visual-implementer / glm-reviewer /
          visual-reviewer），对应 agents/<agent>.md 必须存在；`/glm-conductor:
-         <name>` 斜杠命令引用形式不算 agent 引用；
+         <name>` 斜杠命令引用形式不算 agent 引用。flash-implementer 已
+         在 v2.4 Phase 2（W6）退役删除，其在 Phase 4（P4-C，R4）技能
+         重写后的历史引用已清零，退役豁免同步移除——plugins/ 内任何
+         `glm-conductor:flash-implementer` 引用现在直接 FAIL；
       5. 命名一致性：plugins/、marketplace.json、README.md、
          docs/architecture.md 中不得出现旧名 `glm-advisor`；
       6. 禁词：同上范围内不得出现 `升级信号` / `上报升级` / `升级路由`；
@@ -56,7 +69,7 @@
          （在上述四个文件范围内检查）；
      12. 版本一致性：plugins/glm-conductor/.zcode-plugin/plugin.json 的
          version 字段必须等于 CHANGELOG.md 第一个 `## ` 标题行中的版本记号；
-     13. 钩子清单完整性：plugins/glm-conductor/hooks/hooks.json 存在、合法
+    13. 钩子清单完整性：plugins/glm-conductor/hooks/hooks.json 存在、合法
          JSON、顶层为对象且含非空 `hooks` 对象；事件键限于 SessionStart /
          UserPromptSubmit / PreToolUse / PostToolUse / PostToolUseFailure
          （v2.1 M2 官方七事件全表）、PermissionRequest / Stop，且必须含
@@ -68,31 +81,44 @@
          插件根 plugins/glm-conductor 后必须实际存在；
      14. runtime 状态层与技能契约标记：plugins/glm-conductor/runtime/ 下的
          __init__.py / state.py / journal.py / ownership.py、hooks/ 下的
-         stop_gate.py / pre_tool_use.py、tests/ 下的 test_state.py /
+         stop_gate.py、tests/ 下的 test_state_v24.py /
          test_journal.py / test_ownership.py 均存在且非空；runtime/state.py
          必含 TASK_ID_KEYS / CONTINUITY_ID（legacy 归一证据）/
-         TERMINAL_STATUSES，runtime/journal.py 必含 RECOMMENDED_EVENTS /
+         TERMINAL_STATUSES / detect_legacy_markers /
+         LEGACY_STATE_GUIDANCE / DEFAULT_QUOTA_RESUME（v2.4 P4-A 起
+         改锚遗留检测与 quota_resume 词汇，替代已退役的
+         record_verification / record_review / visual_evidence 锚），
+         runtime/journal.py 必含 RECOMMENDED_EVENTS /
          events.jsonl，runtime/ownership.py 必含 classify_paths /
-         git_touched_files，hooks/stop_gate.py 必含 gate_blocked /
-         gate_passed / gate_exhausted（Layer A 记账词汇），
-         hooks/pre_tool_use.py 必含 additionalContext（Layer B 注入）；
+         git_touched_files，hooks/stop_gate.py 必含 COMPLETION_CHECKS /
+         evaluate_completion / LEGACY_STATE_GUIDANCE / task_completed
+         （v2.4 四查完成守卫词汇——gate_* 记账词随 v2.3 完成门退役，
+         P4-A 起改锚）；
          skills/continuity/SKILL.md 必含 state.json / events.jsonl /
-         task_created / Quota-Aware Scheduling / GLM_CONDUCTOR_QUOTA_API_KEY，
+         waiting_quota / quota_resume / GLM_CONDUCTOR_QUOTA_API_KEY，
          skills/continuity/references/long-horizon.md 必含
          state.json / events.jsonl，skills/orchestration/SKILL.md 必含
-         state.json / route_selected，skills/enforcement/SKILL.md 必含
-         ENFORCEMENT DEGRADED / gate_exhausted / Layer A / Layer B；
+         state.json / route_selected / SELECTIVE ROUTE / v24-compile /
+         writer-acquire，skills/enforcement/SKILL.md 必含
+         ENFORCEMENT DEGRADED / change_id / writer_guard / review-record
+         （v2.4 P4-C 起随技能全面重写改锚活词汇——v2.3 执行面词
+         task_fingerprint / 租约 / gate_exhausted / Layer A / Layer B /
+         verification_stale / review_stale / task_created /
+         Quota-Aware Scheduling 一并退役）；
          runtime/quota/ 下的 parser / provider / _http / zai / bigmodel /
-         scheduler / credentials / report 八模块、commands/quota.md 与
-         tests/ 下五个 test_quota*.py 均存在且非空，scheduler 必含
-         evaluate / plan_resume / PRESSURE / EXHAUSTED，_http 必含
+         credentials / report 七模块、commands/quota.md 与
+         tests/ 下四个 test_quota*.py 均存在且非空，parser 必含
+         evaluate / plan_resume / PRESSURE / EXHAUSTED（v2.4 P3-A 起
+         scheduler 已删除，评估/规划纯函数移入 parser，标记随架构
+         同步改锚），_http 必含
          ALLOWED_HOSTS / malformed，credentials 必含
          GLM_CONDUCTOR_QUOTA_API_KEY / builtin:bigmodel-coding-plan，
          report 必含 --json / unavailable；
-      15. enforcement 审查 receipt 权威标记：skills/enforcement/SKILL.md
-         必含 `run_review` 或 `review-record`（v2.1 M6——Stop 完成门审查
-         检查「fresh ship review receipt 唯一权威」语义在用户侧技能的
-         同步锚定，防止文档回退到 state.review 手写口径）。
+     15. enforcement 审查记录路径锚定：skills/enforcement/SKILL.md
+         必含 `review-record`（v2.4 P4-A 重锚——审查裁决经 `review-record`
+         子命令落为任务级 review 记录（runtime.task.record_review，
+         新鲜度锚定 change_id）；v2.3 的 durable review receipt /
+         run_review 调用真实性链已随执行面退役）。
 
     扫描范围说明：检查 5/6/7/8（及 8 内的旧名负向检查）的扫描范围是显式
     列表——plugins/ 全部文件 + marketplace.json + README.md +
@@ -144,11 +170,27 @@ OPERATIONS = os.path.join(
     SKILLS_DIR, "orchestration", "references", "operations.md")
 
 AGENT_REQUIRED_KEYS = ("name", "description", "model", "thoughtLevel", "tools")
+# v2.4 P1-A / AF-02：reviewer 模型绑定文本/视觉分治——
+#   glm-reviewer（文本审查者）删除 frontmatter model 行（继承宿主/会话模型，
+#   规避 account-connection-unavailable 硬失败），必填集不含 model 且字段
+#   出现即 FAIL；
+#   visual-reviewer（视觉审查者）必须多模态 GLM-5.3-Flash 绑定：model 必填
+#   且须通过 VISUAL_REVIEWER_MODEL_RE + VISUAL_REVIEWER_MODEL_SUFFIX 校验，
+#   缺失/裸 ID/非 Flash 后缀均 FAIL（继承文本主模型会启动成功但丧失读图
+#   契约能力）——与 tests/test_agent_model_binding.py 的断言互为镜像
+REVIEWER_REQUIRED_KEYS = ("name", "description", "thoughtLevel", "tools")
+TEXT_REVIEWER_AGENTS = ("glm-reviewer",)
+VISUAL_REVIEWER_AGENTS = ("visual-reviewer",)
+VISUAL_REVIEWER_MODEL_RE = re.compile(r"^account:[^/\s]+/\S+$")
+VISUAL_REVIEWER_MODEL_SUFFIX = "/GLM-5.3-Flash"
 SKILL_REQUIRED_KEYS = ("name", "description")
 
-# 整改规范点名的四个契约 agent；与 plugins/ 内实际引用取并集后逐一要求存在
+# 整改规范点名的契约 agent（v2.4 Phase 2 W6 起 flash-implementer 退役
+# 移除）；与 plugins/ 内实际引用取并集后逐一要求存在。
+# v2.4 Phase 4（P4-C，R4）：技能全面重写后历史引用清零，原 RETIRED_AGENTS
+# 豁免已移除——任何 flash-implementer 引用回到 plugins/ 即 FAIL（防回潮）。
 CANONICAL_AGENTS = (
-    "flash-implementer", "visual-implementer", "glm-reviewer", "visual-reviewer")
+    "visual-implementer", "glm-reviewer", "visual-reviewer")
 
 # agent 引用；`/glm-conductor:<name>`（斜杠命令引用，如 /glm-conductor:quota）
 # 指向 commands/<name>.md 而非 agents/<name>.md，用负向后顾排除
@@ -223,89 +265,71 @@ RUNTIME_INIT = os.path.join(RUNTIME_DIR, "__init__.py")
 STATE_PY = os.path.join(RUNTIME_DIR, "state.py")
 JOURNAL_PY = os.path.join(RUNTIME_DIR, "journal.py")
 OWNERSHIP_PY = os.path.join(RUNTIME_DIR, "ownership.py")
-FINGERPRINT_PY = os.path.join(RUNTIME_DIR, "fingerprint.py")
-POLICY_PY = os.path.join(RUNTIME_DIR, "policy.py")
 WORK_UNIT_PY = os.path.join(RUNTIME_DIR, "work_unit.py")
 DEPENDENCY_PY = os.path.join(RUNTIME_DIR, "dependency.py")
-DISPATCHER_PY = os.path.join(RUNTIME_DIR, "dispatcher.py")
-RECONCILE_PY = os.path.join(RUNTIME_DIR, "reconcile.py")
-LEASE_PY = os.path.join(RUNTIME_DIR, "lease.py")
 HOOKS_DIR = os.path.join(REPO_ROOT, "plugins", "glm-conductor", "hooks")
 STOP_GATE_PY = os.path.join(HOOKS_DIR, "stop_gate.py")
-PRE_TOOL_USE_PY = os.path.join(HOOKS_DIR, "pre_tool_use.py")
 ENFORCEMENT_SKILL = os.path.join(SKILLS_DIR, "enforcement", "SKILL.md")
 TESTS_DIR = os.path.join(REPO_ROOT, "tests")
-TEST_STATE = os.path.join(TESTS_DIR, "test_state.py")
+TEST_STATE = os.path.join(TESTS_DIR, "test_state_v24.py")
 TEST_JOURNAL = os.path.join(TESTS_DIR, "test_journal.py")
 TEST_OWNERSHIP = os.path.join(TESTS_DIR, "test_ownership.py")
-TEST_FINGERPRINT = os.path.join(TESTS_DIR, "test_fingerprint.py")
-TEST_STOP_GATE = os.path.join(TESTS_DIR, "test_stop_gate.py")
-TEST_PRE_TOOL_USE = os.path.join(TESTS_DIR, "test_pre_tool_use.py")
-TEST_POLICY = os.path.join(TESTS_DIR, "test_policy.py")
-TEST_WORK_UNIT = os.path.join(TESTS_DIR, "test_work_unit.py")
-TEST_DEPENDENCY = os.path.join(TESTS_DIR, "test_dependency.py")
-TEST_DISPATCHER = os.path.join(TESTS_DIR, "test_dispatcher.py")
-TEST_RECONCILE = os.path.join(TESTS_DIR, "test_reconcile.py")
-TEST_LEASE = os.path.join(TESTS_DIR, "test_lease.py")
 QUOTA_DIR = os.path.join(RUNTIME_DIR, "quota")
 QUOTA_PARSER_PY = os.path.join(QUOTA_DIR, "parser.py")
 QUOTA_PROVIDER_PY = os.path.join(QUOTA_DIR, "provider.py")
 QUOTA_HTTP_PY = os.path.join(QUOTA_DIR, "_http.py")
 QUOTA_ZAI_PY = os.path.join(QUOTA_DIR, "zai.py")
 QUOTA_BIGMODEL_PY = os.path.join(QUOTA_DIR, "bigmodel.py")
-QUOTA_SCHEDULER_PY = os.path.join(QUOTA_DIR, "scheduler.py")
 QUOTA_CREDENTIALS_PY = os.path.join(QUOTA_DIR, "credentials.py")
 QUOTA_REPORT_PY = os.path.join(QUOTA_DIR, "report.py")
 QUOTA_COMMAND = os.path.join(
     REPO_ROOT, "plugins", "glm-conductor", "commands", "quota.md")
 TEST_QUOTA_PARSER = os.path.join(TESTS_DIR, "test_quota_parser.py")
 TEST_QUOTA_ADAPTERS = os.path.join(TESTS_DIR, "test_quota_adapters.py")
-TEST_QUOTA_SCHEDULER = os.path.join(TESTS_DIR, "test_quota_scheduler.py")
 TEST_QUOTA_CREDENTIALS = os.path.join(TESTS_DIR, "test_quota_credentials.py")
 TEST_QUOTA_REPORT = os.path.join(TESTS_DIR, "test_quota_report.py")
 ORCHESTRATION_SKILL = os.path.join(SKILLS_DIR, "orchestration", "SKILL.md")
 RUNTIME_REQUIRED_FILES = (
-    RUNTIME_INIT, STATE_PY, JOURNAL_PY, OWNERSHIP_PY, FINGERPRINT_PY,
+    RUNTIME_INIT, STATE_PY, JOURNAL_PY, OWNERSHIP_PY,
     QUOTA_PARSER_PY, QUOTA_PROVIDER_PY, QUOTA_HTTP_PY, QUOTA_ZAI_PY,
-    QUOTA_BIGMODEL_PY, QUOTA_SCHEDULER_PY, QUOTA_CREDENTIALS_PY,
-    QUOTA_REPORT_PY, POLICY_PY, WORK_UNIT_PY, DEPENDENCY_PY,
-    DISPATCHER_PY, RECONCILE_PY, LEASE_PY)
-LAYER_REQUIRED_FILES = (STOP_GATE_PY, PRE_TOOL_USE_PY)
+    QUOTA_BIGMODEL_PY, QUOTA_CREDENTIALS_PY,
+    QUOTA_REPORT_PY, WORK_UNIT_PY, DEPENDENCY_PY)
+LAYER_REQUIRED_FILES = (STOP_GATE_PY,)
 TEST_REQUIRED_FILES = (
-    TEST_STATE, TEST_JOURNAL, TEST_OWNERSHIP, TEST_FINGERPRINT,
-    TEST_STOP_GATE, TEST_PRE_TOOL_USE, TEST_POLICY, TEST_WORK_UNIT,
-    TEST_DEPENDENCY, TEST_DISPATCHER, TEST_RECONCILE, TEST_LEASE,
-    TEST_QUOTA_PARSER, TEST_QUOTA_ADAPTERS, TEST_QUOTA_SCHEDULER,
+    TEST_STATE, TEST_JOURNAL, TEST_OWNERSHIP,
+    TEST_QUOTA_PARSER, TEST_QUOTA_ADAPTERS,
     TEST_QUOTA_CREDENTIALS, TEST_QUOTA_REPORT)
 COMMAND_REQUIRED_FILES = (QUOTA_COMMAND,)
 STATE_REQUIRED_MARKERS = (
     "TASK_ID_KEYS", "CONTINUITY_ID", "TERMINAL_STATUSES",
-    "record_verification", "record_review", "visual_evidence")
+    "detect_legacy_markers", "LEGACY_STATE_GUIDANCE",
+    "DEFAULT_QUOTA_RESUME")
 JOURNAL_REQUIRED_MARKERS = ("RECOMMENDED_EVENTS", "events.jsonl")
 OWNERSHIP_REQUIRED_MARKERS = ("classify_paths", "git_touched_files")
-POLICY_REQUIRED_MARKERS = ("classify_bash", "DECISIONS", "git-reset-hard")
-WORK_UNIT_REQUIRED_MARKERS = ("WORK_UNIT_STATUSES", "WU_TRANSITIONS", "record_attempt")
-DEPENDENCY_REQUIRED_MARKERS = ("graph_errors", "ready_units", "topo_order")
-DISPATCHER_REQUIRED_MARKERS = ("plan_dispatch", "patterns_conflict", "max_workers")
-RECONCILE_REQUIRED_MARKERS = ("reconcile_interrupted", "suggestions")
-LEASE_REQUIRED_MARKERS = ("LeaseConflictError", "acquire_lease", "release_lease")
-FINGERPRINT_REQUIRED_MARKERS = (
-    "compute_fingerprint", "task_fingerprint", "visual_evidence_status")
+# v2.4 Phase 4（P4-A）：完成门记账词（gate_blocked / gate_passed /
+# gate_exhausted）与逐命令证据词（evaluate_task / verification_stale /
+# review_stale）已随 v2.3 完成门退役——锚点改标 stop_gate.py 的
+# v2.4 四查完成守卫词汇。
 STOP_GATE_REQUIRED_MARKERS = (
-    "gate_blocked", "gate_passed", "gate_exhausted",
-    "evaluate_task", "verification_stale", "review_stale")
-PRE_TOOL_USE_REQUIRED_MARKERS = ("additionalContext", "permissionDecision")
+    "COMPLETION_CHECKS", "evaluate_completion",
+    "LEGACY_STATE_GUIDANCE", "task_completed")
+# v2.4 Phase 4（P4-C，R4）：技能契约标记随技能全面重写同步改锚——
+# 旧锚中的 v2.3 执行面词汇（task_fingerprint / 租约 / 工作单元与任务图 /
+# gate_exhausted / Layer A / Layer B / verification_stale / review_stale /
+# task_created / Quota-Aware Scheduling）已随执行面退役，改锚 v2.4 活
+# 词汇：路由与原生 Workflow 编排面（SELECTIVE ROUTE / v24-compile /
+# writer-acquire）、任务级生命周期与恢复面（waiting_quota / quota_resume）、
+# 完成守卫面（writer_guard / change_id / review-record）。
 SKILL_CONTRACT_MARKERS = (
     (CONTINUITY_SKILL,
-     ("state.json", "events.jsonl", "task_created", "task_fingerprint",
-      "Quota-Aware Scheduling", "GLM_CONDUCTOR_QUOTA_API_KEY")),
+     ("state.json", "events.jsonl", "waiting_quota", "quota_resume",
+      "GLM_CONDUCTOR_QUOTA_API_KEY")),
     (LONG_HORIZON, ("state.json", "events.jsonl")),
-    (ORCHESTRATION_SKILL, ("state.json", "route_selected", "task_fingerprint",
-     "ROUTING PREFLIGHT", "工作单元与任务图", "租约")),
+    (ORCHESTRATION_SKILL, ("state.json", "route_selected", "SELECTIVE ROUTE",
+     "v24-compile", "writer-acquire")),
     (ROLE_CONTRACTS, ("TASK CONTEXT PACK", "FILES AND OWNERSHIP")),
     (ENFORCEMENT_SKILL,
-     ("ENFORCEMENT DEGRADED", "gate_exhausted", "Layer A", "Layer B",
-      "verification_stale", "review_stale")),
+     ("ENFORCEMENT DEGRADED", "change_id", "writer_guard", "review-record")),
 )
 
 
@@ -407,7 +431,13 @@ def check_1_json(results):
 
 
 def check_2_agent_frontmatter(results):
-    """检查 2：agents/*.md frontmatter 必填字段。"""
+    """检查 2：agents/*.md frontmatter 必填字段（按角色区分必填集与 model 规则）。
+
+    文本/视觉审查者绑定分治（v2.4 P1-A / AF-02）：
+      - glm-reviewer：必填集不含 model，字段出现即 FAIL（继承宿主/会话模型）；
+      - visual-reviewer：model 必填，须为 provider 全限定 account:<套餐>/<模型>
+        且以 /GLM-5.3-Flash 结尾（多模态 Flash 绑定），否则 FAIL。
+    """
     title = "Agent frontmatter 必填字段（agents/*.md）"
     details = []
     ok = True
@@ -424,10 +454,44 @@ def check_2_agent_frontmatter(results):
             details.append("FAIL: %s: %s" % (shown, error))
             ok = False
             continue
+        agent_name = os.path.splitext(os.path.basename(path))[0]
+        if agent_name in TEXT_REVIEWER_AGENTS:
+            missing = [key for key in REVIEWER_REQUIRED_KEYS
+                       if not meta.get(key)]
+            if missing:
+                details.append("FAIL: %s 缺少必填字段: %s" % (shown, ", ".join(missing)))
+                ok = False
+            elif "model" in meta:
+                details.append(
+                    "FAIL: %s 含 model 字段（值 %s）：文本审查者继承宿主/会话"
+                    "模型，model 行必须删除"
+                    % (shown, meta.get("model") or "（空）"))
+                ok = False
+            else:
+                details.append("PASS: %s（name=%s）" % (shown, meta.get("name")))
+            continue
+        # 其余角色（visual-implementer / visual-reviewer）共用必填集；
+        # visual-reviewer 另须通过多模态 Flash 绑定校验
         missing = [key for key in AGENT_REQUIRED_KEYS if not meta.get(key)]
         if missing:
             details.append("FAIL: %s 缺少必填字段: %s" % (shown, ", ".join(missing)))
             ok = False
+            continue
+        model_value = (meta.get("model") or "").strip().strip('"').strip("'")
+        if agent_name in VISUAL_REVIEWER_AGENTS and not (
+                VISUAL_REVIEWER_MODEL_RE.match(model_value)
+                and model_value.endswith(VISUAL_REVIEWER_MODEL_SUFFIX)):
+            details.append(
+                "FAIL: %s model=%s：视觉审查者必须多模态 GLM-5.3-Flash 绑定"
+                "（provider 全限定 account:<套餐>/<模型> 且以 %s 结尾）——"
+                "继承文本主模型会启动成功但丧失读图契约能力，绑定不可用即 "
+                "fail closed"
+                % (shown, model_value or "（缺失）", VISUAL_REVIEWER_MODEL_SUFFIX))
+            ok = False
+        elif agent_name in VISUAL_REVIEWER_AGENTS:
+            details.append(
+                "PASS: %s（name=%s，多模态 Flash 绑定 model=%s）"
+                % (shown, meta.get("name"), model_value))
         else:
             details.append("PASS: %s（name=%s）" % (shown, meta.get("name")))
     results.append((2, title, ok, details))
@@ -478,6 +542,8 @@ def check_4_agent_refs(results):
                    % (len(refs), ", ".join(sorted(refs)) or "（无）"))
     required = sorted(set(refs) | set(CANONICAL_AGENTS))
     for name in required:
+        # v2.4 Phase 4（P4-C，R4）：技能重写后历史引用清零，RETIRED_AGENTS
+        # 豁免移除——任何已退役 agent 名的引用一律按缺失文件 FAIL（防回潮）
         agent_path = os.path.join(AGENTS_DIR, name + ".md")
         if os.path.isfile(agent_path):
             details.append("PASS: agents/%s.md 存在" % name)
@@ -1008,16 +1074,13 @@ def check_14_runtime_state(results):
         (STATE_PY, STATE_REQUIRED_MARKERS),
         (JOURNAL_PY, JOURNAL_REQUIRED_MARKERS),
         (OWNERSHIP_PY, OWNERSHIP_REQUIRED_MARKERS),
-        (FINGERPRINT_PY, FINGERPRINT_REQUIRED_MARKERS),
-        (POLICY_PY, POLICY_REQUIRED_MARKERS),
-        (WORK_UNIT_PY, WORK_UNIT_REQUIRED_MARKERS),
-        (DEPENDENCY_PY, DEPENDENCY_REQUIRED_MARKERS),
-        (DISPATCHER_PY, DISPATCHER_REQUIRED_MARKERS),
-        (RECONCILE_PY, RECONCILE_REQUIRED_MARKERS),
-        (LEASE_PY, LEASE_REQUIRED_MARKERS),
+        (WORK_UNIT_PY, ("NODE_REQUIRED_KEYS",)),
+        (DEPENDENCY_PY, ("graph_errors",)),
         (STOP_GATE_PY, STOP_GATE_REQUIRED_MARKERS),
-        (PRE_TOOL_USE_PY, PRE_TOOL_USE_REQUIRED_MARKERS),
-        (QUOTA_SCHEDULER_PY,
+        # v2.4 Phase 3 P3-A：scheduler.py 已删除，evaluate / plan_resume
+        # （§28/§29-§33）行为保持移入 parser.py——四个 §28 词汇标记随
+        # 架构同步改锚（总计划规则 12）；标记全在 parser.py 锚定。
+        (QUOTA_PARSER_PY,
          ("evaluate", "plan_resume", "PRESSURE", "EXHAUSTED")),
         (QUOTA_HTTP_PY, ("ALLOWED_HOSTS", "malformed")),
         (QUOTA_CREDENTIALS_PY,
@@ -1041,15 +1104,17 @@ def check_14_runtime_state(results):
     results.append((14, title, ok, details))
 
 
-def check_15_enforcement_receipt(results):
-    """检查 15：enforcement 技能锚定审查 receipt 权威语义（v2.1 M6）。
+def check_15_enforcement_review_record(results):
+    """检查 15：enforcement 技能锚定任务级审查记录路径（v2.4 P4-A 重锚）。
 
-    Stop 完成门的审查检查已升级为「fresh ship review receipt 唯一权威」
-    （receipt 由 `review-record` / `runtime.provenance.run_review` 落盘）；
-    用户侧技能必须同步该口径——缺 `run_review` 与 `review-record` 任一
-    关键词即 FAIL（文档回退到 state.review 手写口径的机械防线）。
+    v2.4 的审查裁决经 `review-record` 子命令落为任务级 review 记录
+    （runtime.task.record_review，先验证后评审，新鲜度锚定 change_id）；
+    v2.3 的 durable review receipt / run_review 调用真实性链已退役。
+    用户侧 enforcement 技能必须同步该口径——缺 `review-record`
+    关键词即 FAIL（文档回退到已退役 receipt 口径或手写 review 的
+    机械防线）。
     """
-    title = "enforcement 审查 receipt 权威标记（run_review / review-record）"
+    title = "enforcement 审查记录路径锚定（review-record）"
     details = []
     ok = True
     text = read_text(ENFORCEMENT_SKILL)
@@ -1058,16 +1123,13 @@ def check_15_enforcement_receipt(results):
         details.append("FAIL: %s 不存在或无法读取，无法确认标记" % shown)
         results.append((15, title, False, details))
         return
-    hits = [marker for marker in ("run_review", "review-record")
-            if marker in text]
-    if hits:
+    if "review-record" in text:
         details.append(
-            "PASS: %s 含审查 receipt 权威标记（%s）"
-            % (shown, " / ".join(hits)))
+            "PASS: %s 含审查记录路径标记（review-record）" % shown)
     else:
         details.append(
-            "FAIL: %s 缺少审查 receipt 权威标记（run_review / "
-            "review-record 均未出现——receipt 唯一权威语义未同步）" % shown)
+            "FAIL: %s 缺少审查记录路径标记（review-record 未出现——"
+            "任务级审查记录语义未同步）" % shown)
         ok = False
     results.append((15, title, ok, details))
 
@@ -1087,7 +1149,7 @@ CHECKS = (
     check_12_version_consistency,
     check_13_hooks_manifest,
     check_14_runtime_state,
-    check_15_enforcement_receipt,
+    check_15_enforcement_review_record,
 )
 
 

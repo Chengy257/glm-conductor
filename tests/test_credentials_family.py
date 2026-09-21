@@ -23,7 +23,8 @@ wu-22-10，Credential Provider Discovery）。
     provider 身份（provider_identity_hash）——异身份缓存绝不复用
     （fresh 不放行、stale 不回退）、legacy 无指纹缓存保守等同异身
     份、fetch 失败直落 UNKNOWN 绝不透出异身份快照、同身份快路径
-    零变化、新缓存条目携带与共享 identity 模块同口径的指纹。
+    零变化、新缓存条目携带 resolver 侧派生的身份指纹（v2.4 P3-D
+    起指纹派生单一真相源即 resolver._provider_identity_hash）。
 
 【零网络 / 零真实凭证纪律】全部测试只读写 tempdir，不发任何网络
 请求，不读取真实 ~/.zcode 配置（environ 一律注入隔离）。
@@ -47,7 +48,6 @@ from runtime.quota import resolver
 from runtime.quota.credentials import (ENV_VAR, FAMILY_MODE_UNAVAILABLE,
                                        PROVIDER_FAMILIES, describe_modes,
                                        discover_families)
-from runtime.quota.identity import compute_provider_identity_hash
 from runtime.quota.provider import QuotaProviderError
 
 # 假 key（含 SECRET 标记：零秘密断言复用同一标记）
@@ -336,12 +336,11 @@ class QuotaCacheIdentityBindingTest(TempDirFixture):
         self.patch_identity(KEY_ACCOUNT_A)
         self.write_account_cache(recording_factory(
             [("fake", FakeFetchProvider(GOOD_SNAPSHOT))]))
-        # 两账号材料 → 互异身份指纹（矩阵前提的机械证据）
+        # 两账号材料 → 互异身份指纹（矩阵前提的机械证据；v2.4 P3-D
+        # 起派生单一真相源 = resolver._provider_identity_hash）
         self.assertNotEqual(
-            compute_provider_identity_hash(
-                environ={ENV_VAR: KEY_ACCOUNT_A}),
-            compute_provider_identity_hash(
-                environ={ENV_VAR: KEY_ACCOUNT_B}))
+            resolver._provider_identity_hash(KEY_ACCOUNT_A),
+            resolver._provider_identity_hash(KEY_ACCOUNT_B))
         self.patch_identity(KEY_ACCOUNT_B)
         reader = recording_factory(
             [("fake", FakeFetchProvider(GOOD_SNAPSHOT))])
@@ -404,9 +403,10 @@ class QuotaCacheIdentityBindingTest(TempDirFixture):
         self.assertIsNone(detail["fetched_at"])
 
     def test_written_cache_carries_correct_provider_identity_hash(self):
-        # 抓取成功写缓存：唯一新增键 provider_identity_hash 与共享
-        # identity 模块对同一身份的产出逐字一致（两处派生口径的防漂
-        # 移锚）；既有四键逐字保留；缓存与返回 dict 零凭证材料（§37）
+        # 抓取成功写缓存：唯一新增键 provider_identity_hash 与当前
+        # 身份在 resolver 侧的派生口径逐字一致（v2.4 P3-D 起该口径
+        # 单一真相源即 resolver._provider_identity_hash）；既有四键
+        # 逐字保留；缓存与返回 dict 零凭证材料（§37）
         self.patch_identity(KEY_ACCOUNT_A)
         result = self.write_account_cache(recording_factory(
             [("fake", FakeFetchProvider(GOOD_SNAPSHOT))]))
@@ -415,8 +415,7 @@ class QuotaCacheIdentityBindingTest(TempDirFixture):
             cache = json.load(handle)
         self.assertEqual(
             cache["provider_identity_hash"],
-            compute_provider_identity_hash(
-                environ={ENV_VAR: KEY_ACCOUNT_A}))
+            resolver._provider_identity_hash(KEY_ACCOUNT_A))
         self.assertEqual(sorted(cache),
                          ["fetched_at", "provider",
                           "provider_identity_hash", "snapshot",

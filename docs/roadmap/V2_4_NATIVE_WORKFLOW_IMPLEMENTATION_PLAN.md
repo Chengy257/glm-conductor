@@ -4,6 +4,34 @@
 > **Audience:** local coding agent / GPT-5.6 Luna implementation handoff.  
 > **Testing rule:** targeted tests at phase boundaries; one full regression at the final gate. Do not repeatedly run the complete legacy suite.
 
+## 0. Current implementation status
+
+- **Phase 0:** COMPLETE.
+- **Phase 1:** COMPLETE.
+- **Phase 2:** COMPLETE.
+- **Phase 3:** COMPLETE.
+- **Phase 4:** COMPLETE.
+- **Post-implementation audit-fix:** COMPLETE; AF-01–AF-06 evidence recorded, gates closed by the final closeout.
+- **Final release closeout:** COMPLETE — FR-01–FR-04 closed with evidence (`docs/reviews/V2_4_AUDIT_FIX_CLOSEOUT_REPORT.md` Final Release Closeout Addendum §A1–§A5).
+- **Merge candidate:** READY.
+
+The final closeout is **not Phase 5** and does not reopen the v2.4 architecture. It contains only:
+
+1. FR-01 — release writer guard from the task's effective bound repository root;
+2. FR-02 — literal fresh-session reviewer proof after cache refresh;
+3. FR-03 — synchronize README / CHANGELOG / docs index / master-plan truth;
+4. FR-04 — final targeted verification + one full regression + CI evidence.
+
+The earlier audit-fix closeout remains historical implementation evidence. Its prior `MERGE_READY` statement is superseded until FR-01–FR-04 pass.
+
+Phase implementation specs remain historical execution authority for the completed work:
+
+- `docs/roadmap/V2_4_PHASE_1_NATIVE_SEMANTIC_CORE_SPEC.md`
+- `docs/roadmap/V2_4_PHASE_2_STATE_ASSURANCE_RETIREMENT_SPEC.md`
+- `docs/roadmap/V2_4_PHASE_3_QUOTA_RESUME_EXTRACTION_SPEC.md`
+- `docs/roadmap/V2_4_PHASE_4_INTEGRATION_RELEASE_SPEC.md`
+
+
 ## 1. Objective
 
 Implement the v2.4 complexity re-baseline by replacing legacy Conductor execution-runtime mechanics with ZCode native Workflow/Scheduled Task capabilities while preserving only Conductor-specific semantics.

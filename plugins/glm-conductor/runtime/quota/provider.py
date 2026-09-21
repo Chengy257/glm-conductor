@@ -42,7 +42,7 @@
 
 依赖：
     仅 Python 3 标准库，零第三方依赖，`python3 -S` 可运行。
-    风格对齐 runtime/state.py / runtime/fingerprint.py。
+    风格对齐 runtime/state.py。
 
 来源：
     v2.0 设计（已蒸馏入 docs/architecture.md：provider 抽象 / 端点兼容 /
