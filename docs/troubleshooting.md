@@ -69,7 +69,7 @@ provider: bigmodel
 
 ## 3. 写者守卫残留：`writer-show` 确认 + `--force` 清除
 
-**现象**：完成守卫查 1 拦截：「仓库写者守卫正被其他任务持有」，但报出的持有任务其实早已消亡（会话崩溃、任务目录被手工删除等）；新委派 `writer-acquire` 冲突；或（AF-04 起）委派任务完成被拦：「完成被阻断：任务 <id> 已注册委派 run，但仓库写者守卫预约缺失（missing writer reservation…）」——有 run id 的委派任务在注册（`v24-record-run`）与完成两处都要求仍持有本仓库写预约，这是生命周期不变式，不覆盖 Conductor 协议之外的裸宿主 Workflow 调用。
+**现象**：完成守卫查 1 拦截：「仓库写者守卫正被其他任务持有」，但报出的持有任务其实早已消亡（会话崩溃、任务目录被手工删除等）；新委派 `writer-acquire` 冲突；或（AF-04 起）委派任务完成被拦：「完成被阻断：任务 <id> 已注册委派 run，但仓库写者守卫预约缺失（missing writer reservation…）」——有 run id 的委派任务在注册（`runtime.task.record_workflow_run`；CLI `v24-record-run` 是 adapter 单据薄壳，不写 state 也不带守卫前置）与完成两处都要求仍持有本仓库写预约，这是生命周期不变式，不覆盖 Conductor 协议之外的裸宿主 Workflow 调用。
 
 **判定**：先看当前持有者：
 
