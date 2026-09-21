@@ -1,6 +1,6 @@
 # GLM Conductor v2.4 Audit-Fix Closeout Plan
 
-> **Status:** implementation-complete → post-implementation audit hardening.  
+> **Status:** IMPLEMENTED — AF-01–AF-06 implementation/evidence completed; final merge verdict is now governed by `V2_4_FINAL_RELEASE_CLOSEOUT_PLAN.md`.  
 > **Branch:** `review/zcode-3.14-native-workflow`.  
 > **Authority:** `docs/reviews/V2_4_NATIVE_WORKFLOW_REBASELINE_SPEC.md` plus the completed Phase 1–4 specs.  
 > **Important:** this is **not Phase 5** and does not reopen v2.4 architecture. It is a bounded release-hardening closeout before merge to `main`.
