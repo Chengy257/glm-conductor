@@ -1,7 +1,7 @@
 # GlobalQuotaClock — Standalone Project Plan
 
-> **Status:** PLANNED / READY FOR NEW-REPOSITORY BOOTSTRAP  
-> **Proposed repository:** `Chengy257/GlobalQuotaClock`  
+> **Status:** HANDED OFF — standalone repository created; implementation authority moved to `Chengy257/ZcodeGlobalQuotaClock`  
+> **Standalone repository:** `Chengy257/ZcodeGlobalQuotaClock`  
 > **CLI / package working name:** `gqclock`  
 > **Origin:** extracted from GLM Conductor v2.3 Global Quota Clock during the v2.4 native-workflow re-baseline.  
 > **Relationship to glm-conductor:** independent companion project; **no runtime dependency in either direction**.
@@ -166,7 +166,7 @@ The old direct-SQLite adapter is historical evidence only.
 Recommended repository shape:
 
 ```text
-GlobalQuotaClock/
+ZcodeGlobalQuotaClock/
 ├── README.md
 ├── pyproject.toml
 ├── src/gqclock/
