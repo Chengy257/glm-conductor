@@ -658,6 +658,104 @@ class TestTerminalAndGuard(LifecycleCase):
             task.fail(self.repo, "life-cycle-a")
 
 
+# —— 6b. 终态释放的生效根（FR-01：账本根 ≠ 绑定仓库根） ——
+
+class TestTerminalTwoRootRelease(LifecycleCase):
+    """FR-01：账本根与绑定仓库根分离时，守卫释放落在绑定仓库根。
+
+    夹具为两个物理目录（绝不 mock writer_guard.release，断言直查
+    守卫文件与持有者）：
+        <tmp>/ledger/  账本根（state.json / events.jsonl）
+        <tmp>/repo/    绑定仓库根（.glm-conductor/writer_guard.json）
+    经正门构造：create_task 在账本根建任务 → bind_repository_root
+    重绑到绑定仓库根 → save_state 落盘（RB-2 公开绑定通道）。
+    同根基线（账本根 == 绑定仓库根）由 TestTerminalAndGuard 既有
+    用例覆盖，本类只测分离面。
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.ledger = os.path.join(self._tmp.name, "ledger")
+        self.bound = os.path.join(self._tmp.name, "repo")
+        os.makedirs(self.ledger)
+        os.makedirs(self.bound)
+
+    def make_bound_task(self, task_id):
+        """账本根建任务后重绑到绑定仓库根，返回重绑后的状态 dict。"""
+        st = task.create_task(
+            self.ledger, task_id, "验证双根终态守卫释放",
+            {"mode": "delegate", "assurance": "high"}, [self.node("build")])
+        state.bind_repository_root(st, self.bound)
+        state.save_state(self.ledger, st)
+        return st
+
+    def guard_file(self, root):
+        """root 下守卫持久记录文件的绝对路径。"""
+        return os.path.join(root, ".glm-conductor", "writer_guard.json")
+
+    def ledger_names(self, task_id):
+        """账本根上该任务的 journal 事件名序列。"""
+        return [item.get("event")
+                for item in journal.read_events(self.ledger, task_id)]
+
+    def test_complete_releases_bound_root_guard(self):
+        """complete(账本根)：终态落账本；守卫从绑定根消失；账本根零守卫文件。"""
+        self.make_bound_task("two-root-complete")
+        self.assertTrue(writer_guard.acquire(
+            self.bound, "two-root-complete", "run-1")["ok"])
+        st = task.complete(self.ledger, "two-root-complete")
+        self.assertEqual(st["status"], "completed")
+        self.assertEqual(
+            state.load_state(self.ledger, "two-root-complete")["status"],
+            "completed")
+        self.assertIsNone(writer_guard.inspect(self.bound))
+        self.assertFalse(os.path.exists(self.guard_file(self.ledger)))
+        # 双根分工不变：state 与 journal 仍在账本根
+        self.assertEqual(self.ledger_names("two-root-complete"),
+                         ["route_selected", "task_completed"])
+
+    def test_fail_and_cancel_release_bound_root_guard(self):
+        """fail / cancel(账本根)：同样从绑定仓库根释放，账本根零守卫文件。"""
+        self.make_bound_task("two-root-fail")
+        writer_guard.acquire(self.bound, "two-root-fail", "run-2")
+        task.fail(self.ledger, "two-root-fail")
+        self.assertEqual(
+            state.load_state(self.ledger, "two-root-fail")["status"],
+            "failed")
+        self.assertIsNone(writer_guard.inspect(self.bound))
+        self.assertFalse(os.path.exists(self.guard_file(self.ledger)))
+        self.make_bound_task("two-root-cancel")
+        writer_guard.acquire(self.bound, "two-root-cancel", "run-3")
+        task.cancel(self.ledger, "two-root-cancel")
+        self.assertEqual(
+            state.load_state(self.ledger, "two-root-cancel")["status"],
+            "cancelled")
+        self.assertIsNone(writer_guard.inspect(self.bound))
+        self.assertFalse(os.path.exists(self.guard_file(self.ledger)))
+
+    def test_two_root_other_task_guard_untouched(self):
+        """绑定根守卫属其它任务 → 终态照常到达，他人守卫绝不误删。"""
+        self.make_bound_task("two-root-bystander")
+        writer_guard.acquire(self.bound, "guard-holder", "run-0")
+        st = task.complete(self.ledger, "two-root-bystander")
+        self.assertEqual(st["status"], "completed")
+        holder = writer_guard.inspect(self.bound)
+        self.assertIsNotNone(holder)
+        self.assertEqual(holder["task_id"], "guard-holder")
+        self.assertFalse(os.path.exists(self.guard_file(self.ledger)))
+
+    def test_two_root_replay_still_releases_bound_root(self):
+        """同终态重放（双根）：事件幂等重做，释放仍指向绑定仓库根。"""
+        self.make_bound_task("two-root-replay")
+        task.complete(self.ledger, "two-root-replay")
+        writer_guard.acquire(self.bound, "two-root-replay", "run-4")
+        task.complete(self.ledger, "two-root-replay")
+        self.assertEqual(
+            self.ledger_names("two-root-replay").count("task_completed"), 2)
+        self.assertIsNone(writer_guard.inspect(self.bound))
+        self.assertFalse(os.path.exists(self.guard_file(self.ledger)))
+
+
 # —— 7. journal 词汇精确 ——
 
 class TestJournalVocabulary(LifecycleCase):

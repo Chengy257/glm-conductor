@@ -72,9 +72,11 @@
     complete(repo_root, task_id) / fail(...) / cancel(...)
         终态收尾：迁移到 completed / failed / cancelled + 任务级
         journal 事件（task_completed / task_failed / task_cancelled）
-        + 经 runtime.writer_guard.release 释放仓库写者守卫（幂等；
-        守卫属其它任务时不误删）。同终态重放放行（事件与释放幂等），
-        跨终态迁移一律拒绝。
+        + 在生效仓库根（state.resolve_repository_root：绑定优先、
+        账本根回退）上经 runtime.writer_guard.release 释放仓库写者
+        守卫（幂等；守卫属其它任务时不误删；账本根与绑定根分离时
+        释放仍落在绑定仓库根——FR-01）。同终态重放放行（事件与
+        释放幂等），跨终态迁移一律拒绝。
 
 journal 词汇（TASK_JOURNAL_EVENTS，恰十名，绝不多不少）：
     route_selected / workflow_started / workflow_reassessed /
@@ -832,6 +834,11 @@ def _finish(repo_root, task_id, terminal_status, event_name) -> dict:
       一律拒绝）；
     - 事件名限于 TASK_JOURNAL_EVENTS（task_completed / task_failed /
       task_cancelled），含 from 字段记录收尾前状态；
+    - 双根分工（FR-01）：state.json / journal 留在账本根 repo_root；
+      写者守卫在生效仓库根上释放（state.resolve_repository_root：
+      repository.root 绑定优先、账本根回退）——账本根与绑定仓库根
+      分离（RB-2）时守卫不在账本根上，绝不在账本根上加兜底第二次
+      释放；
     - 经 runtime.writer_guard.release 释放仓库写者守卫（幂等；守卫
       属其它任务时 release 拒绝且不误删——终态事实不因此回滚，守卫
       归属对账由持有者侧或 U6 CLI --force 负责）。
@@ -845,7 +852,8 @@ def _finish(repo_root, task_id, terminal_status, event_name) -> dict:
     journal.append_event(
         repo_root, task_id,
         {"event": event_name, "from": old_status, "to": terminal_status})
-    writer_guard.release(repo_root, task_id)
+    writer_guard.release(
+        state.resolve_repository_root(st, repo_root), task_id)
     return st
 
 

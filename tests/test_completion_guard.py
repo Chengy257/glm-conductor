@@ -592,5 +592,71 @@ class TestHookShell(CompletionGuardCase):
             self.assertEqual(decision["decision"], "block")
 
 
+# —— 8. 双根完成门（FR-01 决定性回归：账本根 A ≠ 绑定仓库根 B） ——
+
+class TestTwoRootCompletion(CompletionGuardCase):
+    """账本根 A 与绑定仓库根 B 物理分离时的四查全链与收尾释放位置。
+
+    夹具（两物理目录，绝不 mock）：
+        A = <tmp>/ledger  任务账本（state.json / events.jsonl）
+        B = <tmp>/repo    git 仓库 + 本任务写者守卫 + owned 改动
+    经正门构造：create_task 在 A 建任务 → bind_repository_root 重绑
+    到 B → save_state 落盘。守卫在 B、改动在 B、change_id 在 B 求值，
+    evaluate_completion 以 A 为账本根驱动——全部检查必须在 B 上看
+    世界、在 A 上记账、完成收尾把守卫从 B 释放。
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.ledger = os.path.join(self._tmp.name, "ledger")
+        self.bound = os.path.join(self._tmp.name, "repo")
+        os.makedirs(self.ledger)
+        os.makedirs(self.bound)
+
+    def init_git_bound(self):
+        """在绑定仓库根 git init（unborn 基线）；无 git 可执行时 skipTest。"""
+        try:
+            proc = subprocess.run(
+                ["git", "init", "-q"], cwd=self.bound,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        except FileNotFoundError:
+            self.skipTest("环境无 git 可执行")
+        if proc.returncode != 0:
+            raise AssertionError(
+                "测试装置 git init 失败（returncode=%d）：%s"
+                % (proc.returncode,
+                   proc.stderr.decode("utf-8", errors="replace")))
+
+    def test_two_root_gate_allows_and_releases_bound_guard(self):
+        """四查全过 → allow + completed；守卫从 B 消失；A 零守卫文件。"""
+        self.init_git_bound()
+        target = Path(self.bound) / "src" / "build.py"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("内容\n", encoding="utf-8")
+        st = task.create_task(
+            self.ledger, self.tid, "验证双根完成门",
+            {"mode": "delegate", "assurance": "standard"},
+            [self.node("build")])
+        state.bind_repository_root(st, self.bound)
+        state.save_state(self.ledger, st)
+        self.assertTrue(
+            writer_guard.acquire(self.bound, self.tid, "run-self")["ok"])
+        task.record_validation(self.ledger, self.tid, "passed")
+        result = stop_gate.evaluate_completion(self.ledger, self.tid)
+        self.assertEqual(
+            result, {"decision": "allow", "check": None, "detail": None,
+                     "reason": None})
+        self.assertEqual(
+            state.load_state(self.ledger, self.tid)["status"], "completed")
+        self.assertIsNone(writer_guard.inspect(self.bound))
+        self.assertFalse(os.path.exists(
+            os.path.join(self.ledger, ".glm-conductor",
+                         "writer_guard.json")))
+        self.assertEqual(
+            [item.get("event")
+             for item in journal.read_events(self.ledger, self.tid)],
+            ["route_selected", "validation_recorded", "task_completed"])
+
+
 if __name__ == "__main__":
     unittest.main()
