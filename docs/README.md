@@ -20,7 +20,7 @@
 
 ## Active review / implementation handoff（非架构真相源）
 
-以下文档记录 v2.4 重基线的规划与实施过程。v2.4 已落地（Phases 1–3 出垒，Phase 4 收口中），它们保留为设计依据与审计证据，不再描述"未来目标"。
+以下文档记录 v2.4 重基线、audit-fix 与最终发布收口。Phase 0–4 已完成；当前唯一 active 工作是 Final Release Closeout（FR-01–FR-04），完成后方可合并 main。
 
 - [V2_4_NATIVE_WORKFLOW_REBASELINE_SPEC.md](reviews/V2_4_NATIVE_WORKFLOW_REBASELINE_SPEC.md) — **v2.4 冻结规格**（含 W0 复验收口记录 §13.1）：职责切分、路由矩阵、静态 DAG、编译器边界、最小保障模型、legacy 兼容政策、模块处置表。
 - 路线图四计划（`docs/roadmap/`，各 Phase 出垒记录已附于对应执行计划文末，出垒门均 PASSED）：
@@ -29,7 +29,11 @@
   - [Phase 3 — Quota Resume & Clock Extraction](roadmap/V2_4_PHASE_3_QUOTA_RESUME_EXTRACTION_SPEC.md) + [Phase 3 Workflow Execution Plan](roadmap/V2_4_PHASE_3_WORKFLOW_EXECUTION_PLAN.md)（含 Phase 3 出垒记录）
   - [Phase 4 — Integration & Release](roadmap/V2_4_PHASE_4_INTEGRATION_RELEASE_SPEC.md) + [Phase 4 Workflow Execution Plan](roadmap/V2_4_PHASE_4_WORKFLOW_EXECUTION_PLAN.md)（收口阶段：退役面审计、文档/技能重写、测试重置、唯一一次全量回归）
 - [V2_4_RETIRED_SURFACE_AUDIT.md](reviews/V2_4_RETIRED_SURFACE_AUDIT.md) — Phase 4 P4-A 全仓退役面审计：22 个退役概念 × 六面的逐条命中分类（活性引用当场修复 / 历史证据保留 / 迁移注保留）。
-- Phase 4 收口报告（预留挂点）：`reviews/V2_4_CLOSEOUT_REPORT.md` — 删除子系统、保留语义、测试证据与残余宿主限制（R6 主会话收口时落盘）。
+
+- [V2_4_AUDIT_FIX_CLOSEOUT_PLAN.md](roadmap/V2_4_AUDIT_FIX_CLOSEOUT_PLAN.md) + [Detailed Spec](roadmap/V2_4_AUDIT_FIX_CLOSEOUT_IMPLEMENTATION_SPEC.md) — 已实施的 post-implementation audit-fix（AF-01–AF-06），保留为修复依据与证据链。
+- [V2_4_FINAL_RELEASE_CLOSEOUT_PLAN.md](roadmap/V2_4_FINAL_RELEASE_CLOSEOUT_PLAN.md) + [Detailed Spec](roadmap/V2_4_FINAL_RELEASE_CLOSEOUT_IMPLEMENTATION_SPEC.md) — **当前唯一 active merge gate**：FR-01 effective-root writer release、FR-02 fresh-session reviewer proof、FR-03 release-doc truth sync、FR-04 final regression/CI。
+- [V2_4_AUDIT_FIX_CLOSEOUT_REPORT.md](reviews/V2_4_AUDIT_FIX_CLOSEOUT_REPORT.md) — audit-fix 实施与宿主证据报告；其原先的 `MERGE_READY` 结论已由 Final Release Closeout 暂时覆盖，待最终 addendum 重申或改判。
+- [V2_4_CLOSEOUT_REPORT.md](reviews/V2_4_CLOSEOUT_REPORT.md) — Phase 1–4 implementation closeout 基线；后续结论由 audit-fix 与 Final Release Closeout evidence supersede。
 - ZCode 3.14 spike 证据（W0 之前的探索，保留为证据链）：
   - [ZCODE_3_14_NATIVE_WORKFLOW_REBASELINE_PLAN.md](reviews/ZCODE_3_14_NATIVE_WORKFLOW_REBASELINE_PLAN.md) — spike + re-baseline review 的可交付实施计划（WF-00–WF-25、决策闸、capability/module-disposition 产物）。
   - [ZCODE_3_14_NATIVE_WORKFLOW_RESULTS.md](reviews/ZCODE_3_14_NATIVE_WORKFLOW_RESULTS.md) — spike 结果与 re-baseline 建议（宿主/运行/模型事实记录）。
