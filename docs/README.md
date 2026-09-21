@@ -13,6 +13,9 @@
 - [troubleshooting.md](troubleshooting.md) — 面向用户的排障手册：按「现象 → 判定 → 处置」组织（额度诊断、v2.3 遗留任务检测、写者守卫陈旧释放等），每条标注实现模块路径供核对。
 - [CHANGELOG.md（仓库根）](../CHANGELOG.md) — 发布级变更记录（用户可见与维护者相关的变更，不含实施过程细节；2.4.0 条目含重基线概述、删除面统计、保留语义与迁移说明）。
 - [GLOBAL_QUOTA_CLOCK_EXTRACTION_INVENTORY.md](roadmap/GLOBAL_QUOTA_CLOCK_EXTRACTION_INVENTORY.md) — Global Quota Clock 拆离清单：独立未来伴生项目的可复用能力目录与 must-not-migrate 边界。
+
+- [GLOBAL_QUOTA_CLOCK_STANDALONE_PROJECT_PLAN.md](roadmap/GLOBAL_QUOTA_CLOCK_STANDALONE_PROJECT_PLAN.md) — Global Quota Clock 独立项目的冻结范围与 v0.1 架构计划；与 glm-conductor 双向零运行时依赖。
+- [GLOBAL_QUOTA_CLOCK_V0_1_IMPLEMENTATION_SPEC.md](roadmap/GLOBAL_QUOTA_CLOCK_V0_1_IMPLEMENTATION_SPEC.md) — 新仓库 bootstrap + Stage 0–3 可交付实施规格；当前状态为 planned，尚未创建/实施独立仓库。
 - 技能文档 — 运行面操作契约的权威来源（各技能的 `references/` 内含模板与判据细节），位于 `plugins/glm-conductor/skills/`：
   - [orchestration/SKILL.md](../plugins/glm-conductor/skills/orchestration/SKILL.md) — 选择性路由、规范 DAG 构建与 delegate/full 的 Workflow 启动流程；
   - [enforcement/SKILL.md](../plugins/glm-conductor/skills/enforcement/SKILL.md) — 确定性保障运行时契约（写者守卫、change_id 新鲜度、四查完成守卫、被拦截时的恢复方法）；
