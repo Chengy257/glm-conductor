@@ -186,8 +186,8 @@ further implementation and clean up only the runtime state associated
 with this TASK_ID (single cleanup attempt for any associated automation).
 
 If the task is waiting on quota, obtain a fresh quota observation and
-follow the idempotent decision contract (scheduled_activation_decision);
-confirm via confirm_resume_started only after the host resume call is
+follow the idempotent decision contract (quota-resume-decision);
+confirm via quota-resume-confirm only after the host resume call is
 actually accepted.
 
 If a workflow_run_id is recorded and resumable, resume the same run.

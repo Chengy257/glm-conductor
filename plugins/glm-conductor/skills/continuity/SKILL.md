@@ -66,10 +66,10 @@ active task（delegate/full、audit，以及任何需要完成守卫保护的长
 
 额度四态观测（AVAILABLE / PRESSURE / EXHAUSTED / UNKNOWN）来自只读面 `quota-resolve` / `report.py`（见下「额度观测面」）。任务执行中观测到额度不可继续时：
 
-- **enter**：`task.enter_waiting_quota(repo_root, task_id, quota_view=None)`——任务迁移到 `waiting_quota`（journal `waiting_quota` 事件 direction=enter）；传入归一化观测 dict 时把最近一次观测（status / reset_at / observed_at）记入 `quota_resume.last_observation` 供诊断
+- **enter**：`quota-wait <repo_root> <task_id> [--force-refresh]`（runtime CLI；底层 `task.enter_waiting_quota`）——CLI 自带一次额度观测（resolver.resolve_quota_detail）并把归一化观测传入任务层，任务迁移到 `waiting_quota`（journal `waiting_quota` 事件 direction=enter），最近一次观测（status / reset_at / observed_at）记入 `quota_resume.last_observation` 供诊断。语义是任务已遭遇额度相关执行停止后的**显式停靠命令**，不是自动额度失败探测器
 - **停泊语义**：waiting_quota 是有意的停止点——完成守卫放行停泊态；该回合不收尾、不派发
 - **绝不虚构可用性**：观测 EXHAUSTED 或 UNKNOWN 时一律继续等待，不据陈旧缓存或猜测恢复
-- **exit**：额度可用且恢复决策成立后 `task.exit_waiting_quota(repo_root, task_id)` 迁回 active（direction=exit）
+- **exit**：手动恢复走底层 API `task.exit_waiting_quota(repo_root, task_id)` 迁回 active（direction=exit）；自动恢复路径由 `quota-resume-confirm` 落账时直接转 active（`quota_resume_confirmed` 事件）
 
 ## manual / auto 有界恢复（授权 + 预算 + 确认）
 
@@ -78,13 +78,13 @@ active task（delegate/full、audit，以及任何需要完成守卫保护的长
 | mode | 授权要求 | 行为 |
 | --- | --- | --- |
 | manual（默认） | — | 不建自动化：额度恢复后等用户回来，或 SessionStart 恢复注入提示 |
-| auto | 用户显式 `authorize_quota_resume` | 允许自动恢复，严格受 max_resumes 预算约束 |
+| auto | 用户显式 `quota-resume-authorize` | 允许自动恢复，严格受 max_resumes 预算约束 |
 
-授权与计数的三条纪律（机械语义，见 `runtime/task.py`）：
+授权与计数的三条纪律（机械语义，运行时操作一律走 runtime CLI 四命令；`runtime/task.py` 是底层实现）：
 
-1. **授权必须显式**：`task.authorize_quota_resume(repo_root, task_id, max_resumes)` 置 mode=auto 并落预算——只应由用户决定后调用；要求任务处于 waiting_quota 或 active；max_resumes 不得小于已用 resume_count。授权不推断、不随新窗口自动重置
-2. **决策幂等**：每次定时唤醒带新鲜额度观测调 `task.scheduled_activation_decision(repo_root, task_id, quota_view)`，返回封闭四词之一——`no-op`（非 waiting_quota，重复唤醒安全）/ `remain-waiting`（EXHAUSTED/UNKNOWN，继续等）/ `waiting-user`（未授权，或预算耗尽——后者恰一次把任务转 `waiting_user` 等用户重新授权）/ `resume-authorized`（可用 + 已授权 + 预算有余；返回 workflow_run_id 与暂存计数）
-3. **确认才计数**：`resume-authorized` 的计数只是**暂存**——宿主 resume 调用真正被接受后调用 `task.confirm_resume_started(repo_root, task_id)` 落账（resume_count +1、任务转回 active、journal `quota_resume_confirmed` 事件）。未确认的决策绝不消耗预算；确认前重复决策恒返回同一暂存值；预算耗尽（resume_count ≥ max_resumes）后任务停在 `waiting_user`，不再自动恢复
+1. **授权必须显式**：`quota-resume-authorize <repo_root> <task_id> <max_resumes>`（底层 `task.authorize_quota_resume`）置 mode=auto 并落预算——只应由用户决定后调用；要求任务处于 waiting_quota 或 active；max_resumes 不得小于已用 resume_count。授权不推断、不随新窗口自动重置
+2. **决策幂等**：每次定时唤醒带新鲜额度观测调 `quota-resume-decision <repo_root> <task_id> [--force-refresh]`（底层 `task.scheduled_activation_decision`），返回封闭四词之一——`no-op`（非 waiting_quota，重复唤醒安全）/ `remain-waiting`（EXHAUSTED/UNKNOWN，继续等）/ `waiting-user`（未授权，或预算耗尽——后者恰一次把任务转 `waiting_user` 等用户重新授权）/ `resume-authorized`（可用 + 已授权 + 预算有余；返回 workflow_run_id 与暂存计数）。决策命令绝不调用宿主 ResumeWorkflowRun——resume 是主会话的宿主动作
+3. **确认才计数**：`resume-authorized` 的计数只是**暂存**——宿主 resume 调用真正被接受后调用 `quota-resume-confirm <repo_root> <task_id>` 落账（底层 `task.confirm_resume_started`；resume_count +1、任务转回 active、journal `quota_resume_confirmed` 事件）。未确认的决策绝不消耗预算；确认前重复决策恒返回同一暂存值；预算耗尽（resume_count ≥ max_resumes）后任务停在 `waiting_user`，不再自动恢复
 
 ## 原生 Scheduled Task 唤醒
 
@@ -97,8 +97,8 @@ active task（delegate/full、audit，以及任何需要完成守卫保护的长
 
 **幂等决策契约**（每次唤醒固定执行）：
 
-1. 带新鲜额度观测调 `scheduled_activation_decision`——重复唤醒安全：任务不在 waiting_quota（已完成/已取消/已转 waiting_user）一律 no-op，零副作用
-2. `resume-authorized` 时由主会话以同一 run id resume Workflow，宿主接受后立即 `confirm_resume_started` 落账
+1. 带新鲜额度观测调 `quota-resume-decision <repo_root> <task_id> [--force-refresh]`（底层 `task.scheduled_activation_decision`）——重复唤醒安全：任务不在 waiting_quota（已完成/已取消/已转 waiting_user）一律 no-op，零副作用
+2. `resume-authorized` 时由主会话以同一 run id resume Workflow，宿主接受后立即 `quota-resume-confirm <repo_root> <task_id>` 落账（底层 `task.confirm_resume_started`）
 3. 唤醒轮次的工作量要小——做一轮检查、恢复一段工作，不把剩余工作塞进单次唤醒
 4. 任务到达终态后，对该任务关联的一次性 automation 做**单次**清理尝试（删除即止，绝不重试）；删除失败按降级上报
 
@@ -125,6 +125,7 @@ active task（delegate/full、audit，以及任何需要完成守卫保护的长
 ## 额度观测面（只读）
 
 - `quota-resolve <repo_root> [--force-refresh]`（runtime CLI）：四态解析，输出冻结键 `{status, source, evaluated_at, reason}`；层级 = 新鲜缓存 → provider → 陈旧缓存 → UNKNOWN（绝不默认 AVAILABLE、绝不重试网络）；观测面零任务转态
+- `quota-wait / quota-resume-authorize / quota-resume-decision / quota-resume-confirm`（runtime CLI）：额度等待 / 恢复生命周期操作面，规范用法见上「waiting_quota」与「manual / auto 有界恢复」两节；决策落盘只在任务侧，绝不调用宿主 ResumeWorkflowRun
 - `runtime/quota/report.py [--json]`：人读诊断（窗口明细 + status + 恢复建议），详见 `/glm-conductor:quota` 命令
 - **凭证**：环境变量 `GLM_CONDUCTOR_QUOTA_API_KEY` 优先，已登录 ZCode 的 `~/.zcode/v2/config.json` provider 配置为文档化回退；凭证零落盘（不进 state.json / events.jsonl / checkpoint / 日志 / 任何输出）；凭证不可得 → UNKNOWN，不虚构
 - **lite 套餐**：无周窗（仅 5 小时窗）——report 明细按实际存在窗口输出；解析与决策不依赖周窗存在
@@ -134,5 +135,5 @@ active task（delegate/full、audit，以及任何需要完成守卫保护的长
 
 - **定时能力不可用**：不得声称已启用连续性；保留 checkpoint 与 state，向用户报告"手动可恢复"及恢复方法（新建会话即得 SessionStart 恢复注入）
 - **Workflow 不可 resume**：按「Workflow 恢复」第 4 步以仓库现状重建，不重放已完成工作
-- **授权预算耗尽**：任务停在 waiting_user——等用户重新授权（`authorize_quota_resume`）或显式收尾；模型不得自行调高预算
+- **授权预算耗尽**：任务停在 waiting_user——等用户重新授权（`quota-resume-authorize`）或显式收尾；模型不得自行调高预算
 - **v2.3 遗留任务**：按 `LEGACY_STATE_GUIDANCE` 报告处置指引，不迁移、不伪造完成证据

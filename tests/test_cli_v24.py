@@ -23,28 +23,51 @@ writer-release / writer-show / v24-record-run）——规格 U6 测试清单：
   3. v24-record-run：落盘往返（stdout 记录与盘上
      .glm-conductor/workflow-runs/ 记录逐字段一致；--artifact 可选
      字段）；同 task_ref 重复调用整条替换；空 run-id → 2；用法错 → 2。
+  4. quota 生命周期四命令（v2.4 audit-fix AF-03；quota-wait /
+     quota-resume-authorize / quota-resume-decision /
+     quota-resume-confirm）：manual 缺省 quota-wait 进 waiting_quota
+     （journal enter 事件）；authorize 落 mode=auto + max_resumes；
+     EXHAUSTED/UNKNOWN → remain-waiting；AVAILABLE + 预算有余 →
+     resume-authorized（含 workflow_run_id / resume_count_after）；
+     confirm 恰消耗一预算；confirm 前重复 decision 不消耗预算；
+     非 waiting 任务 confirm → 1；预算耗尽 → waiting-user 且任务转
+     waiting_user；max_resumes 非法（"abc" / "-1"）→ 2。
 
 调用方式：模仿 tests/test_cli_extensions.py 的真实子进程冒烟
 （subprocess.run([sys.executable, CLI_PATH, ...], encoding="utf-8")）——
-全部用例经子进程调 cli.py；cwd 一律钉在 tempfile 临时仓库根
-（v24-record-run 的记录目录相对 cwd 落盘、writer 守卫记录落
-<repo_root>/.glm-conductor/，绝不触碰本仓库真实账本）。仅 Python 3.7
+v24-compile / writer-* / v24-record-run 全部用例经子进程调 cli.py；
+quota 生命周期四命令沿用同文件 CLI 测试的进程内调用 + monkeypatch
+风格（cli.main + redirect_stdout + mock.patch.object 注入假
+resolve_quota_detail 观测，零真实网络；同 tests/test_cli_extensions.
+QuotaResolveCliTest），adapter RUNS_DIR 注入临时目录。两种调用 cwd /
+账本一律钉在 tempfile 临时仓库根（writer 守卫记录、任务 state 与
+journal 全落临时目录，绝不触碰本仓库真实账本）。仅 Python 3.7
 标准库。
 
 运行：
     cd <repo_root> && python3 -X utf8 -m unittest tests.test_cli_v24 -v
 """
 
+import io
 import json
 import os
 import subprocess
 import sys
 import tempfile
 import unittest
+from contextlib import redirect_stdout
 from pathlib import Path
+from unittest import mock
 
 CLI_PATH = (Path(__file__).resolve().parents[1] / "plugins" /
             "glm-conductor" / "runtime" / "cli.py")
+
+# quota 生命周期 CLI 用例（进程内调用 + 假 resolver 注入）的模块引导
+# 与 runtime import（tests/test_quota_resume_v24.py 同款 sys.path 引导）
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "plugins" / "glm-conductor"))
+from runtime import cli, journal, state, task  # noqa: E402
+from runtime.quota import resolver as quota_resolver  # noqa: E402
+from runtime.workflow import adapter as workflow_adapter  # noqa: E402
 
 TASK_CONTEXT = {
     "task_ref": "T-U6-001",
@@ -453,6 +476,296 @@ class V24RecordRunCliTest(CliV24Fixture):
         self.assertEqual(code, 2)
         code, _stdout, _stderr = self.run_cli(
             "v24-record-run", "T-1", "run-1", "--bogus", "x")
+        self.assertEqual(code, 2)
+
+
+# —— 5. quota 生命周期四命令（v2.4 audit-fix AF-03） ——
+
+QUOTA_FETCHED_AT = "2026-09-21T12:00:00.000Z"
+
+
+def fake_detail(status, windows=None, fetched_at=QUOTA_FETCHED_AT,
+                source="provider"):
+    """构造 resolve_quota_detail 形状的假观测（键冻结四键，零网络）。"""
+    snapshot = None if windows is None else {"windows": windows}
+    return {"source": source, "status": status,
+            "snapshot": snapshot, "fetched_at": fetched_at}
+
+
+class QuotaLifecycleCliFixture(unittest.TestCase):
+    """quota 生命周期 CLI 夹具：进程内调 cli.main + 假 resolver 注入。
+
+    resolver 侧 mock.patch.object(quota_resolver,
+    "resolve_quota_detail") 注入 fake 观测（零真实网络）；任务账本在
+    tempfile 临时仓库根；adapter RUNS_DIR 注入临时目录（record_
+    workflow_run 的 run 关联记录默认相对 CWD 落盘，绝不污染本仓库）。
+    """
+
+    TID = "quota-cli-4f2a1b"
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.repo = self._tmp.name
+        patcher = mock.patch.object(
+            workflow_adapter, "RUNS_DIR",
+            os.path.join(self._tmp.name, ".glm-conductor", "workflow-runs"))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    # —— 装置助手 ——
+
+    def run_cli(self, *args):
+        """进程内调用 cli.main，返回 (退出码, stdout 原文)。"""
+        buffer = io.StringIO()
+        with redirect_stdout(buffer):
+            code = cli.main(list(args))
+        return code, buffer.getvalue()
+
+    def run_cli_json(self, *args):
+        """进程内调用 cli.main 并把 stdout 单行 JSON 解析为 dict。"""
+        code, stdout = self.run_cli(*args)
+        return code, json.loads(stdout)
+
+    def with_detail(self, detail):
+        """注入假 resolve_quota_detail 的上下文管理器。"""
+        return mock.patch.object(quota_resolver, "resolve_quota_detail",
+                                 return_value=detail)
+
+    def make_task(self, task_id=TID):
+        """临时仓库创建缺省 manual 任务（quota_resume 默认 manual/0/0）。"""
+        return task.create_task(self.repo, task_id, "额度 CLI 测试目标",
+                                {"mode": "solo"})
+
+    def prepare_waiting(self, max_resumes=3, run_id="run-cli-42"):
+        """授权 + 关联 run + 进入 waiting_quota（决策面标准前置）。"""
+        self.make_task()
+        task.record_workflow_run(self.repo, self.TID, run_id)
+        task.authorize_quota_resume(self.repo, self.TID, max_resumes)
+        task.enter_waiting_quota(self.repo, self.TID)
+
+    def load(self, task_id=TID):
+        return state.load_state(self.repo, task_id)
+
+    def names(self, task_id=TID):
+        return [item.get("event")
+                for item in journal.read_events(self.repo, task_id)]
+
+
+class QuotaLifecycleCliTest(QuotaLifecycleCliFixture):
+    """AF-03 四命令：规格测试清单九例 + 透传 / 用法 / 拒绝路径锚定。"""
+
+    # 假 snapshot 窗口（five_hour 在前 weekly 在后，与 parser 排序同形）
+    WINDOWS = [
+        {"kind": "five_hour", "reset_at": "2026-09-21T17:00:00.000Z"},
+        {"kind": "weekly", "reset_at": "2026-09-21T05:00:00.000Z"},
+    ]
+
+    def test_quota_wait_manual_default_enters_waiting_quota(self):
+        """manual 缺省：quota-wait 进入 waiting_quota + enter 事件落账。"""
+        self.make_task()
+        with self.with_detail(
+                fake_detail("EXHAUSTED", windows=self.WINDOWS)) as fake:
+            code, payload = self.run_cli_json(
+                "quota-wait", self.repo, self.TID)
+        self.assertEqual(code, 0)
+        fake.assert_called_once_with(self.repo, force_refresh=False)
+        # 输出三键：观测 view 为归一化诊断四键（reset_at = 窗口字典序
+        # 最大值；observed_at = detail.fetched_at）
+        self.assertEqual(payload["task_id"], self.TID)
+        self.assertEqual(payload["status"], "waiting_quota")
+        self.assertEqual(payload["quota_observation"], {
+            "status": "EXHAUSTED", "source": "provider",
+            "observed_at": QUOTA_FETCHED_AT,
+            "reset_at": "2026-09-21T17:00:00.000Z"})
+        # 盘上状态迁移 + 观测三键记入 last_observation（source 不落盘）
+        st = self.load()
+        self.assertEqual(st["status"], "waiting_quota")
+        self.assertEqual(st["quota_resume"]["last_observation"],
+                         {"status": "EXHAUSTED",
+                          "reset_at": "2026-09-21T17:00:00.000Z",
+                          "observed_at": QUOTA_FETCHED_AT})
+        # journal 落 waiting_quota enter 事件
+        self.assertEqual(self.names(),
+                         ["route_selected", "waiting_quota"])
+        enter = journal.read_events(self.repo, self.TID)[-1]
+        self.assertEqual({k: v for k, v in enter.items() if k != "ts"},
+                         {"event": "waiting_quota", "direction": "enter"})
+
+    def test_quota_wait_force_refresh_passthrough(self):
+        """--force-refresh 透传 resolver（强制走 provider 语义）。"""
+        self.make_task()
+        with self.with_detail(fake_detail("EXHAUSTED")) as fake:
+            code, _payload = self.run_cli_json(
+                "quota-wait", self.repo, self.TID, "--force-refresh")
+        self.assertEqual(code, 0)
+        fake.assert_called_once_with(self.repo, force_refresh=True)
+
+    def test_quota_wait_without_windows_reset_at_none(self):
+        """snapshot 无窗口 → 观测 reset_at=None（纯诊断字段）。"""
+        self.make_task()
+        with self.with_detail(fake_detail("UNKNOWN", windows=None)):
+            code, payload = self.run_cli_json(
+                "quota-wait", self.repo, self.TID)
+        self.assertEqual(code, 0)
+        self.assertIsNone(payload["quota_observation"]["reset_at"])
+
+    def test_authorize_sets_auto_and_budget(self):
+        """显式授权：authorize 落 mode=auto + max_resumes（零网络调用）。"""
+        self.make_task()
+        code, payload = self.run_cli_json(
+            "quota-resume-authorize", self.repo, self.TID, "3")
+        self.assertEqual(code, 0)
+        self.assertEqual(payload["task_id"], self.TID)
+        self.assertEqual(payload["quota_resume"],
+                         {"mode": "auto", "max_resumes": 3,
+                          "resume_count": 0, "automation_id": None})
+        st = self.load()
+        self.assertEqual(st["quota_resume"]["mode"], "auto")
+        self.assertEqual(st["quota_resume"]["max_resumes"], 3)
+
+    def test_decision_exhausted_unknown_remain_waiting(self):
+        """EXHAUSTED / UNKNOWN 观测 → decision 返回 remain-waiting。"""
+        self.prepare_waiting(max_resumes=3)
+        for status in ("EXHAUSTED", "UNKNOWN"):
+            with self.with_detail(fake_detail(status)) as fake:
+                code, payload = self.run_cli_json(
+                    "quota-resume-decision", self.repo, self.TID)
+            self.assertEqual(code, 0)
+            fake.assert_called_once_with(self.repo, force_refresh=False)
+            self.assertEqual(payload["task_id"], self.TID)
+            self.assertEqual(payload["decision"]["action"],
+                             "remain-waiting")
+            self.assertEqual(payload["quota_observation"]["status"], status)
+            self.assertEqual(self.load()["status"], "waiting_quota")
+            self.assertEqual(
+                self.load()["quota_resume"]["resume_count"], 0)
+
+    def test_decision_available_authorized_resume_authorized(self):
+        """AVAILABLE + 预算有余 → resume-authorized（含 run id / 暂存计数）。"""
+        self.prepare_waiting(max_resumes=3)
+        with self.with_detail(fake_detail("AVAILABLE")):
+            code, payload = self.run_cli_json(
+                "quota-resume-decision", self.repo, self.TID)
+        self.assertEqual(code, 0)
+        decision = payload["decision"]
+        self.assertEqual(decision["action"], "resume-authorized")
+        self.assertEqual(decision["workflow_run_id"], "run-cli-42")
+        self.assertEqual(decision["resume_count_after"], 1)
+        # 暂存不落盘：磁盘计数仍为 0
+        self.assertEqual(self.load()["quota_resume"]["resume_count"], 0)
+
+    def test_confirm_consumes_exactly_one_budget(self):
+        """confirm 恰消耗一预算：计数 +1、任务回 active、确认事件落账。"""
+        self.prepare_waiting(max_resumes=3)
+        with self.with_detail(fake_detail("AVAILABLE")):
+            self.run_cli("quota-resume-decision", self.repo, self.TID)
+        code, payload = self.run_cli_json(
+            "quota-resume-confirm", self.repo, self.TID)
+        self.assertEqual(code, 0)
+        self.assertEqual(payload["task_id"], self.TID)
+        self.assertEqual(payload["status"], "active")
+        self.assertEqual(payload["phase"], "workflow")
+        self.assertEqual(payload["quota_resume"]["resume_count"], 1)
+        st = self.load()
+        self.assertEqual(st["status"], "active")
+        self.assertEqual(st["quota_resume"]["resume_count"], 1)
+        self.assertEqual(
+            self.names(),
+            ["route_selected", "workflow_started", "waiting_quota",
+             "quota_resume_confirmed"])
+
+    def test_repeated_decision_before_confirm_consumes_nothing(self):
+        """confirm 前重复 decision：两次同暂存值、磁盘计数不变。"""
+        self.prepare_waiting(max_resumes=3)
+        staged = []
+        for _ in range(2):
+            with self.with_detail(fake_detail("AVAILABLE")):
+                code, payload = self.run_cli_json(
+                    "quota-resume-decision", self.repo, self.TID)
+            self.assertEqual(code, 0)
+            self.assertEqual(payload["decision"]["action"],
+                             "resume-authorized")
+            staged.append(payload["decision"]["resume_count_after"])
+        self.assertEqual(staged, [1, 1])
+        self.assertEqual(self.load()["quota_resume"]["resume_count"], 0)
+        self.assertEqual(self.load()["status"], "waiting_quota")
+
+    def test_confirm_non_waiting_task_refused_exit_1(self):
+        """非 waiting 任务 confirm → 任务层拒绝（退出码 1）。"""
+        self.make_task()  # active：无暂存决策可落账
+        code, payload = self.run_cli_json(
+            "quota-resume-confirm", self.repo, self.TID)
+        self.assertEqual(code, 1)
+        self.assertIn("error", payload)
+        self.assertIn("waiting_quota", payload["error"])
+        self.assertEqual(self.load()["status"], "active")
+        self.assertEqual(self.load()["quota_resume"]["resume_count"], 0)
+
+    def test_budget_exhausted_decision_moves_waiting_user(self):
+        """预算耗尽 → decision 返回 waiting-user 且任务转 waiting_user。"""
+        self.prepare_waiting(max_resumes=0)  # 授权零预算：可用即耗尽
+        with self.with_detail(fake_detail("AVAILABLE")):
+            code, payload = self.run_cli_json(
+                "quota-resume-decision", self.repo, self.TID)
+        self.assertEqual(code, 0)
+        self.assertEqual(payload["decision"]["action"], "waiting-user")
+        self.assertIn("预算已耗尽", payload["decision"]["reason"])
+        self.assertEqual(self.load()["status"], "waiting_user")
+        # 幂等：再次唤醒（任务已 waiting_user）→ no-op，恰一次转态
+        with self.with_detail(fake_detail("AVAILABLE")):
+            code, payload = self.run_cli_json(
+                "quota-resume-decision", self.repo, self.TID)
+        self.assertEqual(code, 0)
+        self.assertEqual(payload["decision"]["action"], "no-op")
+        self.assertEqual(self.load()["status"], "waiting_user")
+
+    def test_invalid_max_resumes_exit_2(self):
+        """max_resumes 非法（"abc" / "-1"）→ 参数值非法，退出码 2。"""
+        self.make_task()
+        for bad in ("abc", "-1"):
+            code, payload = self.run_cli_json(
+                "quota-resume-authorize", self.repo, self.TID, bad)
+            self.assertEqual(code, 2)
+            self.assertIn("max_resumes", payload["error"])
+        # 授权块零副作用（仍为缺省 manual/0）
+        self.assertEqual(self.load()["quota_resume"]["mode"], "manual")
+        self.assertEqual(self.load()["quota_resume"]["max_resumes"], 0)
+
+    def test_missing_task_refused_exit_1(self):
+        """任务缺失：authorize / decision / confirm → 任务层拒绝（1）。"""
+        code, payload = self.run_cli_json(
+            "quota-resume-authorize", self.repo, "ghost-task", "2")
+        self.assertEqual(code, 1)
+        self.assertIn("不存在", payload["error"])
+        with self.with_detail(fake_detail("AVAILABLE")):
+            code, payload = self.run_cli_json(
+                "quota-resume-decision", self.repo, "ghost-task")
+        self.assertEqual(code, 1)
+        self.assertIn("不存在", payload["error"])
+        code, payload = self.run_cli_json(
+            "quota-resume-confirm", self.repo, "ghost-task")
+        self.assertEqual(code, 1)
+        self.assertIn("不存在", payload["error"])
+
+    def test_lifecycle_usage_errors_exit_2(self):
+        """参数个数 / 未知旗标 → 用法错退出码 2。"""
+        code, _stdout = self.run_cli("quota-wait", self.repo)
+        self.assertEqual(code, 2)
+        code, payload = self.run_cli_json(
+            "quota-wait", self.repo, self.TID, "--bogus")
+        self.assertEqual(code, 2)
+        self.assertIn("--force-refresh", payload["error"])
+        code, _stdout = self.run_cli(
+            "quota-resume-authorize", self.repo, self.TID)
+        self.assertEqual(code, 2)
+        code, _stdout = self.run_cli("quota-resume-decision", self.repo)
+        self.assertEqual(code, 2)
+        code, _stdout = self.run_cli(
+            "quota-resume-decision", self.repo, self.TID, "--bogus")
+        self.assertEqual(code, 2)
+        code, _stdout = self.run_cli("quota-resume-confirm", self.repo,
+                                     self.TID, "extra")
         self.assertEqual(code, 2)
 
 
