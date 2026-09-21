@@ -10,7 +10,7 @@
          且非空；hooks/hooks.json 可解析且每个 process 钩子指向的脚本
          文件真实存在（${ZCODE_PLUGIN_ROOT} 展开）；
       3. runtime 包在跑批 Python 下可真实 import（runtime.task）；
-      4. 该模块至少一个纯函数行为符合冻结语义（relevant_paths）。
+      4. 该模块至少一个纯函数行为符合冻结语义（ownership_scopes）。
     零网络、零模型调用、零状态写副作用；stdlib-only，Python 3.7 兼容。
 
 边界：
@@ -118,10 +118,10 @@ def smoke_runtime_import():
         check(False, "runtime.task 可 import (%s)" % exc)
         return
     check(True, "runtime.task 可 import")
-    check(task.relevant_paths({}) == [],
-          "task.relevant_paths({}) == []（纯函数装载后可用：空形状容错）")
-    check(task.relevant_paths({"dag": "junk"}) == [],
-          "task.relevant_paths({'dag': 'junk'}) == []（形状异常容错）")
+    check(task.ownership_scopes({}) == [],
+          "task.ownership_scopes({}) == []（纯函数装载后可用：空形状容错）")
+    check(task.ownership_scopes({"dag": "junk"}) == [],
+          "task.ownership_scopes({'dag': 'junk'}) == []（形状异常容错）")
 
 
 def main():

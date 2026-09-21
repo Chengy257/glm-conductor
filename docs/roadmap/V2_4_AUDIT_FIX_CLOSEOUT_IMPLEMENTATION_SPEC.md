@@ -28,8 +28,8 @@ General rules:
 
 Current code uses:
 
-- `runtime.task.relevant_paths(st)` → union of ownership **scope strings**;
-- `runtime.change_id.compute_change_id(repo_root, relevant_paths)` → treats each item as a literal file path.
+- the pre-fix task-level "relevant paths" helper (`runtime.task`) → union of ownership **scope strings**;
+- `runtime.change_id.compute_change_id(repo_root, ...)` → treats each item as a literal file path.
 
 A scope such as `src/parser/**` therefore does not bind the digest to files under `src/parser/`.
 
@@ -51,7 +51,7 @@ Do **not** teach `change_id.py` the ownership glob language.
 
 ### A1.1 New task helper
 
-Replace or split the current ambiguous `task.relevant_paths` concept.
+Replace or split the then-ambiguous task-level "relevant paths" concept.
 
 Recommended names:
 

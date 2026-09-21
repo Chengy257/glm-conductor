@@ -167,7 +167,7 @@ file <归一路径>\0<sha256:…|missing>   ← 每个相关路径一行（排�
 | Workflow 编译器 | 静态 DAG → TS Workflow 源的确定性翻译；只产码绝不执行 | `runtime/workflow/compiler.py`（CLI `v24-compile`） |
 | persona | 文本工人唯一权威人设；宿主不读插件 agent 定义，须内嵌进生成源 | `runtime/workflow/persona.py` |
 | run 关联单据 | 任务 ↔ Workflow run 的 id 关联；零状态镜像 | `runtime/workflow/adapter.py` |
-| 评审者（glm-reviewer / visual-reviewer） | 全新上下文只读 Custom Subagent，assurance=high 在主验证后独立终审；frontmatter 无 model 字段（继承宿主/会话模型） | `plugins/glm-conductor/agents/` |
+| 评审者（glm-reviewer / visual-reviewer） | 全新上下文只读 Custom Subagent，assurance=high 在主验证后独立终审；模型绑定文本/视觉分治——glm-reviewer 无 model 字段（继承宿主/会话模型），visual-reviewer 显式绑定多模态 GLM-5.3-Flash（绑定不可用即 fail closed） | `plugins/glm-conductor/agents/` |
 | 视觉例外 | visual-implementer 保持 Custom Subagent 通道（多模态截图反馈契约），非第二文本实施路径 | agents/visual-implementer.md |
 | 主会话验证 | Workflow 结束后主会话亲自查 diff、跑有限集成命令、记录 passed/failed | `runtime/task.record_validation` |
 | journal 词汇 | 任务级恰十事件：route_selected / workflow_started / workflow_reassessed / validation_recorded / review_recorded / waiting_quota / quota_resume_confirmed / task_completed / task_failed / task_cancelled | `runtime/journal.py` |

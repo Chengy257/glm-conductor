@@ -57,7 +57,7 @@ importers still import) + validator.
 
 ### W2 — Task-level change identity (P2-B)
 
-New `runtime/change_id.py`: `compute_change_id(repo_root, relevant_paths, base=None) ->
+New `runtime/change_id.py`: `compute_change_id(repo_root, relevant_files, base=None) ->
 "sha256:..."`. Deterministic over task-relevant repository change state; ignores Conductor
 bookkeeping files (`.glm-conductor/**`); implementation MAY adapt the normalization/digest
 internals of `runtime/fingerprint.py` (read it, port what is needed, do not import it).

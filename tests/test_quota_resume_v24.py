@@ -49,7 +49,7 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "plugins" / "glm-conductor"))
 
-from runtime import journal, state, task  # noqa: E402
+from runtime import journal, state, task, writer_guard  # noqa: E402
 from runtime.workflow import adapter as workflow_adapter  # noqa: E402
 
 
@@ -89,9 +89,14 @@ class QuotaResumeCase(unittest.TestCase):
 
     def prepare_waiting(self, max_resumes=3, run_id="run-77", view=None,
                         task_id=TID):
-        """授权 + 关联 run + 进入等待（标准前置；view 缺省不带观测）。"""
+        """授权 + 关联 run + 进入等待（标准前置；view 缺省不带观测）。
+
+        delegate 任务按协议先取本仓库写者守卫（AF-04：record_workflow_run
+        前置要求当前任务持有写预约），再注册委派 run。
+        """
         self.make_task(task_id)
         if run_id is not None:
+            writer_guard.acquire(self.repo, task_id, run_id)
             task.record_workflow_run(self.repo, task_id, run_id)
         task.authorize_quota_resume(self.repo, task_id, max_resumes)
         task.enter_waiting_quota(self.repo, task_id, view)
@@ -204,6 +209,7 @@ class TestEnterObservation(QuotaResumeCase):
     def test_enter_records_observation(self):
         """进入等待时把 status/reset_at/observed_at 记入 last_observation。"""
         self.make_task()
+        writer_guard.acquire(self.repo, self.TID, "run-1")
         task.record_workflow_run(self.repo, self.TID, "run-1")
         view = quota_view("EXHAUSTED",
                           reset_at="2026-09-21T17:00:00.000Z",
@@ -288,6 +294,7 @@ class TestScheduledDecision(QuotaResumeCase):
     def test_manual_waiting_user_no_transition(self):
         """manual 未授权 → waiting-user，状态与计数原地不动。"""
         self.make_task()
+        writer_guard.acquire(self.repo, self.TID, "run-1")
         task.record_workflow_run(self.repo, self.TID, "run-1")
         task.enter_waiting_quota(self.repo, self.TID)
         decision = self.decide(quota_view("PRESSURE"))

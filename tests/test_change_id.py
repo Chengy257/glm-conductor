@@ -239,7 +239,7 @@ class TestDeterminism(GitRepoFixture):
         self.assertEqual(first, second)
         self.assertRegex(first, _CHANGE_ID_RE)
 
-    def test_empty_relevant_paths_stable(self):
+    def test_empty_relevant_files_stable(self):
         # 空相关集：preimage 只有头两行，同样有稳定合法标识
         first = change_id.compute_change_id(self.repo, [])
         second = change_id.compute_change_id(self.repo, ())
@@ -277,7 +277,7 @@ class TestTrackedChange(GitRepoFixture):
             before, change_id.compute_change_id(self.repo, ["src/a.txt"]))
 
     def test_scope_change_changes_id(self):
-        # 相关文件集变化：新增文件进 relevant_paths → 标识变化
+        # 相关文件集变化：新增文件进相关文件集 → 标识变化
         self.write("src/a.txt", b"a\n")
         self.write("src/added.txt", b"newly in scope\n")
         before = change_id.compute_change_id(self.repo, ["src/a.txt"])

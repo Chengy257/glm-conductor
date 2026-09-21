@@ -83,7 +83,7 @@ Shrink `runtime/fingerprint.py` into the single freshness primitive. Rename to `
 Required API concept:
 
 ```text
-compute_change_id(repository, relevant_paths/base) -> sha256:...
+compute_change_id(repository, relevant file paths/base) -> sha256:...
 ```
 
 The same implementation must be used by:

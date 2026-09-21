@@ -11,7 +11,7 @@
   - assurance:high（视觉任务）需要 `glm-conductor:visual-reviewer`
 - solo 与 assurance:standard 无需任何子智能体预检
 - 缺失时的 fail-closed 处理：停止该通道，告知用户检查插件安装（Settings → Plugin Management），不得静默替换为其他子智能体类型
-- 调用时不得附加模型/思考档位覆盖：各角色定义已固定（visual-implementer GLM-5.3-Flash/high；两个 reviewer 继承宿主/会话模型、档位 max），任何运行时覆盖都会破坏本体系的双轴假设
+- 调用时不得附加模型/思考档位覆盖：各角色定义已固定（visual-implementer 与 visual-reviewer 均为 GLM-5.3-Flash 多模态显式绑定，档位分别为 high / max；glm-reviewer 继承宿主/会话模型、档位 max），任何运行时覆盖都会破坏本体系的双轴假设
 
 ## 双轴判断纪律
 
@@ -75,6 +75,7 @@ Workflow 恢复（同 run id resume）、额度等待与有界恢复机制详见
 
 - **插件角色缺失**：所需子智能体不在可用类型列表时，停止该通道，告知用户检查插件安装，必要时重装后新建会话
 - **审查者缺失**（audit/full）：不得降级为无审查交付；保留当前进度并告知用户
+- **视觉高保障终审绑定不可用**（assurance: high 视觉任务）：`visual-reviewer` 启动即报 account-connection-unavailable 等连接错误时，视觉高保障路线 fail closed——向用户报告绑定不可用，不得退回文本模型（glm-reviewer 或主会话）充当视觉终审
 - **视觉证据不可得**：视觉通道停止（实施者返回 blocked），不得改用文字推测界面正常，也不得把视觉任务静默改为纯文本验证
 - **模型名不符**：可用类型中的定义若显示非预期模型，按 fail-closed 处理并告知用户
 - **审查者尝试越权写操作**：立即终止该通道，丢弃其全部输出，改用全新审查者重新审查

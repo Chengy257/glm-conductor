@@ -14,16 +14,17 @@
     task_fingerprint / visual_evidence_status 概念在 v2.4 无对应物）。
 
 语义：
-      - 标识绑定「基线修订 + 相关路径集的归一化内容状态」：任何相关
+      - 标识绑定「基线修订 + 相关文件集的归一化内容状态」：任何相关
         文件增 / 删 / 内容变化 / 相关文件集变化 / 基线变化都会改变
         标识；
-      - 只哈希 relevant_paths 列出的文件——任务相关范围由调用方控制
-        （按 P2 规格：DAG ownership 并集 ∩ git 工作区改动等），本模块
-        不做 ownership 匹配、不枚举工作区；
+      - 只哈希 relevant_files 列出的**字面文件路径**（不是 ownership
+        scope 串）——任务相关范围由调用方解析（按 P2 规格 + AF-01：
+        DAG ownership scope 并集 ∩ git 工作区实际改动），本模块不做
+        ownership 匹配、不枚举工作区；
       - Conductor 记账文件（`.glm-conductor/` 目录下一切）一律剔除：
         编排器自身写账本不得使自己过时（与 ownership.git_touched_files
         的运行时状态目录豁免同一口径）；
-      - relevant_paths 顺序与重复不影响结果（归一后去重排序）。
+      - relevant_files 顺序与重复不影响结果（归一后去重排序）。
 
 与 runtime/fingerprint.py 的关系：
     规范化与摘要内部借鉴自它（换行归一 CRLF→LF / 仓库相对路径归一与
@@ -193,17 +194,19 @@ def resolve_base(repo_root) -> str:
 
 # —— 变更标识计算 ——
 
-def compute_change_id(repo_root, relevant_paths, base=None) -> str:
+def compute_change_id(repo_root, relevant_files, base=None) -> str:
     """计算任务级变更标识，返回 "sha256:" + 64 位小写十六进制。
 
-    标识绑定「基线修订 + 相关路径集的归一化内容状态」：
+    标识绑定「基线修订 + 相关文件集的归一化内容状态」：
       - 同一逻辑内容不因换行风格（CRLF/LF）改变标识（content_digest
         先做 CRLF→LF 归一）；
       - 任何相关文件增 / 删 / 内容变化 / 相关文件集变化 / 基线变化都
         会改变标识；
-      - 只读取 relevant_paths 列出的文件，不哈希其之外的任何文件
-        （任务相关范围由调用方控制）；
-      - relevant_paths 中归一后落在 `.glm-conductor/`（Conductor 记账
+      - 只读取 relevant_files 列出的字面文件路径，不哈希其之外的任何
+        文件（入参不是 ownership scope 串，本函数不展开 scope——
+        scope → 实际改动文件集的解析由 task.relevant_changed_files
+        负责，AF-01 责任分离）；
+      - relevant_files 中归一后落在 `.glm-conductor/`（Conductor 记账
         目录）内的路径一律剔除——编排器自身写账本不改变标识；
       - 归一后去重并按 str 排序：结果与输入顺序 / 重复无关。
 
@@ -217,7 +220,7 @@ def compute_change_id(repo_root, relevant_paths, base=None) -> str:
         （结构性错误，不静默转换，与 normalize_relpath 的输入纪律一致）。
 
     流程：
-      1. relevant_paths 逐项 normalize_relpath（非法路径 ChangeIdError
+      1. relevant_files 逐项 normalize_relpath（非法路径 ChangeIdError
          自然上抛），归一后剔除记账路径、去重并按 str 排序；
       2. 取基线（按上述 base 参数规则）；
       3. 逐路径读工作区文件 <repo_root>/<归一路径>：
@@ -233,12 +236,12 @@ def compute_change_id(repo_root, relevant_paths, base=None) -> str:
                                         # 之间单个 NUL 字符
          经 hashlib.sha256 得 hexdigest，返回 "sha256:" + hexdigest。
 
-    relevant_paths 为空 → preimage 只有头两行（空相关集也有稳定标识）。
+    relevant_files 为空 → preimage 只有头两行（空相关集也有稳定标识）。
     本函数是验证记录 / 评审记录 / 完成门新鲜度比对共用的唯一入口
     （消费方 W3 / W4 必须两侧同调此函数，标识才可比）。
     """
     normalized_set = set()
-    for item in relevant_paths:
+    for item in relevant_files:
         normalized_set.add(normalize_relpath(item))
     # Conductor 记账文件剔除：编排器自身账本不入标识（顺序无关先排序）
     ordered = sorted(

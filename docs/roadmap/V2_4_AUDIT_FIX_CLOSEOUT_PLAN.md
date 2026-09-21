@@ -26,8 +26,8 @@ The post-implementation audit found a small number of release-hardening issues. 
 Current task freshness derives:
 
 ```text
-task.relevant_paths = union(DAG ownership scopes)
-                     ↓
+task relevant-paths state = union(DAG ownership scopes)
+                          ↓
 change_id.compute_change_id(...)
 ```
 
