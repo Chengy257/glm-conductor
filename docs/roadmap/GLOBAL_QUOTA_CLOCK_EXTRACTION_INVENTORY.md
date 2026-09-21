@@ -4,6 +4,7 @@
 > **Authority:** `docs/reviews/V2_4_NATIVE_WORKFLOW_REBASELINE_SPEC.md` → `docs/roadmap/V2_4_PHASE_3_QUOTA_RESUME_EXTRACTION_SPEC.md` §7（P3-F）→ `docs/roadmap/V2_4_PHASE_3_WORKFLOW_EXECUTION_PLAN.md` unit Q2。
 > **性质：** 交接（handover），不是实施。本文档只描述「未来独立 Global Quota Clock 项目」可参考/必须避开的材料；不在 Phase 3 创建新仓库，不承诺任何代码可直接搬用。
 > **读者：** 未来独立 Global Quota Clock 项目的实施者；以及 Phase 3 Q3/Q4 删除单元的执行者（删除前请先读完本清单）。
+> **Standalone project follow-up (2026-09-21):** standalone implementation is **not yet created**. The approved new-project handoff is now frozen in `docs/roadmap/GLOBAL_QUOTA_CLOCK_STANDALONE_PROJECT_PLAN.md` and `docs/roadmap/GLOBAL_QUOTA_CLOCK_V0_1_IMPLEMENTATION_SPEC.md`. Proposed repository: `Chengy257/GlobalQuotaClock`; working CLI/package name: `gqclock`.
 
 GLM Conductor v2.3 的 Global Quota Clock 是 account 级常驻机制：一个 ZCode recurring automation 周期注入 tick 回合，每个 tick 消费 provider quota 快照、按冻结决策表算出下一个目标时刻、再经宿主 adapter 把 automation 的 `next_run_at` 动态改写为目标值。v2.4 Phase 3 把它从 Conductor 拆离（`V2_4_PHASE_3_QUOTA_RESUME_EXTRACTION_SPEC.md` §1：Conductor 不再保留 provider/account 级连续 clock）。本清单把拆离前的材料分三类：概念上可迁移/复用（第一节）、禁止迁移（第二节）、必须警告（第三节）。
 
