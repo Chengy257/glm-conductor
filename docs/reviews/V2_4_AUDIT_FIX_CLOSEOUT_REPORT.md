@@ -133,3 +133,47 @@ MERGE_READY
 ```
 
 依据：AF-01–AF-04 全部落地且经定向门 + 独立审查 + 主会话独立复现三重验证；AF-05 启动器探针 + 新缓存真实宿主钩子事件双证关闭（免改结论）；AF-06 两条 reviewer 通道真实启动、只读、有效裁决 + 视觉盲测读图决定性证据；定向束 315 例、全量回归 677 例、validator/smoke/ruff/compileall 全绿；文档保证措辞与实际能力对齐。`review/zcode-3.14-native-workflow` 可作为 v2.4.0 合并候选进入 `main`。
+
+---
+
+# Final Release Closeout Addendum（2026-09-21）
+
+> 本 addendum 按页首 OVERRIDE 注记要求追加，处置 `docs/roadmap/V2_4_FINAL_RELEASE_CLOSEOUT_PLAN.md` 的 FR-01–FR-04，并**取代 §8 第 1 条**（字面新会话复验待补）——该缺口已由下方 §A3 的真新鲜会话双 smoke 关闭。§1–§9 的 AF-01–AF-06 历史证据原样保留。
+
+## A1. FR-01 — 终态收尾在生效仓库根释放写者守卫（merge blocker 关闭）
+
+**发现**：`runtime/task.py::_finish` 以账本根 `repo_root` 调 `writer_guard.release`，而 touched-file 发现、change_id 求值、委派 run 守卫检查、完成门查 1 均在 `state.resolve_repository_root` 生效根上求值——账本根 ≠ 绑定 `repository.root` 时，complete/fail/cancel 会在账本根下释放不存在的守卫，真守卫滞留绑定仓库根（违反单活跃写者不变量）。
+
+**修复**（commit `28fe26c`）：`_finish` 载入状态后经 `state.resolve_repository_root(st, repo_root)` 解析生效根再释放；state/journal 恒留账本根；不加账本根兜底第二次释放；`_finish`/模块 docstring 双根分工同步更正。三条终态路径（complete/fail/cancel）共享 `_finish`，一处修复全覆盖。
+
+**回归**：新增双物理目录夹具（`<tmp>/ledger` 账本根 + `<tmp>/repo` 绑定仓库根，经正门 `create_task` + `bind_repository_root` 构造，绝不 mock release）：
+
+- complete / fail / cancel 三终态：守卫从绑定根消失、账本根零守卫文件、state/journal 留账本根（`tests/test_task_lifecycle.py::TestTerminalTwoRootRelease`）；
+- 非属主持有：终态照常到达、他人守卫绝不误删；
+- 同终态重放（双根）：释放仍指向绑定根；
+- 完成门决定性集成：账本根 A / 绑定根 B 分离下四查全过 → allow + completed + 守卫从 B 释放 + A 零守卫（`tests/test_completion_guard.py::TestTwoRootCompletion`）。
+
+**红绿验证**：`git stash` 临时还原修复 → 5 个新用例全红（守卫滞留绑定根，复现病灶）；恢复修复 → 定向门三模块（task_lifecycle + completion_guard + writer_guard）**121 例全绿** + ruff 全过。
+
+## A2. FR-03 — 发布面真相同步
+
+六面统一于本 addendum 定稿时点的最终状态：README.md / README.zh-CN.md 的 reviewer 证明措辞由"待补"改为"已实证"（保留 App 关闭定时触发未实证与 fail-closed 语义两条真实限制）；CHANGELOG 2.4.0 关闭 AF-05/AF-06、新增 FR-01 条目、迁移注撤回 pending 措辞；`docs/README.md` 与主实施计划状态随 F3 终门联动收口（见 §A4）。
+
+## A3. FR-02 — 真新鲜会话 reviewer 双 smoke（release gate 关闭）
+
+**缓存与宿主记录**（F2.1）：
+
+- 插件安装记录 `glm-conductor@glm-conductor` → `installedPath` = `C:\Users\user\.zcode\cli\plugins\cache\glm-conductor\glm-conductor\2.3.2`（目录名 2.3.2 承载 2.4.0 载荷，就地刷新既定程序）；`plugin.json` version = **2.4.0**；
+- F1 落地后无清除复制刷新：1 文件更新（`runtime/task.py`）、42 文件一致、2 个过渡空操作桩按规格"验证不引用"分支保留（缓存 `hooks.json` 已为 v2.4 面，仅 SessionStart+Stop，新会话快照不引用桩）；`task.py` 仓库↔缓存 sha256 一致（`5940d738…`）；
+- 被测仓库提交：`28fe26c`；宿主 ZCode 3.14.x（updater 显示 3.14.1 待装）；agents 声明绑定：`visual-reviewer` = `account:bigmodel-individual-coding-plan/GLM-5.3-Flash`（thoughtLevel max、只读工具面）、`glm-reviewer` 无固定 model 字段（继承宿主/会话模型）。
+
+**新鲜会话**（`sess_c0dbf41b`，2026-09-21 18:19 +0800 启动，晚于缓存刷新，非实施会话）：
+
+- **Smoke A（glm-reviewer）**：真实启动、只读（仅 1 次指定 fixture 读取）、输出遵循 `GLM REVIEW` 契约，裁决 fix-first（对受控 diff 给出实质发现：新函数零测试覆盖、非 dict 记录路径可抛 AttributeError 等）——文本审查通道在新会话内有效。
+- **Smoke B（visual-reviewer，盲测）**：真实启动于声明的多模态 Flash 绑定、只读（仅 1 次读图）、输出遵循 `VISUAL REVIEW` 契约，裁决 ship。派发指令仅含图片路径与"裸描述"要求，**零内容提示**；对图 `fr02_blind.png`（为本轮新造，构图与 AF-06 旧图不同，且新会话被禁读真值持有文件与 docs/reviews/**）回报：纯黑背景横幅、左侧偏中大实心黄色圆形且底部与横条相切、底部青色水平长条横贯大部分宽度、右上不贴边亮品红正方形、无文字/渐变/阴影——与程序化锁定的真值（360×180 黑底；黄圆心 (100,90) r=62、底缘 y=152 与条顶 y=150 相切；品红方块 60px 边长右缘距边 30px；青条 x∈[40,320) 跨 280/360）**逐项吻合**。纯文本复述提示词不可能产出该描述——多模态实读能力在真新鲜会话内成立。
+
+**判定**：FR-02 原始门（刷新缓存 + 真新会话 + reviewer 启动，视觉须真实读图）以未弱化的字面形态关闭。
+
+## A4. FR-04 — 终门证据与最终裁决
+
+（本节随 F3 定稿：定向束、validator/smoke/lint/compile、唯一一次全量回归、push 后远端 CI 结果与最终裁决。）
