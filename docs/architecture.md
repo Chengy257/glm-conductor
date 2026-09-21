@@ -216,7 +216,7 @@ blocked         → active | waiting_quota | waiting_user | failed | cancelled
 
 `runtime/change_id.py` 的 `compute_change_id(repo_root, relevant_paths)` 把「基线修订 + 相关路径集的归一化内容状态」确定性压缩为 `"sha256:" + 64 位十六进制`。语义：任何相关文件增 / 删 / 内容变化 / 相关文件集变化 / 基线变化都会改变标识；CRLF→LF 归一（同一逻辑内容不因换行风格改变标识）；`.glm-conductor/` 记账路径剔除（编排器写自己的账本不使自己过时）；归一去重排序（与输入顺序无关）；空相关集同样给出稳定标识。
 
-**单一实现红线**：同一函数被三处共用（禁止旁路重算）——主会话记录验证（`validation.change_id`）、记录评审（`review.change_id`）、完成守卫新鲜度比对（§12）。相关路径集的派生同被两侧共用：`task.relevant_paths(task_state)` = dag 全节点 ownership scope 并集（去重排序）——记录侧与守卫侧同调此派生，标识才可比。任何任务相关仓库变化都使既有验证 / 评审记录过时：「任何修复使先前验证 / 评审失效」由此自动成立；唯一恢复路径是重新验证 / 重新评审并记录新值，禁止回写旧值"续命"。
+**单一实现红线**：同一函数被三处共用（禁止旁路重算）——主会话记录验证（`validation.change_id`）、记录评审（`review.change_id`）、完成守卫新鲜度比对（§12）。相关改动文件集的派生同被两侧共用：`task.relevant_changed_files(task_state, repo_root)` = ownership scope 并集（`task.ownership_scopes`）∩ git 工作区实际改动（`ownership.git_touched_files` + `classify_paths`）——记录侧与守卫侧同调此派生，标识才可比。owned 文件的增 / 删 / 改 / 改名 / 文件集变化都会改变标识；scope 外改动仍由 ownership 完成检查拦截，与新鲜度无关；`.glm-conductor/` 记账在 touched 与 change_id 两层各自剔除。任何 owned 相关文件变化都使既有验证 / 评审记录过时：「任何修复使先前验证 / 评审失效」由此自动成立；唯一恢复路径是重新验证 / 重新评审并记录新值，禁止回写旧值"续命"。
 
 ## 10. 主会话验证
 

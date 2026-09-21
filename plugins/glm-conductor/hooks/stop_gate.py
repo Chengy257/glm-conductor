@@ -19,13 +19,13 @@
          持有者 task_id 与 workflow_run_id；
       2. ownership：实际改动路径（ownership.git_touched_files）全部
          落在 dag 全节点 ownership scope 并集内
-         （task.relevant_paths + ownership.classify_paths）；越界路径
+         （task.ownership_scopes + ownership.classify_paths）；越界路径
          逐条列出，并附参与比对的 dag 节点 id；
       3. validation：validation.status == "passed" 且
          validation.change_id 等于当前 change_id.compute_change_id
-         （相关路径集 = dag ownership 并集，与 W3 记录侧同调
-         task.relevant_paths 同一派生——任何相关文件变化都会使既有
-         记录过期）；
+         （相关改动文件集 = task.relevant_changed_files：ownership
+         scope 并集 ∩ git 工作区实际改动，与 W3 记录侧同一派生与
+         实现——任何 owned 文件变化都会使既有记录过期）；
       4. review：route.assurance == "high" 时 review.verdict 必须为
          "ship" 且 review.change_id 等于当前 change_id。
     standard 保障任务无独立审查义务（查 4 跳过）；fix-first / rethink
@@ -321,7 +321,7 @@ def evaluate_completion(repo_root, task_id) -> dict:
 
     effective_root = state.resolve_repository_root(st, repo_root)
     node_ids = _dag_node_ids(st)
-    scopes = task.relevant_paths(st)
+    scopes = task.ownership_scopes(st)
 
     # 查 1：无活跃写 workflow（持有者是自己放行——完成门就是释放点）
     holder = writer_guard.inspect(effective_root)
@@ -341,8 +341,10 @@ def evaluate_completion(repo_root, task_id) -> dict:
             {"out_of_scope": out_of_scope, "node_ids": node_ids},
             _ownership_reason(task_id, out_of_scope, node_ids))
 
-    # 查 3：验证通过且新鲜（change_id 与 W3 记录侧同一派生与实现）
-    current = change_id.compute_change_id(effective_root, scopes)
+    # 查 3：验证通过且新鲜（change_id 与 W3 记录侧同一派生与实现：
+    # 同调 task.relevant_changed_files——scope 并集 ∩ git 实际改动）
+    current = change_id.compute_change_id(
+        effective_root, task.relevant_changed_files(st, effective_root))
     validation = _section(st.get("validation"))
     if validation.get("status") != "passed":
         return _block(

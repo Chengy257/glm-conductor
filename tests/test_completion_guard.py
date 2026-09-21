@@ -13,6 +13,11 @@
       fix-first / ship 但过期）——四查按序首败即返（顺序锚定）；
     - 全过 → allow + task.complete（status=completed + 写者守卫释放 +
       journal task_completed 事件）；自持有守卫不拦查 1；
+    - 新鲜度绑定 owned touched 文件（AF-01）：目录前缀 / src/** /
+      嵌套 glob 内编辑或新增文件 → validation stale；high 评审后
+      owned-glob 内编辑、重验不重审 → review stale；scope 外改动拦
+      查 2（ownership 失败面，非新鲜度面）；仅 .glm-conductor/ 记账
+      改动不过期、照常收尾；
     - 拒绝面：任务缺失 / state.json 损坏 / v2.3 遗留（携带处置指引）
       → ValueError；
     - hook 外壳（子进程）：无活跃任务静默放行；v2.3 遗留任务放行 +
@@ -192,6 +197,19 @@ class TestOwnershipCheck(CompletionGuardCase):
         self.assertIn("build", result["reason"])
         self.assertEqual(self.load()["status"], "active")
 
+    def test_out_of_scope_edit_is_ownership_block_not_stale(self):
+        """scope 外改动属 ownership 失败面：即使记录仍新鲜也先拦查 2。"""
+        self.gate_ready()
+        self.make_task()
+        task.record_validation(self.repo, self.tid, "passed")
+        self.write_file("stray.txt", "越界改动\n")
+        result = self.evaluate()
+        self.assertEqual(result["decision"], "block")
+        self.assertEqual(result["check"], "ownership")
+        self.assertEqual(result["detail"]["out_of_scope"], ["stray.txt"])
+        # 不是查 3 的新鲜度面：不带过期分支的「验证记录已过期」话术
+        self.assertNotIn("验证记录已过期", result["reason"])
+
 
 # —— 3. 查 3：validation ——
 
@@ -232,6 +250,49 @@ class TestValidationCheck(CompletionGuardCase):
             result["detail"]["recorded_change_id"],
             result["detail"]["current_change_id"])
 
+    def gate_with_scope(self, ownership, rel, text="初版内容\n"):
+        """指定 scope 形状的可过门基座：git init + owned 文件 + passed 验证。"""
+        self.init_git()
+        self.write_file(rel, text)
+        node = work_unit.new_node(
+            "build", "实现 build 节点", ownership=ownership)
+        self.make_task(dag=[node])
+        task.record_validation(self.repo, self.tid, "passed")
+
+    def assert_validation_stale_block(self):
+        """断言当前求值拦在查 3 的过期分支（decision/check/理由/两侧 id）。"""
+        result = self.evaluate()
+        self.assertEqual(result["decision"], "block")
+        self.assertEqual(result["check"], "validation")
+        self.assertIn("过期", result["reason"])
+        self.assertNotEqual(
+            result["detail"]["recorded_change_id"],
+            result["detail"]["current_change_id"])
+
+    def test_stale_after_directory_prefix_edit_blocks(self):
+        """目录前缀 scope（src/auth）内编辑 → validation stale 阻断。"""
+        self.gate_with_scope(("src/auth",), "src/auth/login.py")
+        self.write_file("src/auth/login.py", "编辑后的内容\n")
+        self.assert_validation_stale_block()
+
+    def test_stale_after_owned_glob_edit_blocks(self):
+        """glob scope（src/**）内编辑 → stale 阻断（scope 不再被当字面路径哈希）。"""
+        self.gate_with_scope(("src/**",), "src/parser/core.py")
+        self.write_file("src/parser/core.py", "编辑后的内容\n")
+        self.assert_validation_stale_block()
+
+    def test_stale_after_owned_glob_new_file_blocks(self):
+        """glob（src/**）下新增 owned 文件（文件集变化）→ validation stale 阻断。"""
+        self.gate_with_scope(("src/**",), "src/parser/core.py")
+        self.write_file("src/parser/extra.py", "新增文件\n")
+        self.assert_validation_stale_block()
+
+    def test_stale_after_nested_glob_edit_blocks(self):
+        """嵌套 glob（a/**/b）内文件编辑 → validation stale 阻断。"""
+        self.gate_with_scope(("a/**/b",), "a/x/y/b")
+        self.write_file("a/x/y/b", "编辑后的内容\n")
+        self.assert_validation_stale_block()
+
 
 # —— 4. 查 4：review（仅 high 保障） ——
 
@@ -267,6 +328,27 @@ class TestReviewCheck(CompletionGuardCase):
         task.record_review(self.repo, self.tid, "glm-reviewer", "ship")
         self.write_file("src/build.py", "评审后编辑\n")
         # 刷新验证（查 3 重新新鲜），评审未刷新 → 拦在查 4 的过期分支
+        task.record_validation(self.repo, self.tid, "passed")
+        result = self.evaluate()
+        self.assertEqual(result["decision"], "block")
+        self.assertEqual(result["check"], "review")
+        self.assertIn("过期", result["reason"])
+
+    def test_high_review_stale_blocks_after_owned_glob_edit(self):
+        """high：owned glob（src/**）内编辑后重验不重审 → review stale 阻断。
+
+        重录 validation 后查 3 重新新鲜（记录侧与守卫侧同调
+        relevant_changed_files 的直接证明），拦在查 4 的过期分支。
+        """
+        self.init_git()
+        self.write_file("src/parser/core.py")
+        node = work_unit.new_node(
+            "build", "实现 build 节点", ownership=("src/**",))
+        self.make_task(route={"mode": "full", "assurance": "high"},
+                       dag=[node])
+        task.record_validation(self.repo, self.tid, "passed")
+        task.record_review(self.repo, self.tid, "glm-reviewer", "ship")
+        self.write_file("src/parser/core.py", "评审后编辑\n")
         task.record_validation(self.repo, self.tid, "passed")
         result = self.evaluate()
         self.assertEqual(result["decision"], "block")
@@ -313,6 +395,20 @@ class TestCompletionSuccess(CompletionGuardCase):
         self.assertEqual(result["decision"], "allow")
         self.assertEqual(self.load()["status"], "completed")
         self.assertEqual(self.events()[-1]["event"], "task_completed")
+
+    def test_bookkeeping_only_change_still_completes(self):
+        """仅 .glm-conductor/ 记账改动 → 不入相关文件集、记录不过期 → 照常收尾。"""
+        self.gate_ready()
+        self.make_task()
+        self.acquire_guard(self.tid, "run-self")
+        task.record_validation(self.repo, self.tid, "passed")
+        self.write_file(".glm-conductor/notes/cache.json", "{}\n")
+        result = self.evaluate()
+        self.assertEqual(
+            result, {"decision": "allow", "check": None, "detail": None,
+                     "reason": None})
+        self.assertEqual(self.load()["status"], "completed")
+        self.assertIsNone(writer_guard.inspect(self.bound_root()))
 
 
 # —— 6. 拒绝面 ——

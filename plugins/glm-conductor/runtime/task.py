@@ -30,8 +30,9 @@
         workflow_started 事件。
     record_validation(repo_root, task_id, status, summary=None, commands=None)
         任务级验证记录（status ∈ passed/failed）；change_id 经
-        runtime.change_id.compute_change_id 现算现存（相关路径集 =
-        dag 全节点 ownership scope 并集，见 relevant_paths()）。
+        runtime.change_id.compute_change_id 现算现存（相关改动文件集 =
+        ownership scope 并集 ∩ git 工作区实际改动，见
+        relevant_changed_files()）。
     record_review(repo_root, task_id, reviewer, verdict, findings=None)
         任务级审查记录（verdict ∈ ship/fix-first/rethink）；要求先有
         validation 记录（status 与 change_id 齐备），否则拒绝（先验证
@@ -83,20 +84,28 @@ journal 词汇（TASK_JOURNAL_EVENTS，恰十名，绝不多不少）：
     状态（其 status_changed 事件不在任务级词汇内）——状态门用
     state.TASK_TRANSITIONS + state.save_state 自己走。
 
-变更标识的相关路径集（W4 完成守卫共用的同一派生）：
-    relevant_paths(task_state) = dag 全节点 ownership scope 并集
-    （去重排序；归一与记账剔除由 change_id.compute_change_id 内部
-    负责）。record_validation / record_review 与 W4 的新鲜度比对必须
-    同调此派生，change_id 才可比。
+变更标识的相关改动文件集（W4 完成守卫共用的同一派生）：
+    ownership_scopes(task_state) = dag 全节点 ownership scope 并集
+    （去重排序；DAG 声明的 glob 语言，绝不当作字面文件路径哈希）。
+    relevant_changed_files(task_state, repo_root) = scope 并集拥有的
+    当前 git 实际改动文件（ownership.git_touched_files +
+    ownership.classify_paths，在 resolve_repository_root 生效根上
+    求值）。record_validation / record_review 与 W4 的新鲜度比对必须
+    同调 relevant_changed_files，change_id 才可比。owned 文件的
+    增 / 删 / 改 / 改名 / 文件集变化都会改变标识；scope 外改动仍由
+    ownership 完成检查拦截，与新鲜度无关；.glm-conductor/ 记账在
+    touched 与 change_id 两层各自剔除。
 
 依赖：
     仅 Python 3 标准库 + runtime.state（W1）/ runtime.change_id（W2）/
+    runtime.ownership（P1-C，touched 清单与 scope 匹配）/
     runtime.journal / runtime.writer_guard（P1-E）/
     runtime.workflow.adapter（P1-D，只写关联单据，绝不启动任何
     Workflow）；零第三方依赖，3.7 兼容（注解引号形式）。
     结构性拒绝一律 ValueError（与 runtime.state 的错误口径一致）；
     change_id 求值的结构性错误（非 git 仓库等）以 change_id.
-    ChangeIdError 原样上抛。
+    ChangeIdError 原样上抛；touched 清单 / scope 匹配的结构性错误以
+    ownership.OwnershipError 原样上抛。
 
 来源：
     docs/roadmap/V2_4_PHASE_2_WORKFLOW_EXECUTION_PLAN.md W3（单元规格）
@@ -108,7 +117,7 @@ journal 词汇（TASK_JOURNAL_EVENTS，恰十名，绝不多不少）：
     §3（P3-B 最小恢复授权）与 §4（P3-C 等待/恢复生命周期）。
 """
 
-from runtime import change_id, journal, state, writer_guard
+from runtime import change_id, journal, ownership, state, writer_guard
 from runtime.workflow import adapter as workflow_adapter
 
 # —— 任务级 journal 事件词汇（恰十名；本模块追加的事件名绝不出此表） ——
@@ -198,20 +207,20 @@ def _ensure_transition_allowed(st, new_status, op) -> None:
             % (op, old_status, new_status, old_status, targets))
 
 
-# —— 相关路径集（W4 完成守卫共用的同一派生） ——
+# —— 相关路径派生与相关改动文件集（W4 完成守卫共用的同一派生） ——
 
-def relevant_paths(task_state) -> "list[str]":
-    """派生任务相关路径集：dag 全节点 ownership scope 并集（去重排序）。
+def ownership_scopes(task_state) -> "list[str]":
+    """派生任务 ownership scope 并集：dag 全节点 ownership 非空字符串并集。
 
-    这是 record_validation / record_review 存 change_id 与 W4 完成守卫
-    新鲜度比对共用的唯一派生（两侧同调此函数，change_id 才可比）：
+    这是 DAG 声明层（glob 语言）的 scope 汇总原语，供 W4 完成守卫查 2
+    （touched ⊆ scopes?）与 relevant_changed_files（文件集解析）共用：
       - 遍历 task_state["dag"]（缺键 / 非数组 / 条目非 dict 一律跳过
         ——形状纠错归 state.validate_state，本函数是容错派生）；
       - 收集每节点 ownership 内全部非空字符串 scope；
-      - 去重并按 str 排序返回。反斜杠写法归一 / 记账目录剔除 / 非法
-        路径拒绝由 change_id.compute_change_id 内部负责（ChangeIdError
-        原样上抛）。
-    空 dag → 空列表（compute_change_id 对空相关集同样给出稳定标识）。
+      - 去重并按 str 排序返回。
+    空 dag → 空列表。返回值是 scope 字符串（ownership 模式语言），
+    绝不当作字面文件路径哈希——实际改动文件集由 relevant_changed_files
+    经 ownership 模块解析。
     """
     paths = set()
     if not isinstance(task_state, dict):
@@ -231,14 +240,47 @@ def relevant_paths(task_state) -> "list[str]":
     return sorted(paths)
 
 
+def relevant_changed_files(task_state, repo_root) -> "list[str]":
+    """解析任务相关改动文件集：scope 并集拥有的当前 git 实际改动文件。
+
+    这是 record_validation / record_review 存 change_id 与 W4 完成守卫
+    新鲜度比对共用的唯一文件集派生（两侧同调此函数，change_id 才可比）。
+    责任分离：ownership scopes（DAG 声明）→ ownership 模块解析仓库
+    实际 touched 文件 → 任务级相关改动文件集 → change_id 哈希精确
+    文件 + 基线修订（scope 的 glob 语言绝不教给 change_id）：
+      - scopes = ownership_scopes(task_state)（DAG 声明的并集）；
+      - effective_root = state.resolve_repository_root(task_state,
+        repo_root)（RB-2：绑定优先、账本根回退）；
+      - touched = ownership.git_touched_files(effective_root)（当前
+        git 工作区全部实际改动文件；.glm-conductor/ 记账目录已豁免）；
+      - owned, _out = ownership.classify_paths(touched, scopes)
+        （scope 并集过滤；scope 外改动不入集——那是 ownership 完成
+        检查的失败面，不是新鲜度面）；
+      - 返回 sorted(set(owned))。
+    结构性错误（OwnershipError：git 失败 / 非法 scope 模式）原样上抛；
+    空 scope → 空列表（无 scope 即无相关文件，compute_change_id 对空
+    相关集同样给出稳定标识）。
+    """
+    scopes = ownership_scopes(task_state)
+    if not scopes:
+        return []
+    effective_root = state.resolve_repository_root(task_state, repo_root)
+    touched = ownership.git_touched_files(effective_root)
+    owned, _out = ownership.classify_paths(touched, scopes)
+    return sorted(set(owned))
+
+
 def _compute_change_id(st, repo_root) -> str:
-    """按任务绑定仓库根（RB-2）现算 change_id（相关路径集见 relevant_paths）。
+    """按任务绑定仓库根（RB-2）现算 change_id（文件集见
+    relevant_changed_files）。
 
     绑定优先、账本根回退（state.resolve_repository_root），与 W2 的
-    求值口径一致；非 git 仓库等结构性错误以 ChangeIdError 原样上抛。
+    求值口径一致；非 git 仓库等结构性错误以 ChangeIdError 原样上抛
+    （touched 清单 / scope 匹配失败则是 OwnershipError 原样上抛）。
     """
+    effective_root = state.resolve_repository_root(st, repo_root)
     return change_id.compute_change_id(
-        state.resolve_repository_root(st, repo_root), relevant_paths(st))
+        effective_root, relevant_changed_files(st, repo_root))
 
 
 # —— 创建 / 读取 ——
@@ -337,10 +379,12 @@ def record_validation(repo_root, task_id, status, summary=None,
 
     - status ∈ state.VALIDATION_STATUSES（passed / failed），词汇外
       拒绝；终态任务冻结（_ensure_not_terminal）；
-    - change_id 经 compute_change_id 现算现存（相关路径集 =
-      relevant_paths(st)：dag ownership 并集）——W4 完成守卫的新鲜度
-      比对同调此派生与同一实现，任何任务相关仓库变化都会使既有记录
-      过时；
+    - change_id 经 compute_change_id 现算现存（相关改动文件集 =
+      relevant_changed_files(st, repo_root)：ownership scope 并集 ∩
+      git 工作区实际改动）——W4 完成守卫的新鲜度比对同调此派生与
+      同一实现，任何 owned 文件增 / 删 / 改 / 改名 / 文件集变化都会
+      使既有记录过时（scope 外改动由 ownership 检查拦截，与新鲜度
+      无关；.glm-conductor/ 记账两层各自剔除）；
     - summary：可选非空 str 或 None；commands：可选非空字符串数组
       （允许空数组）或 None——纯人读诊断摘要，不要求 stdout 捕获、
       runner 身份或任何逐命令证据（P2-C 红线）；

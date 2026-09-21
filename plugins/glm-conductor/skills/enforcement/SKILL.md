@@ -64,7 +64,7 @@ Stop 触发时，守卫只对**触发域内**的任务求值；域外零介入�
 
 验证与审查记录都绑定记录时刻的仓库变更状态，锚点是任务级 `change_id`（`runtime/change_id.py`）：
 
-- **计算口径**：`compute_change_id(repo_root, relevant_paths)` =「基线修订 + 相关路径集的归一化内容状态」的 sha256。相关路径集 = DAG 全节点 ownership scope 并集（`runtime.task.relevant_paths`）——三处（record_validation / record_review / 守卫比对）共用同一派生与同一实现，**禁止旁路重算**：两侧口径不一致的值永远无法通过比对
+- **计算口径**：`compute_change_id` =「基线修订 + 相关改动文件集的归一化内容状态」的 sha256。相关改动文件集 = `runtime.task.relevant_changed_files`（DAG 全节点 ownership scope 并集 ∩ git 工作区实际改动）——三处（record_validation / record_review / 守卫比对）共用同一派生与同一实现，**禁止旁路重算**：两侧口径不一致的值永远无法通过比对；owned 文件增 / 删 / 改 / 改名 / 文件集变化都改变标识，scope 外改动由 ownership 检查拦截、与新鲜度无关，`.glm-conductor/` 记账在两层各自剔除
 - **过期语义**：任何相关文件的增 / 删 / 内容变化 / 基线变化都会改变当前 change_id——既有验证或审查记录随即过期。这是「任何修复使先前验证/审查失效」的自动强制：fix-first / rethink 修复后必须重验（重录 validation）， assurance: high 还须换全新审查者重审（重录 review）
 - **恢复路径只有一条**：重跑验证 / 重新审查并落新记录；禁止回写旧 change_id "续命"
 - Conductor 自身记账目录（`.glm-conductor/`）不参与变更标识——写账本不会使自己过期

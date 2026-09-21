@@ -26,11 +26,16 @@
       逐条不多不少落在词汇内，无宿主子代理生命周期词汇；
     - record_workflow_run：state + adapter.record_run 双镜像 +
       workflow_started 事件；非法 id / 终态拒绝；
-    - v2.3 遗留任务：load_task 与全部变更入口拒绝并携带处置指引。
+    - v2.3 遗留任务：load_task 与全部变更入口拒绝并携带处置指引；
+    - ownership scope 并集 / 相关改动文件集派生（W4 共用）：形状容错、
+      去重排序、scope 外与 .glm-conductor/ 记账剔除、owned 文件
+      增 / 删 / 改 / 改名后既有 validation / review 记录判过期。
 
 全部离线：git fixture 在 tempfile.TemporaryDirectory 内（仅 git init，
-unborn 基线 "-"，绝不提交、绝不触碰仓库内 .glm-conductor/ 真实账本）；
-环境无 git 可执行时依赖 change_id 的用例自动 skipTest。adapter 的
+unborn 基线 "-"，绝不触碰仓库内 .glm-conductor/ 真实账本；唯一例外是
+git 改名用例——porcelain 的 R 条目要求原路径在 HEAD，故先做一次本地
+提交作为改名基座）；环境无 git 可执行时依赖 change_id 的用例自动
+skipTest。adapter 的
 RUNS_DIR 每测试注入临时目录（adapter 模块文档化的注入点），绝不污染
 真实仓库工作目录。仅 Python 3 标准库（unittest + tempfile），零第三方
 依赖。
@@ -39,6 +44,7 @@ RUNS_DIR 每测试注入临时目录（adapter 模块文档化的注入点），
 import json
 import os
 import re
+import stat
 import subprocess
 import sys
 import tempfile
@@ -48,7 +54,7 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "plugins" / "glm-conductor"))
 
-from runtime import change_id, journal, state, task, work_unit, writer_guard  # noqa: E402
+from runtime import change_id, journal, ownership, state, task, work_unit, writer_guard  # noqa: E402
 from runtime.workflow import adapter as workflow_adapter  # noqa: E402
 
 
@@ -69,7 +75,7 @@ class LifecycleCase(unittest.TestCase):
 
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self._tmp.cleanup)
+        self.addCleanup(self._force_cleanup)
         self.repo = self._tmp.name
         # adapter 的 run 关联记录相对 CWD 落盘（模块级常量 RUNS_DIR 是
         # 文档化的测试注入点）——注入临时目录，绝不污染真实仓库
@@ -78,6 +84,23 @@ class LifecycleCase(unittest.TestCase):
             os.path.join(self._tmp.name, ".glm-conductor", "workflow-runs"))
         patcher.start()
         self.addCleanup(patcher.stop)
+
+    def _force_cleanup(self):
+        """解除 git 只读对象后清理临时目录（同 tests.test_change_id 手法）。
+
+        git add / mv 会在 .git/objects 写只读松散对象，Windows 上
+        TemporaryDirectory.cleanup() 的 rmtree 会 PermissionError；先
+        遍历 .git 清掉只读位再删除。
+        """
+        git_dir = os.path.join(self._tmp.name, ".git")
+        if os.path.isdir(git_dir):
+            for dirpath, _dirnames, filenames in os.walk(git_dir):
+                for name in filenames:
+                    try:
+                        os.chmod(os.path.join(dirpath, name), stat.S_IWRITE)
+                    except OSError:
+                        pass
+        self._tmp.cleanup()
 
     # —— 装置助手 ——
 
@@ -107,6 +130,17 @@ class LifecycleCase(unittest.TestCase):
             raise AssertionError(
                 "测试装置 git init 失败（returncode=%d）：%s"
                 % (proc.returncode,
+                   proc.stderr.decode("utf-8", errors="replace")))
+
+    def git(self, *args):
+        """在临时仓库执行 git 子命令（测试装置专用，失败即断言错误）。"""
+        proc = subprocess.run(
+            ["git"] + list(args), cwd=self.repo,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        if proc.returncode != 0:
+            raise AssertionError(
+                "测试装置 git %s 失败（returncode=%d）：%s"
+                % (" ".join(args), proc.returncode,
                    proc.stderr.decode("utf-8", errors="replace")))
 
     def write_file(self, rel, text="内容\n"):
@@ -616,9 +650,9 @@ class TestLegacyRefusal(LifecycleCase):
                              {"mode": "solo"})
 
 
-# —— 9. 相关路径派生（W4 共用） ——
+# —— 9. ownership scope 并集与相关改动文件集（W4 共用） ——
 
-class TestRelevantPaths(LifecycleCase):
+class TestOwnershipScopes(LifecycleCase):
 
     def test_union_dedup_sorted(self):
         """dag 全节点 ownership 并集：去重 + 排序。"""
@@ -626,15 +660,199 @@ class TestRelevantPaths(LifecycleCase):
         node_b = work_unit.new_node("b", "B", depends_on=("a",),
                                     ownership=("a.py", "c/x.py"))
         self.assertEqual(
-            task.relevant_paths({"dag": [node_a, node_b]}),
+            task.ownership_scopes({"dag": [node_a, node_b]}),
             ["a.py", "b.py", "c/x.py"])
 
     def test_malformed_states_yield_empty(self):
         """非 dict / 缺 dag / dag 非数组 / 节点非 dict → 容错返回空列表。"""
-        self.assertEqual(task.relevant_paths(None), [])
-        self.assertEqual(task.relevant_paths({}), [])
-        self.assertEqual(task.relevant_paths({"dag": "oops"}), [])
-        self.assertEqual(task.relevant_paths({"dag": ["oops"]}), [])
+        self.assertEqual(task.ownership_scopes(None), [])
+        self.assertEqual(task.ownership_scopes({}), [])
+        self.assertEqual(task.ownership_scopes({"dag": "oops"}), [])
+        self.assertEqual(task.ownership_scopes({"dag": ["oops"]}), [])
+
+
+class TestRelevantChangedFiles(LifecycleCase):
+    """relevant_changed_files：scope 并集 ∩ git 工作区实际改动（记录侧派生）。"""
+
+    def make_scoped_task(self, ownership, task_id="life-cycle-a"):
+        """创建单节点任务（ownership 指定 scope 形状）。"""
+        node = work_unit.new_node(
+            "build", "实现 build 节点", ownership=ownership)
+        return task.create_task(
+            self.repo, task_id, "验证相关改动文件集派生",
+            {"mode": "delegate", "assurance": "standard"}, [node])
+
+    def test_malformed_state_yields_empty_without_git(self):
+        """非 dict / dag 形状异常 → 空 scope → 空文件集（容错派生，不碰 git）。"""
+        self.assertEqual(task.relevant_changed_files(None, self.repo), [])
+        self.assertEqual(
+            task.relevant_changed_files({"dag": "oops"}, self.repo), [])
+
+    def test_empty_dag_yields_empty_even_with_changes(self):
+        """空 dag（无 scope）→ 空文件集：无 scope 即无相关文件。"""
+        self.init_git()
+        self.write_file("src/build.py")
+        self.make_task(dag=[])
+        self.assertEqual(
+            task.relevant_changed_files(self.load(), self.repo), [])
+
+    def test_owned_touched_dedup_sorted_and_out_of_scope_excluded(self):
+        """glob 命中的 touched 进集：多节点重叠 scope 去重、排序；scope 外不入集。"""
+        self.init_git()
+        self.write_file("src/deep/b.py")
+        self.write_file("src/a.py")
+        self.write_file("stray.txt")
+        node_a = work_unit.new_node("a", "A", ownership=("src/**",))
+        node_b = work_unit.new_node("b", "B", depends_on=("a",),
+                                    ownership=("src/**",))
+        self.make_task(dag=[node_a, node_b])
+        self.assertEqual(
+            task.relevant_changed_files(self.load(), self.repo),
+            ["src/a.py", "src/deep/b.py"])
+
+    def test_bookkeeping_files_never_enter_set(self):
+        """`.glm-conductor/` 记账文件不入 touched 也不入相关文件集（第一层剔除）。"""
+        self.init_git()
+        self.write_file("src/build.py")
+        self.make_scoped_task(("src/**",))
+        self.write_file(".glm-conductor/notes/cache.json", "{}")
+        self.assertEqual(
+            task.relevant_changed_files(self.load(), self.repo),
+            ["src/build.py"])
+
+    def test_non_git_repo_raises_ownership_error(self):
+        """touched 求值失败（非 git 仓库）→ OwnershipError 原样上抛。"""
+        self.write_file("src/build.py")
+        self.make_scoped_task(("src/**",))
+        with self.assertRaises(ownership.OwnershipError):
+            task.relevant_changed_files(self.load(), self.repo)
+
+    def test_rename_contributes_old_and_new_paths(self):
+        """git 改名：old / new 都在 touched → 都入相关文件集。
+
+        porcelain 的 R 条目要求被改名的原路径在 HEAD 里（否则退化为
+        纯 add，旧路径不留痕），故此处一次性提交作为改名基座。
+        """
+        self.init_git()
+        self.write_file("src/old.py", "旧内容\n")
+        self.git("add", "src/old.py")
+        self.git("config", "user.email", "task-lifecycle@example.com")
+        self.git("config", "user.name", "Task Lifecycle Tests")
+        self.git("commit", "-m", "rename base")
+        self.make_scoped_task(("src/**",))
+        # 已提交且工作区干净 → 无实际改动 → 相关文件集为空
+        self.assertEqual(
+            task.relevant_changed_files(self.load(), self.repo), [])
+        self.git("mv", "src/old.py", "src/new.py")
+        self.assertEqual(
+            task.relevant_changed_files(self.load(), self.repo),
+            ["src/new.py", "src/old.py"])
+
+
+class TestOwnedEditStalesRecords(LifecycleCase):
+    """四种 scope 形状各一例：owned 文件编辑后既有 validation / review 记录判过期。
+
+    记录侧与守卫侧同调 relevant_changed_files：记录里的 change_id 是
+    记录时刻的 owned touched 文件集状态；编辑后同一派生现算出不同值，
+    既有记录即判过期（守卫侧拦截见 tests.test_completion_guard）。
+    """
+
+    def scenario(self, ownership, rel):
+        """git init + owned 文件 + 建任务 + 记 validation / review。
+
+        断言两条记录共享同一 change_id（同一派生与实现），返回该值。
+        """
+        self.init_git()
+        self.write_file(rel, "初版内容\n")
+        node = work_unit.new_node(
+            "build", "实现 build 节点", ownership=ownership)
+        self.make_task(dag=[node])
+        validated = task.record_validation(
+            self.repo, "life-cycle-a", "passed")
+        reviewed = task.record_review(
+            self.repo, "life-cycle-a", "glm-reviewer", "ship")
+        self.assertEqual(validated["validation"]["change_id"],
+                         reviewed["review"]["change_id"])
+        return validated["validation"]["change_id"]
+
+    def assert_edit_stales(self, ownership, rel):
+        """scope 内文件编辑 → 同一派生现算 change_id 变化（既有记录判过期）。"""
+        recorded = self.scenario(ownership, rel)
+        self.write_file(rel, "编辑后的内容\n")
+        refreshed = task.record_validation(
+            self.repo, "life-cycle-a", "passed")
+        self.assertNotEqual(recorded,
+                            refreshed["validation"]["change_id"])
+
+    def test_exact_file_scope_stales(self):
+        """精确文件 scope：编辑 owned 文件 → 过期。"""
+        self.assert_edit_stales(("src/build.py",), "src/build.py")
+
+    def test_directory_prefix_scope_stales(self):
+        """目录前缀 scope（字面量双语义）：前缀下文件编辑 → 过期。"""
+        self.assert_edit_stales(("src/auth",), "src/auth/login.py")
+
+    def test_glob_scope_stales(self):
+        """glob scope（src/**）：深层文件编辑 → 过期（scope 不再被当字面路径哈希）。"""
+        self.assert_edit_stales(("src/**",), "src/parser/nested/deep.py")
+
+    def test_nested_glob_scope_stales(self):
+        """嵌套 glob scope（a/**/b）：匹配文件编辑 → 过期。"""
+        self.assert_edit_stales(("a/**/b",), "a/x/y/b")
+
+    def test_glob_new_file_changes_id(self):
+        """glob 下新增 owned 文件（文件集变化）→ change_id 变化。"""
+        recorded = self.scenario(("src/**",), "src/build.py")
+        self.write_file("src/extra.py", "新增文件\n")
+        refreshed = task.record_validation(
+            self.repo, "life-cycle-a", "passed")
+        self.assertNotEqual(recorded,
+                            refreshed["validation"]["change_id"])
+
+    def test_glob_deleted_file_changes_id(self):
+        """glob 下删除 owned 文件（missing 态）→ change_id 变化。"""
+        recorded = self.scenario(("src/**",), "src/build.py")
+        (Path(self.repo) / "src" / "build.py").unlink()
+        refreshed = task.record_validation(
+            self.repo, "life-cycle-a", "passed")
+        self.assertNotEqual(recorded,
+                            refreshed["validation"]["change_id"])
+
+    def test_rename_changes_id(self):
+        """git 改名（old / new 都在 touched）→ change_id 变化。
+
+        R 条目要求原路径在 HEAD（先提交改名基座），基线变化后重录
+        一次再改名，保证前后只差「改名」这一个事实。
+        """
+        self.scenario(("src/**",), "src/old.py")
+        self.git("add", "src/old.py")
+        self.git("config", "user.email", "task-lifecycle@example.com")
+        self.git("config", "user.name", "Task Lifecycle Tests")
+        self.git("commit", "-m", "rename base")
+        base = task.record_validation(self.repo, "life-cycle-a", "passed")
+        self.git("mv", "src/old.py", "src/new.py")
+        after = task.record_validation(self.repo, "life-cycle-a", "passed")
+        self.assertNotEqual(base["validation"]["change_id"],
+                            after["validation"]["change_id"])
+
+    def test_out_of_scope_change_keeps_id(self):
+        """scope 外改动不入相关文件集：change_id 不变（失败面在 ownership 查）。"""
+        recorded = self.scenario(("src/build.py",), "src/build.py")
+        self.write_file("stray.txt", "越界改动\n")
+        st = self.load()
+        self.assertEqual(
+            task.relevant_changed_files(st, self.repo), ["src/build.py"])
+        refreshed = task.record_validation(
+            self.repo, "life-cycle-a", "passed")
+        self.assertEqual(recorded, refreshed["validation"]["change_id"])
+
+    def test_bookkeeping_change_keeps_id(self):
+        """仅 .glm-conductor/ 记账改动 → 记录不过期（change_id 不变）。"""
+        recorded = self.scenario(("src/**",), "src/build.py")
+        self.write_file(".glm-conductor/notes/cache.json", "{}\n")
+        refreshed = task.record_validation(
+            self.repo, "life-cycle-a", "passed")
+        self.assertEqual(recorded, refreshed["validation"]["change_id"])
 
 
 if __name__ == "__main__":

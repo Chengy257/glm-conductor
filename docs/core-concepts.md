@@ -103,7 +103,7 @@ dag:
 **是什么**：v2.4 唯一的新鲜度原语——「基线修订 + 相关路径集的归一化内容状态」的确定性摘要（`"sha256:" + 64 位十六进制`）。
 
 - **语义**：任何相关文件增 / 删 / 内容变化 / 相关文件集变化 / 基线变化都会改变标识；CRLF→LF 归一；`.glm-conductor/` 记账路径剔除（编排器写自己的账本不使自己过时）；与输入顺序无关
-- **相关路径集**：`task.relevant_paths` = dag 全节点 ownership scope 并集——记录侧与守卫侧**同调同一派生、同一实现**，标识才可比（单一实现红线，禁止旁路重算）
+- **相关路径集**：`task.relevant_changed_files` = dag 全节点 ownership scope 并集（`task.ownership_scopes`）∩ git 工作区实际改动（`ownership.git_touched_files` + `classify_paths`）——记录侧与守卫侧**同调同一派生、同一实现**，标识才可比（单一实现红线，禁止旁路重算）；owned 文件增 / 删 / 改 / 改名 / 文件集变化都改变标识，scope 外改动仍由 ownership 完成检查拦截、与新鲜度无关，`.glm-conductor/` 记账在两层各自剔除
 - **三处共用**：验证记录（`validation.change_id`）、评审记录（`review.change_id`）、完成守卫新鲜度比对。"任何修复使先前验证 / 评审失效"由此自动成立；唯一恢复路径是重做并记录新值，禁止回写旧值"续命"
 - **权威落点**：`runtime/change_id.py`（`compute_change_id`）
 
