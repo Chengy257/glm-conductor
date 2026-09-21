@@ -6,20 +6,22 @@
 
 ## 0. Current implementation status
 
-- **Phase 0:** COMPLETE — host evidence closure recorded in `docs/reviews/ZCODE_3_14_NATIVE_WORKFLOW_RESULTS.md §13`.
-- **Phase 1:** READY — execute `V2_4_PHASE_1_NATIVE_SEMANTIC_CORE_SPEC.md`.
-- **Phase 2:** planned — execute only after the Phase 1 exit gate.
-- **Phase 3:** planned — execute only after the Phase 2 exit gate.
-- **Phase 4:** planned — final integration/release gate after Phase 3.
+- **Phase 0:** COMPLETE.
+- **Phase 1:** COMPLETE.
+- **Phase 2:** COMPLETE.
+- **Phase 3:** COMPLETE.
+- **Phase 4:** COMPLETE.
+- **Post-implementation audit:** ACTIVE — execute `docs/roadmap/V2_4_AUDIT_FIX_CLOSEOUT_PLAN.md` and `docs/roadmap/V2_4_AUDIT_FIX_CLOSEOUT_IMPLEMENTATION_SPEC.md` before merge to `main`.
 
-Phase-specific authoritative implementation specs:
+This audit-fix closeout is **not Phase 5** and does not reopen the v2.4 architecture. It contains two merge-blocking fixes (change freshness over ownership scopes; visual-reviewer multimodal capability), two lifecycle hardening items (quota-resume CLI; writer-guard lifecycle enforcement), and final fresh-host/fresh-session proof.
+
+Phase implementation specs remain historical execution authority for the completed work:
 
 - `docs/roadmap/V2_4_PHASE_1_NATIVE_SEMANTIC_CORE_SPEC.md`
 - `docs/roadmap/V2_4_PHASE_2_STATE_ASSURANCE_RETIREMENT_SPEC.md`
 - `docs/roadmap/V2_4_PHASE_3_QUOTA_RESUME_EXTRACTION_SPEC.md`
 - `docs/roadmap/V2_4_PHASE_4_INTEGRATION_RELEASE_SPEC.md`
 
-The functioning-hook fresh-session follow-up noted by W0 is **non-blocking** for Phase 1. The W0 reviewer model-binding failure **is** a Phase-1 implementation requirement and is handled in P1-A.
 
 ## 1. Objective
 
