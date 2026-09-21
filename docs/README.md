@@ -15,7 +15,7 @@
 - [GLOBAL_QUOTA_CLOCK_EXTRACTION_INVENTORY.md](roadmap/GLOBAL_QUOTA_CLOCK_EXTRACTION_INVENTORY.md) — Global Quota Clock 拆离清单：独立未来伴生项目的可复用能力目录与 must-not-migrate 边界。
 
 - [GLOBAL_QUOTA_CLOCK_STANDALONE_PROJECT_PLAN.md](roadmap/GLOBAL_QUOTA_CLOCK_STANDALONE_PROJECT_PLAN.md) — Global Quota Clock 独立项目的冻结范围与 v0.1 架构计划；与 glm-conductor 双向零运行时依赖。
-- [GLOBAL_QUOTA_CLOCK_V0_1_IMPLEMENTATION_SPEC.md](roadmap/GLOBAL_QUOTA_CLOCK_V0_1_IMPLEMENTATION_SPEC.md) — 新仓库 bootstrap + Stage 0–3 可交付实施规格；当前状态为 planned，尚未创建/实施独立仓库。
+- [GLOBAL_QUOTA_CLOCK_V0_1_IMPLEMENTATION_SPEC.md](roadmap/GLOBAL_QUOTA_CLOCK_V0_1_IMPLEMENTATION_SPEC.md) — 独立仓库 `Chengy257/ZcodeGlobalQuotaClock` 的历史 handoff 规格；新项目已建立，后续实施权威文档位于该仓库。
 - 技能文档 — 运行面操作契约的权威来源（各技能的 `references/` 内含模板与判据细节），位于 `plugins/glm-conductor/skills/`：
   - [orchestration/SKILL.md](../plugins/glm-conductor/skills/orchestration/SKILL.md) — 选择性路由、规范 DAG 构建与 delegate/full 的 Workflow 启动流程；
   - [enforcement/SKILL.md](../plugins/glm-conductor/skills/enforcement/SKILL.md) — 确定性保障运行时契约（写者守卫、change_id 新鲜度、四查完成守卫、被拦截时的恢复方法）；
