@@ -68,9 +68,9 @@ The current recommended assignment is intentionally simple:
 | Workflow workers | **session model** | bounded text implementation inside Native Workflows |
 | Visual implementer | **GLM-5.3-Flash** | bounded multimodal implementation (Custom Subagent exception) |
 | Text reviewer | **host/session model** | fresh-context, read-only final review |
-| Visual reviewer | **host/session model** | fresh-context visual review |
+| Visual reviewer | **GLM-5.3-Flash** | fresh-context visual review (pinned multimodal binding; fails closed if unavailable) |
 
-Workflow workers and reviewers inherit the host/session model — reviewer agents deliberately carry no pinned model, which keeps them startable across hosts and plans. These are current assignments, not permanent architectural identities.
+Text workers and the text reviewer inherit the host/session model — the text reviewer deliberately carries no pinned model, which keeps it startable across hosts and plans; the two visual roles are pinned to the provider-qualified multimodal GLM-5.3-Flash binding, and the visual high-assurance route fails closed when that binding is unavailable. These are current assignments, not permanent architectural identities.
 
 ## Native Workflow execution
 
@@ -88,9 +88,9 @@ Canonical Conductor DAG → Workflow Compiler → ZCode Native Workflow
 
 Delegation is not accepted on model claims alone, and v2.4 keeps the enforcement surface deliberately small:
 
-- **change_id** — one deterministic task-level change identity (hash of the base revision plus current changed-file content/state). Validation and review records bind to it; if the repository changes afterwards, the validation or review is stale and must be redone.
+- **change_id** — one deterministic task-level change identity (hash of the base revision plus the exact owned files currently changed, resolved from the ownership scopes — never the scope strings themselves). Validation and review records bind to it; if the repository changes afterwards, the validation or review is stale and must be redone.
 - **Completion guard** — a Stop-hook guard checks four invariants before a task may complete: no active write workflow remains, changed paths are inside the union of DAG ownership, required main validation is fresh (change_id matches), and for high-assurance routes a fresh `ship` review exists.
-- **One active write workflow per repository** — a coarse repository writer guard replaces per-unit leases: a second Conductor write workflow cannot acquire the repo until the holder releases it. Workflow-internal parallelism is allowed after compile-time ownership validation.
+- **One active write workflow per repository** — a coarse repository writer guard replaces per-unit leases: a second Conductor write workflow cannot acquire the repo until the holder releases it, and delegated run registration and completion refuse a task that skipped acquisition (a Conductor lifecycle invariant; raw host Workflow calls outside the Conductor protocol are outside this guarantee). Workflow-internal parallelism is allowed after compile-time ownership validation.
 - **Small task state** — seven statuses (`active` / `waiting_quota` / `waiting_user` / `blocked` / `completed` / `cancelled` / `failed`). There are no per-unit runtime states, dispatch permits, leases, or verification receipts to reconcile.
 
 The main session still owns final acceptance: worker reports are claims, while repository state, diffs, and reproduced validation are evidence. If a guard cannot evaluate, it degrades visibly rather than silently blocking the session.
@@ -101,7 +101,7 @@ Quota handling is not a routing axis. A delegated task that runs out of provider
 
 - `manual` (default): you resume when you choose. `auto`: a scheduled turn refreshes provider quota; if it is usable, and you have explicitly authorized auto resume within `max_resumes`, the same workflow run is resumed.
 - Each actual resume consumes one unit of the bounded budget; once the budget is exhausted, the task transitions to `waiting_user`.
-- No quota epochs, subscriptions, watcher processes, or window bookkeeping exist in v2.4. Quota diagnostics are read-only (`/glm-conductor:quota` or `quota-resolve`).
+- No quota epochs, subscriptions, watcher processes, or window bookkeeping exist in v2.4. Quota diagnostics are read-only (`/glm-conductor:quota` or `quota-resolve`); the resume lifecycle runs through stable CLI commands (`quota-wait` / `quota-resume-authorize` / `quota-resume-decision` / `quota-resume-confirm`).
 
 > The account-level **Global Quota Clock** is no longer part of GLM Conductor. It is planned as a separate future companion project; see its extraction inventory at [`docs/roadmap/GLOBAL_QUOTA_CLOCK_EXTRACTION_INVENTORY.md`](./docs/roadmap/GLOBAL_QUOTA_CLOCK_EXTRACTION_INVENTORY.md).
 
@@ -116,7 +116,7 @@ Requirements:
 Known limitations, stated honestly:
 
 - **Scheduled firing while the ZCode app is closed is unverified.** Scheduled turns observed on the tested host behave as mid-turn continuations of the owning session; the plugin does not claim wake behavior with the app closed.
-- **Reviewer fresh-session portability is fixed statically; the live proof is pending.** Reviewer agents carry no pinned model (they inherit the host/session model), which removes the single-model host hard-failure observed during W0 revalidation; a live fresh-session reviewer launch proof had not been recorded when this release was documented.
+- **Reviewer fresh-session proof is still pending for the final bindings.** The text reviewer carries no pinned model (inherits the host/session model), which removes the single-model host hard-failure observed during W0 revalidation; the visual reviewer is pinned to a provider-qualified multimodal GLM-5.3-Flash binding and the visual high-assurance route fails closed if it is unavailable; live fresh-session launch proofs (text reviewer; visual reviewer actually reading an image) had not been recorded when this release was documented.
 - `visual-implementer` remains a Custom Subagent capability exception, not a Native Workflow worker; the visual feedback topology requires the main session to capture screenshots.
 - Hooks are limited to SessionStart (resume context) and Stop (completion guard). There are no dispatch-permit, ownership-injection, or Bash policy hooks; use ZCode's native permission facilities plus worker constraints for tool policy.
 
@@ -173,7 +173,7 @@ All runtime operations go through one CLI (`python <plugin-root>/runtime/cli.py 
 
 | Command | Purpose |
 | --- | --- |
-| `quota-resolve <repo> [--force-refresh]` | four-state provider quota resolution (read-only observation) |
+| `quota-resolve <repo> [--force-refresh]` · `quota-wait` / `quota-resume-authorize` / `quota-resume-decision` / `quota-resume-confirm` | four-state provider quota resolution (read-only) and the bounded resume lifecycle (wait / authorize / decision / confirm) |
 | `v24-compile <dag.json> [--task-ref <id>] [--out <path>]` | compile a canonical DAG into Native Workflow source (generation only, never auto-executes) |
 | `writer-acquire <repo> <task_id> [--run-id <id>]` | acquire the repository write reservation |
 | `writer-release <repo> <task_id> [--force]` | release the reservation (`--force` after explicit inspection) |

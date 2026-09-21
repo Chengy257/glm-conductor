@@ -2,7 +2,7 @@
 
 > 面向用户的排障手册：按「现象 → 判定 → 处置」组织，只写结论性行为事实；每条事实标注实现模块路径供核对。架构全貌见 [architecture.md](architecture.md)，概念入门见 [core-concepts.md](core-concepts.md)。
 >
-> runtime CLI 统一入口是 `plugins/glm-conductor/runtime/cli.py`（本文以 `<cli>` 代指；安装后以实际插件缓存路径为准）。用可用的 Python 3 解释器执行（Windows 无 `python3` 启动器时用 `python`）。v2.4 的 CLI 子命令仅：`quota-resolve` / `v24-compile` / `writer-acquire` / `writer-release` / `writer-show` / `v24-record-run` / `review-record`；额度诊断另有独立脚本 `runtime/quota/report.py`。查询本文未列出的子命令（permit / lease / wave / clock / bridge / policy / verify-* / host-check 等）没有意义——那些面连同后端已不存在。
+> runtime CLI 统一入口是 `plugins/glm-conductor/runtime/cli.py`（本文以 `<cli>` 代指；安装后以实际插件缓存路径为准）。用可用的 Python 3 解释器执行（Windows 无 `python3` 启动器时用 `python`）。v2.4 的 CLI 子命令仅：`quota-resolve` / `quota-wait` / `quota-resume-authorize` / `quota-resume-decision` / `quota-resume-confirm` / `v24-compile` / `writer-acquire` / `writer-release` / `writer-show` / `v24-record-run` / `review-record`；额度诊断另有独立脚本 `runtime/quota/report.py`。查询本文未列出的子命令（permit / lease / wave / clock / bridge / policy / verify-* / host-check 等）没有意义——那些面连同后端已不存在。
 
 ## 1. 额度诊断：report.py 双模式与套餐口径
 
@@ -41,6 +41,8 @@ provider: bigmodel
 | `EXHAUSTED` | 耗尽 | `remain-waiting` |
 | `UNKNOWN` | 数据不可得（无凭证 / 网络失败 / 无缓存） | `remain-waiting`——绝不虚构可用性 |
 
+**恢复操作入口**（AF-03 起）：等待 / 授权 / 决策 / 确认四步的稳定入口是 CLI `quota-wait` / `quota-resume-authorize` / `quota-resume-decision` / `quota-resume-confirm`（单行 JSON 输出，见 `runtime/cli.py`）——额度恢复的运行时操作走这四个子命令，不用 `python3 -c` 直调 runtime API（授权本身仍由用户在技能 / 策略层把关，CLI 不自助放行）。
+
 **窗口机制口径**：reset_at 时刻窗口恢复 100%（周窗优先）；下一个 reset_at 只在新窗口内发生模型调用时才物化——纯查询绝不推进它（`runtime/quota/window_math.py` / `time_utils.py`）。
 
 ## 2. v2.3 遗留任务：检测与处置
@@ -67,7 +69,7 @@ provider: bigmodel
 
 ## 3. 写者守卫残留：`writer-show` 确认 + `--force` 清除
 
-**现象**：完成守卫查 1 拦截：「仓库写者守卫正被其他任务持有」，但报出的持有任务其实早已消亡（会话崩溃、任务目录被手工删除等）；或新委派 `writer-acquire` 冲突。
+**现象**：完成守卫查 1 拦截：「仓库写者守卫正被其他任务持有」，但报出的持有任务其实早已消亡（会话崩溃、任务目录被手工删除等）；新委派 `writer-acquire` 冲突；或（AF-04 起）委派任务完成被拦：「完成被阻断：任务 <id> 已注册委派 run，但仓库写者守卫预约缺失（missing writer reservation…）」——有 run id 的委派任务在注册（`v24-record-run`）与完成两处都要求仍持有本仓库写预约，这是生命周期不变式，不覆盖 Conductor 协议之外的裸宿主 Workflow 调用。
 
 **判定**：先看当前持有者：
 
@@ -79,8 +81,9 @@ python <cli> writer-show <repo_root>
 
 **处置**（按优先级）：
 
-1. 持有任务还活着 → 等它收尾（终态收尾 `task.complete` / `fail` / `cancel` 自动释放守卫），或在该任务内走完完成守卫；
-2. 持有任务确已消亡（目录已删 / 用户确认放弃）→ 显式清除：
+1. 委派任务被「预约缺失」拦截（守卫记录被手工删除等，任务本身还在）→ 用本任务身份重新取预约补挂 run id：`writer-acquire <repo_root> <task_id> --run-id <run_id>`（同任务重复 acquire 幂等成功）；此时若预约已被其他任务持有，走下面 2 / 3；
+2. 持有任务还活着 → 等它收尾（终态收尾 `task.complete` / `fail` / `cancel` 自动释放守卫），或在该任务内走完完成守卫；
+3. 持有任务确已消亡（目录已删 / 用户确认放弃）→ 显式清除：
 
 ```
 python <cli> writer-release <repo_root> <holder_task_id> --force
@@ -88,21 +91,21 @@ python <cli> writer-release <repo_root> <holder_task_id> --force
 
 `--force` 是"inspect 之后由操作者显式清除"的运维通道：以**持有者自身的 task_id** 执行释放（守卫模块本身不设绕过持有者的旁路），stdout 报出被清除的持有者四字段信息。正常（非残留）释放不要带 `--force`。
 
-## 4. reviewer 模型继承：评审者跑在哪个模型上
+## 4. reviewer 模型绑定分治：评审者跑在哪个模型上
 
-**背景事实**：两个评审者 agent（`agents/glm-reviewer.md` / `agents/visual-reviewer.md`）的 frontmatter **没有 `model` 字段**——这是 v2.4 的刻意设计：宿主实测表明，单模型宿主上不可解析的固定 model id 会让评审者确定性无法启动（普通 Agent 面直接硬失败）；去掉 model 字段后评审者**继承宿主 / 当前会话的模型**，绑定因此宿主可移植（`scripts/validate_plugin.py` 检查 2 机械锚定：reviewer 出现 model 字段即 FAIL）。
+**背景事实**（v2.4 AF-02 起文本/视觉分治）：`agents/glm-reviewer.md` 的 frontmatter **没有 `model` 字段**——宿主实测表明，单模型宿主上不可解析的固定 model id 会让评审者确定性无法启动（普通 Agent 面直接硬失败）；去掉 model 字段后文本评审者**继承宿主 / 当前会话的模型**，对文本审查契约而言继承即可满足（`scripts/validate_plugin.py` 检查 2 机械锚定：glm-reviewer 出现 model 字段即 FAIL）。`agents/visual-reviewer.md` 则相反：视觉审查契约要求直接读图，继承纯文本主会话模型会「启动成功但丧失契约能力」——其 frontmatter **必须**是 provider 全限定的多模态 Flash 绑定（`account:…/GLM-5.3-Flash`，与 visual-implementer 同款；validate 检查 2 同步锚定：model 缺失、裸 ID 或非 Flash 后缀即 FAIL）。
 
 **含义与排查**：
 
-- 评审者与主会话同模型是**预期行为**，不是回退故障；独立性的来源是**全新上下文 + 只读工具白名单**，不是跨模型；
-- 视觉评审（`visual-reviewer`）需要多模态能力：在纯文本主会话模型下派发视觉评审会无法真正读图——此时按视觉例外的 fail-closed 纪律停止视觉通道并告知用户，不得用文本推测界面正常；
-- 对照：`visual-implementer`（实施者，非评审者）**保留** provider 全限定 `model: "account:…/GLM-5.3-Flash"` 字段——它走 Custom Subagent 通道，不适用上述继承机制；
+- 文本评审者（`glm-reviewer`）与主会话同模型是**预期行为**，不是回退故障；独立性的来源是**全新上下文 + 只读工具白名单**，不是跨模型；
+- 视觉评审（`visual-reviewer`）跑在已验证的多模态 GLM-5.3-Flash 绑定上；宿主上绑定不可用（启动报 account-connection-unavailable 等）时按视觉例外的 fail-closed 纪律停止视觉高保障路线并告知用户——不得退回文本模型（glm-reviewer 或主会话）充当视觉终审，也不得用文本推测界面正常；
+- 对照：`visual-implementer`（实施者，非评审者）同样**保留** provider 全限定 `model: "account:…/GLM-5.3-Flash"` 字段——两个视觉角色同款绑定，文本评审者不共用该规则；
 - agent 定义只在会话启动时快照：修改 agents 定义后须**新开会话**再派发才生效。
 
 | agent | model 字段 | 实际模型 | 通道 |
 | --- | --- | --- | --- |
 | glm-reviewer | 无 | 继承宿主 / 会话模型 | 原生 Custom Subagent |
-| visual-reviewer | 无 | 继承宿主 / 会话模型（须多模态） | 原生 Custom Subagent |
+| visual-reviewer | `account:…/GLM-5.3-Flash`（全限定） | 固定 Flash 多模态（不可用即 fail closed） | 原生 Custom Subagent |
 | visual-implementer | `account:…/GLM-5.3-Flash`（全限定） | 固定 Flash 多模态 | 原生 Custom Subagent（视觉例外） |
 | 文本 worker（delegate/full） | 无 agent 定义 | persona 内嵌进生成源 | Native Workflow |
 

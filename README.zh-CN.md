@@ -68,9 +68,9 @@ ZCode 仍然是底层编码 harness，并拥有执行编排：workflow 运行生
 | Workflow 工作者 | **会话模型** | 原生 Workflow 内的有界文本实施 |
 | 视觉实施者 | **GLM-5.3-Flash** | 有界的多模态实施（Custom Subagent 例外通道） |
 | 文本审查者 | **宿主/会话模型** | 全新上下文、只读最终审查 |
-| 视觉审查者 | **宿主/会话模型** | 全新上下文视觉审查 |
+| 视觉审查者 | **GLM-5.3-Flash** | 全新上下文视觉审查（固定多模态绑定，不可用即 fail closed） |
 
-Workflow 工作者与审查者继承宿主/会话模型——审查者 agent 刻意不固定 model 字段，从而在不同宿主与套餐下都可启动。这些只是当前推荐的模型分配，不是永久架构身份。
+文本工作者与文本审查者继承宿主/会话模型——文本审查者刻意不固定 model 字段，从而在不同宿主与套餐下都可启动；两个视觉角色固定为 provider 全限定的多模态 GLM-5.3-Flash 绑定，绑定不可用时视觉高保障路线 fail closed。这些只是当前推荐的模型分配，不是永久架构身份。
 
 ## 原生 Workflow 执行
 
@@ -88,9 +88,9 @@ Workflow 工作者与审查者继承宿主/会话模型——审查者 agent 刻
 
 委派结果不会仅凭模型的"已完成"声明被接受，而 v2.4 把强制面刻意收窄：
 
-- **change_id** —— 单一确定性的任务级变更身份（基线修订 + 当前改动文件内容/状态的哈希）。验证与审查记录都绑定它；此后仓库一旦变化，验证或审查即过期，必须重做。
+- **change_id** —— 单一确定性的任务级变更身份（基线修订 + 当前实际改动的 owned 文件内容/状态的哈希，由 ownership scope 解析而来——绝不哈希 scope 串本身）。验证与审查记录都绑定它；此后仓库一旦变化，验证或审查即过期，必须重做。
 - **完成守卫（completion guard）** —— Stop 钩子在任务完成前只检查四项不变量：无仍在活跃的写 workflow、改动路径全部落在 DAG ownership 并集内、必需的主会话验证是新鲜的（change_id 匹配）、高保障路由还存在新鲜的 `ship` 审查。
-- **一个仓库至多一个活跃写 workflow** —— 粗粒度的仓库写者守卫取代按单元租约：持有者释放之前，第二个 Conductor 写 workflow 无法取得该仓库。编译期 ownership 校验通过后，workflow 内部并行不受影响。
+- **一个仓库至多一个活跃写 workflow** —— 粗粒度的仓库写者守卫取代按单元租约：持有者释放之前，第二个 Conductor 写 workflow 无法取得该仓库；委派 run 的注册与完成都会拒绝跳过取守卫的任务（Conductor 生命周期不变式；协议之外的裸宿主 Workflow 调用不在此保证范围内）。编译期 ownership 校验通过后，workflow 内部并行不受影响。
 - **小任务状态** —— 七个状态（`active` / `waiting_quota` / `waiting_user` / `blocked` / `completed` / `cancelled` / `failed`）。没有需要 reconciliation 的按单元运行时状态、dispatch permit、租约或验证 receipt。
 
 最终验收仍由主会话负责：工作者报告只是声明，仓库实际状态、diff 和主会话重新运行的验证才是证据。如果守卫自身无法评估，它会明确降级，而不是静默阻断会话。
@@ -101,7 +101,7 @@ Workflow 工作者与审查者继承宿主/会话模型——审查者 agent 刻
 
 - `manual`（默认）：由你选择何时恢复。`auto`：定时回合刷新 provider 额度；若额度可用、且你已明确授权 auto 恢复并在 `max_resumes` 预算内，则恢复同一个 workflow 运行。
 - 每次真实恢复消耗一单位有界预算；预算耗尽后任务转为 `waiting_user`。
-- v2.4 中不存在 quota epoch、订阅、常驻 watcher 进程或窗口记账。额度诊断是只读的（`/glm-conductor:quota` 或 `quota-resolve`）。
+- v2.4 中不存在 quota epoch、订阅、常驻 watcher 进程或窗口记账。额度诊断是只读的（`/glm-conductor:quota` 或 `quota-resolve`）；恢复生命周期经稳定 CLI 子命令执行（`quota-wait` / `quota-resume-authorize` / `quota-resume-decision` / `quota-resume-confirm`）。
 
 > 账号级 **Global Quota Clock** 已不属于 GLM Conductor。它计划作为独立的未来伴生项目；拆离清单见 [`docs/roadmap/GLOBAL_QUOTA_CLOCK_EXTRACTION_INVENTORY.md`](./docs/roadmap/GLOBAL_QUOTA_CLOCK_EXTRACTION_INVENTORY.md)。
 
@@ -116,7 +116,7 @@ Workflow 工作者与审查者继承宿主/会话模型——审查者 agent 刻
 如实声明的已知限制：
 
 - **关闭 ZCode 应用时的定时触发未经实证。** 已测宿主上观察到的定时回合表现为所属会话的回合中续跑；本插件不宣称、也不保证 App 关闭时的唤醒行为。
-- **审查者新会话可移植性已静态修复，活体证明待补。** 审查者 agent 不固定 model 字段（继承宿主/会话模型），消除了 W0 复验中观察到的单模型宿主硬失败；截至本发布文档撰写时，尚未记录新会话审查者启动的活体证明。
+- **审查者最终绑定的新会话活体证明待补。** 文本审查者不固定 model 字段（继承宿主/会话模型），消除了 W0 复验中观察到的单模型宿主硬失败；视觉审查者固定为 provider 全限定的多模态 GLM-5.3-Flash 绑定，绑定不可用时视觉高保障路线 fail closed；截至本发布文档撰写时，尚未记录新会话启动活体证明（文本审查者；视觉审查者真实读图）。
 - `visual-implementer` 仍是 Custom Subagent 能力例外，不是 Native Workflow 工作者；视觉反馈拓扑需要主会话采集截图。
 - 钩子只剩 SessionStart（恢复上下文）与 Stop（完成守卫）。没有 dispatch permit、ownership 注入或 Bash 策略钩子；工具策略请使用 ZCode 原生权限设施加工作者约束。
 
@@ -173,7 +173,7 @@ reason: implementation is bounded by explicit interfaces, owned files, and deter
 
 | 命令 | 用途 |
 | --- | --- |
-| `quota-resolve <repo> [--force-refresh]` | 额度四态解析（只读观测） |
+| `quota-resolve <repo> [--force-refresh]` · `quota-wait` / `quota-resume-authorize` / `quota-resume-decision` / `quota-resume-confirm` | 额度四态解析（只读观测）与有界恢复生命周期（等待 / 授权 / 决策 / 确认） |
 | `v24-compile <dag.json> [--task-ref <id>] [--out <path>]` | 把规范 DAG 编译为原生 Workflow 源码（只生成，绝不自动执行） |
 | `writer-acquire <repo> <task_id> [--run-id <id>]` | 取得仓库写预约 |
 | `writer-release <repo> <task_id> [--force]` | 释放写预约（`--force` 供显式 inspect 之后的清除） |
