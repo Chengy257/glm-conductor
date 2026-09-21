@@ -1,6 +1,6 @@
 # GLM Conductor v2.4 Final Release Closeout Plan
 
-> **Status:** FINAL CLOSEOUT ACTIVE  
+> **Status:** COMPLETE — FR-01–FR-04 closed with evidence; final verdict `MERGE_READY` in `docs/reviews/V2_4_AUDIT_FIX_CLOSEOUT_REPORT.md` (Final Release Closeout Addendum §A1–§A5).  
 > **Branch:** `review/zcode-3.14-native-workflow`  
 > **Purpose:** close the final merge-blocking correctness and release-evidence gaps found after the v2.4 audit-fix implementation.  
 > **Important:** this is **not Phase 5**, not a new architecture review, and not a repeat of AF-01–AF-06.

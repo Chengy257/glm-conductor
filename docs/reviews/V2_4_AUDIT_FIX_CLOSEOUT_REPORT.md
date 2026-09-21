@@ -1,6 +1,6 @@
 # GLM Conductor v2.4 Audit-Fix Closeout Report
 
-> **FINAL RELEASE CLOSEOUT OVERRIDE:** A subsequent repository audit found one additional merge-blocking correctness bug: terminal lifecycle cleanup releases the repository writer guard using the ledger root instead of the task's effective bound `repository.root` when those roots differ. The same audit also confirmed that the literal fresh-session reviewer proof required by the original gate was not yet performed, and found release-document status drift. Therefore the `MERGE_READY` verdict later in this report is **temporarily superseded** by `docs/roadmap/V2_4_FINAL_RELEASE_CLOSEOUT_PLAN.md`. Preserve this report as AF-01–AF-06 evidence; append final FR-01–FR-04 evidence after implementation rather than rewriting history.
+> **FINAL RELEASE CLOSEOUT OVERRIDE — RESOLVED:** A subsequent repository audit found one additional merge-blocking correctness bug: terminal lifecycle cleanup releases the repository writer guard using the ledger root instead of the task's effective bound `repository.root` when those roots differ. The same audit also confirmed that the literal fresh-session reviewer proof required by the original gate was not yet performed, and found release-document status drift. The Final Release Closeout Addendum (§A1–§A5, 2026-09-21) closes FR-01–FR-04 and issues the final verdict `MERGE_READY`, which supersedes this temporary override and re-affirms §9. §1–§9 remain the AF-01–AF-06 evidence record, unmodified.
 
 
 > **Branch:** `review/zcode-3.14-native-workflow`
@@ -176,4 +176,20 @@ MERGE_READY
 
 ## A4. FR-04 — 终门证据与最终裁决
 
-（本节随 F3 定稿：定向束、validator/smoke/lint/compile、唯一一次全量回归、push 后远端 CI 结果与最终裁决。）
+**定向束（F3.1）**：`tests.test_task_lifecycle` + `tests.test_completion_guard` + `tests.test_writer_guard` + `tests.test_agent_model_binding` → **125 例 OK**。
+
+**静态门（F3.2）**：`scripts/validate_plugin.py` → **15/15 通过**；`scripts/smoke_plugin_load.py` → **0 失败**；`ruff check plugins scripts tests` → **全过**；`compileall`（runtime + hooks + scripts）→ **干净**。
+
+**唯一一次全量回归（F3.3，commit `65f45ef` 树上）**：`python3 -X utf8 -m unittest discover -s tests -q` → **Ran 682 tests — OK**（审计修复基线 677 + FR-01 新增 5 例双根回归；本阶段零修复零重跑）。此后变更仅为本 addendum 与状态文档（纯文档，不触代码与测试）。
+
+**最终分支头与远端**：本 addendum 定稿提交见 git log（FR 收口 commit 序列 `28fe26c` → `65f45ef` → 终稿）；push 后 GitHub Actions 按 §8 第 3 条既有矩阵（ruff + validator + smoke + unittest，Py3.8/3.13 × ubuntu/windows）复核，结果记录于本节末尾的远端补记。
+
+## A5. 最终裁决
+
+```
+MERGE_READY
+```
+
+依据：FR-01 修复经红绿验证与双物理目录全终态回归（含完成门 A/B 两根决定性集成）；FR-02 以未弱化字面形态在真新鲜会话关闭（双角色启动、只读、契约遵循、视觉真实盲读图且与真值吻合）；FR-03 六面发布文档收敛一致；FR-04 定向束 125 + validator 15/15 + smoke + ruff + compileall + 唯一一次全量回归 682 全绿。本裁决**取代页首 OVERRIDE 的暂时覆盖**，恢复并重申 §9 的合并候选结论：`review/zcode-3.14-native-workflow` 可作为 v2.4.0 合并候选进入 `main`。
+
+**远端 CI 补记**：push 后追加。

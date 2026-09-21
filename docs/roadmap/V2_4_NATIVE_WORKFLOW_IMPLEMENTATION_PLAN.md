@@ -11,8 +11,9 @@
 - **Phase 2:** COMPLETE.
 - **Phase 3:** COMPLETE.
 - **Phase 4:** COMPLETE.
-- **Post-implementation audit-fix:** IMPLEMENTED; AF-01–AF-06 evidence recorded.
-- **Final release closeout:** ACTIVE — execute `docs/roadmap/V2_4_FINAL_RELEASE_CLOSEOUT_PLAN.md` and `docs/roadmap/V2_4_FINAL_RELEASE_CLOSEOUT_IMPLEMENTATION_SPEC.md` before merge to `main`.
+- **Post-implementation audit-fix:** COMPLETE; AF-01–AF-06 evidence recorded, gates closed by the final closeout.
+- **Final release closeout:** COMPLETE — FR-01–FR-04 closed with evidence (`docs/reviews/V2_4_AUDIT_FIX_CLOSEOUT_REPORT.md` Final Release Closeout Addendum §A1–§A5).
+- **Merge candidate:** READY.
 
 The final closeout is **not Phase 5** and does not reopen the v2.4 architecture. It contains only:
 
