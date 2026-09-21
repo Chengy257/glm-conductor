@@ -1,18 +1,18 @@
 # GlobalQuotaClock v0.1 — New Repository Bootstrap and Implementation Spec
 
-> **Target repository:** `Chengy257/GlobalQuotaClock`  
+> **Target repository:** `Chengy257/ZcodeGlobalQuotaClock`  
 > **Working package/CLI:** `gqclock`  
 > **Parent handoff:** `glm-conductor/docs/roadmap/GLOBAL_QUOTA_CLOCK_EXTRACTION_INVENTORY.md`  
 > **Authority:** `GLOBAL_QUOTA_CLOCK_STANDALONE_PROJECT_PLAN.md`.
 
 ## 1. Repository bootstrap
 
-Create a new standalone repository. Do not add it as a subdirectory or git submodule of glm-conductor.
+The standalone repository now exists. Implement in `Chengy257/ZcodeGlobalQuotaClock`; do not add it as a subdirectory or git submodule of glm-conductor.
 
 Initial tree:
 
 ```text
-GlobalQuotaClock/
+ZcodeGlobalQuotaClock/
 ├── README.md
 ├── LICENSE
 ├── pyproject.toml
