@@ -1,5 +1,8 @@
 # v2.4 Implementation Closeout Report
 
+> **POST-IMPLEMENTATION AUDIT OVERRIDE:** Phase 1–4 implementation is complete, but the later audit found release-hardening issues that supersede this report's original `release-ready pending…` conclusion. The current merge gate is `docs/roadmap/V2_4_AUDIT_FIX_CLOSEOUT_PLAN.md`; final readiness must be recorded in `docs/reviews/V2_4_AUDIT_FIX_CLOSEOUT_REPORT.md`. This report remains the implementation evidence baseline and is not deleted or rewritten as if the audit findings never existed.
+
+
 > **Campaign:** v2.4 native-first re-baseline, executed 2026-09-21 on branch
 > `review/zcode-3.14-native-workflow` (local commits only; push pending user instruction).
 > **Mode:** four phase-workflows (one native Workflow per phase, all unit implementers
