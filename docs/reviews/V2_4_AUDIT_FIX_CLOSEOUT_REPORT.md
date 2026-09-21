@@ -1,5 +1,8 @@
 # GLM Conductor v2.4 Audit-Fix Closeout Report
 
+> **FINAL RELEASE CLOSEOUT OVERRIDE:** A subsequent repository audit found one additional merge-blocking correctness bug: terminal lifecycle cleanup releases the repository writer guard using the ledger root instead of the task's effective bound `repository.root` when those roots differ. The same audit also confirmed that the literal fresh-session reviewer proof required by the original gate was not yet performed, and found release-document status drift. Therefore the `MERGE_READY` verdict later in this report is **temporarily superseded** by `docs/roadmap/V2_4_FINAL_RELEASE_CLOSEOUT_PLAN.md`. Preserve this report as AF-01–AF-06 evidence; append final FR-01–FR-04 evidence after implementation rather than rewriting history.
+
+
 > **Branch:** `review/zcode-3.14-native-workflow`
 > **报告落盘时分支头：** `8330e15`（本报告与 troubleshooting F3 修正随下一提交入列）
 > **日期：** 2026-09-21（UTC+8）
