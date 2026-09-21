@@ -10,9 +10,15 @@
       2. Agent frontmatter：plugins/glm-conductor/agents/*.md 必填字段按
          角色区分——visual-implementer 必含
          name / description / model / thoughtLevel / tools；
-         glm-reviewer / visual-reviewer 必含
+         glm-reviewer（文本审查者）必含
          name / description / thoughtLevel / tools 且不得含 model 字段
-         （v2.4 P1-A 起 reviewer 继承宿主/会话模型）；
+         （继承宿主/会话模型，v2.4 P1-A 起）；
+         visual-reviewer（视觉审查者）必含
+         name / description / model / thoughtLevel / tools，model 必须
+         匹配 provider 全限定 account:<套餐>/<模型> 且以 /GLM-5.3-Flash
+         结尾（v2.4 AF-02 起文本/视觉审查者绑定分治：视觉审查者必须
+         多模态 Flash 绑定，继承文本主模型会启动成功但丧失读图契约
+         能力，绑定不可用即 fail closed）；
       3. Skill frontmatter：plugins/glm-conductor/skills/*/SKILL.md 必含
          name / description；
       4. 引用 agent 存在：plugins/ 内出现的 `glm-conductor:<agent>` 引用
@@ -164,11 +170,19 @@ OPERATIONS = os.path.join(
     SKILLS_DIR, "orchestration", "references", "operations.md")
 
 AGENT_REQUIRED_KEYS = ("name", "description", "model", "thoughtLevel", "tools")
-# v2.4 P1-A：reviewer 删除 frontmatter model 行（继承宿主/会话模型，规避
-# account-connection-unavailable 硬失败），必填集不含 model 且字段出现即
-# FAIL——与 tests/test_agent_model_binding.py 的断言互为镜像
+# v2.4 P1-A / AF-02：reviewer 模型绑定文本/视觉分治——
+#   glm-reviewer（文本审查者）删除 frontmatter model 行（继承宿主/会话模型，
+#   规避 account-connection-unavailable 硬失败），必填集不含 model 且字段
+#   出现即 FAIL；
+#   visual-reviewer（视觉审查者）必须多模态 GLM-5.3-Flash 绑定：model 必填
+#   且须通过 VISUAL_REVIEWER_MODEL_RE + VISUAL_REVIEWER_MODEL_SUFFIX 校验，
+#   缺失/裸 ID/非 Flash 后缀均 FAIL（继承文本主模型会启动成功但丧失读图
+#   契约能力）——与 tests/test_agent_model_binding.py 的断言互为镜像
 REVIEWER_REQUIRED_KEYS = ("name", "description", "thoughtLevel", "tools")
-REVIEWER_AGENTS = ("glm-reviewer", "visual-reviewer")
+TEXT_REVIEWER_AGENTS = ("glm-reviewer",)
+VISUAL_REVIEWER_AGENTS = ("visual-reviewer",)
+VISUAL_REVIEWER_MODEL_RE = re.compile(r"^account:[^/\s]+/\S+$")
+VISUAL_REVIEWER_MODEL_SUFFIX = "/GLM-5.3-Flash"
 SKILL_REQUIRED_KEYS = ("name", "description")
 
 # 整改规范点名的契约 agent（v2.4 Phase 2 W6 起 flash-implementer 退役
@@ -417,7 +431,13 @@ def check_1_json(results):
 
 
 def check_2_agent_frontmatter(results):
-    """检查 2：agents/*.md frontmatter 必填字段（必填集按角色区分；reviewer 禁含 model 字段）。"""
+    """检查 2：agents/*.md frontmatter 必填字段（按角色区分必填集与 model 规则）。
+
+    文本/视觉审查者绑定分治（v2.4 P1-A / AF-02）：
+      - glm-reviewer：必填集不含 model，字段出现即 FAIL（继承宿主/会话模型）；
+      - visual-reviewer：model 必填，须为 provider 全限定 account:<套餐>/<模型>
+        且以 /GLM-5.3-Flash 结尾（多模态 Flash 绑定），否则 FAIL。
+    """
     title = "Agent frontmatter 必填字段（agents/*.md）"
     details = []
     ok = True
@@ -435,18 +455,43 @@ def check_2_agent_frontmatter(results):
             ok = False
             continue
         agent_name = os.path.splitext(os.path.basename(path))[0]
-        required = (REVIEWER_REQUIRED_KEYS if agent_name in REVIEWER_AGENTS
-                    else AGENT_REQUIRED_KEYS)
-        missing = [key for key in required if not meta.get(key)]
+        if agent_name in TEXT_REVIEWER_AGENTS:
+            missing = [key for key in REVIEWER_REQUIRED_KEYS
+                       if not meta.get(key)]
+            if missing:
+                details.append("FAIL: %s 缺少必填字段: %s" % (shown, ", ".join(missing)))
+                ok = False
+            elif "model" in meta:
+                details.append(
+                    "FAIL: %s 含 model 字段（值 %s）：文本审查者继承宿主/会话"
+                    "模型，model 行必须删除"
+                    % (shown, meta.get("model") or "（空）"))
+                ok = False
+            else:
+                details.append("PASS: %s（name=%s）" % (shown, meta.get("name")))
+            continue
+        # 其余角色（visual-implementer / visual-reviewer）共用必填集；
+        # visual-reviewer 另须通过多模态 Flash 绑定校验
+        missing = [key for key in AGENT_REQUIRED_KEYS if not meta.get(key)]
         if missing:
             details.append("FAIL: %s 缺少必填字段: %s" % (shown, ", ".join(missing)))
             ok = False
-        elif agent_name in REVIEWER_AGENTS and "model" in meta:
+            continue
+        model_value = (meta.get("model") or "").strip().strip('"').strip("'")
+        if agent_name in VISUAL_REVIEWER_AGENTS and not (
+                VISUAL_REVIEWER_MODEL_RE.match(model_value)
+                and model_value.endswith(VISUAL_REVIEWER_MODEL_SUFFIX)):
             details.append(
-                "FAIL: %s 含 model 字段（值 %s）：v2.4 P1-A 起 reviewer "
-                "继承宿主/会话模型，model 行必须删除"
-                % (shown, meta.get("model") or "（空）"))
+                "FAIL: %s model=%s：视觉审查者必须多模态 GLM-5.3-Flash 绑定"
+                "（provider 全限定 account:<套餐>/<模型> 且以 %s 结尾）——"
+                "继承文本主模型会启动成功但丧失读图契约能力，绑定不可用即 "
+                "fail closed"
+                % (shown, model_value or "（缺失）", VISUAL_REVIEWER_MODEL_SUFFIX))
             ok = False
+        elif agent_name in VISUAL_REVIEWER_AGENTS:
+            details.append(
+                "PASS: %s（name=%s，多模态 Flash 绑定 model=%s）"
+                % (shown, meta.get("name"), model_value))
         else:
             details.append("PASS: %s（name=%s）" % (shown, meta.get("name")))
     results.append((2, title, ok, details))

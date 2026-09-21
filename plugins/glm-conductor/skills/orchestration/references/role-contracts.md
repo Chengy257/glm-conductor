@@ -268,7 +268,8 @@ delegate/full 的文本实施由原生 Workflow 运行的文本工人（text wor
 
 ## visual-reviewer 契约（视觉任务审查者）
 
-- **定位**：全新上下文、与实施隔离的只读审查者（fresh-context, implementation-isolated reviewer）；独立性来自干净上下文与只读工具白名单，不宣称跨模型独立（模型继承宿主/会话，诊断时可记录实际运行模型，但不是持久任务状态轴）
+- **定位**：全新上下文、与实施隔离的只读审查者（fresh-context, implementation-isolated reviewer）；独立性来自干净上下文与只读工具白名单，不宣称跨模型独立
+- **模型**：GLM-5.3-Flash（多模态，frontmatter 显式 provider 全限定绑定）——亲自读取截图进行视觉验收是角色契约的一部分；绑定不可用的宿主上本角色不可用（fail closed），绝不静默退回纯文本模型假装视觉审查
 - **思考档位**：max（已固定）
 - **用途**：仅限视觉任务的 audit/full 路由，且必须在主会话验证之后调用；主职是独立视觉验收（截图证据 + VISUAL ACCEPTANCE + 用户可见回归），代码 diff 作为上下文读取，不替代主会话的代码审查
 - **职责分工**：主会话负责完整 diff、代码正确性、功能验证与范围/接口核验；visual-reviewer 负责视觉验收、交互证据、截图证据与用户可见回归

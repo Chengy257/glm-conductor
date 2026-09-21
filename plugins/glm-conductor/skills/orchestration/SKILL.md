@@ -146,7 +146,7 @@ delegate/full 的唯一实施基底是 ZCode 原生 Workflow。主会话按以�
 按任务模态选择全新上下文的只读审查者：
 
 - 文本任务 → `glm-reviewer`（只读白名单，模型继承宿主/会话——不宣称跨模型独立，独立性来自全新上下文与只读隔离）
-- 视觉任务 → `visual-reviewer`（多模态只读，主职独立视觉验收：亲自读截图对照 VISUAL ACCEPTANCE、检查用户可见回归；diff 仅作上下文）
+- 视觉任务 → `visual-reviewer`（多模态只读，GLM-5.3-Flash frontmatter 显式绑定，主职独立视觉验收：亲自读截图对照 VISUAL ACCEPTANCE、检查用户可见回归；diff 仅作上下文）。宿主上该绑定不可用（启动报 account-connection-unavailable 等连接错误）时视觉高保障路线 fail closed：向用户报告绑定不可用，绝不退回文本模型（glm-reviewer 或主会话）充当视觉终审
 
 纪律：
 
@@ -170,6 +170,7 @@ delegate/full 的唯一实施基底是 ZCode 原生 Workflow。主会话按以�
 - 视觉通道需要 `glm-conductor:visual-implementer` 在 Agent 工具的可用类型列表中；assurance: high 按模态核对 `glm-conductor:glm-reviewer` / `glm-conductor:visual-reviewer`
 - delegate/full 的文本实施经原生 Workflow 执行（worker persona 由编译器内嵌生成源），无需子智能体预检；solo 与 assurance: standard 无需任何预检
 - 模型与思考档位已固定在子智能体定义中，调用时不得附加模型覆盖
+- 视觉高保障终审（assurance: high 视觉任务）必须使用多模态 `visual-reviewer`：其 GLM-5.3-Flash 绑定在宿主上不可用（启动报 account-connection-unavailable 等连接错误）时按 fail closed 处理——向用户报告绑定不可用并停止视觉高保障路线，绝不退回文本模型充当视觉终审
 - 视觉通道额外要求：确认截图证据可以落盘并由实施者读取；不可得即停止视觉通道
 - 任何所需角色缺失、不可用或名称不符时：停止该通道，告知用户检查插件安装（Settings → Plugin Management），不得静默替换为其他子智能体类型
 
