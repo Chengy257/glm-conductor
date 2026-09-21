@@ -172,6 +172,7 @@ v2.4 有意选择粗粒度仓库级写不变量（取代 v2.3 的 per-unit 租�
 
 - **永不自动过期**：全代码无 TTL / generation / heartbeat / 按时间过期的逻辑。`created_at` 仅为诊断信息，守卫判定绝不读取它——残留记录无论多旧一律冲突。恢复只有两条路：关联任务到达终态（`task.complete` / `fail` / `cancel` 自动释放）或操作者在 `writer-show` inspect 之后显式 `writer-release --force`
 - **并发安全**：读-改-写全程走 `durable_io.atomic_update_json`（独占锁 + 原子替换），两个并发 acquire 必有一方看到对方落盘的持有者；同 task 重复 acquire 幂等成功；冲突零写入并报出持有者 `task_id` 与 `workflow_run_id`
+- **生命周期强制（AF-04）**：写者守卫是 Conductor 生命周期不变式，在委派 run 注册与完成两处强制——`record_workflow_run`（delegate/full）要求当前任务已持有写预约（缺失 / 他人持有即 ValueError），既有落盘成功后把 run id 幂等补挂进预约记录；完成守卫查 1 对已注册委派 run（`workflow_run_id` 非空）的任务在守卫缺失时同样拦截（missing writer reservation）。协议之外的裸宿主 Workflow 调用（不经 Conductor 生命周期的 CreateWorkflow）不在此保证范围内——守卫不宣称拦截每一次 CreateWorkflow
 - 释放权威键是 `task_id`（`workflow_run_id` 仅诊断）；非持有者释放被拒绝且绝不代删他人预约；Workflow 内部并行在编译期 ownership 验证之后是允许的——守卫约束的是**仓库之间**的第二条写 Workflow
 
 ## 8. 任务状态（七态）
@@ -235,7 +236,7 @@ Workflow 结束后，GLM-5.3 主会话必须亲自完成主会话验证（main v
 - **输入五要素**：ROLE / STATED GOAL / ACCUMULATED CHANGE SET / INTERFACES AND CONSTRAINTS / VERIFICATION EVIDENCE——缺任何一项应要求补齐而不是猜测
 - **裁决词汇**：`ship / fix-first / rethink`；fix-first / rethink 修复后主验证必须先刷新（diff 变了 change_id 必变），复审必须换**全新评审者**——旧裁决不因修复而复活
 - **持久化最小化**：仅一条任务级 review 记录（`runtime.task.record_review`；CLI `review-record`）：`{reviewer, verdict, change_id, findings?}` + `review_recorded` 事件。v2.3 的评审调用真实性链、tool-use ID 证明、receipts 目录、runner 身份、journal/state 双镜像全部不存在
-- **模型绑定**：评审者 agent frontmatter **无 `model` 字段**——继承宿主/会话模型（W0 发现：单模型宿主上不可解析的固定 model id 会让评审者确定性无法启动）；宿主可移植性由此成立
+- **模型绑定**：文本/视觉审查者分治（v2.4 AF-02）——`glm-reviewer` frontmatter **无 `model` 字段**，继承宿主/会话模型（W0 发现：单模型宿主上不可解析的固定 model id 会让评审者确定性无法启动），文本审查契约继承即可满足；`visual-reviewer` 契约要求直接读图，frontmatter **必须显式绑定**多模态 `GLM-5.3-Flash`（继承纯文本主模型会启动成功但丧失读图契约能力），绑定不可用的宿主上视觉高保障路线 fail closed
 
 ## 12. 完成守卫（四查）
 
@@ -246,8 +247,10 @@ Workflow 结束后，GLM-5.3 主会话必须亲自完成主会话验证（main v
 四查（按序，首败即返；求值根 = `resolve_repository_root` 生效仓库根）：
 
 ```
-1. writer_guard ：仓库无其他任务的活跃写预约（持有者是自己放行——完成门即释放点）
-                  否 → block：逐字报出持有者 task_id 与 workflow_run_id
+1. writer_guard ：仓库无其他任务的活跃写预约（持有者是自己放行——完成门即释放点）；
+                  已注册委派 run（workflow_run_id 非空）而守卫缺失同样拦截
+                  否 → block：他人持有——逐字报出持有者 task_id 与 workflow_run_id；
+                  守卫缺失——missing writer reservation（点名任务与 run id）
 2. ownership    ：git 实际改动路径 ⊆ dag 全节点 ownership 并集
                   否 → block：越界路径逐条列出 + 参与比对的节点 id
 3. validation   ：validation.status == "passed" 且 validation.change_id == 当前 change_id

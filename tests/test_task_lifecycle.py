@@ -24,7 +24,9 @@
     - journal 词汇精确：TASK_JOURNAL_EVENTS 恰十名（Phase 3 Q1 恰增
       quota_resume_confirmed）；全生命周期事件名
       逐条不多不少落在词汇内，无宿主子代理生命周期词汇；
-    - record_workflow_run：state + adapter.record_run 双镜像 +
+    - record_workflow_run：delegate/full 写者守卫前置（预约缺失 /
+      他人持有拒绝；solo/audit 放行——AF-04）+ 注册成功幂等补挂
+      run id 进守卫记录；state + adapter.record_run 双镜像 +
       workflow_started 事件；非法 id / 终态拒绝；
     - v2.3 遗留任务：load_task 与全部变更入口拒绝并携带处置指引；
     - ownership scope 并集 / 相关改动文件集派生（W4 共用）：形状容错、
@@ -239,6 +241,7 @@ class TestWorkflowRunMirror(LifecycleCase):
     def test_record_run_mirrors_state_and_adapter(self):
         """record_workflow_run：state 落盘 + adapter 单据 + workflow_started 事件。"""
         self.make_task()
+        writer_guard.acquire(self.repo, "life-cycle-a", "run-pre")
         st = task.record_workflow_run(self.repo, "life-cycle-a", "run-123")
         self.assertEqual(st["workflow_run_id"], "run-123")
         self.assertEqual(self.load()["workflow_run_id"], "run-123")
@@ -250,16 +253,23 @@ class TestWorkflowRunMirror(LifecycleCase):
                          ["route_selected", "workflow_started"])
         self.assertEqual(
             self.events()[-1]["workflow_run_id"], "run-123")
+        # 注册成功后守卫记录幂等补挂本 run id（AF-04，inspect 可见）
+        self.assertEqual(
+            writer_guard.inspect(self.repo)["workflow_run_id"], "run-123")
 
     def test_record_run_reruns_replace(self):
         """重复记录 → adapter 关联整条替换（一任务一活跃 run 口径）。"""
         self.make_task()
+        writer_guard.acquire(self.repo, "life-cycle-a")
         task.record_workflow_run(self.repo, "life-cycle-a", "run-1")
         task.record_workflow_run(self.repo, "life-cycle-a", "run-2")
         self.assertEqual(self.load()["workflow_run_id"], "run-2")
         self.assertEqual(
             workflow_adapter.load_run("life-cycle-a")["workflow_run_id"],
             "run-2")
+        # 守卫记录随最后一次注册更新到最新 run id
+        self.assertEqual(
+            writer_guard.inspect(self.repo)["workflow_run_id"], "run-2")
 
     def test_record_run_invalid_refused(self):
         """workflow_run_id 空串 / 非 str → 拒绝且 state 零改动。"""
@@ -276,6 +286,99 @@ class TestWorkflowRunMirror(LifecycleCase):
         with self.assertRaises(ValueError):
             task.record_workflow_run(self.repo, "life-cycle-a", "run-9")
         self.assertIsNone(self.load()["workflow_run_id"])
+
+
+# —— 2b. 委派 run 注册的写者守卫前置（AF-04） ——
+
+class TestWorkflowRunGuardPrecondition(LifecycleCase):
+    """record_workflow_run 的生命周期强制（AF-04）：
+
+    delegate/full 注册必须先持有本仓库写者守卫（缺失 / 他人持有即
+    ValueError）；注册成功后把 run id 幂等补挂进守卫记录（同任务
+    acquire 重入更新语义，补挂竞态冲突宁可拒绝注册）；solo/audit 不
+    持有写 Workflow，无此前置。
+    """
+
+    def test_delegate_without_guard_refused(self):
+        """delegate 无守卫注册 → ValueError（missing writer reservation）。"""
+        self.make_task()
+        with self.assertRaises(ValueError) as ctx:
+            task.record_workflow_run(self.repo, "life-cycle-a", "run-1")
+        message = str(ctx.exception)
+        self.assertIn("守卫", message)
+        self.assertIn("missing writer reservation", message)
+        # 零副作用：state / adapter / journal / 守卫四无变化
+        self.assertIsNone(self.load()["workflow_run_id"])
+        self.assertNotIn("workflow_started", self.names())
+        self.assertIsNone(workflow_adapter.load_run("life-cycle-a"))
+        self.assertIsNone(writer_guard.inspect(self.repo))
+
+    def test_full_without_guard_refused(self):
+        """full 模式同样受写者守卫前置约束。"""
+        self.make_task(route={"mode": "full", "assurance": "high"})
+        with self.assertRaises(ValueError) as ctx:
+            task.record_workflow_run(self.repo, "life-cycle-a", "run-1")
+        self.assertIn("missing writer reservation", str(ctx.exception))
+        self.assertIsNone(self.load()["workflow_run_id"])
+
+    def test_guard_of_other_task_refused_reports_holder(self):
+        """守卫属其它任务 → ValueError 报持有者 task_id / run id。"""
+        self.make_task()
+        writer_guard.acquire(self.repo, "guard-holder", "run-0")
+        with self.assertRaises(ValueError) as ctx:
+            task.record_workflow_run(self.repo, "life-cycle-a", "run-1")
+        message = str(ctx.exception)
+        self.assertIn("guard-holder", message)
+        self.assertIn("run-0", message)
+        # 零副作用：state 不落 run 关联，他人守卫原样保留
+        self.assertIsNone(self.load()["workflow_run_id"])
+        self.assertEqual(
+            writer_guard.inspect(self.repo)["task_id"], "guard-holder")
+
+    def test_own_guard_registers_and_attaches_run_id(self):
+        """本任务持守卫 → 注册成功，守卫记录补挂 run id（inspect 可见）。"""
+        self.make_task()
+        writer_guard.acquire(self.repo, "life-cycle-a")
+        before = writer_guard.inspect(self.repo)
+        st = task.record_workflow_run(self.repo, "life-cycle-a", "run-77")
+        self.assertEqual(st["workflow_run_id"], "run-77")
+        holder = writer_guard.inspect(self.repo)
+        self.assertEqual(holder["task_id"], "life-cycle-a")
+        self.assertEqual(holder["workflow_run_id"], "run-77")
+        # 同任务重入是更新语义：created_at 保持首次 acquire 时刻
+        self.assertEqual(holder["created_at"], before["created_at"])
+
+    def test_solo_records_without_guard(self):
+        """solo 无守卫注册放行（无委派 run 的合法路径），且不触碰守卫。"""
+        self.make_task(route={"mode": "solo"})
+        st = task.record_workflow_run(self.repo, "life-cycle-a", "run-s1")
+        self.assertEqual(st["workflow_run_id"], "run-s1")
+        self.assertEqual(self.names(),
+                         ["route_selected", "workflow_started"])
+        # solo/audit 不持有写 Workflow：注册前后守卫记录始终缺失
+        self.assertIsNone(writer_guard.inspect(self.repo))
+
+    def test_audit_records_without_guard(self):
+        """audit 无守卫注册同样放行。"""
+        self.make_task(route={"mode": "audit"})
+        st = task.record_workflow_run(self.repo, "life-cycle-a", "run-a1")
+        self.assertEqual(st["workflow_run_id"], "run-a1")
+        self.assertIsNone(writer_guard.inspect(self.repo))
+
+    def test_attach_conflict_refuses_registration(self):
+        """补挂竞态（前置检查后守卫被其它任务抢注）→ 拒绝注册并报冲突方。"""
+        self.make_task()
+        writer_guard.acquire(self.repo, "life-cycle-a")
+        conflict = {"task_id": "thief-task", "workflow_run_id": "run-thief",
+                    "created_at": "2026-09-21T00:00:00.000Z"}
+        with mock.patch.object(
+                writer_guard, "acquire",
+                return_value={"ok": False, "conflict": conflict}):
+            with self.assertRaises(ValueError) as ctx:
+                task.record_workflow_run(self.repo, "life-cycle-a", "run-8")
+        message = str(ctx.exception)
+        self.assertIn("thief-task", message)
+        self.assertIn("run-thief", message)
 
 
 # —— 3. 任务级验证记录（change_id） ——
@@ -575,6 +678,7 @@ class TestJournalVocabulary(LifecycleCase):
         self.init_git()
         self.write_file("src/build.py")
         self.make_task(dag=[self.node("build")])
+        writer_guard.acquire(self.repo, "life-cycle-a", "run-42")
         task.record_workflow_run(self.repo, "life-cycle-a", "run-42")
         task.enter_waiting_quota(self.repo, "life-cycle-a")
         task.exit_waiting_quota(self.repo, "life-cycle-a")

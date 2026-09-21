@@ -16,7 +16,10 @@
          runtime.writer_guard.inspect(生效仓库根) 为空即过；持有者是
          本任务同样放行（本任务 Workflow 的预约要到终态收尾才释放，
          完成门自身就是释放点）；被其他任务持有 → 拦截并逐字报出
-         持有者 task_id 与 workflow_run_id；
+         持有者 task_id 与 workflow_run_id；已注册委派 run
+         （state.workflow_run_id 非空）而守卫缺失 → 拦截（missing
+         writer reservation——委派任务完成前必须仍持有守卫，AF-04）；
+         无 run id（solo/audit 或未注册委派 run）守卫缺失仍放行；
       2. ownership：实际改动路径（ownership.git_touched_files）全部
          落在 dag 全节点 ownership scope 并集内
          （task.ownership_scopes + ownership.classify_paths）；越界路径
@@ -216,6 +219,25 @@ def _guard_reason(task_id, holder) -> str:
            _display_id(holder.get("workflow_run_id"))))
 
 
+def _reservation_missing_reason(task_id, workflow_run_id) -> str:
+    """查 1 失败理由（委派任务守卫缺失）：点名任务与已注册的 run id。
+
+    已注册委派 run（workflow_run_id 非空）的任务完成前必须仍持有本
+    仓库写者守卫（AF-04）；预约缺失说明生命周期不变式已破（记录被
+    误清 / 损坏），绝不放行。
+    """
+    return (
+        "完成被阻断：任务 %s 已注册委派 run，但仓库写者守卫预约缺失"
+        "（missing writer reservation——委派任务完成前必须仍持有本仓库"
+        "写者守卫）。\n"
+        "- 任务 task_id：%s\n"
+        "- 已注册 workflow_run_id：%s\n"
+        "请先经 cli.py writer-show 查看预约状态，核实守卫记录是否被"
+        "误清；为本任务补回写预约（cli.py writer-acquire <repo_root> "
+        "<task_id> --run-id <workflow_run_id>）后再请求完成。"
+        % (task_id, task_id, workflow_run_id))
+
+
 def _ownership_reason(task_id, out_of_scope, node_ids) -> str:
     """查 2 失败理由：越界路径逐条列出，附参与比对的 dag 节点 id。"""
     lines = [
@@ -323,7 +345,9 @@ def evaluate_completion(repo_root, task_id) -> dict:
     node_ids = _dag_node_ids(st)
     scopes = task.ownership_scopes(st)
 
-    # 查 1：无活跃写 workflow（持有者是自己放行——完成门就是释放点）
+    # 查 1：无活跃写 workflow（持有者是自己放行——完成门就是释放点）；
+    # 已注册委派 run 的任务在守卫缺失时同样拦截（AF-04：missing
+    # writer reservation——完成前必须仍持有守卫；无 run id 放行）
     holder = writer_guard.inspect(effective_root)
     if holder is not None and holder.get("task_id") != task_id:
         return _block(
@@ -331,6 +355,14 @@ def evaluate_completion(repo_root, task_id) -> dict:
             {"holder_task_id": holder.get("task_id"),
              "holder_workflow_run_id": holder.get("workflow_run_id")},
             _guard_reason(task_id, holder))
+    if holder is None:
+        registered_run_id = st.get("workflow_run_id")
+        if isinstance(registered_run_id, str) and registered_run_id != "":
+            return _block(
+                "writer_guard",
+                {"missing_writer_reservation": True,
+                 "workflow_run_id": registered_run_id},
+                _reservation_missing_reason(task_id, registered_run_id))
 
     # 查 2：实际改动 ⊆ dag ownership 并集（越界路径逐条点名）
     touched = ownership.git_touched_files(effective_root)

@@ -25,9 +25,13 @@
         ValueError（带 LEGACY_STATE_GUIDANCE 处置指引），绝不静默当作
         v2.4 任务返回。
     record_workflow_run(repo_root, task_id, workflow_run_id)
-        记录委派 run 关联：state.workflow_run_id 落盘 + 镜像到
-        runtime.workflow.adapter.record_run（run-id 关联单据）+
-        workflow_started 事件。
+        记录委派 run 关联：delegate/full 模式前置要求当前任务持有本
+        仓库写者守卫（预约缺失 / 属其它任务即 ValueError——委派注册
+        必须先持有本仓库写预约，AF-04）；既有落盘（state.workflow_run_id
+        + 镜像 runtime.workflow.adapter.record_run 的 run-id 关联单据 +
+        workflow_started 事件）成功后把 run id 幂等补挂进守卫记录
+        （同任务 acquire 重入更新语义；补挂冲突宁可拒绝注册）。
+        solo/audit 不持有写 Workflow，无此前置。
     record_validation(repo_root, task_id, status, summary=None, commands=None)
         任务级验证记录（status ∈ passed/failed）；change_id 经
         runtime.change_id.compute_change_id 现算现存（相关改动文件集 =
@@ -348,11 +352,22 @@ def load_task(repo_root, task_id) -> "dict | None":
 def record_workflow_run(repo_root, task_id, workflow_run_id) -> dict:
     """记录委派 Workflow run 关联，返回更新后的状态 dict。
 
-    三件事（顺序固定）：
+    四步（顺序固定）：
+      0. 写者守卫前置（仅 delegate / full，AF-04）：在生效仓库根
+         （resolve_repository_root：绑定优先、账本根回退）上
+         writer_guard.inspect——预约缺失 → ValueError（delegated run
+         注册必须先持有本仓库写者守卫——missing writer reservation，
+         请先经宿主侧 writer-acquire 取得写预约）；预约属其它任务 →
+         ValueError（报出持有者 task_id / workflow_run_id）。
+         solo/audit 不持有写 Workflow，无此前置；
       1. state.workflow_run_id 落盘（非空 str 强制；终态任务冻结）；
       2. 镜像到 runtime.workflow.adapter.record_run（run-id 关联单据，
          同任务重复调用整条替换——「一任务一活跃 run」口径）；
-      3. 落 workflow_started 事件（含 workflow_run_id）。
+      3. 落 workflow_started 事件（含 workflow_run_id）；
+      4. 幂等补挂（仅 delegate / full）：writer_guard.acquire 以本
+         run id 更新本任务既有预约（同任务重入更新语义，writer-show /
+         inspect 由此可见 run id）；补挂冲突（步骤 0 与本步之间守卫
+         被其它任务抢注的竞态）→ ValueError 报冲突方——宁可拒绝注册。
     workflow_run_id 结构非法 → ValueError（adapter 侧 WorkflowRunError
     口径与本模块 ValueError 口径在此对齐，先校验后写盘零副作用）。
     """
@@ -362,12 +377,45 @@ def record_workflow_run(repo_root, task_id, workflow_run_id) -> dict:
             % (workflow_run_id,))
     st = _load_v24_state(repo_root, task_id)
     _ensure_not_terminal(st, "record_workflow_run")
+    route = st.get("route")
+    mode = route.get("mode") if isinstance(route, dict) else None
+    effective_root = None
+    if mode in ("delegate", "full"):
+        # AF-04 前置：委派 run 注册必须由持有本仓库写者守卫的任务发起
+        effective_root = state.resolve_repository_root(st, repo_root)
+        holder = writer_guard.inspect(effective_root)
+        if holder is None:
+            raise ValueError(
+                "record_workflow_run：委派 run 注册必须先持有本仓库写者"
+                "守卫（missing writer reservation）——任务 %s 当前无写"
+                "预约，请先经宿主侧 writer-acquire 取得写预约再注册"
+                % task_id)
+        if holder.get("task_id") != task_id:
+            raise ValueError(
+                "record_workflow_run：本仓库写者守卫正被其他任务持有"
+                "（task_id=%r，workflow_run_id=%r），任务 %s 不得注册"
+                "委派 run"
+                % (holder.get("task_id"),
+                   holder.get("workflow_run_id"), task_id))
     st["workflow_run_id"] = workflow_run_id
     state.save_state(repo_root, st)
     workflow_adapter.record_run(task_id, workflow_run_id)
     journal.append_event(
         repo_root, task_id,
         {"event": "workflow_started", "workflow_run_id": workflow_run_id})
+    if effective_root is not None:
+        # 幂等补挂：把本 run id 更新进本任务既有预约（同任务 acquire
+        # 重入更新语义）；竞态冲突 → 宁可拒绝注册
+        outcome = writer_guard.acquire(
+            effective_root, task_id, workflow_run_id=workflow_run_id)
+        if not outcome.get("ok"):
+            conflict = outcome.get("conflict") or {}
+            raise ValueError(
+                "record_workflow_run：补挂 run id 时本仓库写者守卫已被"
+                "其他任务持有（task_id=%r，workflow_run_id=%r），拒绝"
+                "本次注册"
+                % (conflict.get("task_id"),
+                   conflict.get("workflow_run_id")))
     return st
 
 

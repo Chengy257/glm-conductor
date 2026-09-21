@@ -10,7 +10,7 @@ description: GLM Conductor v2.4 完成守卫契约（completion guard）。解�
 v2.4 分工（冻结）：GLM Conductor 拥有语义编排与验收；ZCode 拥有执行编排。Conductor 侧的确定性强制点只剩两个：
 
 1. **Stop 完成守卫**（钩子 `hooks/stop_gate.py`）——任务完成的唯一合法通道；
-2. **仓库写者守卫**（`runtime/writer_guard.py` 的仓库级写预约，经 CLI `writer-acquire/release/show` 操作）——一个 Git 仓库至多一个活跃 Conductor 写 Workflow。
+2. **仓库写者守卫**（`runtime/writer_guard.py` 的仓库级写预约，经 CLI `writer-acquire/release/show` 操作）——一个 Git 仓库至多一个活跃 Conductor 写 Workflow。写者守卫是 Conductor 生命周期不变式，在委派 run 注册（`record_workflow_run` 前置）与完成（完成守卫查 1）两处强制；协议之外的裸宿主 Workflow 调用（不经 Conductor 生命周期的 CreateWorkflow）不在此保证范围内。
 
 派发面钩子（实施者派发拦截、Bash 命令分类、派发时注入）已随 v2.3 执行面整体退役：委派实施不再有钩子前置拦截，完成守卫是唯一确定性防线。绕过过程的任务（越界改动、未验证、未审查）会在收尾时被守卫拦下。
 
@@ -50,7 +50,7 @@ Stop 触发时，守卫只对**触发域内**的任务求值；域外零介入�
 
 | # | 检查 | 通过条件 | 失败形态 |
 | --- | --- | --- | --- |
-| 1 | 仓库写者守卫 | 仓库写预约不存在，或持有者就是本任务（本任务 Workflow 的预约要到终态收尾才释放——完成守卫自身就是释放点） | 其他任务持有：拦截并逐字报出持有者 task_id 与 workflow_run_id |
+| 1 | 仓库写者守卫 | 仓库写预约不存在，或持有者就是本任务（本任务 Workflow 的预约要到终态收尾才释放——完成守卫自身就是释放点） | 其他任务持有：拦截并逐字报出持有者 task_id 与 workflow_run_id；已注册委派 run（workflow_run_id 非空）而守卫缺失：拦截（missing writer reservation，点名任务与 run id）——无 run id（solo/audit 或未注册委派 run）守卫缺失仍放行 |
 | 2 | ownership | 实际改动路径（git touched）全部落在 DAG 全节点 ownership scope 并集内 | 越界路径逐条列出，并附参与比对的 DAG 节点 id |
 | 3 | 主会话验证 | `validation.status == "passed"` 且 `validation.change_id` 等于当前 change_id | 未验证 / 验证记录过期 |
 | 4 | 独立审查 | 仅 `route.assurance == "high"` 时受查：`review.verdict == "ship"` 且 `review.change_id` 等于当前 change_id | 未审查 / 裁决非 ship / 裁决过期；standard 保障任务跳过本查 |

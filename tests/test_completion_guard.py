@@ -7,10 +7,12 @@
 
 覆盖（W4 单元规格）：
     - evaluate_completion 单查失败各出对应理由（恰好一条中文、可操作）：
-      writer_guard（他人持有 → 逐字报持有者 task_id / workflow_run_id）、
-      ownership（越界路径逐条列出 + dag 节点 id）、validation（无通过
-      记录 / failed / 编辑后 change_id 过期）、review（high 无 ship /
-      fix-first / ship 但过期）——四查按序首败即返（顺序锚定）；
+      writer_guard（他人持有 → 逐字报持有者 task_id / workflow_run_id；
+      已注册委派 run 而守卫缺失 → missing writer reservation 拦截，
+      无 run id 放行——AF-04）、ownership（越界路径逐条列出 + dag 节点
+      id）、validation（无通过记录 / failed / 编辑后 change_id 过期）、
+      review（high 无 ship / fix-first / ship 但过期）——四查按序首败
+      即返（顺序锚定）；
     - 全过 → allow + task.complete（status=completed + 写者守卫释放 +
       journal task_completed 事件）；自持有守卫不拦查 1；
     - 新鲜度绑定 owned touched 文件（AF-01）：目录前缀 / src/** /
@@ -138,6 +140,17 @@ class CompletionGuardCase(unittest.TestCase):
         self.assertTrue(outcome["ok"])
         return outcome
 
+    def register_run_manually(self, run_id="run-reg-1", task_id=None):
+        """不经 record_workflow_run 把已注册 run id 直接落进任务状态。
+
+        record_workflow_run 自 AF-04 起要求持有写者守卫，而守卫缺失
+        正是这里被测的场景——故直接手工落 workflow_run_id（同
+        tests 手工 validation 的既有手法）。
+        """
+        st = self.load(task_id)
+        st["workflow_run_id"] = run_id
+        state.save_state(self.repo, st)
+
     def evaluate(self, task_id=None):
         """驱动被测入口 evaluate_completion（缺省任务）。"""
         return stop_gate.evaluate_completion(
@@ -177,6 +190,47 @@ class TestGuardCheck(CompletionGuardCase):
         self.assertEqual(result["decision"], "block")
         self.assertEqual(result["check"], "validation")
         self.assertNotIn("writer_guard", result["check"])
+
+    def test_delegated_missing_reservation_blocks(self):
+        """已注册委派 run 而守卫缺失 → 查 1 拦截（missing writer reservation）。"""
+        self.gate_ready()
+        self.make_task()
+        self.register_run_manually("run-reg-1")
+        result = self.evaluate()
+        self.assertEqual(result["decision"], "block")
+        self.assertEqual(result["check"], "writer_guard")
+        self.assertTrue(result["detail"]["missing_writer_reservation"])
+        self.assertEqual(result["detail"]["workflow_run_id"], "run-reg-1")
+        # 理由点名任务与已注册的 run id，并携带 missing writer reservation 口径
+        self.assertIn("missing writer reservation", result["reason"])
+        self.assertIn(self.tid, result["reason"])
+        self.assertIn("run-reg-1", result["reason"])
+        # 失败路径零副作用：状态不变、守卫仍缺失
+        self.assertEqual(self.load()["status"], "active")
+        self.assertIsNone(writer_guard.inspect(self.bound_root()))
+
+    def test_delegated_own_holder_proceeds_to_next_checks(self):
+        """已注册委派 run + 守卫属本任务 → 查 1 放行进入后续检查。"""
+        self.gate_ready()
+        self.make_task()
+        self.acquire_guard(self.tid, "run-reg-1")
+        self.register_run_manually("run-reg-1")
+        result = self.evaluate()
+        self.assertEqual(result["decision"], "block")
+        self.assertEqual(result["check"], "validation")
+        self.assertNotIn("writer_guard", result["check"])
+
+    def test_solo_without_run_id_passes_missing_guard(self):
+        """无 run id（solo/audit 等未注册委派 run）守卫缺失仍放行查 1。"""
+        self.gate_ready()
+        self.make_task(route={"mode": "solo", "assurance": "standard"})
+        result = self.evaluate()
+        # 查 1 已过（守卫缺失但无 run id）：拦在查 3 验证
+        self.assertEqual(result["decision"], "block")
+        self.assertEqual(result["check"], "validation")
+        # 验证通过后照常放行收尾——缺失守卫不拦无委派 run 的任务
+        task.record_validation(self.repo, self.tid, "passed")
+        self.assertEqual(self.evaluate()["decision"], "allow")
 
 
 # —— 2. 查 2：ownership ——
