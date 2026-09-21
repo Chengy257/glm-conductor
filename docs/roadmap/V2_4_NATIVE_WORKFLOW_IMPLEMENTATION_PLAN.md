@@ -11,9 +11,17 @@
 - **Phase 2:** COMPLETE.
 - **Phase 3:** COMPLETE.
 - **Phase 4:** COMPLETE.
-- **Post-implementation audit:** ACTIVE — execute `docs/roadmap/V2_4_AUDIT_FIX_CLOSEOUT_PLAN.md` and `docs/roadmap/V2_4_AUDIT_FIX_CLOSEOUT_IMPLEMENTATION_SPEC.md` before merge to `main`.
+- **Post-implementation audit-fix:** IMPLEMENTED; AF-01–AF-06 evidence recorded.
+- **Final release closeout:** ACTIVE — execute `docs/roadmap/V2_4_FINAL_RELEASE_CLOSEOUT_PLAN.md` and `docs/roadmap/V2_4_FINAL_RELEASE_CLOSEOUT_IMPLEMENTATION_SPEC.md` before merge to `main`.
 
-This audit-fix closeout is **not Phase 5** and does not reopen the v2.4 architecture. It contains two merge-blocking fixes (change freshness over ownership scopes; visual-reviewer multimodal capability), two lifecycle hardening items (quota-resume CLI; writer-guard lifecycle enforcement), and final fresh-host/fresh-session proof.
+The final closeout is **not Phase 5** and does not reopen the v2.4 architecture. It contains only:
+
+1. FR-01 — release writer guard from the task's effective bound repository root;
+2. FR-02 — literal fresh-session reviewer proof after cache refresh;
+3. FR-03 — synchronize README / CHANGELOG / docs index / master-plan truth;
+4. FR-04 — final targeted verification + one full regression + CI evidence.
+
+The earlier audit-fix closeout remains historical implementation evidence. Its prior `MERGE_READY` statement is superseded until FR-01–FR-04 pass.
 
 Phase implementation specs remain historical execution authority for the completed work:
 
