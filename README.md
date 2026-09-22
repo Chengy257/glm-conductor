@@ -2,7 +2,7 @@
 
 **English** | [简体中文](./README.zh-CN.md)
 
-![Version](https://img.shields.io/badge/version-2.4.0-blue.svg)
+![Version](https://img.shields.io/badge/version-2.4.1-blue.svg)
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
 ![ZCode Plugin](https://img.shields.io/badge/ZCode-plugin-green.svg)
 ![Models](https://img.shields.io/badge/models-GLM--5.3%20%2F%20GLM--5.3--Flash-orange.svg)
@@ -65,12 +65,12 @@ The current recommended assignment is intentionally simple:
 | Role | Default model | Responsibility |
 | --- | --- | --- |
 | Main session | **GLM-5.3** | planning, architecture, routing, validation, acceptance |
-| Workflow workers | **session model** | bounded text implementation inside Native Workflows |
+| Workflow workers | **GLM-5.3-Flash (explicit, required)** | bounded text implementation inside Native Workflows — every delegate/full submission must carry an explicit provider-qualified `…/GLM-5.3-Flash` `subagent_model` selected through the model preflight (`workflow-model-select`); omitting it silently inherits the main-session model and is a hard protocol violation (v2.4.0 defect A) |
 | Visual implementer | **GLM-5.3-Flash** | bounded multimodal implementation (Custom Subagent exception) |
 | Text reviewer | **host/session model** | fresh-context, read-only final review |
 | Visual reviewer | **GLM-5.3-Flash** | fresh-context visual review (pinned multimodal binding; fails closed if unavailable) |
 
-Text workers and the text reviewer inherit the host/session model — the text reviewer deliberately carries no pinned model, which keeps it startable across hosts and plans; the two visual roles are pinned to the provider-qualified multimodal GLM-5.3-Flash binding, and the visual high-assurance route fails closed when that binding is unavailable. These are current assignments, not permanent architectural identities.
+Workflow workers never inherit the session model: the compiled TypeScript is model-agnostic (the host binds one model at run submission), so Conductor makes the explicit Flash selection a launch gate — exactly one configured provider-qualified Flash id is auto-selected, zero candidates fails closed, and multiple candidates require an explicit choice. The text reviewer deliberately carries no pinned model, which keeps it startable across hosts and plans; the two visual roles are pinned to the provider-qualified multimodal GLM-5.3-Flash binding, and the visual high-assurance route fails closed when that binding is unavailable. These are current assignments, not permanent architectural identities.
 
 ## Native Workflow execution
 
@@ -82,6 +82,7 @@ Canonical Conductor DAG → Workflow Compiler → ZCode Native Workflow
 
 - A Work Unit is a **static DAG node**: `id`, `objective`, `depends_on`, `ownership`, plus optional `interfaces` / `constraints` / `local_check`. It describes what must be done, not where execution currently is — Conductor persists no per-node runtime state.
 - The compiler validates the DAG, detects ownership overlaps between nodes that could run concurrently (conflicts are serialized or rejected before launch), generates worker instructions from one canonical persona, and emits a deterministic TypeScript workflow. It never auto-executes — launching the run is the main session's host action.
+- Before any delegate/full submission the main session resolves the worker model through a hard preflight gate (`workflow-model-select`): host model list → configured exact ids → explicit provider-qualified GLM-5.3-Flash selection → `CreateWorkflow(subagent_model=<exact id>)`. Selection failure means no launch; the main-session GLM-5.3 is never accepted as a worker fallback.
 - ZCode owns everything about the run: parallelism, retries, stop/resume, background execution, and observability. Conductor records only the task ↔ run-id association.
 
 ## Minimal deterministic assurance
@@ -99,9 +100,9 @@ The main session still owns final acceptance: worker reports are claims, while r
 
 Quota handling is not a routing axis. A delegated task that runs out of provider quota can enter `waiting_quota` and be woken by a native ZCode Scheduled Task:
 
-- `manual` (default): you resume when you choose. `auto`: a scheduled turn refreshes provider quota; if it is usable, and you have explicitly authorized auto resume within `max_resumes`, the same workflow run is resumed.
-- Each actual resume consumes one unit of the bounded budget; once the budget is exhausted, the task transitions to `waiting_user`.
-- No quota epochs, subscriptions, watcher processes, or window bookkeeping exist in v2.4. Quota diagnostics are read-only (`/glm-conductor:quota` or `quota-resolve`); the resume lifecycle runs through stable CLI commands (`quota-wait` / `quota-resume-authorize` / `quota-resume-decision` / `quota-resume-confirm`).
+- `manual` (default): you resume when you choose. `auto`: continuity is **armed before work** — a future native Scheduled Task is created and its automation id bound to the task (`quota-automation-bind`), and `quota-continuity-preflight` must pass (exit 0) before the first quota-consuming Workflow launch and before every automatic resume; an unarmed auto task fails preflight with exit code 2 and the scheduled decision stays `remain-waiting` (`continuity-unarmed`).
+- Recurring scheduled tasks are preferred (they stay armed across successful wakes); a one-shot fallback must create and bind its successor activation before resuming. Each actual resume consumes one unit of the bounded `max_resumes` budget; once the budget is exhausted, the task transitions to `waiting_user`.
+- No quota epochs, subscriptions, watcher processes, or window bookkeeping exist. Quota diagnostics are read-only (`/glm-conductor:quota` or `quota-resolve`); the resume and arming lifecycle runs through stable CLI commands (`quota-wait` / `quota-resume-authorize` / `quota-resume-decision` / `quota-resume-confirm` / `quota-automation-bind` / `quota-automation-clear` / `quota-continuity-preflight`).
 
 > The account-level **Global Quota Clock** is no longer part of GLM Conductor. It is planned as a separate future companion project; see its extraction inventory at [`docs/roadmap/GLOBAL_QUOTA_CLOCK_EXTRACTION_INVENTORY.md`](./docs/roadmap/GLOBAL_QUOTA_CLOCK_EXTRACTION_INVENTORY.md).
 
@@ -158,7 +159,7 @@ assurance: standard
 reason: implementation is bounded by explicit interfaces, owned files, and deterministic verification
 ```
 
-For `delegate`/`full`, the main session then builds the canonical DAG, compiles it with `v24-compile`, acquires the repository writer guard, launches the Native Workflow, and after the run finishes records the run association and validates the result.
+For `delegate`/`full`, the main session then builds the canonical DAG, compiles it with `v24-compile`, resolves the explicit GLM-5.3-Flash worker model through `workflow-model-select` (a hard gate — no launch on selection failure, never omit `subagent_model`), acquires the repository writer guard, launches the Native Workflow, and after the run finishes records the run association and validates the result. Tasks authorized for unattended continuation arm their future scheduled activation before launch (authorize → create Scheduled Task → bind → preflight pass → launch).
 
 Useful entry points:
 
@@ -174,6 +175,8 @@ All runtime operations go through one CLI (`python <plugin-root>/runtime/cli.py 
 | Command | Purpose |
 | --- | --- |
 | `quota-resolve <repo> [--force-refresh]` · `quota-wait` / `quota-resume-authorize` / `quota-resume-decision` / `quota-resume-confirm` | four-state provider quota resolution (read-only) and the bounded resume lifecycle (wait / authorize / decision / confirm) |
+| `quota-automation-bind` / `quota-automation-clear` / `quota-continuity-preflight` | auto-continuity arming lifecycle (bind / clear / preflight; `ready=false` → exit 2 as the launch/resume blocker signal) |
+| `workflow-model-select <models-json> [--model <exact-id>]` | worker-model preflight gate (exactly one configured Flash auto-selected, zero fails closed, multiple require an explicit id; emits the `{subagent_model, model_policy}` submission contract) |
 | `v24-compile <dag.json> [--task-ref <id>] [--out <path>]` | compile a canonical DAG into Native Workflow source (generation only, never auto-executes) |
 | `writer-acquire <repo> <task_id> [--run-id <id>]` | acquire the repository write reservation |
 | `writer-release <repo> <task_id> [--force]` | release the reservation (`--force` after explicit inspection) |
@@ -193,7 +196,7 @@ Quota diagnostics additionally ship as `runtime/quota/report.py` (text and `--js
 
 ## Project status and migration
 
-**v2.4.0 is the current line** — a complexity re-baseline on ZCode Native Workflow, not an incremental release over the v2.3 runtime. The v2.3 execution runtime (dispatcher, dispatch permits, per-unit leases, receipts, quota control plane, Global Quota Clock) has been removed. **v2.3 task states are not migrated**: v2.4 detects legacy task directories and refuses them with recovery guidance instead of converting them. Finish or explicitly retire active v2.3 tasks before upgrading; released v2.3.x remains recoverable through Git history and tags. See [Troubleshooting](./docs/troubleshooting.md) for legacy detection guidance.
+**v2.4.1 is the current line** — a narrow continuity hotfix over the v2.4 re-baseline. It closes two v2.4.0 defects observed in real use: Workflow workers silently inheriting the main-session model when `subagent_model` was omitted (now an explicit provider-qualified GLM-5.3-Flash selection gate before every delegate/full launch), and auto-continuity entering quota wait without a guaranteed future activation (now armed before work: recurring Scheduled Task preferred, one-shot fallback renews its successor before resume, `until_done` remains bounded by `max_resumes`). The v2.3 execution runtime (dispatcher, dispatch permits, per-unit leases, receipts, quota control plane, Global Quota Clock) has been removed. **v2.3 task states are not migrated**: v2.4 detects legacy task directories and refuses them with recovery guidance instead of converting them. Finish or explicitly retire active v2.3 tasks before upgrading; released v2.3.x remains recoverable through Git history and tags. See [Troubleshooting](./docs/troubleshooting.md) for legacy detection guidance.
 
 ## License
 

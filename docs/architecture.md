@@ -103,6 +103,8 @@ local_check:
 
 **编译器不做**（这些是宿主 Native Workflow 的职责，Conductor 不再造）：就绪队列、dispatch wave、并发调度器、后台管理器、重试管理器、子 actor 生命周期账本、ask 回放、Workflow resume 引擎。编译器只生成源码、只做静态断言——**绝不启动任何 Workflow**；执行是主会话经宿主 CreateWorkflow 发起的事（CLI 入口 `v24-compile`，只产码或落盘）。
 
+**编译器 TypeScript 模型无关（v2.4.1 明确）**：生成源不携带、也设置不了 worker 模型——`subagent_model` 是宿主在 CreateWorkflow 提交时刻绑定的 run 级提交属性。因此 worker 模型选择只能发生在提交边界：主会话经宿主模型列表 → `workflow-model-select`（`runtime/workflow/submission.py`，INV-MODEL-01）选定显式 provider 限定 GLM-5.3-Flash 后随 CreateWorkflow 提交；省略 `subagent_model` 会使 run 继承主会话模型（v2.4.0 缺陷 A），Conductor 协议把它列为硬禁止。
+
 生成源形态（节选示意，实际产物以编译器输出为准）：
 
 ```typescript
@@ -136,7 +138,7 @@ v2.4 有两个真相域：**静态语义真相**（Conductor 任务/DAG state）
   "created_at": "2026-09-21T08:30:00.000Z" }
 ```
 
-主会话的委派启动顺序固化为：`v24-compile` 产码 → `writer-acquire` 取仓库写预约 → 宿主 CreateWorkflow 启动 run → `record_workflow_run`（state.workflow_run_id + adapter 单据 + journal 事件）。run 的中途状态（进行中 / 卡在 ask / 已完成）一律经宿主 ListWorkflowRuns / GetWorkflowRun 观察，不进 Conductor 账本。
+主会话的委派启动顺序固化为：`v24-compile` 产码 → **worker 模型选型硬闸**（宿主模型列表 → `workflow-model-select` 选定显式 provider 限定 GLM-5.3-Flash；mode=auto 任务还须先完成连续性武装：建 Scheduled Task → `quota-automation-bind` → `quota-continuity-preflight` PASS，见 §14）→ `writer-acquire` 取仓库写预约 → 宿主 CreateWorkflow（显式 `subagent_model`）启动 run → `record_workflow_run`（state.workflow_run_id + adapter 单据 + journal 事件）。run 的中途状态（进行中 / 卡在 ask / 已完成）一律经宿主 ListWorkflowRuns / GetWorkflowRun 观察，不进 Conductor 账本。
 
 ## 6. ownership 与编译期冲突处理
 
@@ -308,7 +310,10 @@ state 顶层 `quota_resume` 块（冻结初始形状 `{mode: "manual", max_resum
   2. 观测 EXHAUSTED / UNKNOWN → remain-waiting（绝不虚构可用性）
   3. mode 非 auto → waiting-user（等用户显式授权）
   4. 预算耗尽 → waiting-user，且恰一次转 waiting_user（幂等：再唤醒即 no-op）
-  5. 可用（AVAILABLE/PRESSURE）+ 已授权 + 预算有余 → resume-authorized
+  5. v2.4.1 连续性闸（INV-CONT-01）：mode=auto 且 automation_id 空 →
+     remain-waiting（reason 含 continuity-unarmed）——零状态写盘、零预算
+     消耗；武装缺失是运维活性故障而非授权耗尽，故不转 waiting_user
+  6. 可用（AVAILABLE/PRESSURE）+ 已授权 + 预算有余 + 已武装 → resume-authorized
      （附 workflow_run_id；resume_count_after 仅暂存在返回值里——绝不写盘计数）
         → 宿主 resume 调用真正被接受后 → confirm_resume_started：
            resume_count +1（唯一落账点）+ 任务转回 active（phase=workflow）
@@ -316,11 +321,16 @@ state 顶层 `quota_resume` 块（冻结初始形状 `{mode: "manual", max_resum
 预算耗尽后任务停在 waiting_user 等用户；不再有自动动作
 ```
 
+**先武装后开工（v2.4.1，arm-before-work）**：授权与武装是两个独立事实——`authorize` 是用户许可，`bind` 是未来激活见证，`preflight` 是两者齐备的机械确认。mode=auto 的任务必须在首个消耗额度的 Workflow 启动之前、以及任何自动 ResumeWorkflowRun 之前完成武装（`auto_continuity_armed = mode==auto AND automation_id 为非空 str`）。三个任务级 API（`runtime/task.py`）：`bind_quota_automation`（状态限 active/waiting_quota/waiting_user；同 id 幂等、异 id 拒绝不静默替换；绑定绝不推断 mode=auto）、`clear_quota_automation`（精确对账；只清 automation_id 不动 mode/预算；终态允许清理）、`quota_continuity_preflight`（纯读三态判定；只证明持久化绑定存在，绝不证明宿主侧激活仍存活——宿主存在性在恢复边界仍须宿主面核查）。CLI 面：`quota-automation-bind` / `quota-automation-clear` / `quota-continuity-preflight`（ready=false 以退出码 2 报告 = launch/resume 阻断信号）。调度策略：recurring Scheduled Task 优先（成功唤醒后不删不重建，保持到终态清理 / 显式取消）；one-shot 后备必须先创建并绑定后继激活、preflight PASS 后才 resume（INV-CONT-02），且绝不用硬编码周期推算下一窗口。
+
 观测词汇（`QUOTA_VIEW_STATUSES`）恰为 `AVAILABLE / PRESSURE / EXHAUSTED / UNKNOWN` 四态；UNKNOWN 绝不当作可用。配额恢复不改变路由（额度决定"何时"，不决定"谁做"）。
 
 典型时间线（auto 授权 + `max_resumes=1`）：
 
 ```
+用户 authorize_quota_resume(max_resumes=1) → mode=auto
+创建原生未来 Scheduled Task → bind_quota_automation → preflight PASS（armed）
+→ 才许 CreateWorkflow 启动（arm-before-work）
 额度耗尽 → waiting_quota（last_observation 记入）
 定时唤醒 #1 → 观测 EXHAUSTED → remain-waiting（零改写）
 定时唤醒 #2 → 观测 AVAILABLE、mode=manual → waiting-user（未授权）
@@ -328,6 +338,7 @@ state 顶层 `quota_resume` 块（冻结初始形状 `{mode: "manual", max_resum
 定时唤醒 #3 → resume-authorized（暂存 resume_count_after=1）
 宿主 resume 被接受 → confirm_resume_started → resume_count=1、active
 定时唤醒 #4 → 观测 EXHAUSTED → 预算 1/1 耗尽 → waiting-user（恰一次转态）
+终态 → 删除本任务绑定的 automation（单次）→ 确认删除后才 clear 绑定
 ```
 
 ## 15. Global Quota Clock 拆离
@@ -357,7 +368,7 @@ plugins/glm-conductor/
     ├── ownership.py    # 路径匹配 + git_touched_files + plan_stages 编译期规划
     ├── work_unit.py    # 静态节点（构造 + 校验，零运行时字段）
     ├── dependency.py   # 纯 DAG 校验与确定性排序
-    ├── workflow/       # persona + compiler + adapter（§4 / §5）
+    ├── workflow/       # persona + compiler + adapter + submission（§4 / §5 / 提交模型选型）
     ├── writer_guard.py # 仓库写者守卫（§7）
     ├── journal.py      # events.jsonl append-only（任务级十事件词汇）
     ├── durable_io.py   # 共享原子写 / 独占锁原语（不 import runtime 包内任何模块）
@@ -373,6 +384,8 @@ runtime CLI 子命令（退出码 0 成功 / 2 校验拒绝 / 1 运行期拒绝�
 | `v24-compile <dag-json> [--task-ref] [--out]` | 静态 DAG → TS Workflow 源（只产码，绝不执行） |
 | `writer-acquire / writer-release [--force] / writer-show` | 仓库写者守卫操作面（§7） |
 | `v24-record-run <task_ref> <run-id>` | 任务 ↔ Workflow run 关联单据（§5） |
+| `workflow-model-select <models-json> [--model <exact-id>]` | worker 模型选型硬闸（INV-MODEL-01；恰一 Flash 自动 / 零候选拒 / 多候选歧义拒；输出 `{subagent_model, model_policy}` 提交契约） |
+| `quota-automation-bind / quota-automation-clear / quota-continuity-preflight` | auto 连续性武装操作面（§14；preflight ready=false → 退出码 2 = launch/resume 阻断） |
 | `review-record <repo> <task> <reviewer> <verdict> [note]` | 任务级评审记录（先验证后评审） |
 | `quota-resolve <repo> [--force-refresh]` | 额度四态解析（§17） |
 

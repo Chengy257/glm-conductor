@@ -140,14 +140,18 @@ file <归一路径>\0<sha256:…|missing>   ← 每个相关路径一行（排�
 
 - **形状**：state 顶层恰四键 `{mode, max_resumes, resume_count, automation_id}`，初始 `{manual, 0, 0, null}`；预算不变量 `resume_count <= max_resumes` 保存时强制
 - **mode**：`manual`（默认）/ `auto`——auto 只能由显式 `authorize_quota_resume(max_resumes)` 落盘授权，绝不推断；`max_resumes=1` 即一次性恢复，`N` 即有界多窗
+- **automation_id**（v2.4.1 语义）：当前关联的未来原生 Scheduled Task 见证——auto 连续性的持久化武装事实；其存在是 preflight 的要求，但绝不独立证明宿主侧激活仍存在
+- **先武装后开工**（v2.4.1，arm-before-work）：`auto_continuity_armed = mode==auto AND automation_id 为非空 str`——mode=auto 的任务在首个消耗额度的 Workflow 启动与任何自动 resume 之前必须完成「创建 Scheduled Task → `quota-automation-bind` → `quota-continuity-preflight` PASS」；recurring 优先（成功唤醒后不删不重建），one-shot 后备先创建后继激活再 resume（绝不硬编码周期推算下一窗）
 - **等待**：额度耗尽 → `enter_waiting_quota`（七态中的 waiting_quota；`workflow_run_id` 保留；最近观测记入 `last_observation` 供诊断）
-- **定时唤醒决策**（`scheduled_activation_decision`，幂等五步）：非 waiting_quota → `no-op`；观测 EXHAUSTED/UNKNOWN → `remain-waiting`（绝不虚构可用性）；未授权 → `waiting-user`；预算耗尽 → `waiting-user` 且恰一次转 `waiting_user`；可用 + 已授权 + 预算有余 → `resume-authorized`（计数仅暂存）
+- **定时唤醒决策**（`scheduled_activation_decision`，幂等六步）：非 waiting_quota → `no-op`；观测 EXHAUSTED/UNKNOWN → `remain-waiting`（绝不虚构可用性）；未授权 → `waiting-user`；预算耗尽 → `waiting-user` 且恰一次转 `waiting_user`；auto 且 automation_id 空 → `remain-waiting`（reason 含 `continuity-unarmed`，零写盘零预算消耗）；可用 + 已授权 + 预算有余 + 已武装 → `resume-authorized`（计数仅暂存）
 - **确认落账**：宿主 resume 调用**真正被接受后**才调 `confirm_resume_started`——`resume_count +1` + 转回 active + `quota_resume_confirmed` 事件；未确认的决策绝不消耗预算
 - **激活基底**：原生 ZCode Scheduled Task（宿主能力）；重复唤醒是安全 no-op；没装任何外部时钟一切照常工作
-- **权威落点**：`runtime/task.py`；额度观测面 `runtime/quota/`（只读：AVAILABLE / PRESSURE / EXHAUSTED / UNKNOWN 四态，lite 套餐无周窗是合法形态）
+- **权威落点**：`runtime/task.py`（含 bind/clear/preflight 三武装 API）；额度观测面 `runtime/quota/`（只读：AVAILABLE / PRESSURE / EXHAUSTED / UNKNOWN 四态，lite 套餐无周窗是合法形态）
 
 ```
 （auto 授权 + max_resumes=1 的决策时间线）
+用户 authorize_quota_resume(1) → mode=auto
+创建原生 Scheduled Task → bind → preflight PASS（armed）→ 才许启动（arm-before-work）
 额度耗尽 → waiting_quota
 唤醒 → 观测 EXHAUSTED          → remain-waiting
 唤醒 → 观测 AVAILABLE、manual  → waiting-user（未授权）
@@ -155,6 +159,7 @@ file <归一路径>\0<sha256:…|missing>   ← 每个相关路径一行（排�
 唤醒 → 可用、auto、预算有余     → resume-authorized（计数暂存 1）
 宿主 resume 被接受 → confirm_resume_started → resume_count=1、active
 唤醒 → 观测 EXHAUSTED          → 预算 1/1 耗尽 → waiting-user
+终态 → 删本任务 automation（单次）→ 确认删除后 clear 绑定
 ```
 
 ---

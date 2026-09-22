@@ -4,7 +4,7 @@
   "plugins": [
     {
       "name": "glm-conductor",
-      "version": "2.4.0",
+      "version": "2.4.1",
       "source": "./plugins/glm-conductor",
       "description": "GLM-5.3 architect with selective routing (Delegability x Assurance): delegated work compiles from a canonical DAG into ZCode Native Workflows, fresh-context read-only reviewers cover high-assurance routes, and minimal deterministic guarantees (change_id, ownership scope, writer guard, completion guard) plus optional user-authorized bounded quota resume keep delegated work verifiable and recoverable"
     }

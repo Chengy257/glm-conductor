@@ -2,7 +2,7 @@
 
 > 面向用户的排障手册：按「现象 → 判定 → 处置」组织，只写结论性行为事实；每条事实标注实现模块路径供核对。架构全貌见 [architecture.md](architecture.md)，概念入门见 [core-concepts.md](core-concepts.md)。
 >
-> runtime CLI 统一入口是 `plugins/glm-conductor/runtime/cli.py`（本文以 `<cli>` 代指；安装后以实际插件缓存路径为准）。用可用的 Python 3 解释器执行（Windows 无 `python3` 启动器时用 `python`）。v2.4 的 CLI 子命令仅：`quota-resolve` / `quota-wait` / `quota-resume-authorize` / `quota-resume-decision` / `quota-resume-confirm` / `v24-compile` / `writer-acquire` / `writer-release` / `writer-show` / `v24-record-run` / `review-record`；额度诊断另有独立脚本 `runtime/quota/report.py`。查询本文未列出的子命令（permit / lease / wave / clock / bridge / policy / verify-* / host-check 等）没有意义——那些面连同后端已不存在。
+> runtime CLI 统一入口是 `plugins/glm-conductor/runtime/cli.py`（本文以 `<cli>` 代指；安装后以实际插件缓存路径为准）。用可用的 Python 3 解释器执行（Windows 无 `python3` 启动器时用 `python`）。v2.4.x 的 CLI 子命令仅：`quota-resolve` / `quota-wait` / `quota-resume-authorize` / `quota-resume-decision` / `quota-resume-confirm` / `v24-compile` / `writer-acquire` / `writer-release` / `writer-show` / `v24-record-run` / `review-record` / `workflow-model-select` / `quota-automation-bind` / `quota-automation-clear` / `quota-continuity-preflight`；额度诊断另有独立脚本 `runtime/quota/report.py`。查询本文未列出的子命令（permit / lease / wave / clock / bridge / policy / verify-* / host-check 等）没有意义——那些面连同后端已不存在。
 
 ## 1. 额度诊断：report.py 双模式与套餐口径
 
@@ -37,11 +37,11 @@ provider: bigmodel
 
 | status | 含义 | `scheduled_activation_decision` 行为 |
 | --- | --- | --- |
-| `AVAILABLE` / `PRESSURE` | 可用（PRESSURE 是余量压力，仍可恢复） | 已授权且有预算 → `resume-authorized` |
+| `AVAILABLE` / `PRESSURE` | 可用（PRESSURE 是余量压力，仍可恢复） | 已授权、有预算**且已武装**（automation_id 非空）→ `resume-authorized`；auto 未武装 → `remain-waiting`（reason 含 `continuity-unarmed`） |
 | `EXHAUSTED` | 耗尽 | `remain-waiting` |
 | `UNKNOWN` | 数据不可得（无凭证 / 网络失败 / 无缓存） | `remain-waiting`——绝不虚构可用性 |
 
-**恢复操作入口**（AF-03 起）：等待 / 授权 / 决策 / 确认四步的稳定入口是 CLI `quota-wait` / `quota-resume-authorize` / `quota-resume-decision` / `quota-resume-confirm`（单行 JSON 输出，见 `runtime/cli.py`）——额度恢复的运行时操作走这四个子命令，不用 `python3 -c` 直调 runtime API（授权本身仍由用户在技能 / 策略层把关，CLI 不自助放行）。
+**恢复操作入口**（AF-03 起）：等待 / 授权 / 决策 / 确认四步的稳定入口是 CLI `quota-wait` / `quota-resume-authorize` / `quota-resume-decision` / `quota-resume-confirm`（单行 JSON 输出，见 `runtime/cli.py`）——额度恢复的运行时操作走这四个子命令，不用 `python3 -c` 直调 runtime API（授权本身仍由用户在技能 / 策略层把关，CLI 不自助放行）。**auto 连续性武装**（v2.4.1）另有三命令：`quota-automation-bind` / `quota-automation-clear` / `quota-continuity-preflight`——mode=auto 的任务在启动 / 自动 resume 前必须「建 Scheduled Task → bind → preflight PASS」（先武装后开工）；`quota-continuity-preflight` 返回 `ready=false` 时以**退出码 2** 报告（这是 launch/resume 阻断信号，不是命令故障）。
 
 **窗口机制口径**：reset_at 时刻窗口恢复 100%（周窗优先）；下一个 reset_at 只在新窗口内发生模型调用时才物化——纯查询绝不推进它（`runtime/quota/window_math.py` / `time_utils.py`）。
 
@@ -109,7 +109,23 @@ python <cli> writer-release <repo_root> <holder_task_id> --force
 | visual-implementer | `account:…/GLM-5.3-Flash`（全限定） | 固定 Flash 多模态 | 原生 Custom Subagent（视觉例外） |
 | 文本 worker（delegate/full） | 无 agent 定义 | persona 内嵌进生成源 | Native Workflow |
 
-## 5. 「hook 不拦 Workflow 子代理」：宿主事实与含义
+## 5. Workflow worker 模型选型：`workflow-model-select` 拒绝的处置
+
+**现象**：`workflow-model-select` 退出码 2——零 Flash 候选 / 多候选歧义 / 显式 id 未配置 / 给了 `/GLM-5.3` 文本模型；或技能层报「选型失败绝不 CreateWorkflow」。
+
+**判定**（v2.4.1 起 delegate/full 的提交硬闸，INV-MODEL-01）：
+
+```
+python <cli> workflow-model-select '<JSON 数组或文件路径>' [--model <exact-id>]
+```
+
+- 输入是主会话从宿主模型列表（ListModels 等）提取的已配置精确 id 集合（内联 `["..."]` 或 JSON 文件均可）；
+- 恰一个 `account:` 前缀且以 `/GLM-5.3-Flash` 结尾的候选 → 自动选定；多个 → 歧义拒绝并列出全部候选（**必须显式 `--model <exact-id>`**）；零个 → 拒绝（检查账号是否配置了 Flash 模型）；
+- 裸 `GLM-5.3-Flash`（无 `account:` 前缀）与任何 `/GLM-5.3` 结尾的文本模型一律拒绝——省略 `subagent_model` 会使 Workflow 继承主会话模型，是 v2.4.0 缺陷 A，协议硬禁止。
+
+**处置**：选型成功后 CreateWorkflow 的 `subagent_model` **逐字取**返回契约的 `subagent_model` 值；选型失败按原因处理（换账号 / 显式指定 / 修复配置），绝不猜测回退、绝不静默改用其他模型、绝不省略参数提交。
+
+## 6. 「hook 不拦 Workflow 子代理」：宿主事实与含义
 
 **宿主事实**（W0 复验，2026-09-20 在当前构建上确认）：ZCode Native Workflow 的子 actor **不触发插件钩子**——workflow 子代理在活动任务存在时零 hook 可见痕迹。这是宿主结构性事实，不是配置问题，插件侧不可修复。
 
@@ -121,7 +137,7 @@ python <cli> writer-release <repo_root> <holder_task_id> --force
 - 钩子（SessionStart / Stop）只对**主会话**生效且依赖 `python3` 在 PATH；钩子自身故障 fail-open（stderr 报 `ENFORCEMENT DEGRADED` 后放行，绝不卡死会话）——看到该报文说明守卫本轮没干活，属降级可见，不是放行许可；
 - 需要权限约束时，用宿主原生权限设施 + worker 约束（节点的 `interfaces` / `constraints` 声明与 persona 纪律），不要试图恢复派发面钩子。
 
-## 6. 状态文件位置速查（排障先找对文件）
+## 7. 状态文件位置速查（排障先找对文件）
 
 | 状态 | 位置 | 说明 |
 | --- | --- | --- |

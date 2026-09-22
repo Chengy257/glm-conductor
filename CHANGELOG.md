@@ -1,5 +1,38 @@
 # Changelog
 
+## 2.4.1
+
+Continuity hotfix — two narrow production defects observed in real use after the v2.4.0 closeout, closed without changing the v2.4 architecture. Companion plan/spec: `docs/roadmap/V2_4_1_CONTINUITY_HOTFIX_PLAN.md` + `V2_4_1_CONTINUITY_HOTFIX_IMPLEMENTATION_SPEC.md`; implementation report: `docs/reviews/V2_4_1_CONTINUITY_HOTFIX_REPORT.md`.
+
+### Defect A — Workflow worker model inheritance (INV-MODEL-01)
+
+Omitting `subagent_model` at CreateWorkflow made every Workflow worker silently inherit the main-session model (GLM-5.3) instead of running on GLM-5.3-Flash. The compiled TypeScript is model-agnostic — the host binds one model at run submission — so the fix is a submission-boundary protocol, not a compiler change:
+
+- New pure module `runtime/workflow/submission.py`: `validate_worker_model` (provider-qualified `account:…/GLM-5.3-Flash` shape, rejects bare aliases and any `…/GLM-5.3` text-model id), `select_worker_model` (exactly one configured Flash auto-selected; zero candidates fails closed; multiple candidates are rejected as ambiguous with all ids listed — never a silent first pick), `build_submission_contract` (`{subagent_model, model_policy: "explicit-flash-required"}`).
+- CLI `workflow-model-select <models-json> [--model <exact-id>]` (inline JSON array or file); selection failure is exit 2 and means **no CreateWorkflow**.
+- Orchestration skill §6 rewritten with a mandatory model-selection gate before every delegate/full launch: never omit `subagent_model`, never fall back to the main-session GLM-5.3, never persist the selected model as task identity.
+
+### Defect B — auto continuity without a guaranteed future activation (INV-CONT-01..04)
+
+v2.4.0 had the resume decision primitive but no mechanically enforced "a future wake exists before quota-consuming work starts". v2.4.1 makes arming a durable, checkable fact:
+
+- `runtime/task.py` gains `bind_quota_automation` (same-id idempotent, different-id rejected — never silent replacement; binding never implies authorization), `clear_quota_automation` (exact-reconciliation clear after confirmed host deletion; never touches mode/budget; allowed on terminal tasks for cleanup), and `quota_continuity_preflight` (read-only: manual → ready; auto + bound id → ready; auto + null → not armed; proves durable binding, not host liveness).
+- CLI `quota-automation-bind` / `quota-automation-clear` / `quota-continuity-preflight`; preflight `ready=false` reports exit code 2 as the mechanical launch/resume blocker.
+- `scheduled_activation_decision` strengthened (preferred option): mode=auto with no bound automation id now returns `remain-waiting` with a `continuity-unarmed` reason — no state write, no budget consumption — so the decision layer can no longer lead to a host resume path without armed preflight.
+- Continuity skill + long-horizon reference rewritten: arm-before-work launch order (authorize → create native Scheduled Task → bind → preflight PASS → compile → model gate → writer-acquire → CreateWorkflow); recurring Scheduled Task preferred and kept armed across successful wakes (INV-CONT-03); one-shot fallback must create and bind its successor before resuming (INV-CONT-02), never derives the next window from a hard-coded period, and never clears the only wake capability without a successor; terminal cleanup deletes only the bound automation and clears the binding only after confirmed deletion.
+- `until_done` wording remains UX authorization intent implemented as bounded `auto` + `max_resumes`; no unbounded resume exists.
+
+### Static enforcement and evidence
+
+- `scripts/validate_plugin.py` check 16 anchors the §5.6 protocol contracts statically (model-gate markers, launch-order chain, armed-with-null prohibition, successor-before-resume, no Global Quota Clock / scheduler SQLite reintroduction in production runtime).
+- Live host evidence (see report): explicit Flash selection with two configured account-prefixed Flash ids resolved by explicit choice; arm-before-launch ordering with creation timestamps; stopped run resumed by the same run id with `resume_count` incrementing exactly once; repeated wake a safe no-op; terminal cleanup delete-then-clear. One-shot fallback recorded as structurally tested (recurring is the production default and was live-proven). Scheduled firing with the ZCode app closed remains unverified.
+
+### Compatibility
+
+- `quota_resume` shape unchanged (no second continuity state machine; no epoch/subscription fields); `TASK_JOURNAL_EVENTS` stays at exactly ten names (bind/clear/preflight add no journal events).
+- Python 3.7-compatible syntax (verified on 3.7.9 locally; CI covers 3.8/3.13). Exit-code contract unchanged except the documented preflight `ready=false` → 2 signal.
+- Historical v2.4 evidence documents were not rewritten.
+
 ## 2.4.0
 
 Native Workflow re-baseline. v2.4 is **not** an incremental release over the v2.3 runtime: it is a complexity re-baseline governed by one rule — *if ZCode owns an execution fact, Conductor must not model the same fact again.* GLM Conductor keeps semantic orchestration and acceptance (selective routing, canonical implementation DAG, ownership, task-level acceptance, high-assurance review); ZCode Native Workflows take over execution orchestration (run lifecycle, parallel scheduling, retries, background execution, resume mechanics).
