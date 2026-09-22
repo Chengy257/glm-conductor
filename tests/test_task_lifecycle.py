@@ -842,6 +842,14 @@ class TestLegacyRefusal(LifecycleCase):
                 lambda: task.set_status(self.repo, "legacy-23-task", "active"),
                 lambda: task.set_phase(self.repo, "legacy-23-task", "workflow"),
                 lambda: task.enter_waiting_quota(self.repo, "legacy-23-task"),
+                lambda: task.authorize_quota_resume(
+                    self.repo, "legacy-23-task", 1),
+                lambda: task.bind_quota_automation(
+                    self.repo, "legacy-23-task", "sched-legacy-1"),
+                lambda: task.clear_quota_automation(
+                    self.repo, "legacy-23-task"),
+                lambda: task.quota_continuity_preflight(
+                    self.repo, "legacy-23-task"),
                 lambda: task.complete(self.repo, "legacy-23-task"),
                 lambda: task.fail(self.repo, "legacy-23-task"),
                 lambda: task.cancel(self.repo, "legacy-23-task")):

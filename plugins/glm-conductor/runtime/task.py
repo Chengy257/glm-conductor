@@ -65,10 +65,36 @@
         定时轮次的幂等决策原语（P3-C）：四action 封闭词汇
         （no-op / remain-waiting / waiting-user / resume-authorized），
         绝不虚构可用性；resume-authorized 只暂存计数，绝不落账。
+        v2.4.1 强化（INV-CONT-01 首选方案）：mode=auto 且
+        automation_id 为空/非 str 时返回 remain-waiting（reason 恒含
+        "continuity-unarmed"）——auto 连续性未武装绝不给出
+        resume-authorized，任务原地保持 waiting_quota、零状态写盘、
+        零预算消耗（闸在预算检查之后、resume-authorized 之前）。
     confirm_resume_started(repo_root, task_id)
         暂存计数落账：宿主 resume 调用真正被接受后由调用方调用——
         resume_count +1、任务转回 active（workflow 阶段）、落
         quota_resume_confirmed 事件。未确认的决策绝不消耗预算。
+    bind_quota_automation(repo_root, task_id, automation_id)
+        auto 连续性武装（v2.4.1，INV-CONT-01）：把当前关联的未来原生
+        Scheduled Task 见证 id 绑入 quota_resume.automation_id。任务
+        须存在且为 v2.4；id 非空 str；状态限 active/waiting_quota/
+        waiting_user；存量 None → 绑定、同 id → 幂等成功、异 id →
+        拒绝（绝不静默替换——替换必须走显式 clear-then-bind 且宿主侧
+        生命周期已对账）。绑定绝不推断 mode=auto（绑定 ≠ 授权自动
+        恢复），绝不持久化秘密/prompt，不追加 journal 事件。
+    clear_quota_automation(repo_root, task_id, automation_id=None)
+        清除 automation_id 绑定（终态清理与显式对账通道）：参数给出
+        且与存量不一致 → 拒绝；存量 None → 幂等成功；清为 None。
+        绝不改 mode / max_resumes / resume_count；终态任务允许清理
+        （完成后才能删绑定）。预期在宿主侧删除确认或操作者显式对账
+        后调用。不追加 journal 事件。
+    quota_continuity_preflight(repo_root, task_id)
+        连续性预检（纯读，绝不改状态）：manual → ready=true（manual
+        模式无需定时激活）；auto + 非空 automation_id → ready=true
+        （armed）；auto + 空 → ready=false（unarmed，即启动/恢复
+        阻塞）。输出恒含 ready 布尔键 + mode + automation_id +
+        reason。只证明持久化绑定存在，绝不宣称宿主侧激活仍存活
+        （宿主存在性在恢复边界仍需宿主面检查）。
     complete(repo_root, task_id) / fail(...) / cancel(...)
         终态收尾：迁移到 completed / failed / cancelled + 任务级
         journal 事件（task_completed / task_failed / task_cancelled）
@@ -88,7 +114,9 @@ journal 词汇（TASK_JOURNAL_EVENTS，恰十名，绝不多不少）：
     名（暂存恢复计数落账 + 转回 active 的事实记录）。本模块追加的
     事件名绝不出此表；也绝不经由 state.transition_task_status 迁移
     状态（其 status_changed 事件不在任务级词汇内）——状态门用
-    state.TASK_TRANSITIONS + state.save_state 自己走。
+    state.TASK_TRANSITIONS + state.save_state 自己走。v2.4.1 的
+    bind / clear / preflight 三 API 对 journal 零新增（绑定事实由
+    state 落盘记录，预检纯读）。
 
 变更标识的相关改动文件集（W4 完成守卫共用的同一派生）：
     ownership_scopes(task_state) = dag 全节点 ownership scope 并集
@@ -120,7 +148,10 @@ journal 词汇（TASK_JOURNAL_EVENTS，恰十名，绝不多不少）：
     + docs/roadmap/V2_4_PHASE_3_WORKFLOW_EXECUTION_PLAN.md Q1（授权
     与等待/恢复生命周期单元规格）
     + docs/roadmap/V2_4_PHASE_3_QUOTA_RESUME_EXTRACTION_SPEC.md
-    §3（P3-B 最小恢复授权）与 §4（P3-C 等待/恢复生命周期）。
+    §3（P3-B 最小恢复授权）与 §4（P3-C 等待/恢复生命周期）
+    + docs/roadmap/V2_4_1_CONTINUITY_HOTFIX_IMPLEMENTATION_SPEC.md
+    §4（H2：automation 绑定 / 清理 / 连续性预检 + 决策原语的
+    continuity-unarmed 闸——INV-CONT-01 首选强化方案）。
 """
 
 from runtime import change_id, journal, ownership, state, writer_guard
@@ -157,6 +188,11 @@ QUOTA_VIEW_STATUSES = ("AVAILABLE", "PRESSURE", "EXHAUSTED", "UNKNOWN")
 # scheduled_activation_decision 的 action 封闭词汇（恰四值）
 SCHEDULED_ACTIVATION_ACTIONS = (
     "no-op", "remain-waiting", "waiting-user", "resume-authorized")
+
+# bind_quota_automation 允许绑定的任务状态词汇（v2.4.1，恰三值）：
+# 绑定只在这三个非终态进行；终态不得新增绑定事实（终态清理走
+# clear_quota_automation——clear 对终态放行，见规格 §4.1）。
+AUTOMATION_BIND_STATUSES = ("active", "waiting_quota", "waiting_user")
 
 
 # —— 内部助手 ——
@@ -703,16 +739,25 @@ def scheduled_activation_decision(repo_root, task_id, quota_view) -> dict:
          "waiting-user"}，且恰一次把任务转 waiting_user（迁移本身
          不落 journal——任务级词汇无通用状态名；幂等性由第 1 步保证：
          再次唤醒时任务已非 waiting_quota → no-op）；
-      5. 可用（AVAILABLE/PRESSURE）且已授权且预算有余 → {"action":
-         "resume-authorized", "workflow_run_id", "resume_count_after"}。
-         resume_count_after = 现计数 + 1 只暂存在返回值里：本函数
-         绝不写盘计数，未确认的决策绝不消耗预算，确认前重复决策
-         恒返回同一暂存值——落账只能经 confirm_resume_started。
+      5. v2.4.1 连续性闸（INV-CONT-01 首选强化）：mode=auto 且
+         automation_id 为空 / 非 str → {"action": "remain-waiting"}，
+         reason 恒含 "continuity-unarmed"——auto 连续性未武装，绝不
+         给出 resume-authorized、绝不走向宿主 resume 路径；任务原地
+         保持 waiting_quota、零状态写盘、零预算消耗（武装是运维活性
+         事实而非授权耗尽，故不转 waiting_user；先经
+         bind_quota_automation 武装再唤醒即可恢复）；
+      6. 可用（AVAILABLE/PRESSURE）且已授权且预算有余且已武装 →
+         {"action": "resume-authorized", "workflow_run_id",
+         "resume_count_after"}。resume_count_after = 现计数 + 1 只
+         暂存在返回值里：本函数绝不写盘计数，未确认的决策绝不消耗
+         预算，确认前重复决策恒返回同一暂存值——落账只能经
+         confirm_resume_started。
 
     结构性拒绝（ValueError，先于一切写盘）：任务缺失 / v2.3 遗留 /
-    quota_view 形状非法；第 5 步前置条件 workflow_run_id 缺失（无
+    quota_view 形状非法；第 6 步前置条件 workflow_run_id 缺失（无
     关联 run 可恢复——虚构 resume-authorized 即虚构可用性）。
-    绝不引入 epoch/subscription/accounting 概念。
+    绝不引入 epoch/subscription/accounting 概念；绝不虚构 automation
+    id（武装缺失就是缺失，绝不就地编造）。
     """
     _validate_quota_view(quota_view)
     st = _load_v24_state(repo_root, task_id)
@@ -748,6 +793,20 @@ def scheduled_activation_decision(repo_root, task_id, quota_view) -> dict:
             "reason": "自动恢复预算已耗尽（resume_count=%d >= "
                       "max_resumes=%d），任务转 waiting_user 等用户处理"
                       % (resume_count, max_resumes)}
+    # v2.4.1 连续性闸（INV-CONT-01）：auto 连续性未武装绝不走向宿主
+    # resume 路径——纯决策返回，零状态写盘、零预算消耗
+    automation_id = block.get("automation_id")
+    if not isinstance(automation_id, str) or automation_id == "":
+        return {
+            "action": "remain-waiting",
+            "reason": "continuity-unarmed：auto 连续性未武装"
+                      "（quota_resume.automation_id=%r），缺少未来定时"
+                      "激活见证，绝不给出 resume-authorized；任务保持 "
+                      "waiting_quota、零预算消耗——这是运维活性缺失而非"
+                      "授权耗尽，请先经宿主侧创建定时激活并 "
+                      "bind_quota_automation 绑定，再经 "
+                      "quota_continuity_preflight 确认 ready"
+                      % (automation_id,)}
     workflow_run_id = st.get("workflow_run_id")
     if not isinstance(workflow_run_id, str) or workflow_run_id == "":
         raise ValueError(
@@ -824,6 +883,141 @@ def confirm_resume_started(repo_root, task_id) -> dict:
     return st
 
 
+# —— auto 连续性武装：绑定 / 清理 / 预检（v2.4.1 H2） ——
+
+def bind_quota_automation(repo_root, task_id, automation_id) -> dict:
+    """绑定未来原生 Scheduled Task 见证 id（v2.4.1，INV-CONT-01）。
+
+    把 automation_id 写入 quota_resume.automation_id（auto 连续性
+    武装事实），返回更新后的状态 dict：
+
+    - automation_id 必须是非空字符串（结构性拒绝 ValueError，先于
+      一切读盘写盘）；
+    - 任务必须存在且为 v2.4（缺失 / v2.3 遗留 → ValueError）；
+    - 状态限 AUTOMATION_BIND_STATUSES（active / waiting_quota /
+      waiting_user）；blocked 与终态拒绝——终态不得新增绑定事实；
+    - 存量 None → 绑定；存量与供给同 id → 幂等成功（零写盘原样
+      返回现状）；存量异 id → 拒绝，绝不静默替换（替换必须走显式
+      clear-then-bind 序列，且宿主侧生命周期先对账）；
+    - 绝不推断 mode=auto：绑定 ≠ 授权自动恢复（授权与武装是两个
+      独立事实，授权只能走 authorize_quota_resume 的显式落盘）；
+    - 经 state.save_state 落盘（其转换门 + 全量校验二次把关）；
+    - 不追加 journal 事件（绑定事实由 state 落盘记录）；绝不持久化
+      秘密 / prompt（本参数只是宿主定时激活的 id 见证）。
+    """
+    if not isinstance(automation_id, str) or automation_id == "":
+        raise ValueError(
+            "bind_quota_automation：automation_id 必须是非空字符串，"
+            "得到 %r" % (automation_id,))
+    st = _load_v24_state(repo_root, task_id)
+    status = st.get("status")
+    if status not in AUTOMATION_BIND_STATUSES:
+        raise ValueError(
+            "bind_quota_automation：任务 %s 处于 %r，绑定要求任务处于"
+            " %s（终态不得新增绑定事实；终态清理走 clear_quota_"
+            "automation）"
+            % (task_id, status, " / ".join(AUTOMATION_BIND_STATUSES)))
+    block = st.get("quota_resume")
+    if not isinstance(block, dict):
+        block = state.default_quota_resume()
+        st["quota_resume"] = block
+    current = block.get("automation_id")
+    if current == automation_id:
+        # 幂等：同 id 重绑零写盘，原样返回现状
+        return st
+    if current is not None:
+        raise ValueError(
+            "bind_quota_automation：任务 %s 已绑定 automation_id %r，"
+            "拒绝静默替换为 %r（替换必须先经宿主侧生命周期对账，再走"
+            "显式 clear_quota_automation → bind_quota_automation 序列）"
+            % (task_id, current, automation_id))
+    block["automation_id"] = automation_id
+    state.save_state(repo_root, st)
+    return st
+
+
+def clear_quota_automation(repo_root, task_id, automation_id=None) -> dict:
+    """清除 automation_id 绑定（清为 None），返回更新后的状态 dict。
+
+    预期在宿主侧删除确认之后、或操作者显式对账陈旧 id 时调用
+    （规格 §4.1）：
+
+    - automation_id 参数给出（非 None）且与存量不一致 → 拒绝
+      （精确对账：绝不清掉预期之外的绑定）；
+    - 存量 None → 幂等成功（零写盘原样返回现状）；
+    - 只把 automation_id 清为 None，绝不改 mode / max_resumes /
+      resume_count（授权与预算是独立事实，清理武装不动授权）；
+    - 终态任务允许清理（完成后才能删绑定；终态冻结的是 validation /
+      review / run 关联等新事实，武装解除是对既有事实的对账收尾）；
+    - 任务必须存在且为 v2.4；经 state.save_state 落盘；不追加
+      journal 事件。
+    """
+    st = _load_v24_state(repo_root, task_id)
+    block = st.get("quota_resume")
+    if not isinstance(block, dict):
+        block = state.default_quota_resume()
+        st["quota_resume"] = block
+    current = block.get("automation_id")
+    if current is None:
+        # 幂等：本就未武装，零写盘原样返回现状
+        return st
+    if automation_id is not None and automation_id != current:
+        raise ValueError(
+            "clear_quota_automation：给定 automation_id %r 与任务 %s "
+            "的存量绑定 %r 不一致，拒绝清理（精确对账口径；无预期时"
+            "传 None 表示无条件清除现存绑定）"
+            % (automation_id, task_id, current))
+    block["automation_id"] = None
+    state.save_state(repo_root, st)
+    return st
+
+
+def quota_continuity_preflight(repo_root, task_id) -> dict:
+    """auto 连续性预检（v2.4.1，纯读，绝不改状态），返回判定 dict。
+
+    恒含四键：ready（布尔）+ mode + automation_id + reason（规格
+    §4.1 给出的英文短句）。判定（manual / auto 两分支）：
+
+    - mode 非 auto（manual 未授权）→ ready=true：manual 模式不需要
+      定时激活，无武装要求；
+    - mode=auto 且 automation_id 为非空 str → ready=true（armed）；
+    - mode=auto 且 automation_id 空 / 非 str → ready=false
+      （unarmed——按 CLI 约定即启动 / 恢复阻塞）。
+
+    本函数是持久化绑定存在性的证明，绝不宣称宿主侧激活仍存活
+    （规格红线：宿主存在性在恢复边界仍需宿主面独立检查）；绝不
+    写盘、绝不落 journal、绝不虚构 automation id（输出原样携带
+    state 里的存量值，未武装时为 None）。
+    """
+    st = _load_v24_state(repo_root, task_id)
+    block = st.get("quota_resume")
+    mode = block.get("mode") if isinstance(block, dict) else None
+    automation_id = (block.get("automation_id")
+                     if isinstance(block, dict) else None)
+    armed = isinstance(automation_id, str) and automation_id != ""
+    if mode != "auto":
+        return {
+            "ready": True,
+            "mode": mode if isinstance(mode, str) and mode != ""
+                    else "manual",
+            "automation_id": automation_id if armed else None,
+            "reason": "manual mode does not require scheduled activation",
+        }
+    if armed:
+        return {
+            "ready": True,
+            "mode": "auto",
+            "automation_id": automation_id,
+            "reason": "auto continuity armed",
+        }
+    return {
+        "ready": False,
+        "mode": "auto",
+        "automation_id": None,
+        "reason": "auto continuity is not armed",
+    }
+
+
 # —— 终态收尾 ——
 
 def _finish(repo_root, task_id, terminal_status, event_name) -> dict:
@@ -870,3 +1064,4 @@ def fail(repo_root, task_id) -> dict:
 def cancel(repo_root, task_id) -> dict:
     """取消任务（→ cancelled + task_cancelled 事件 + 释放写者守卫）。"""
     return _finish(repo_root, task_id, "cancelled", "task_cancelled")
+

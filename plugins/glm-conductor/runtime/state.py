@@ -33,7 +33,11 @@
 v2.4 顶层概念（schema 权威清单）：
     task_id / goal / repository / route / dag / status / phase（可选
     描述性标注）/ workflow_run_id（可空，委派运行启动前为 null）/
-    validation / review / quota_resume（P3-B 定稿的配额恢复授权块）。
+    validation / review / quota_resume（P3-B 定稿的配额恢复授权块；
+    其中 automation_id 是当前关联的未来原生 Scheduled Task 见证
+    ——auto 连续性的持久化武装事实，其存在是 Conductor preflight
+    的要求，但绝不独立证明宿主侧激活仍存在；v2.4.1 无 epoch/
+    subscription 字段、无第二连续性状态机）。
     validation 与 review 是任务级唯一记录（无逐单元证据）。
 
 durable status 恰为七态：
@@ -169,6 +173,10 @@ LEGACY_STATE_GUIDANCE = (
 # 续跑授权语义。模块常量只读，default_quota_resume() 每次返回全新
 # 拷贝，防止调用方改动波及本常量。auto 不需要附加字段；诊断性的
 # 最近观测（enter_waiting_quota 记入）不在本常量内——缺省即无观测）
+# automation_id（v2.4.1 语义澄清）：当前关联的未来原生 Scheduled
+# Task 见证——auto 连续性的持久化武装事实；其存在是 Conductor
+# preflight（task.quota_continuity_preflight）的要求，但绝不独立
+# 证明宿主侧激活仍存在（宿主存在性在恢复边界仍需宿主面检查）。
 DEFAULT_QUOTA_RESUME = {
     "mode": "manual",
     "max_resumes": 0,
@@ -183,7 +191,8 @@ def default_quota_resume() -> dict:
     每次调用构造新 dict，调用方改写返回值不影响模块常量
     DEFAULT_QUOTA_RESUME；形状恰为 mode="manual" / max_resumes=0 /
     resume_count=0 / automation_id=None（P3-B 定稿初始态：未授权、
-    零预算——恢复只能走显式授权 + 调用方确认通道）。
+    零预算——恢复只能走显式授权 + 调用方确认通道；automation_id
+    初始 None = 尚未绑定任何未来定时激活见证，auto 连续性未武装）。
     """
     return dict(DEFAULT_QUOTA_RESUME)
 
@@ -446,7 +455,11 @@ def _validate_quota_resume(block):
         是 int 子类，True/False 不得充当计数）；
       - 交叉不变量：resume_count 不得大于 max_resumes（两侧均为合法
         非负整数时才比对，形状错误已各自单独报告，不重复报）；
-      - automation_id 为 null 或非空 str。
+      - automation_id 为 null 或非空 str（v2.4.1 语义：当前关联的
+        未来原生 Scheduled Task 见证——auto 连续性的持久化武装
+        事实；其存在是 Conductor preflight 的要求，但绝不独立证明
+        宿主侧激活仍存在。写入口径归 task.bind_quota_automation /
+        task.clear_quota_automation，本层只收形状）。
     """
     if not isinstance(block, dict):
         return ["quota_resume 必须是 JSON 对象"]
@@ -472,6 +485,8 @@ def _validate_quota_resume(block):
             "quota_resume.resume_count %d 不得大于 quota_resume."
             "max_resumes %d（预算不变量：resume_count <= max_resumes）"
             % (resume_count, max_resumes))
+    # automation_id（未来定时激活见证）：null 或非空 str，无 epoch/
+    # subscription 字段（v2.4.1 明确不引入第二连续性状态机）
     if "automation_id" in block and block["automation_id"] is not None:
         value = block["automation_id"]
         if not isinstance(value, str) or value == "":
@@ -931,3 +946,4 @@ def find_active_tasks(repo_root) -> "list[str]":
     不进入 active，也不中断扫描。
     """
     return [name for name, _status in discover_tasks(repo_root)["active"]]
+

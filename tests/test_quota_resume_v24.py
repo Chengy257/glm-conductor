@@ -29,6 +29,20 @@
       active（phase=workflow）、落 quota_resume_confirmed 事件；
       重复确认 / manual / 计数形状异常 / 预算已耗尽一律拒绝（重复
       确认绝不重复消耗预算）；第二窗口恢复后预算耗尽的完整闭环；
+    - bind/clear/preflight 三公共 API（v2.4.1 H2，规格 §4.5 最低
+      14 用例）：manual 预检 ready；auto 仅授权未武装 → 预检不
+      ready；bind 后 ready；同 id 重绑幂等；异 id 重绑拒绝（绝不
+      静默替换）；clear 精确 id → 解除武装；clear None 幂等；
+      clear 错误期望 id 拒绝；终态清理允许；非法 automation id
+      拒绝；bind 不改 mode 与预算（绝不推断 mode=auto）；clear
+      不改 mode 与预算；auto 无武装决策绝不走向宿主 resume 路径
+      （remain-waiting + continuity-unarmed）；无武装唤醒零状态
+      写盘零预算消耗；
+    - v2.4.1 契约强化（INV-CONT-01）：标准前置 prepare_waiting 先
+      bind 武装再进入等待——既有 resume-authorized / confirm 用例
+      在已武装任务上断言（先武装后开工；契约加强而非测试弱化），
+      scheduled_activation_decision 在预算检查之后、resume-
+      authorized 之前插入 continuity-unarmed 闸；
     - state 层校验收口：mode 恰为 manual/auto（auto 合法，v2.3 四
       模式旧词拒绝）；max_resumes/resume_count 为 >= 0 整数（bool
       拒绝）；预算不变量 resume_count <= max_resumes（save_state
@@ -88,8 +102,13 @@ class QuotaResumeCase(unittest.TestCase):
             {"mode": "delegate"})
 
     def prepare_waiting(self, max_resumes=3, run_id="run-77", view=None,
-                        task_id=TID):
-        """授权 + 关联 run + 进入等待（标准前置；view 缺省不带观测）。
+                        task_id=TID, automation_id="sched-witness-1"):
+        """授权 + 武装 + 关联 run + 进入等待（标准前置；view 缺省不带观测）。
+
+        v2.4.1 契约（INV-CONT-01 先武装后开工）：auto 授权后先 bind
+        未来定时激活见证再进入等待——既有 resume-authorized / confirm
+        用例在已武装任务上断言；automation_id=None 可构造「已授权但
+        未武装」的 auto 任务，供 continuity-unarmed 闸用例使用。
 
         delegate 任务按协议先取本仓库写者守卫（AF-04：record_workflow_run
         前置要求当前任务持有写预约），再注册委派 run。
@@ -99,6 +118,8 @@ class QuotaResumeCase(unittest.TestCase):
             writer_guard.acquire(self.repo, task_id, run_id)
             task.record_workflow_run(self.repo, task_id, run_id)
         task.authorize_quota_resume(self.repo, task_id, max_resumes)
+        if automation_id is not None:
+            task.bind_quota_automation(self.repo, task_id, automation_id)
         task.enter_waiting_quota(self.repo, task_id, view)
         return self.load(task_id)
 
@@ -444,6 +465,277 @@ class TestScheduledDecision(QuotaResumeCase):
         """任务不存在 → ValueError。"""
         with self.assertRaises(ValueError):
             self.decide(quota_view("AVAILABLE"), task_id="ghost-task")
+
+
+# —— 3b. auto 连续性武装：bind / clear / preflight（v2.4.1 H2，§4.5） ——
+
+class TestAutomationBinding(QuotaResumeCase):
+    """automation 绑定 / 清理 / 连续性预检 + 决策原语 unarmed 闸。
+
+    规格 §4.5 最低 14 用例逐条落位（编号对齐规格清单）：
+      1 manual 预检 ready；2 auto 仅授权未武装 → 预检不 ready；
+      3 bind 后 ready；4 同 id 幂等；5 异 id 拒绝；6 clear 精确 id
+      → 解除武装；7 clear None 幂等；8 clear 错误期望 id 拒绝；
+      9 终态清理允许；10 非法 automation id 拒绝；11 bind 不改
+      mode 与预算；12 clear 不改 mode 与预算；13 auto 无武装决策
+      不得走向宿主 resume 路径；14 无武装唤醒零预算消耗。
+    """
+
+    AUTO_ID = "sched-witness-1"
+    TID = QuotaResumeCase.TID
+
+    def arm(self, task_id=TID, automation_id=AUTO_ID, max_resumes=3):
+        """武装前置：建任务 → 授权 → 绑定（bind 不改 mode/状态）。"""
+        self.make_task(task_id)
+        task.authorize_quota_resume(self.repo, task_id, max_resumes)
+        return task.bind_quota_automation(self.repo, task_id, automation_id)
+
+    def state_bytes(self, task_id=TID):
+        """读取 state.json 原始字节（零写盘断言用）。"""
+        return state.state_path(self.repo, task_id).read_bytes()
+
+    # 1. manual preflight ready without automation
+
+    def test_manual_preflight_ready_without_automation(self):
+        """manual 未授权未武装 → 预检 ready=true（manual 无需定时激活）。"""
+        self.make_task()
+        before = self.state_bytes()
+        report = task.quota_continuity_preflight(self.repo, self.TID)
+        self.assertEqual(report, {
+            "ready": True, "mode": "manual", "automation_id": None,
+            "reason": "manual mode does not require scheduled activation"})
+        self.assertEqual(self.state_bytes(), before,
+                         "preflight 纯读：绝不变更状态文件")
+
+    # 2. auto authorization alone -> preflight not ready
+
+    def test_auto_authorized_but_preflight_not_ready(self):
+        """auto 已授权但未绑定 → 预检 ready=false（unarmed 即阻塞）。"""
+        self.make_task()
+        task.authorize_quota_resume(self.repo, self.TID, 3)
+        report = task.quota_continuity_preflight(self.repo, self.TID)
+        self.assertEqual(report, {
+            "ready": False, "mode": "auto", "automation_id": None,
+            "reason": "auto continuity is not armed"})
+
+    # 3. bind -> ready
+
+    def test_bind_then_preflight_ready(self):
+        """绑定后预检 ready=true；绑定事实落盘；journal 零新增事件。"""
+        self.arm()
+        report = task.quota_continuity_preflight(self.repo, self.TID)
+        self.assertEqual(report, {
+            "ready": True, "mode": "auto",
+            "automation_id": self.AUTO_ID,
+            "reason": "auto continuity armed"})
+        self.assertEqual(
+            self.load()["quota_resume"]["automation_id"], self.AUTO_ID)
+        # bind / preflight 对 journal 零新增（arm 仅落 route_selected）
+        self.assertEqual(self.names(), ["route_selected"])
+        for name in self.names():
+            self.assertIn(name, task.TASK_JOURNAL_EVENTS)
+
+    # 4. same-id rebind idempotent
+
+    def test_bind_same_id_idempotent(self):
+        """同 id 重绑 → 幂等成功，绑定与预算原样不动。"""
+        self.arm()
+        before = self.load()["quota_resume"]
+        st = task.bind_quota_automation(self.repo, self.TID, self.AUTO_ID)
+        self.assertEqual(st["quota_resume"]["automation_id"], self.AUTO_ID)
+        self.assertEqual(st["quota_resume"], before)
+        self.assertEqual(
+            self.load()["quota_resume"]["automation_id"], self.AUTO_ID)
+
+    # 5. different-id rebind rejected
+
+    def test_bind_different_id_refused(self):
+        """异 id 重绑 → 拒绝（绝不静默替换），存量绑定原样保留。"""
+        self.arm()
+        with self.assertRaises(ValueError) as ctx:
+            task.bind_quota_automation(self.repo, self.TID, "other-sched")
+        self.assertIn("静默替换", str(ctx.exception))
+        self.assertEqual(
+            self.load()["quota_resume"]["automation_id"], self.AUTO_ID)
+        self.assertEqual(
+            task.quota_continuity_preflight(self.repo, self.TID)
+            ["automation_id"], self.AUTO_ID)
+
+    # 6. clear exact id -> unarmed
+
+    def test_clear_exact_id_unarms(self):
+        """clear 精确 id → 绑定清为 None，预检转 unarmed。"""
+        self.arm()
+        st = task.clear_quota_automation(
+            self.repo, self.TID, self.AUTO_ID)
+        self.assertIsNone(st["quota_resume"]["automation_id"])
+        self.assertIsNone(self.load()["quota_resume"]["automation_id"])
+        report = task.quota_continuity_preflight(self.repo, self.TID)
+        self.assertFalse(report["ready"])
+        self.assertEqual(report["reason"], "auto continuity is not armed")
+
+    # 7. clear None when already clear idempotent
+
+    def test_clear_none_when_already_clear_idempotent(self):
+        """存量 None（从未绑定 / 已清理）→ clear 幂等成功零写盘。"""
+        self.make_task()
+        before = self.state_bytes()
+        st = task.clear_quota_automation(self.repo, self.TID)
+        self.assertIsNone(st["quota_resume"]["automation_id"])
+        self.assertEqual(self.state_bytes(), before, "幂等成功零写盘")
+        # 已绑定任务 clear 后再次 clear → 同样幂等零写盘
+        task.authorize_quota_resume(self.repo, self.TID, 3)
+        task.bind_quota_automation(self.repo, self.TID, self.AUTO_ID)
+        task.clear_quota_automation(self.repo, self.TID)
+        after_first_clear = self.state_bytes()
+        st = task.clear_quota_automation(self.repo, self.TID)
+        self.assertIsNone(st["quota_resume"]["automation_id"])
+        self.assertEqual(self.state_bytes(), after_first_clear)
+
+    # 8. clear wrong expected id rejected
+
+    def test_clear_wrong_expected_id_refused(self):
+        """clear 期望 id 与存量不一致 → 拒绝，存量绑定原样保留。"""
+        self.arm()
+        with self.assertRaises(ValueError) as ctx:
+            task.clear_quota_automation(
+                self.repo, self.TID, "wrong-expected-id")
+        self.assertIn("不一致", str(ctx.exception))
+        self.assertEqual(
+            self.load()["quota_resume"]["automation_id"], self.AUTO_ID)
+
+    # 9. terminal task cleanup allowed
+
+    def test_terminal_cleanup_allowed(self):
+        """终态清理允许：completed 后 clear 放行（清后才能删绑定）。"""
+        self.arm()
+        self.assertEqual(
+            self.load()["quota_resume"]["automation_id"], self.AUTO_ID)
+        task.complete(self.repo, self.TID)
+        st = task.clear_quota_automation(self.repo, self.TID)
+        self.assertIsNone(st["quota_resume"]["automation_id"])
+        self.assertIsNone(self.load()["quota_resume"]["automation_id"])
+        # 清理不动 mode / 预算 / 状态
+        loaded = self.load()
+        self.assertEqual(loaded["status"], "completed")
+        self.assertEqual(loaded["quota_resume"]["mode"], "auto")
+        self.assertEqual(loaded["quota_resume"]["max_resumes"], 3)
+        self.assertEqual(loaded["quota_resume"]["resume_count"], 0)
+
+    # 10. invalid automation ids rejected
+
+    def test_invalid_automation_ids_refused(self):
+        """空串 / None / 非 str 的 automation id → 拒绝且零副作用。"""
+        self.make_task()
+        for bad in ("", None, 123, b"sched-id", ["sched-id"]):
+            with self.assertRaises(ValueError):
+                task.bind_quota_automation(self.repo, self.TID, bad)
+        self.assertIsNone(self.load()["quota_resume"]["automation_id"])
+        self.assertEqual(self.load()["quota_resume"]["mode"], "manual")
+        # 任务不存在 / v2.3 遗留同样拒绝（结构性拒绝 ValueError）
+        with self.assertRaises(ValueError):
+            task.bind_quota_automation(self.repo, "ghost-task", self.AUTO_ID)
+        with self.assertRaises(ValueError):
+            task.quota_continuity_preflight(self.repo, "ghost-task")
+
+    # 11. bind does not alter mode or budget
+
+    def test_bind_does_not_alter_mode_or_budget(self):
+        """bind 只写 automation_id：不改 mode / 预算 / 状态，绝不推断 auto。"""
+        # manual 任务绑定 → mode 仍是 manual（绑定 ≠ 授权自动恢复）
+        self.make_task()
+        st = task.bind_quota_automation(self.repo, self.TID, self.AUTO_ID)
+        self.assertEqual(st["quota_resume"], {
+            "mode": "manual", "max_resumes": 0, "resume_count": 0,
+            "automation_id": self.AUTO_ID})
+        self.assertEqual(st["status"], "active")
+        # manual + 已武装：预检仍按 manual 分支 ready（无需定时激活）
+        report = task.quota_continuity_preflight(self.repo, self.TID)
+        self.assertTrue(report["ready"])
+        self.assertEqual(report["mode"], "manual")
+        # auto 任务绑定 → 授权与预算逐键原样
+        self.arm(task_id="bind-auto-a", max_resumes=5)
+        loaded = self.load("bind-auto-a")
+        self.assertEqual(loaded["quota_resume"]["mode"], "auto")
+        self.assertEqual(loaded["quota_resume"]["max_resumes"], 5)
+        self.assertEqual(loaded["quota_resume"]["resume_count"], 0)
+        self.assertEqual(loaded["status"], "active")
+
+    # 12. clear does not alter mode or budget
+
+    def test_clear_does_not_alter_mode_or_budget(self):
+        """clear 只清 automation_id：mode / max_resumes / resume_count 原样。"""
+        self.prepare_waiting(max_resumes=3)
+        self.decide(quota_view("AVAILABLE"))
+        self.confirm()  # resume_count=1，预算已部分消耗
+        task.enter_waiting_quota(self.repo, self.TID)
+        before = self.load()["quota_resume"]
+        self.assertEqual(before["resume_count"], 1)
+        st = task.clear_quota_automation(self.repo, self.TID)
+        self.assertEqual(st["quota_resume"], {
+            "mode": "auto", "max_resumes": 3, "resume_count": 1,
+            "automation_id": None})
+        self.assertEqual(self.load()["status"], "waiting_quota")
+
+    # 13. auto scheduled decision cannot lead to host resume path unarmed
+
+    def test_unarmed_auto_decision_cannot_reach_resume(self):
+        """auto 已授权未武装 → 决策 remain-waiting（continuity-unarmed），
+        绝不给出 resume-authorized、绝不携带宿主 resume 所需 run id。"""
+        self.prepare_waiting(automation_id=None)
+        decision = self.decide(quota_view("AVAILABLE"))
+        self.assertEqual(decision["action"], "remain-waiting")
+        self.assertIn("continuity-unarmed", decision["reason"])
+        self.assertNotIn("resume-authorized", decision["action"])
+        self.assertNotIn("workflow_run_id", decision)
+        self.assertNotIn("resume_count_after", decision)
+        # 同一任务武装后同一观测 → resume-authorized（闸只拦未武装）
+        task.bind_quota_automation(self.repo, self.TID, self.AUTO_ID)
+        decision = self.decide(quota_view("AVAILABLE"))
+        self.assertEqual(decision["action"], "resume-authorized")
+        self.assertEqual(decision["workflow_run_id"], "run-77")
+
+    # 14. no budget consumption on unarmed wake
+
+    def test_unarmed_wake_consumes_no_budget(self):
+        """无武装唤醒：零状态写盘、零预算消耗、状态原地 waiting_quota。"""
+        self.prepare_waiting(automation_id=None)
+        before = self.state_bytes()
+        for _ in range(3):
+            decision = self.decide(quota_view("AVAILABLE"))
+            self.assertEqual(decision["action"], "remain-waiting")
+            self.assertIn("continuity-unarmed", decision["reason"])
+        self.assertEqual(self.state_bytes(), before,
+                         "unarmed 决策零状态写盘")
+        loaded = self.load()
+        self.assertEqual(loaded["status"], "waiting_quota")
+        self.assertEqual(loaded["quota_resume"]["resume_count"], 0)
+        self.assertEqual(self.names().count("quota_resume_confirmed"), 0)
+        # 武装后端到端闭环仍通：bind → 决策 → 确认 → 计数恰 +1
+        task.bind_quota_automation(self.repo, self.TID, self.AUTO_ID)
+        self.assertEqual(
+            self.decide(quota_view("AVAILABLE"))["action"],
+            "resume-authorized")
+        st = self.confirm()
+        self.assertEqual(st["quota_resume"]["resume_count"], 1)
+
+    # —— 状态词汇补充（bind 状态限三非终态） ——
+
+    def test_bind_status_restriction(self):
+        """绑定限 active / waiting_quota / waiting_user：blocked 与终态拒绝。"""
+        self.make_task()
+        task.set_status(self.repo, self.TID, "blocked")
+        with self.assertRaises(ValueError):
+            task.bind_quota_automation(self.repo, self.TID, self.AUTO_ID)
+        self.assertIsNone(self.load()["quota_resume"]["automation_id"])
+        task.set_status(self.repo, self.TID, "active")
+        task.set_status(self.repo, self.TID, "waiting_user")
+        st = task.bind_quota_automation(self.repo, self.TID, self.AUTO_ID)
+        self.assertEqual(st["quota_resume"]["automation_id"], self.AUTO_ID)
+        task.set_status(self.repo, self.TID, "active")
+        task.complete(self.repo, self.TID)
+        with self.assertRaises(ValueError):
+            task.bind_quota_automation(self.repo, self.TID, "late-bind")
 
 
 # —— 4. state 层校验收口（mode 词汇 / 非负整数 / 预算不变量） ——
