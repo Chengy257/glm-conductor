@@ -6,9 +6,12 @@
     以单行 JSON stdout 薄壳提供数族子命令：任务操作面（review-record）、
     额度只读解析（quota-resolve）、v2.4 audit-fix AF-03 额度等待/恢复
     生命周期操作面（quota-wait / quota-resume-authorize /
-    quota-resume-decision / quota-resume-confirm），以及 v2.4 新路径
-    操作面（v24-compile / writer-* / v24-record-run）。技能层 runtime
-    调用一律走本 CLI（禁止 python3 -c 内联）。
+    quota-resume-decision / quota-resume-confirm）、v2.4 新路径
+    操作面（v24-compile / writer-* / v24-record-run），以及 v2.4.1
+    continuity hotfix 操作面（workflow-model-select /
+    quota-automation-bind / quota-automation-clear /
+    quota-continuity-preflight）。技能层 runtime 调用一律走本 CLI
+    （禁止 python3 -c 内联）。
 
 v2.4 Phase 2（W6，P2-F）退役面：
     v2.3 执行运行时（派发决策 / permit / 租约 / run 账本 / 恢复清单 /
@@ -124,6 +127,41 @@ v2.4 Phase 3（P3-D/E）收口面：
         workflow_run_id / created_at + 可选 artifact_path）；结构非法
         （空 id 等，WorkflowRunError）→ 退出码 2。零状态镜像：绝不落
         任何子代理运行时状态（F6 冻结结果）。
+    workflow-model-select <models-json> [--model <exact-id>]
+        v2.4.1 Workflow 提交 worker 模型选型（H1，INV-MODEL-01；
+        runtime.workflow.submission.select_worker_model /
+        build_submission_contract 薄壳；绝不写宿主 API 客户端——模型
+        发现面归宿主，id 集合由调用方供给）。models-json 参数：能按
+        JSON 解析为数组则直接采用（支持内联 '["..."]' 形态），否则按
+        JSON 文件路径读取数组（UTF-8）。从已配置 id 集合选定唯一
+        provider 限定 Flash worker 模型：显式 --model <exact-id> 校验
+        之并要求精确成员（优先于自动选择）；否则恰一 Flash 候选自动
+        选定、零候选 / 多候选歧义拒绝（绝不静默取第一个）。成功输出
+        单行 JSON 提交契约 {subagent_model, model_policy}（
+        model_policy 恒为 "explicit-flash-required"）——CreateWorkflow
+        的 subagent_model 必须取此值。校验 / 配置拒绝（清单不可读 /
+        非法 JSON / 顶层非数组 / WorkflowSubmissionError）→ 退出码 2。
+    quota-automation-bind <repo_root> <task_id> <automation_id>
+        auto 连续性武装（H2，task.bind_quota_automation 薄壳）：把
+        未来原生 Scheduled Task 见证 id 绑入
+        quota_resume.automation_id（同 id 幂等成功、异 id 拒绝——绝不
+        静默替换；绑定绝不推断 mode=auto）。任务层拒绝（任务缺失 /
+        v2.3 遗留 / 状态词汇外 / 空串 id / 异 id 冲突）→ 退出码 1。
+        输出单行 JSON {task_id, quota_resume}。
+    quota-automation-clear <repo_root> <task_id> [automation_id]
+        清除 automation_id 绑定（task.clear_quota_automation 薄壳；
+        预期在宿主侧删除确认或操作者显式对账后使用）：给定 id 与存量
+        不一致 → 拒绝；存量 None 幂等成功；只清 automation_id，绝不
+        改 mode / max_resumes / resume_count；终态任务允许清理。
+        任务层拒绝 → 退出码 1。输出单行 JSON {task_id, quota_resume}。
+    quota-continuity-preflight <repo_root> <task_id>
+        auto 连续性预检（task.quota_continuity_preflight 薄壳，纯读
+        绝不改状态）：manual → ready=true；auto + 非空 automation_id
+        → ready=true（armed）；auto + 空 → ready=false（unarmed）→
+        退出码 2——主会话机械视作 launch/resume 阻断（本 CLI 惟一的
+        「非校验类」退出码 2 面，判定本身即阻塞信号）。只证明持久化
+        绑定存在，绝不宣称宿主侧激活仍存活。任务层拒绝（任务缺失 /
+        v2.3 遗留）→ 退出码 1。输出单行 JSON {task_id, preflight}。
 
 输出与退出码契约：
     stdout 恒为单行 JSON（json.dumps(..., ensure_ascii=True)，中文以
@@ -133,10 +171,13 @@ v2.4 Phase 3（P3-D/E）收口面：
     退出码：
       0 = 成功；
       2 = 校验拒绝（用法错误 / 参数值非法 / save_state 校验闸或状态
-          转换门拒绝——含盘上 state.json 损坏的解析拒绝）；
+          转换门拒绝——含盘上 state.json 损坏的解析拒绝）；另含
+          quota-continuity-preflight 判定 ready=false（非校验错误的
+          运行期阻塞信号：主会话机械视作 launch/resume 阻断）；
       1 = 异常（任务不存在 / 审查记录被拒 / 额度等待与恢复生命周期
-          操作被 runtime.task 拒绝 / 意外错误；错误 JSON 只含异常
-          类型名与消息，供操作者排查）。
+          操作被 runtime.task 拒绝 / auto 连续性武装操作面被
+          runtime.task 拒绝 / 意外错误；错误 JSON 只含异常类型名与
+          消息，供操作者排查）。
 
 依赖方向：
     本模块是薄壳：校验与变换都在 runtime.state / runtime.task /
@@ -173,7 +214,11 @@ USAGE = (
     "writer-acquire <repo_root> <task_id> [--run-id <id>] | "
     "writer-release <repo_root> <task_id> [--run-id <id>] [--force] | "
     "writer-show <repo_root> | "
-    "v24-record-run <task_ref> <run-id> [--artifact <path>]")
+    "v24-record-run <task_ref> <run-id> [--artifact <path>] | "
+    "workflow-model-select <models-json> [--model <exact-id>] | "
+    "quota-automation-bind <repo_root> <task_id> <automation_id> | "
+    "quota-automation-clear <repo_root> <task_id> [automation_id] | "
+    "quota-continuity-preflight <repo_root> <task_id>")
 
 
 class _UsageError(ValueError):
@@ -194,6 +239,15 @@ class _QuotaRejected(Exception):
     """额度等待 / 恢复生命周期操作被 runtime.task 拒绝（任务缺失 /
     非 waiting 状态 / 预算不变量 / 观测词汇外等 ValueError 口径）
     ——运行期拒绝，退出码 1。"""
+
+
+class _AutomationRejected(Exception):
+    """auto 连续性武装操作面（quota-automation-bind /
+    quota-automation-clear / quota-continuity-preflight）被
+    runtime.task 拒绝（任务缺失 / v2.3 遗留任务 / 状态词汇外 /
+    空串 id / 异 id 冲突等 ValueError 口径）——运行期拒绝，退出码 1
+    （与 _QuotaRejected 同口径；preflight 的 ready=false 阻断信号
+    不走本类——那是显式退出码 2，见 _quota_continuity_preflight）。"""
 
 
 def _emit(payload):
@@ -569,6 +623,124 @@ def _v24_record_run(task_ref, run_id, artifact=None) -> int:
     return 0
 
 
+# —— v2.4.1 continuity hotfix（H1/H2）：提交模型选型与 auto 连续性 CLI 面 ——
+#
+# 本节同为纯追加薄壳：模型选型 / 提交契约语义在
+# runtime.workflow.submission（纯内存计算，零 I/O），武装 / 清理 /
+# 预检语义在 runtime.task；这里只做 models-json 读入、argv 解析、
+# JSON 输出与退出码映射。绝不写宿主 API 客户端（模型发现面归宿主，
+# 已配置 id 集合由调用方供给）。
+
+def _load_configured_model_ids(models_json) -> list:
+    """workflow-model-select 的 models-json 参数解析：内联 JSON 数组
+    优先，否则按 JSON 文件路径读取数组。
+
+    参数能被 json.loads 解析且恰为 JSON 数组 → 直接采用（支持内联
+    '["account:a/x"]' 形态）；否则按文件路径读取（UTF-8）。文件不可读
+    / 非法 JSON / 顶层非数组 → ValueError（校验拒绝口径，退出码 2；
+    元素形状校验归 submission._validated_configured）。只解析调用方
+    供给的 id 集合——绝不调用宿主模型发现面。"""
+    try:
+        inline = json.loads(models_json)
+    except ValueError:
+        inline = None
+    if isinstance(inline, list):
+        return inline
+    try:
+        with open(models_json, "r", encoding="utf-8") as handle:
+            document = json.load(handle)
+    except OSError as exc:
+        raise ValueError(
+            "workflow-model-select：参数 %r 既不是内联 JSON 数组，也无法"
+            "作为 JSON 文件路径读取：%s" % (models_json, exc))
+    except ValueError as exc:  # json.JSONDecodeError 是 ValueError 子类
+        raise ValueError(
+            "workflow-model-select：模型清单文件 %r 不是合法 JSON：%s"
+            % (models_json, exc))
+    if not isinstance(document, list):
+        raise ValueError(
+            "workflow-model-select：模型清单必须是 JSON 数组（模型 id "
+            "字符串集合），%r 顶层为 %s"
+            % (models_json, type(document).__name__))
+    return document
+
+
+def _workflow_model_select(models_json, model=None) -> int:
+    """workflow-model-select：worker 模型选型 + 提交契约输出
+    （submission.select_worker_model / build_submission_contract 薄壳；
+    INV-MODEL-01：worker 必须显式选定 provider 限定 Flash 模型，绝不
+    继承主会话文本模型，绝不接受裸别名）。
+
+    models-json 解析见 _load_configured_model_ids（内联数组与文件两
+    形态等价）。显式 --model <exact-id> 校验之并要求 configured 精确
+    成员（显式选择优先于自动选择）；否则恰一 Flash 候选自动选定、
+    零候选 / 多候选歧义拒绝（绝不静默取第一个）。成功输出单行 JSON
+    提交契约 {subagent_model, model_policy}；校验 / 配置拒绝
+    （WorkflowSubmissionError 是 ValueError 子类）→ 退出码 2；意外
+    → 退出码 1。"""
+    from runtime.workflow import submission  # 函数内 import：monkeypatch 友好
+    configured = _load_configured_model_ids(models_json)
+    selected = submission.select_worker_model(configured,
+                                              explicit_model_id=model)
+    _emit(submission.build_submission_contract(selected))
+    return 0
+
+
+def _quota_automation_bind(repo_root, task_id, automation_id) -> int:
+    """quota-automation-bind：auto 连续性武装
+    （task.bind_quota_automation 薄壳）：把未来原生 Scheduled Task
+    见证 id 绑入 quota_resume.automation_id（同 id 幂等成功、异 id
+    拒绝不静默替换；绑定绝不推断 mode=auto）。任务层 ValueError
+    （任务缺失 / v2.3 遗留 / 状态词汇外 / 空串 id / 异 id 冲突）→
+    _AutomationRejected（退出码 1）。输出单行 JSON
+    {task_id, quota_resume}。"""
+    from runtime import task  # 函数内 import：monkeypatch 友好
+    try:
+        st = task.bind_quota_automation(repo_root, task_id, automation_id)
+    except ValueError as exc:
+        raise _AutomationRejected(str(exc)) from exc
+    _emit({"task_id": task_id, "quota_resume": st.get("quota_resume")})
+    return 0
+
+
+def _quota_automation_clear(repo_root, task_id, automation_id=None) -> int:
+    """quota-automation-clear：清除 automation_id 绑定
+    （task.clear_quota_automation 薄壳；预期在宿主侧删除确认或操作者
+    显式对账后使用）。给定 id 与存量不一致 → 拒绝；存量 None 幂等
+    成功；只清 automation_id，绝不改 mode / max_resumes /
+    resume_count；终态任务允许清理。任务层 ValueError →
+    _AutomationRejected（退出码 1）。输出单行 JSON
+    {task_id, quota_resume}。"""
+    from runtime import task  # 函数内 import：monkeypatch 友好
+    try:
+        st = task.clear_quota_automation(repo_root, task_id,
+                                         automation_id=automation_id)
+    except ValueError as exc:
+        raise _AutomationRejected(str(exc)) from exc
+    _emit({"task_id": task_id, "quota_resume": st.get("quota_resume")})
+    return 0
+
+
+def _quota_continuity_preflight(repo_root, task_id) -> int:
+    """quota-continuity-preflight：auto 连续性预检
+    （task.quota_continuity_preflight 薄壳，纯读绝不改状态）。
+
+    manual → ready=true；auto + 非空 automation_id → ready=true
+    （armed）；auto + 空 → ready=false（unarmed）→ 退出码 2——主会话
+    机械视作 launch/resume 阻断（本 CLI 惟一的「非校验类」退出码 2
+    面，判定本身即阻塞信号）。只证明持久化绑定存在，绝不宣称宿主侧
+    激活仍存活。任务层 ValueError（任务缺失 / v2.3 遗留）→
+    _AutomationRejected（退出码 1）。输出单行 JSON
+    {task_id, preflight}。"""
+    from runtime import task  # 函数内 import：monkeypatch 友好
+    try:
+        report = task.quota_continuity_preflight(repo_root, task_id)
+    except ValueError as exc:
+        raise _AutomationRejected(str(exc)) from exc
+    _emit({"task_id": task_id, "preflight": report})
+    return 0 if report.get("ready") is True else 2
+
+
 def _dispatch(args) -> int:
     """argv 分发；子命令 / 参数个数错误抛 _UsageError（退出码 2）。"""
     if not args:
@@ -722,6 +894,40 @@ def _dispatch(args) -> int:
                     + USAGE)
             artifact = rest[3]
         return _v24_record_run(rest[0], rest[1], artifact=artifact)
+    if cmd == "workflow-model-select":
+        # 位置参数 <models-json> + 旗标对（--model <exact-id>，至多
+        # 一次）→ 一或三个参数
+        if len(rest) not in (1, 3):
+            raise _UsageError(
+                "workflow-model-select 需要 <models-json> "
+                "[--model <exact-id>] 一或三个参数。" + USAGE)
+        model = None
+        if len(rest) == 3:
+            if rest[1] != "--model":
+                raise _UsageError(
+                    "workflow-model-select 的可选参数只接受 "
+                    "--model <exact-id>。" + USAGE)
+            model = rest[2]
+        return _workflow_model_select(rest[0], model=model)
+    if cmd == "quota-automation-bind":
+        if len(rest) != 3:
+            raise _UsageError(
+                "quota-automation-bind 需要 <repo_root> <task_id> "
+                "<automation_id> 三个参数。" + USAGE)
+        return _quota_automation_bind(rest[0], rest[1], rest[2])
+    if cmd == "quota-automation-clear":
+        if len(rest) not in (2, 3):
+            raise _UsageError(
+                "quota-automation-clear 需要 <repo_root> <task_id> "
+                "[automation_id] 两或三个参数。" + USAGE)
+        return _quota_automation_clear(
+            rest[0], rest[1], rest[2] if len(rest) == 3 else None)
+    if cmd == "quota-continuity-preflight":
+        if len(rest) != 2:
+            raise _UsageError(
+                "quota-continuity-preflight 需要 <repo_root> <task_id> "
+                "两个参数。" + USAGE)
+        return _quota_continuity_preflight(rest[0], rest[1])
     raise _UsageError("未知子命令 %r。" % cmd + USAGE)
 
 
@@ -732,8 +938,10 @@ def main(argv=None) -> int:
     ValueError（用法 / 参数值 / save_state 校验栈）→ 2；
     _TaskMissing（任务不存在）/ _ReviewRejected（审查记录被
     runtime.task 顺序与状态闸拒绝）/ _QuotaRejected（额度等待与
-    恢复生命周期操作被 runtime.task 拒绝）→ 1；其余意外异常 → 1
-    （错误 JSON 含异常类型名，stdout 契约不破）。
+    恢复生命周期操作被 runtime.task 拒绝）/ _AutomationRejected
+    （auto 连续性武装操作面被 runtime.task 拒绝）→ 1；其余意外异常
+    → 1（错误 JSON 含异常类型名，stdout 契约不破）。preflight 的
+    ready=false 阻断是函数内显式返回 2，不经异常路径。
     """
     args = list(sys.argv[1:]) if argv is None else list(argv)
     try:
@@ -741,7 +949,8 @@ def main(argv=None) -> int:
     except ValueError as exc:  # 含 _UsageError：校验拒绝类
         _emit({"error": str(exc)})
         return 2
-    except (_TaskMissing, _ReviewRejected, _QuotaRejected) as exc:
+    except (_TaskMissing, _ReviewRejected, _QuotaRejected,
+            _AutomationRejected) as exc:
         _emit({"error": str(exc)})
         return 1
     except Exception as exc:  # 意外兜底

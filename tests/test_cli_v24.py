@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""v2.4 Phase 1 新路径 CLI 子命令测试（P1-F，单元 U6）。
+"""v2.4 Phase 1 新路径 CLI 子命令测试（P1-F，单元 U6）+ v2.4.1 continuity hotfix CLI 面。
 
 锚定对象：cli.py 纯追加的五个子命令（v24-compile / writer-acquire /
-writer-release / writer-show / v24-record-run）——规格 U6 测试清单：
+writer-release / writer-show / v24-record-run）与 v2.4.1 continuity
+hotfix 追加的四子命令（workflow-model-select / quota-automation-bind /
+quota-automation-clear / quota-continuity-preflight）——规格 U6 测试
+清单 + 规格 §3.4（workflow-model-select CLI 测试）/ §4.5（H2 CLI 测试）：
 
   1. v24-compile：固定小 DAG 黄金输出（phase 名含节点 id、
      await Promise.all、NodeResult 接口）；--out 落盘 + stdout 只打
@@ -27,11 +30,29 @@ writer-release / writer-show / v24-record-run）——规格 U6 测试清单：
      quota-resume-authorize / quota-resume-decision /
      quota-resume-confirm）：manual 缺省 quota-wait 进 waiting_quota
      （journal enter 事件）；authorize 落 mode=auto + max_resumes；
-     EXHAUSTED/UNKNOWN → remain-waiting；AVAILABLE + 预算有余 →
-     resume-authorized（含 workflow_run_id / resume_count_after）；
-     confirm 恰消耗一预算；confirm 前重复 decision 不消耗预算；
-     非 waiting 任务 confirm → 1；预算耗尽 → waiting-user 且任务转
-     waiting_user；max_resumes 非法（"abc" / "-1"）→ 2。
+     EXHAUSTED/UNKNOWN → remain-waiting；AVAILABLE + 预算有余 + 已武装
+     → resume-authorized（含 workflow_run_id / resume_count_after；
+     v2.4.1 起决策的 resume-authorized 路径要求 auto 连续性已武装，
+     prepare_waiting 缺省绑定见证 id）；confirm 恰消耗一预算；
+     confirm 前重复 decision 不消耗预算；非 waiting 任务 confirm →
+     1；预算耗尽 → waiting-user 且任务转 waiting_user；max_resumes
+     非法（"abc" / "-1"）→ 2。
+  5. workflow-model-select（v2.4.1 H1，submission 薄壳）：恰一 Flash
+     自动选中（stdout 恰 {subagent_model, model_policy=
+     "explicit-flash-required"}）；内联数组与文件两形态等价；零候选
+     exit 2；多候选歧义 exit 2 且错误列出全部候选 id；显式 --model
+     精确选中；显式未配置 / 显式主会话文本模型 exit 2；清单文件缺失 /
+     坏 JSON / 顶层非数组 exit 2；用法错（零参数 / 未知旗标 / 旗标缺
+     取值）exit 2。
+  6. auto 连续性武装三命令（v2.4.1 H2；quota-automation-bind /
+     quota-automation-clear / quota-continuity-preflight）：bind →
+     armed 往返（quota_resume.automation_id 落盘、同 id 幂等、
+     journal 零新增）；异 id 冲突 exit 1 且盘上零改动；clear 解除
+     （幂等；给定 id 与存量不一致 exit 1）；preflight 三态 manual →
+     0 / auto+armed → 0 / auto+unarmed → 2（主会话机械视作
+     launch/resume 阻断）；任务缺失 exit 1；空 automation_id exit 1；
+     auto 已授权未武装的 decision 经 CLI 仍 remain-waiting
+     （continuity-unarmed，任务保持 waiting_quota、零预算消耗）。
 
 调用方式：模仿 tests/test_cli_extensions.py 的真实子进程冒烟
 （subprocess.run([sys.executable, CLI_PATH, ...], encoding="utf-8")）——
@@ -537,11 +558,20 @@ class QuotaLifecycleCliFixture(unittest.TestCase):
         return task.create_task(self.repo, task_id, "额度 CLI 测试目标",
                                 {"mode": "solo"})
 
-    def prepare_waiting(self, max_resumes=3, run_id="run-cli-42"):
-        """授权 + 关联 run + 进入 waiting_quota（决策面标准前置）。"""
+    def prepare_waiting(self, max_resumes=3, run_id="run-cli-42",
+                        automation_id="sched-witness-run-42"):
+        """授权 + 关联 run + 进入 waiting_quota（决策面标准前置）。
+
+        v2.4.1 起决策原语的 resume-authorized 路径要求 auto 连续性
+        已武装（mode=auto 且 automation_id 为空 → remain-waiting 的
+        continuity-unarmed 闸）——本助手缺省绑定见证 id 使 resume-
+        authorized 用例走完整前置；automation_id=None 显式保留未武装
+        构造（供 unarmed 闸用例）。"""
         self.make_task()
         task.record_workflow_run(self.repo, self.TID, run_id)
         task.authorize_quota_resume(self.repo, self.TID, max_resumes)
+        if automation_id is not None:
+            task.bind_quota_automation(self.repo, self.TID, automation_id)
         task.enter_waiting_quota(self.repo, self.TID)
 
     def load(self, task_id=TID):
@@ -766,6 +796,303 @@ class QuotaLifecycleCliTest(QuotaLifecycleCliFixture):
         self.assertEqual(code, 2)
         code, _stdout = self.run_cli("quota-resume-confirm", self.repo,
                                      self.TID, "extra")
+        self.assertEqual(code, 2)
+
+
+# —— 6. workflow-model-select（v2.4.1 H1，submission 薄壳） ——
+
+FLASH_A = "account:team-a/GLM-5.3-Flash"
+FLASH_B = "account:team-b/GLM-5.3-Flash"
+TEXT_MODEL_ID = "account:team-a/GLM-5.3"
+OTHER_MODEL_ID = "account:team-a/GLM-4-Air"
+
+
+class WorkflowModelSelectCliTest(CliV24Fixture):
+    """workflow-model-select：内联 / 文件两形态、显式与自动选择、拒绝面。
+
+    真实子进程调用（选型链纯内存计算，零状态零网络）——stdout 恰单行
+    JSON 提交契约 {subagent_model, model_policy}。"""
+
+    def write_models(self, models, name="models.json"):
+        """模型 id 数组写入临时仓库根 JSON 文件（子进程 cwd 即临时目录）。"""
+        path = os.path.join(self.repo, name)
+        with open(path, "w", encoding="utf-8", newline="\n") as handle:
+            json.dump(models, handle, ensure_ascii=False)
+        return name
+
+    def test_single_flash_auto_selected_contract_stdout(self):
+        """恰一 Flash 候选：自动选定，stdout 恰单行两键提交契约。"""
+        name = self.write_models([TEXT_MODEL_ID, FLASH_A, OTHER_MODEL_ID])
+        code, stdout, stderr = self.run_cli("workflow-model-select", name)
+        self.assertEqual(code, 0, stderr)
+        self.assertEqual(stderr, "")
+        self.assertEqual(len(stdout.strip().splitlines()), 1)
+        self.assertEqual(json.loads(stdout), {
+            "subagent_model": FLASH_A,
+            "model_policy": "explicit-flash-required"})
+        # 成功路径零落盘（选型是纯内存计算，绝不写宿主面）
+        self.assertEqual(self.listdir(), [name])
+
+    def test_inline_array_and_file_forms_equivalent(self):
+        """内联数组与文件两形态对同一集合输出逐字等价。"""
+        name = self.write_models([FLASH_A, TEXT_MODEL_ID])
+        code_file, stdout_file, _ = self.run_cli(
+            "workflow-model-select", name)
+        code_inline, stdout_inline, _ = self.run_cli(
+            "workflow-model-select", json.dumps([FLASH_A, TEXT_MODEL_ID]))
+        self.assertEqual(code_file, 0)
+        self.assertEqual(code_inline, 0)
+        self.assertEqual(stdout_file, stdout_inline)
+
+    def test_zero_flash_candidates_exit_2(self):
+        """零 Flash 候选（含内联空数组）→ 校验拒绝，退出码 2。"""
+        name = self.write_models([TEXT_MODEL_ID, OTHER_MODEL_ID])
+        code, stdout, _ = self.run_cli("workflow-model-select", name)
+        self.assertEqual(code, 2)
+        self.assertIn("error", json.loads(stdout))
+        code, stdout, _ = self.run_cli("workflow-model-select", "[]")
+        self.assertEqual(code, 2)
+        self.assertIn("error", json.loads(stdout))
+
+    def test_multiple_flash_candidates_exit_2_listing_candidates(self):
+        """多候选歧义 → 退出码 2 且错误列出全部候选 id（绝不静默取第一个）。"""
+        name = self.write_models([FLASH_A, FLASH_B, OTHER_MODEL_ID])
+        code, stdout, _ = self.run_cli("workflow-model-select", name)
+        self.assertEqual(code, 2)
+        text = self.decoded(stdout)
+        self.assertIn("歧义", text)
+        self.assertIn(FLASH_A, text)
+        self.assertIn(FLASH_B, text)
+
+    def test_explicit_model_exact_selection_wins(self):
+        """显式 --model <exact-id>：精确选中（显式优先于自动选择）。"""
+        name = self.write_models([FLASH_A, FLASH_B])
+        code, stdout, _ = self.run_cli(
+            "workflow-model-select", name, "--model", FLASH_B)
+        self.assertEqual(code, 0)
+        payload = json.loads(stdout)
+        self.assertEqual(payload["subagent_model"], FLASH_B)
+        self.assertEqual(payload["model_policy"], "explicit-flash-required")
+
+    def test_explicit_unconfigured_model_exit_2(self):
+        """显式给出未配置 id → 精确成员闸拒绝，退出码 2。"""
+        name = self.write_models([FLASH_A])
+        code, stdout, _ = self.run_cli(
+            "workflow-model-select", name, "--model", FLASH_B)
+        self.assertEqual(code, 2)
+        self.assertIn(FLASH_B, self.decoded(stdout))
+
+    def test_explicit_text_model_exit_2(self):
+        """显式给主会话文本模型：缺陷 A 的误继承源，专门拒绝。"""
+        name = self.write_models([FLASH_A, TEXT_MODEL_ID])
+        code, stdout, _ = self.run_cli(
+            "workflow-model-select", name, "--model", TEXT_MODEL_ID)
+        self.assertEqual(code, 2)
+        self.assertIn("文本模型", self.decoded(stdout))
+
+    def test_models_input_rejections_exit_2(self):
+        """清单不可读 / 坏 JSON / 顶层非数组 / 元素非字符串 → 退出码 2。"""
+        # 文件缺失
+        code, stdout, _ = self.run_cli(
+            "workflow-model-select", "no-such.json")
+        self.assertEqual(code, 2)
+        self.assertIn("no-such.json", self.decoded(stdout))
+        # 坏 JSON 文件
+        with open(os.path.join(self.repo, "bad.json"), "w",
+                  encoding="utf-8") as handle:
+            handle.write("{not json")
+        code, _stdout, _ = self.run_cli("workflow-model-select", "bad.json")
+        self.assertEqual(code, 2)
+        # 顶层非数组（JSON 对象文件）
+        with open(os.path.join(self.repo, "obj.json"), "w",
+                  encoding="utf-8") as handle:
+            json.dump({"models": [FLASH_A]}, handle)
+        code, stdout, _ = self.run_cli("workflow-model-select", "obj.json")
+        self.assertEqual(code, 2)
+        self.assertIn("数组", self.decoded(stdout))
+        # 内联可解析但非数组 → 落到文件路径读取 → 不存在 → 2
+        code, _stdout, _ = self.run_cli("workflow-model-select", '{"a": 1}')
+        self.assertEqual(code, 2)
+        # 数组元素非字符串
+        name = self.write_models([FLASH_A, 42], name="nums.json")
+        code, _stdout, _ = self.run_cli("workflow-model-select", name)
+        self.assertEqual(code, 2)
+
+    def test_usage_errors_exit_2(self):
+        """零参数 / 未知旗标 / 旗标缺取值 / 参数个数错误 → 退出码 2。"""
+        code, _stdout, _ = self.run_cli("workflow-model-select")
+        self.assertEqual(code, 2)
+        name = self.write_models([FLASH_A])
+        code, _stdout, _ = self.run_cli(
+            "workflow-model-select", name, "--bogus", "x")
+        self.assertEqual(code, 2)
+        code, _stdout, _ = self.run_cli(
+            "workflow-model-select", name, "--model")
+        self.assertEqual(code, 2)
+        code, _stdout, _ = self.run_cli(
+            "workflow-model-select", name, "--model", FLASH_A, "extra")
+        self.assertEqual(code, 2)
+
+
+# —— 7. auto 连续性武装三命令（v2.4.1 H2，task 薄壳） ——
+
+class QuotaAutomationCliTest(QuotaLifecycleCliFixture):
+    """quota-automation-bind / quota-automation-clear /
+    quota-continuity-preflight：armed 往返、冲突拒绝、preflight 三态。"""
+
+    AUTO_ID = "sched-witness-cli-1"
+
+    def test_bind_clear_preflight_roundtrip(self):
+        """bind → 盘上武装 → 同 id 幂等 → clear 解除 → 幂等清理。
+
+        bind / clear 绝不改 mode 与预算、绝不追加 journal 事件。"""
+        self.make_task()
+        code, payload = self.run_cli_json(
+            "quota-automation-bind", self.repo, self.TID, self.AUTO_ID)
+        self.assertEqual(code, 0)
+        self.assertEqual(payload["task_id"], self.TID)
+        self.assertEqual(payload["quota_resume"]["automation_id"],
+                         self.AUTO_ID)
+        # 绑定绝不推断 mode=auto，绝不动预算
+        self.assertEqual(payload["quota_resume"]["mode"], "manual")
+        self.assertEqual(payload["quota_resume"]["max_resumes"], 0)
+        self.assertEqual(payload["quota_resume"]["resume_count"], 0)
+        # 盘上真实落盘
+        self.assertEqual(
+            self.load()["quota_resume"]["automation_id"], self.AUTO_ID)
+        # 同 id 重绑幂等成功
+        code, payload = self.run_cli_json(
+            "quota-automation-bind", self.repo, self.TID, self.AUTO_ID)
+        self.assertEqual((code, payload["quota_resume"]["automation_id"]),
+                         (0, self.AUTO_ID))
+        # clear 给定同 id：解除武装
+        code, payload = self.run_cli_json(
+            "quota-automation-clear", self.repo, self.TID, self.AUTO_ID)
+        self.assertEqual(code, 0)
+        self.assertIsNone(payload["quota_resume"]["automation_id"])
+        self.assertIsNone(self.load()["quota_resume"]["automation_id"])
+        # clear 不改 mode / 预算
+        self.assertEqual(payload["quota_resume"]["mode"], "manual")
+        self.assertEqual(payload["quota_resume"]["max_resumes"], 0)
+        # 无给定 id 的 clear 幂等（存量已 None）
+        code, payload = self.run_cli_json(
+            "quota-automation-clear", self.repo, self.TID)
+        self.assertEqual(code, 0)
+        self.assertIsNone(payload["quota_resume"]["automation_id"])
+        # bind / clear 对 journal 零新增（仍只有建任务的 route_selected）
+        self.assertEqual(self.names(), ["route_selected"])
+
+    def test_bind_conflicting_id_exit_1_no_silent_replace(self):
+        """异 id 重绑冲突 → 退出码 1，绝不静默替换，盘上零改动。"""
+        self.make_task()
+        self.run_cli("quota-automation-bind", self.repo, self.TID,
+                     self.AUTO_ID)
+        code, payload = self.run_cli_json(
+            "quota-automation-bind", self.repo, self.TID, "other-sched")
+        self.assertEqual(code, 1)
+        self.assertIn("error", payload)
+        self.assertIn("other-sched", payload["error"])
+        self.assertIn(self.AUTO_ID, payload["error"])
+        self.assertEqual(
+            self.load()["quota_resume"]["automation_id"], self.AUTO_ID)
+
+    def test_clear_wrong_expected_id_exit_1(self):
+        """clear 给定 id 与存量不一致 → 精确对账拒绝，退出码 1。"""
+        self.make_task()
+        self.run_cli("quota-automation-bind", self.repo, self.TID,
+                     self.AUTO_ID)
+        code, payload = self.run_cli_json(
+            "quota-automation-clear", self.repo, self.TID, "mismatch-id")
+        self.assertEqual(code, 1)
+        self.assertIn("mismatch-id", payload["error"])
+        self.assertEqual(
+            self.load()["quota_resume"]["automation_id"], self.AUTO_ID)
+
+    def test_bind_empty_automation_id_exit_1(self):
+        """空串 automation_id（任务层结构拒绝）→ 退出码 1，盘上零改动。"""
+        self.make_task()
+        code, payload = self.run_cli_json(
+            "quota-automation-bind", self.repo, self.TID, "")
+        self.assertEqual(code, 1)
+        self.assertIn("automation_id", payload["error"])
+        self.assertIsNone(self.load()["quota_resume"]["automation_id"])
+
+    def test_preflight_three_states_exit_0_0_2(self):
+        """preflight 三态：manual → 0；auto 未武装 → 2（launch/resume
+        阻断）；auto 已武装 → 0。纯读，绝不改状态。"""
+        # 态一：manual 未授权 → ready=true，退出码 0
+        self.make_task()
+        code, payload = self.run_cli_json(
+            "quota-continuity-preflight", self.repo, self.TID)
+        self.assertEqual(code, 0)
+        self.assertEqual(payload["task_id"], self.TID)
+        self.assertEqual(payload["preflight"], {
+            "ready": True, "mode": "manual", "automation_id": None,
+            "reason": "manual mode does not require scheduled activation"})
+        # 态二：auto 已授权未武装 → ready=false，退出码 2
+        task.authorize_quota_resume(self.repo, self.TID, 3)
+        code, payload = self.run_cli_json(
+            "quota-continuity-preflight", self.repo, self.TID)
+        self.assertEqual(code, 2)
+        self.assertEqual(payload["preflight"], {
+            "ready": False, "mode": "auto", "automation_id": None,
+            "reason": "auto continuity is not armed"})
+        # 纯读：预检绝不改状态（仍 active）
+        self.assertEqual(self.load()["status"], "active")
+        # 态三：bind 武装后 → ready=true，退出码 0
+        self.run_cli("quota-automation-bind", self.repo, self.TID,
+                     self.AUTO_ID)
+        code, payload = self.run_cli_json(
+            "quota-continuity-preflight", self.repo, self.TID)
+        self.assertEqual(code, 0)
+        self.assertEqual(payload["preflight"], {
+            "ready": True, "mode": "auto",
+            "automation_id": self.AUTO_ID,
+            "reason": "auto continuity armed"})
+        self.assertEqual(self.load()["status"], "active")
+
+    def test_unarmed_auto_decision_remains_waiting_via_cli(self):
+        """auto 已授权未武装：AVAILABLE 观测下 decision 仍
+        remain-waiting（continuity-unarmed 闸经 CLI；任务保持
+        waiting_quota、零预算消耗）。"""
+        self.prepare_waiting(automation_id=None)
+        with self.with_detail(fake_detail("AVAILABLE")):
+            code, payload = self.run_cli_json(
+                "quota-resume-decision", self.repo, self.TID)
+        self.assertEqual(code, 0)
+        self.assertEqual(payload["decision"]["action"], "remain-waiting")
+        self.assertIn("continuity-unarmed", payload["decision"]["reason"])
+        self.assertEqual(self.load()["status"], "waiting_quota")
+        self.assertEqual(self.load()["quota_resume"]["resume_count"], 0)
+
+    def test_automation_missing_task_exit_1(self):
+        """任务缺失：三命令均任务层拒绝（退出码 1，错误含「不存在」）。"""
+        for argv in (
+            ("quota-automation-bind", self.repo, "ghost-task", "sched-x"),
+            ("quota-automation-clear", self.repo, "ghost-task"),
+            ("quota-continuity-preflight", self.repo, "ghost-task"),
+        ):
+            code, payload = self.run_cli_json(*argv)
+            self.assertEqual(code, 1)
+            self.assertIn("不存在", payload["error"])
+
+    def test_automation_usage_errors_exit_2(self):
+        """参数个数错误（不足 / 超出）→ 用法错，退出码 2。"""
+        code, _stdout = self.run_cli("quota-automation-bind", self.repo)
+        self.assertEqual(code, 2)
+        code, _stdout = self.run_cli(
+            "quota-automation-bind", self.repo, self.TID, "s", "extra")
+        self.assertEqual(code, 2)
+        code, _stdout = self.run_cli("quota-automation-clear", self.repo)
+        self.assertEqual(code, 2)
+        code, _stdout = self.run_cli(
+            "quota-automation-clear", self.repo, self.TID, "s", "extra")
+        self.assertEqual(code, 2)
+        code, _stdout = self.run_cli(
+            "quota-continuity-preflight", self.repo)
+        self.assertEqual(code, 2)
+        code, _stdout = self.run_cli(
+            "quota-continuity-preflight", self.repo, self.TID, "extra")
         self.assertEqual(code, 2)
 
 
