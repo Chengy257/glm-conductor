@@ -21,6 +21,11 @@
   - [enforcement/SKILL.md](../plugins/glm-conductor/skills/enforcement/SKILL.md) — 确定性保障运行时契约（写者守卫、change_id 新鲜度、四查完成守卫、被拦截时的恢复方法）；
   - [continuity/SKILL.md](../plugins/glm-conductor/skills/continuity/SKILL.md) — Workflow 恢复、waiting_quota、手动/自动有界恢复与原生 Scheduled Task 唤醒。
 
+## v2.4.1 active hotfix handoff
+
+- [V2_4_1_CONTINUITY_HOTFIX_PLAN.md](roadmap/V2_4_1_CONTINUITY_HOTFIX_PLAN.md) — v2.4.1 总体计划：修复 Native Workflow worker 模型遗漏导致继承主会话 GLM-5.3，以及 auto quota resume 未强制预建未来唤醒的连续性缺口。
+- [V2_4_1_CONTINUITY_HOTFIX_IMPLEMENTATION_SPEC.md](roadmap/V2_4_1_CONTINUITY_HOTFIX_IMPLEMENTATION_SPEC.md) — **可直接交付实施的详细规格**：H1 显式 Flash submission contract、H2 automation binding/preflight、H3 arm-before-work/wake protocol、H4 live acceptance + 单次最终全量回归。
+
 ## Active review / implementation handoff（非架构真相源）
 
 以下文档记录 v2.4 重基线、audit-fix 与最终发布收口。Phase 0–4、audit-fix（AF-01–AF-06）与 Final Release Closeout（FR-01–FR-04）均已完成，最终裁决 `MERGE_READY`（见审计报告 Final Release Closeout Addendum）；分支可合并 main。
