@@ -15,7 +15,7 @@
 
 | 工作包 | Commit | 内容 |
 | --- | --- | --- |
-| H1 | `f356469` | `feat(v2.4.1): workflow submission model preflight module (H1)` — submission.py + 34 例测试 |
+| H1 | `f356469` | `feat(v2.4.1): workflow submission model preflight module (H1)` — submission.py + 35 例测试 |
 | H2 | `aa48fea` | `feat(v2.4.1): automation binding and continuity preflight (H2)` — task.py 三 API + decision 强化 + state.py 语义澄清 + 测试 |
 | CLI 收口 | `9248e94` | `feat(v2.4.1): CLI surface for model selection and continuity arming (H1+H2 收口)` — cli.py 四子命令 + 测试 |
 | H3 | `ffd4563` | `feat(v2.4.1): arm-before-work protocol and static contract checks (H3)` — 三技能文档 + validator check_16 |
@@ -37,7 +37,7 @@
 - `plugins/glm-conductor/skills/continuity/references/long-horizon.md`（结构化 resume prompt 重写 + Scheduled Trigger 契约）
 - `scripts/validate_plugin.py`（+check_16：§5.6 六静态契约）
 
-测试（4）：`tests/test_workflow_submission.py`（新建 34 例）、`tests/test_quota_resume_v24.py`（+15 例 + 既有用例按 v2.4.1 契约更新）、`tests/test_cli_v24.py`（+四命令用例）、`tests/test_task_lifecycle.py`（+1 断言）。
+测试（4）：`tests/test_workflow_submission.py`（新建 35 例）、`tests/test_quota_resume_v24.py`（+15 例 + 既有用例按 v2.4.1 契约更新）、`tests/test_cli_v24.py`（+四命令用例）、`tests/test_task_lifecycle.py`（+1 断言）。
 
 文档/清单（8）：`README.md`、`README.zh-CN.md`、`docs/architecture.md`、`docs/core-concepts.md`、`docs/troubleshooting.md`、`CHANGELOG.md`、`plugins/glm-conductor/.zcode-plugin/plugin.json`（2.4.1）、`marketplace.json`（2.4.1）、本报告。
 
