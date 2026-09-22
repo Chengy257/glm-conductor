@@ -1,6 +1,6 @@
 ---
 name: orchestration
-description: GLM 双轴选择性路由 + 原生 Workflow 编排。主会话任架构师，按 Delegability × Assurance 两个独立维度在首次任务委派前声明 SELECTIVE ROUTE（solo/delegate/audit/full）；delegate/full 经 v24-compile 把静态节点 DAG 确定性编译为宿主原生 Workflow 源码，由主会话 CreateWorkflow 提交执行（writer-acquire 取仓库写预约 → 记录 run 关联 → 等待结构化结果）；实施完成后主会话亲自验证并记录 validation，assurance:high 时引入全新上下文的只读审查者并经 review-record 申报裁决；视觉任务走子代理例外通道。适用于构建并验证功能、多步骤交付、前端/视觉任务、需要委派实施或独立代码审查的任务。
+description: GLM 双轴选择性路由 + 原生 Workflow 编排。主会话任架构师，按 Delegability × Assurance 两个独立维度在首次任务委派前声明 SELECTIVE ROUTE（solo/delegate/audit/full）；delegate/full 经 v24-compile 把静态节点 DAG 确定性编译为宿主原生 Workflow 源码，由主会话以显式 GLM-5.3-Flash subagent_model 提交执行——提交前必经宿主模型列表 → workflow-model-select 选型硬闸，选型失败绝不 CreateWorkflow、绝不省略 subagent_model、绝不继承主会话 GLM-5.3（writer-acquire 取仓库写预约 → 记录 run 关联 → 等待结构化结果）；实施完成后主会话亲自验证并记录 validation，assurance:high 时引入全新上下文的只读审查者并经 review-record 申报裁决；视觉任务走子代理例外通道。适用于构建并验证功能、多步骤交付、前端/视觉任务、需要委派实施或独立代码审查的任务。
 ---
 
 # GLM 编排：双轴选择性路由 + 原生 Workflow
@@ -124,15 +124,64 @@ delegate/full 需要多段实施时，把任务分解为静态节点 DAG。节�
 
 delegate/full 的唯一实施基底是 ZCode 原生 Workflow。主会话按以下固定顺序执行（运行时调用一律走 CLI：`python3 plugins/glm-conductor/runtime/cli.py <子命令>`，退出码 0=成功 / 2=校验拒绝 / 1=运行期拒绝；禁止 `python3 -c` 拼复杂内联脚本）：
 
-1. **写 DAG JSON**：`{"task_context": {"task_ref": <task-id>, "goal": ..., "repository": ...}, "nodes": [...]}`（节点即 §5.2 形状）
-2. **编译**：`cli.py v24-compile <dag-json> [--task-ref <id>] [--out <path>]`——逐节点形状校验 + 全图校验 + ownership 阶段规划 + 确定性 TypeScript 源。校验失败退出码 2 并一次报出全部错误；**生成源绝不自动执行**
-3. **取仓库写预约**：`cli.py writer-acquire <repo_root> <task_id>`——一个 Git 仓库至多一个活跃 Conductor 写 Workflow；冲突时退出码 1 并报当前持有者（先对账再重试，绝不强行并行写）
-4. **CreateWorkflow 提交**：主会话把编译产物经宿主 CreateWorkflow 提交（ZCode 拥有执行编排；模型与推理档位策略由主会话按仓库惯例指定，Conductor 不镜像）
-5. **记录 run 关联**：拿到 run id 后立即 `runtime.task.record_workflow_run(repo_root, task_id, workflow_run_id)`（一条调用完成 state.workflow_run_id + `.glm-conductor/workflow-runs/` 关联单据 + journal `workflow_started` 事件）；只落关联单据可用 `cli.py v24-record-run <task_ref> <run-id>`
-6. **等待结构化结果**：完成通知经宿主送达（GetWorkflowRun 可查进度）。每个节点返回一份 NodeResult：`node_id / status（complete | partial | blocked）/ changes / local_checks / reassessment / gaps`——全部结果按节点 id 聚合返回
-7. **收尾**：验收通过后 `runtime.task.complete(...)`（终态迁移 + `task_completed` 事件 + 自动释放写者守卫）；失败/取消走 `task.fail` / `task.cancel`（同样释放守卫）
+### 6.1 worker 模型选型硬闸（INV-MODEL-01）
 
-中断与恢复（Workflow 停摆、额度等待）见 `skills/continuity`；完成守卫语义见 `skills/enforcement`。
+每次 CreateWorkflow 提交前必须完成显式 worker 模型选型。这是强制序列而非可选建议——前一步失败即停，绝不带病进入下一步：
+
+1. **调用宿主模型列表**：ListModels 等宿主模型发现面，取已配置模型全集（模型发现归宿主，runtime 绝不自建模型清单）
+2. **提取配置精确 id**：只保留 provider 全限定 `account:<账户>/<模型>` 形态的精确 id（裸别名不可选）
+3. **跑 workflow-model-select**：`cli.py workflow-model-select <models-json> [--model <exact-id>]`（或等价 submission 助手 `runtime.workflow.submission.select_worker_model`）——恰一 provider 限定 Flash 候选时自动选定；多候选必须显式给 exact id（歧义即拒，绝不静默取第一个）；零候选拒绝
+4. **选型失败绝不 CreateWorkflow**：校验拒绝（退出码 2）是硬闸——报告原因并停止本次委派；绝不猜测回退、绝不静默改用其他模型
+5. **以返回的精确 subagent_model 提交**：CreateWorkflow 的 `subagent_model` 逐字取选型返回值（provider 全限定、以 `/GLM-5.3-Flash` 结尾）
+6. **绝不省略 subagent_model**——省略即继承主会话模型，是 v2.4.0 缺陷 A 的直接复现
+7. **绝不替换主会话 GLM-5.3**——`/GLM-5.3` 结尾的主会话文本模型绝不可用作 worker；绝不虚构模型 id
+8. **诊断可报、身份不落**：诊断输出可报告实际选定的模型 id（选型成功返回 `{subagent_model, model_policy: "explicit-flash-required"}` 提交契约），但模型选型不是任务身份——绝不把选定模型写入 state.json / journal 当作任务标识
+
+**编译器 TypeScript 模型无关（宿主绑定事实）**：v24-compile 生成的 TS 源不携带、也设置不了 worker 模型——`subagent_model` 是宿主在 run 提交（CreateWorkflow）时刻绑定的 run 级提交属性。因此模型选择只能发生在提交边界上：编译产物对任何 worker 模型成立，跑错模型的责任在提交动作，不在编译器。
+
+### 6.2 启动序列（manual / auto 双分支）
+
+**manual 连续性**（无自动化要求）：
+
+```
+create task
+-> v24-compile
+-> 显式 Flash 模型选型（§6.1 硬闸）
+-> writer-acquire
+-> CreateWorkflow（subagent_model=精确 Flash id）
+-> 记录 run 关联
+```
+
+**auto / 用户说 until_done**：用户陈述只是授权意图，不是无界授权。auto 连续性必须**先武装后开工**（arm-before-work，INV-CONT-01）——调度创建、绑定与预检一律置于 CreateWorkflow 之前：
+
+```
+create task
+-> quota-resume-authorize（显式有界 max_resumes）
+-> 创建原生未来 Scheduled Task（宿主动作，主会话执行）
+-> quota-automation-bind（只绑真实创建返回的 automation id）
+-> quota-continuity-preflight 必须 PASS（ready=false 即阻断启动）
+-> v24-compile
+-> 显式 Flash 模型选型（§6.1 硬闸）
+-> writer-acquire
+-> CreateWorkflow（subagent_model=精确 Flash id）
+-> 记录 run 关联
+```
+
+Scheduled Task 创建失败时三禁：绝不谎称 auto 连续性已启用；绝不绑假 id；绝不按 auto/until_done 承诺继续——按调用上下文报告降级（本轮仅手动连续性可用）或交运营者处理。武装、唤醒与终态清理契约见 `skills/continuity`。
+
+### 6.3 启动细则（两分支共用）
+
+- **写 DAG JSON**：`{"task_context": {"task_ref": <task-id>, "goal": ..., "repository": ...}, "nodes": [...]}`（节点即 §5.2 形状）
+- **编译**：`cli.py v24-compile <dag-json> [--task-ref <id>] [--out <path>]`——逐节点形状校验 + 全图校验 + ownership 阶段规划 + 确定性 TypeScript 源。校验失败退出码 2 并一次报出全部错误；**生成源绝不自动执行**
+- **取仓库写预约**：`cli.py writer-acquire <repo_root> <task_id>`——一个 Git 仓库至多一个活跃 Conductor 写 Workflow；冲突时退出码 1 并报当前持有者（先对账再重试，绝不强行并行写）
+
+### 6.4 提交后程序
+
+1. **记录 run 关联**：拿到 run id 后立即 `runtime.task.record_workflow_run(repo_root, task_id, workflow_run_id)`（一条调用完成 state.workflow_run_id + `.glm-conductor/workflow-runs/` 关联单据 + journal `workflow_started` 事件）；只落关联单据可用 `cli.py v24-record-run <task_ref> <run-id>`
+2. **等待结构化结果**：完成通知经宿主送达（GetWorkflowRun 可查进度）。每个节点返回一份 NodeResult：`node_id / status（complete | partial | blocked）/ changes / local_checks / reassessment / gaps`——全部结果按节点 id 聚合返回
+3. **收尾**：验收通过后 `runtime.task.complete(...)`（终态迁移 + `task_completed` 事件 + 自动释放写者守卫）；失败/取消走 `task.fail` / `task.cancel`（同样释放守卫）
+
+中断与恢复（Workflow 停摆、额度等待、auto 唤醒）见 `skills/continuity`；完成守卫语义见 `skills/enforcement`。
 
 ## 7. 主会话验证（main validation）
 
@@ -168,7 +217,7 @@ delegate/full 的唯一实施基底是 ZCode 原生 Workflow。主会话按以�
 ## 10. 审查者与实施者预检（fail-closed）
 
 - 视觉通道需要 `glm-conductor:visual-implementer` 在 Agent 工具的可用类型列表中；assurance: high 按模态核对 `glm-conductor:glm-reviewer` / `glm-conductor:visual-reviewer`
-- delegate/full 的文本实施经原生 Workflow 执行（worker persona 由编译器内嵌生成源），无需子智能体预检；solo 与 assurance: standard 无需任何预检
+- delegate/full 的文本实施经原生 Workflow 执行（worker persona 由编译器内嵌生成源），无需子智能体预检；worker 模型选型硬闸（§6.1）同属 fail-closed，但不属本节子智能体预检；solo 与 assurance: standard 无需任何预检
 - 模型与思考档位已固定在子智能体定义中，调用时不得附加模型覆盖
 - 视觉高保障终审（assurance: high 视觉任务）必须使用多模态 `visual-reviewer`：其 GLM-5.3-Flash 绑定在宿主上不可用（启动报 account-connection-unavailable 等连接错误）时按 fail closed 处理——向用户报告绑定不可用并停止视觉高保障路线，绝不退回文本模型充当视觉终审
 - 视觉通道额外要求：确认截图证据可以落盘并由实施者读取；不可得即停止视觉通道

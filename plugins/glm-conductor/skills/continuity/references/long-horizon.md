@@ -8,7 +8,13 @@
 任务开始（orchestration 声明 SELECTIVE ROUTE，create_task 落 state.json）
    |
    v
-[执行] delegate/full → 原生 Workflow 运行（record_workflow_run 绑定 run id）
+[武装]（仅 auto/until_done，arm-before-work：quota-resume-authorize
+   -> 创建原生未来 Scheduled Task -> quota-automation-bind
+   -> quota-continuity-preflight PASS——调度创建失败绝不谎称已启用）
+   |
+   v
+[执行] delegate/full → 原生 Workflow 运行（显式 Flash 模型选型 ->
+   CreateWorkflow(subagent_model=精确 Flash id) -> record_workflow_run 绑定 run id）
    |
    v（实质性里程碑 -> 写 CONTINUITY CHECKPOINT）
    |
@@ -18,8 +24,8 @@
    v
 八步恢复检查（repository > checkpoint > 会话记忆）
    |
-   +-- 目标已完成 -> 清理（删本任务目录、停关联 automation）
-   +-- 可恢复 -> 同 run id resume（额度可用 + 授权 + 预算有余时）
+   +-- 目标已完成 -> 终态清理（先删 automation、确认删除才清绑定，再删本任务目录）
+   +-- 可恢复 -> 同 run id resume（额度可用 + 授权 + 预算有余 + auto 已武装/preflight ready 时）
    +-- 不可恢复（额度耗尽 / run 已死）-> 停泊等待或按仓库现状重建
 ```
 
@@ -64,7 +70,7 @@ OPEN RISKS:
 - ...
 ```
 
-若 ZCode 运行时实际暴露了以下标识，可选择性附加记录；不暴露就不写，**不得虚构**：
+若 ZCode 运行时实际暴露了以下标识，可选择性附加记录；不暴露就不写，**不得虚构**。automation 关联的权威落点是 state.json 的 `quota_resume.automation_id`（auto 连续性武装见证，bind/clear 经 CLI 操作）；checkpoint 里的 AUTOMATION_ID 只是导航提示，两者不一致时以 state.json 为准：
 
 ```
 SESSION_ID:
@@ -133,7 +139,7 @@ state.json 字段概览（权威 schema 见插件 `runtime/state.py`）：
 | workflow_run_id | 委派 run 关联（启动时由 record_workflow_run 落盘；恢复按同 run id resume） |
 | validation | 任务级验证记录（status passed/failed + change_id） |
 | review | 任务级审查记录（reviewer + verdict + change_id） |
-| quota_resume | 恢复授权块（mode / max_resumes / resume_count / automation_id [+ 诊断性 last_observation]） |
+| quota_resume | 恢复授权块（mode / max_resumes / resume_count / automation_id [+ 诊断性 last_observation]）；automation_id 是当前关联的未来原生 Scheduled Task 见证——mode=auto 时它非空才算 armed（preflight 的必要条件），其存在不独立证明宿主侧激活仍存活 |
 
 status 只前进不回退（`state.TASK_TRANSITIONS` 矩阵校验）；终态不得静默重开（显式重开走 `state.reopen_task`）；repository 仍是代码状态真相源，state.json 只是运行时任务状态。
 
@@ -143,7 +149,7 @@ events.jsonl 任务级事件词汇恰十个（`runtime.task.TASK_JOURNAL_EVENTS`
 
 八步恢复中，第 2 步读取 checkpoint 的同时读取 state.json、并查看 events.jsonl 尾部：
 
-1. **state.json**（机器可读）：恢复 status、route、workflow_run_id、validation / review 认知——若存在且非终态，本任务仍是 active task，恢复后仍受完成守卫跟踪；quota_resume 块显示授权与预算现状
+1. **state.json**（机器可读）：恢复 status、route、workflow_run_id、validation / review 认知——若存在且非终态，本任务仍是 active task，恢复后仍受完成守卫跟踪；quota_resume 块显示授权、预算与武装现状（mode=auto 时 automation_id 为空即未武装：先重建激活并 bind + preflight PASS 才许自动 resume）
 2. **checkpoint.md**（叙述性）：恢复 NEXT ACTION 与上下文
 3. **events.jsonl 尾部**（最近若干条）：了解中断前最后发生了什么（最后一条事件往往就是中断点）
 
@@ -160,7 +166,7 @@ events.jsonl 任务级事件词汇恰十个（`runtime.task.TASK_JOURNAL_EVENTS`
 5. **判断先前变更是否仍在**：checkpoint 声称已完成的改动，是否能在 diff 与仓库中观察到
 6. **判断目标是否已完成**：已完成则停止实施，进入 Completion Cleanup
 7. **检查最新验证状态**：validation 记录是否仍新鲜（change_id 与当前一致）、还剩哪些验证未做
-8. **从 NEXT ACTION 恢复**：重新输出 SELECTIVE ROUTE 声明后，从 NEXT ACTION 继续执行（委派任务先走「同 run id resume」，见 SKILL.md）
+8. **从 NEXT ACTION 恢复**：重新输出 SELECTIVE ROUTE 声明后，从 NEXT ACTION 继续执行（委派任务先走「同 run id resume」，见 SKILL.md；auto 唤醒路径必经幂等决策 `resume-authorized` **且** `quota-continuity-preflight` ready 两道硬闸才许 ResumeWorkflowRun，one-shot 路径先创建后继再 resume）
 
 两条禁令：
 
@@ -169,29 +175,44 @@ events.jsonl 任务级事件词汇恰十个（`runtime.task.TASK_JOURNAL_EVENTS`
 
 ## 结构化 Resume Prompt（定时任务用）
 
-以下 prompt 用作宿主原生 Scheduled Task 的触发内容。它必须自包含：不依赖任何会话上下文，凭此 prompt + 指定 checkpoint + 仓库状态即可恢复。**占位符必须在创建定时任务时替换为真实值**：
+以下 prompt 用作宿主原生 Scheduled Task 的触发内容。它必须自包含：不依赖任何会话上下文，凭此 prompt + 指定任务状态 + 仓库状态即可恢复。**占位符必须在创建定时任务时替换为真实值**。prompt 只携带稳定标识与恢复指令——绝不嵌入完整 workflow 源码、秘密 / 凭证、或过期额度假设（额度在唤醒时现测）：
 
 ```
 Resume GLM Conductor task:
 
 TASK_ID: <id>
+REPOSITORY ROOT: <repo_root>
 TASK DIR: .glm-conductor/tasks/<id>/
 CHECKPOINT: .glm-conductor/tasks/<id>/checkpoint.md
 
-Inspect the current goal, the task state.json, the specified checkpoint,
-and the current repository state.
+First load the current task state (.glm-conductor/tasks/<id>/state.json),
+the specified checkpoint, and the current repository state. Load task
+state before taking any action.
 
-If the task is already terminal or its goal is satisfied, perform no
-further implementation and clean up only the runtime state associated
-with this TASK_ID (single cleanup attempt for any associated automation).
+Refresh the quota observation at this wake (quota-resume-decision carries
+a fresh observation; never rely on stale quota assumptions).
 
-If the task is waiting on quota, obtain a fresh quota observation and
-follow the idempotent decision contract (quota-resume-decision);
-confirm via quota-resume-confirm only after the host resume call is
-actually accepted.
+Inspect the exact workflow_run_id recorded in task state.
 
-If a workflow_run_id is recorded and resumable, resume the same run.
-Otherwise rebuild from repository reality; never replay finished work.
+If a workflow_run_id is recorded and resumable, follow the resume gates
+below. Otherwise rebuild from repository reality; never replay finished
+work.
+
+Run quota-continuity-preflight before any automatic resume. Resume the
+same run id via ResumeWorkflowRun only when BOTH hold: the decision is
+resume-authorized AND the preflight is ready. After the host accepts the
+resume, record it via quota-resume-confirm.
+
+If the task is already terminal, perform no further implementation:
+delete the scheduled automation bound to this task once, clear the bound
+automation id only after the deletion is confirmed, then stop.
+
+If the task is waiting on the user, do not resume automatically.
+
+If recurring scheduling is in use, keep the activation in place — do not
+delete or recreate it on a successful wake. If a one-shot activation was
+consumed, create and bind the successor activation and pass the
+continuity preflight BEFORE resuming.
 
 Repository state is authoritative over checkpoint state.
 
@@ -206,15 +227,18 @@ delegability or assurance.
 
 无人值守恢复映射到宿主原生定时任务：
 
-- **触发内容** = 上述结构化 resume prompt（已替换 TASK_ID 与路径占位符）
-- **载体** = one-shot（一次性）定时任务——一次触发解决一轮恢复；任务到达终态后对它做单次清理尝试
+- **触发内容** = 上述结构化 resume prompt（已替换 TASK_ID、REPOSITORY ROOT 与路径占位符）
+- **载体优先级** = **recurring 优先**：一次创建持续唤醒，激活保持到终态清理、显式取消或运营者批准的策略变更；recurring 激活成功唤醒后**不删、不重建**（INV-CONT-03），重复唤醒天然安全
+- **one-shot 后备**（仅 recurring 不可用或刻意不用时）：one-shot 激活触发即失效，唤醒时必须**先创建后继**——创建后继未来激活 → `quota-automation-bind` 绑后继 → `quota-continuity-preflight` PASS → 才 ResumeWorkflowRun（INV-CONT-02：后继武装先于 resume）
+- **one-shot id 的安全替换序列**（宿主不支持先建后删时）：对账已触发 / 现存 automation → `quota-automation-clear` 清旧 → 创建后继 → bind 后继 → preflight PASS → resume。宿主支持先建后删时，先创建后继再经显式对账序列原子迁移绑定——**绝不在无后继时 clear**（清掉唯一唤醒能力而任务仍需自动续跑，长自动续跑即失去唤醒能力）
+- **下一窗口绝不硬编码推导**：不以「加 5 小时」推算下一次唤醒——只依据 provider 复位证据（观测 reset_at）或受支持的 recurring / retry 计划
 - **每次唤醒任务量要小**：做一轮检查，然后恢复一段工作——避免单次唤醒塞满全部剩余工作
 
 **调度触发即存活探针**：唤醒成功启动即说明模型执行当前可用；唤醒失败或未启动则不会产生任何仓库改动，自然等待下次触发或用户恢复。
 
 **同会话投递事实**：宿主把唤醒 prompt 作为新 turn 注入既有会话（中途续入）——唤醒轮次可见会话既有上下文，但恢复依据仍然是仓库与 state（repository > checkpoint > 会话记忆）；跨会话自包含恢复（同一 prompt 语义）不依赖会话记忆，两种形态下行为一致。
 
-不硬编码重置周期：额度政策可能变化，任何固定周期都会在政策变化后静默失效。唤醒时机只依赖"唤醒时重新检查"这一动作（新鲜额度观测 + 幂等决策），与具体政策解耦；额度不可知时等待用户或下次触发，不虚构可用性。
+不硬编码重置周期：额度政策可能变化，任何固定周期都会在政策变化后静默失效。唤醒时机只依赖"唤醒时重新检查"这一动作（新鲜额度观测 + 幂等决策 + preflight 硬闸），与具体政策解耦；额度不可知时等待用户或下次触发，不虚构可用性。
 
 ## Route Recovery
 
@@ -222,17 +246,20 @@ delegability or assurance.
 
 ## Completion Cleanup
 
-目标完成并验收后的动作清单（只作用于本任务）：
+目标完成并验收后的动作清单（只作用于本任务，次序固定——**先删后清**）：
 
-1. 删除本任务目录 `.glm-conductor/tasks/<task-id>/`（仅此目录，不得触碰其他任务的状态）
-2. 移除与该 TASK_ID 关联的定时 automation——**会话侧单次尝试**动作（绝不重试；删除失败按降级上报）
-3. 向用户报告最终状态
+1. 对本任务绑定的 automation（按 state 里记录的 automation_id 定位）做宿主侧删除尝试——**会话侧单次尝试**动作（绝不重试，无重试风暴）；**确认删除成功后才** `quota-automation-clear` 清除绑定 id；删除失败则如实上报 stale 关联（哪个 automation_id 仍悬挂），绝不假装已清理干净
+2. **绝不删他人 automation**：只删本任务绑定的这一个；删除全局调度面或其他任务的 automation 是禁止操作
+3. 删除本任务目录 `.glm-conductor/tasks/<task-id>/`（仅此目录，不得触碰其他任务的状态）；既有清理流程删除任务目录时，次序绝不在宿主删除尝试之前抹掉 automation_id
+4. 向用户报告最终状态
 
-宿主调度动作（创建 / 删除定时任务）由主会话执行；runtime 自身零宿主调度调用。窗口/预算语义与 automation 存活解耦：授权与计数只发生在 `authorize_quota_resume` / `confirm_resume_started` 两个落盘点。
+宿主调度动作（创建 / 删除定时任务）由主会话执行；runtime 自身零宿主调度调用。窗口/预算语义与 automation 存活解耦：授权与计数只发生在 `authorize_quota_resume` / `confirm_resume_started` 两个落盘点，武装与解绑只发生在 `bind_quota_automation` / `clear_quota_automation` 两个绑定点。
 
 ## Failure Cases
 
-- **定时能力不可用**：不得声称已启用连续性；保留本任务 checkpoint 目录，向用户报告手动可恢复，并附恢复方法——新建会话输入"读取 .glm-conductor/tasks/<task-id>/checkpoint.md 并按八步恢复流程继续"（SessionStart 恢复注入会自动提示）
+- **定时能力不可用**：auto 连续性保持未武装（`quota-continuity-preflight` ready=false）——不得声称已启用连续性、绝不绑假 id、绝不按 auto/until_done 承诺继续；保留本任务 checkpoint 目录，向用户报告手动可恢复，并附恢复方法——新建会话输入"读取 .glm-conductor/tasks/<task-id>/checkpoint.md 并按八步恢复流程继续"（SessionStart 恢复注入会自动提示）
+- **唤醒发现 auto 未武装**（绑定丢失 / 宿主激活已消失）：按 `continuity-unarmed` 的 remain-waiting 处理——先经宿主重建激活、bind + preflight PASS 才恢复；绝不虚构 activation、绝不无武装 resume
+- **唤醒发现任务已终态**：走终态清理（先删 automation、确认删除才清绑定），不重开实施
 - **实施通道缺失**（如 visual-implementer 不可用）：fail-closed，不自动换成其他执行者，交回用户处理
 - **唤醒后 checkpoint 与仓库严重不一致**：以仓库为准，向用户报告差异后继续；不得回滚仓库新改动
 - **Workflow run 不可 resume**：宿主报告 run 不存在或不可恢复时，按 SKILL.md「Workflow 恢复」第 4 步以仓库现状重建（未实施节点重新编译提交），绝不重放已完成工作

@@ -118,7 +118,26 @@
          必含 `review-record`（v2.4 P4-A 重锚——审查裁决经 `review-record`
          子命令落为任务级 review 记录（runtime.task.record_review，
          新鲜度锚定 change_id）；v2.3 的 durable review receipt /
-         run_review 调用真实性链已随执行面退役）。
+         run_review 调用真实性链已随执行面退役）；
+     16. v2.4.1 编排/连续性协议静态契约（continuity hotfix H3，规格
+         §5.6）——六条件任一出现即 FAIL：
+         a) orchestration 允许 delegate/full 继承模型，或 CreateWorkflow
+            序列缺显式 subagent_model（模型选型硬闸标记 workflow-model-
+            select / subagent_model / 绝不省略 subagent_model / 绝不替换
+            主会话 / 选型失败绝不 必含；继承/省略措辞仅在含否定词的行
+            允许——glm-reviewer 继承宿主/会话模型是另一合法事实，不在
+            token 集）；
+         b) auto/until_done 启动序列未把 scheduling/bind/preflight 置于
+            CreateWorkflow 之前（authorize→bind→preflight→CreateWorkflow
+            顺序链在 orchestration 与 continuity 两技能文档均须成立）；
+         c) continuity 文档称 auto 可在 automation_id null 时 armed
+            （claim 形禁令 token 零容忍，出现即 FAIL——无否定行豁免）；
+         d) one-shot 路径先 resume 后 successor 武装（正向标记
+            「先创建后继」必含 + 逆序措辞禁令（零容忍）+ 武装命令锚必含）；
+         e) 生产 runtime 重现 Global Quota Clock 或 sqlite 直写调度依赖
+            （扫描限 plugins/glm-conductor/runtime 生产 .py 模块：
+            sqlite 零容忍；Global Quota Clock 仅在含退役/否定词的行
+            豁免——journal.py 既有退役注记不属依赖复活）。
 
     扫描范围说明：检查 5/6/7/8（及 8 内的旧名负向检查）的扫描范围是显式
     列表——plugins/ 全部文件 + marketplace.json + README.md +
@@ -331,6 +350,61 @@ SKILL_CONTRACT_MARKERS = (
     (ENFORCEMENT_SKILL,
      ("ENFORCEMENT DEGRADED", "change_id", "writer_guard", "review-record")),
 )
+
+# —— 检查 16：v2.4.1 编排/连续性协议静态契约（continuity hotfix H3，§5.6） ——
+# 六条件任一出现即 FAIL（条件 a-e 的实现拆解见模块 docstring 第 16 项）。
+# 16a：模型选型硬闸必含标记（orchestration/SKILL.md，INV-MODEL-01 文档面）
+MODEL_GATE_MARKERS = (
+    "workflow-model-select",
+    "subagent_model",
+    "绝不省略 subagent_model",
+    "绝不替换主会话",
+    "选型失败绝不",
+)
+# 16a：delegate/full worker 模型继承/省略措辞只在否定行允许。glm-reviewer
+# 继承宿主/会话模型（§8）是另一合法事实，措辞不同，不落在本 token 集内。
+MODEL_INHERIT_TOKENS = (
+    "继承主会话", "继承会话模型",
+    "省略 subagent_model", "不指定 subagent_model")
+PROTOCOL_NEGATIONS = ("不", "禁止", "绝不", "不得", "never", "not")
+# 16b：auto/until_done 启动序列顺序链（authorize → bind → preflight →
+# CreateWorkflow；存在性 + 次序双检，orchestration 与 continuity 均须成立）
+AUTO_LAUNCH_CHAIN = (
+    "quota-resume-authorize",
+    "quota-automation-bind",
+    "quota-continuity-preflight",
+    "CreateWorkflow",
+)
+AUTO_LAUNCH_CHAIN_FILES = (ORCHESTRATION_SKILL, CONTINUITY_SKILL)
+# 16c：continuity 文档不得称 auto 可在 automation_id 为空/null 时 armed。
+# claim 形 token 零容忍（出现即 FAIL，无否定行豁免——否定行豁免会被
+# 无关否定词「不用/不可用」意外放大；「为空即未武装」类反向声明不含
+# 这些 token，合法存在）
+ARMED_NULL_TOKENS = (
+    "为空即已武装", "为 null 即已武装", "null 即已武装",
+    "为空即 armed", "为 null 即 armed",
+    "armed with automation_id null",
+    "未绑定即视为已武装", "为空即视为已武装")
+ARMED_NULL_FILES = (CONTINUITY_SKILL, LONG_HORIZON)
+# 16d：one-shot 后继先于 resume（INV-CONT-02 文档面）——正向标记必含 +
+# 逆序措辞禁令（claim 形 token 零容忍，同 16c 口径）+ 武装命令锚必含
+ONE_SHOT_ORDER_TOKENS = (
+    "先 resume 后", "先 ResumeWorkflowRun 后", "先恢复后武装",
+    "resume 后再创建后继")
+ONE_SHOT_MARKER_PLANS = (
+    (CONTINUITY_SKILL,
+     ("arm-before-work", "先创建后继", "quota-automation-bind",
+      "quota-continuity-preflight")),
+    (LONG_HORIZON,
+     ("先创建后继", "quota-automation-bind", "quota-continuity-preflight")),
+)
+# 16e：生产 runtime 禁依赖（扫描限 plugins/glm-conductor/runtime 生产 .py）
+RUNTIME_SQLITE_TOKEN = "sqlite"  # 直写调度依赖：零容忍（生产 runtime 现零命中）
+RUNTIME_GQC_TOKENS = ("global quota clock", "global_quota_clock",
+                      "globalquotaclock")
+# Global Quota Clock 的退役/否定注释行豁免（journal.py 既有退役注记不属复活）
+GQC_RETIREMENT_WORDS = ("删除", "退役", "移除", "下架",
+                        "不", "禁止", "绝不")
 
 
 def rel_display(path):
@@ -1134,6 +1208,197 @@ def check_15_enforcement_review_record(results):
     results.append((15, title, ok, details))
 
 
+def iter_runtime_py_files():
+    """runtime/ 生产 .py 模块的绝对路径（排序稳定，剪枝口径同 iter_plugins_files）。
+
+    检查 16e 的扫描范围：仅 plugins/glm-conductor/runtime/ 生产模块——
+    跳过 `__pycache__` 目录与 `*.pyc` / `*.pyo` 文件，只取 `.py` 后缀。
+    """
+    for dirpath, dirnames, filenames in os.walk(RUNTIME_DIR):
+        dirnames[:] = sorted(
+            name for name in dirnames if name not in PRUNED_DIR_NAMES)
+        for fname in sorted(filenames):
+            if fname.endswith(PRUNED_FILE_SUFFIXES):
+                continue
+            if fname.endswith(".py"):
+                yield os.path.join(dirpath, fname)
+
+
+def marker_chain_present(text, markers):
+    """顺序链判定：markers 依次出现在 text 中且位置严格递增。
+
+    返回 (positions, None) 表示链成立（存在性 + 次序双检）；链断裂时
+    返回 (None, 首个失配 marker)——失配含「标记缺失」与「次序倒置」
+    两种（find 从上一锚点之后起查，倒置即找不到）。
+    """
+    pos = 0
+    positions = []
+    for marker in markers:
+        idx = text.find(marker, pos)
+        if idx < 0:
+            return None, marker
+        positions.append(idx)
+        pos = idx + len(marker)
+    return positions, None
+
+
+def check_16_v241_protocol(results):
+    """检查 16：v2.4.1 编排/连续性协议静态契约（continuity hotfix H3，§5.6）。
+
+    六条件任一出现即 FAIL：
+      a) orchestration 允许 delegate/full 继承模型 / CreateWorkflow 序列
+         缺显式 subagent_model —— 硬闸标记必含 + 继承/省略措辞仅否定行；
+      b) auto/until_done 启动序列未把 scheduling/bind/preflight 置于
+         CreateWorkflow 之前 —— authorize→bind→preflight→CreateWorkflow
+         顺序链（两技能文档均须成立）；
+      c) continuity 文档称 auto 可在 automation_id null 时 armed ——
+         claim 形禁令 token 仅否定行；
+      d) one-shot 先 resume 后 successor 武装 —— 「先创建后继」正向
+         标记 + 武装命令锚必含 + 逆序措辞禁令；
+      e) 生产 runtime 重现 Global Quota Clock / sqlite 直写调度依赖 ——
+         扫描限 runtime/ 生产 .py，sqlite 零容忍，GQC 仅退役/否定行豁免。
+    """
+    title = "v2.4.1 编排/连续性协议静态契约（模型选型硬闸 / arm-before-work / one-shot 后继 / 生产 runtime 禁依赖）"
+    details = []
+    ok = True
+
+    # —— 16a：模型选型硬闸 ——
+    orch_shown = rel_display(ORCHESTRATION_SKILL)
+    orch_text = read_text(ORCHESTRATION_SKILL)
+    if orch_text is None or not os.path.isfile(ORCHESTRATION_SKILL):
+        details.append("FAIL: %s 不存在或无法读取，无法执行 16a 检查" % orch_shown)
+        results.append((16, title, False, details))
+        return
+    for marker in MODEL_GATE_MARKERS:
+        if marker in orch_text:
+            details.append("PASS: %s 含模型选型硬闸标记 `%s`" % (orch_shown, marker))
+        else:
+            details.append(
+                "FAIL: %s 缺少模型选型硬闸标记 `%s`（CreateWorkflow 序列"
+                "缺显式 subagent_model 口径）" % (orch_shown, marker))
+            ok = False
+    inherit_hits = tokens_on_non_negated_lines(
+        ORCHESTRATION_SKILL, MODEL_INHERIT_TOKENS, PROTOCOL_NEGATIONS)
+    if inherit_hits:
+        for lineno, line, hit in inherit_hits:
+            details.append(
+                "FAIL: %s:%d delegate/full worker 模型继承/省略措辞 `%s` "
+                "出现在无否定词（不/禁止/绝不/不得/never/not）的行: %s"
+                % (orch_shown, lineno, "/".join(hit), line))
+        ok = False
+    else:
+        details.append(
+            "PASS: %s 的 worker 模型继承/省略措辞仅出现在含否定词的行" % orch_shown)
+
+    # —— 16b：auto/until_done 启动序列顺序链 ——
+    for path in AUTO_LAUNCH_CHAIN_FILES:
+        shown = rel_display(path)
+        text = read_text(path)
+        if text is None or not os.path.isfile(path):
+            details.append("FAIL: %s 不存在或无法读取，无法确认启动序列链" % shown)
+            ok = False
+            continue
+        _positions, missing = marker_chain_present(text, AUTO_LAUNCH_CHAIN)
+        if missing is None:
+            details.append(
+                "PASS: %s 启动序列链 authorize→bind→preflight→CreateWorkflow "
+                "存在且次序成立" % shown)
+        else:
+            details.append(
+                "FAIL: %s auto/until_done 启动序列未把 scheduling/bind/"
+                "preflight 置于 CreateWorkflow 之前（链断于 `%s`）"
+                % (shown, missing))
+            ok = False
+
+    # —— 16c：armed-with-null 禁令（claim 形 token 零容忍，出现即 FAIL） ——
+    armed_null_hits = []
+    for path in ARMED_NULL_FILES:
+        text = read_text(path)
+        if not text:
+            continue
+        shown = rel_display(path)
+        for lineno, line in enumerate(text.splitlines(), 1):
+            hit = [tok for tok in ARMED_NULL_TOKENS if tok in line]
+            if hit:
+                armed_null_hits.append((shown, lineno, line.strip(), hit))
+    if armed_null_hits:
+        for shown, lineno, line, hit in armed_null_hits:
+            details.append(
+                "FAIL: %s:%d continuity 文档称 auto 可在 automation_id 为空/"
+                "null 时 armed（`%s`）: %s"
+                % (shown, lineno, "/".join(hit), line))
+        ok = False
+    else:
+        details.append(
+            "PASS: continuity 文档无「automation_id 为空/null 即已武装」措辞")
+
+    # —— 16d：one-shot 后继先于 resume ——
+    for path, markers in ONE_SHOT_MARKER_PLANS:
+        shown = rel_display(path)
+        text = read_text(path)
+        if text is None or not os.path.isfile(path):
+            details.append("FAIL: %s 不存在或无法读取，无法确认 16d 标记" % shown)
+            ok = False
+            continue
+        for marker in markers:
+            if marker in text:
+                details.append("PASS: %s 含 `%s`" % (shown, marker))
+            else:
+                details.append(
+                    "FAIL: %s 缺少 one-shot 后继先于 resume 标记 `%s`"
+                    % (shown, marker))
+                ok = False
+    order_hits = []
+    for path in ARMED_NULL_FILES:
+        text = read_text(path)
+        if not text:
+            continue
+        shown = rel_display(path)
+        for lineno, line in enumerate(text.splitlines(), 1):
+            hit = [tok for tok in ONE_SHOT_ORDER_TOKENS if tok in line]
+            if hit:
+                order_hits.append((shown, lineno, line.strip(), hit))
+    if order_hits:
+        for shown, lineno, line, hit in order_hits:
+            details.append(
+                "FAIL: %s:%d one-shot 路径先 resume 后 successor 武装的措辞 "
+                "（`%s`）: %s" % (shown, lineno, "/".join(hit), line))
+        ok = False
+    else:
+        details.append("PASS: continuity 文档无「先 resume 后武装」逆序措辞")
+
+    # —— 16e：生产 runtime 禁依赖 ——
+    runtime_scanned = 0
+    runtime_fail = False
+    for path in iter_runtime_py_files():
+        runtime_scanned += 1
+        text = read_text(path)
+        if text is None:
+            continue
+        shown = rel_display(path)
+        for lineno, line in enumerate(text.splitlines(), 1):
+            if RUNTIME_SQLITE_TOKEN in line.lower():
+                details.append(
+                    "FAIL: %s:%d 生产 runtime 出现 sqlite 直写调度依赖: %s"
+                    % (shown, lineno, line.strip()))
+                runtime_fail = True
+            hit = [tok for tok in RUNTIME_GQC_TOKENS if tok in line.lower()]
+            if hit and not any(word in line for word in GQC_RETIREMENT_WORDS):
+                details.append(
+                    "FAIL: %s:%d 生产 runtime 重现 Global Quota Clock 依赖"
+                    "（`%s`，且非退役/否定注释行）: %s"
+                    % (shown, lineno, "/".join(hit), line.strip()))
+                runtime_fail = True
+    if runtime_fail:
+        ok = False
+    else:
+        details.append(
+            "PASS: 生产 runtime 扫描 %d 个 .py 模块，无 sqlite 直写调度依赖、"
+            "无 Global Quota Clock 复活" % runtime_scanned)
+
+    results.append((16, title, ok, details))
+
+
 CHECKS = (
     check_1_json,
     check_2_agent_frontmatter,
@@ -1150,6 +1415,7 @@ CHECKS = (
     check_13_hooks_manifest,
     check_14_runtime_state,
     check_15_enforcement_review_record,
+    check_16_v241_protocol,
 )
 
 
