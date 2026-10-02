@@ -1,6 +1,6 @@
 ---
 name: continuity
-description: GLM 长任务连续性：原生 Workflow 恢复（同 run id resume）、waiting_quota 额度等待、manual/auto 有界恢复（authorize 授权 + max_resumes 预算 + confirm 确认才计数）、auto 连续性先武装后开工（arm-before-work：授权 → 创建原生未来 Scheduled Task → bind → preflight PASS 才算 armed，才许 CreateWorkflow 与自动 resume）、原生 Scheduled Task 唤醒（recurring 优先、one-shot 后备先创建后继再 resume；幂等决策契约；唤醒轮次是宿主会话中途续入）与终态清理（确认删除才清绑定）。适用于长任务跨会话或跨额度窗口中断后的恢复、额度耗尽后的有界续跑、无人值守的定时唤醒。
+description: GLM 长任务连续性：原生 Workflow 恢复（同 run id resume）、waiting_quota 额度等待、manual/auto 有界恢复（authorize 授权 + max_resumes 预算 + confirm 确认才计数）、auto 连续性先武装后开工（arm-before-work：授权 → 创建原生未来 Scheduled Task → bind → preflight PASS 才算 armed，才许 CreateWorkflow 与自动 resume；武装建立顺序绝对优先——唤醒发现 unarmed 第一动作=自动重建，重建失败 remain-waiting 报告绝不弹问）、原生 Scheduled Task 唤醒（recurring 武装载体与兜底不动、精确唤醒 one-shot 加发并存——remain-waiting 后继 one-shot 先行、加发零状态、绝不用 CronUpdate；one-shot 后备先创建后继再 resume；幂等决策契约；唤醒轮次是宿主会话中途续入、唤醒轮绝不弹问）与终态清理（确认删除才清绑定）。适用于长任务跨会话或跨额度窗口中断后的恢复、额度耗尽后的有界续跑、无人值守的定时唤醒。
 ---
 
 # GLM 连续性：Workflow 恢复与有界续跑
@@ -15,6 +15,11 @@ v2.4 的连续性由四个机制构成，全部围绕任务状态（state.json�
 2. **waiting_quota**——额度耗尽时的确定性停泊点；
 3. **manual / auto 有界恢复**——恢复是用户授权下的预算行为，不是模型的即兴决定；
 4. **arm-before-work 原生调度武装**——auto 连续性先武装后开工：授权 → 创建原生未来 Scheduled Task → bind → preflight PASS 才算 armed，才许 CreateWorkflow 启动与任何自动 resume。
+
+v2.5 在四机制之上并入两条并存扩展：
+
+5. **任务启动问答授权落点**——建状态任务启动前的强制一次问答（两问合并，契约见 orchestration §6.0）把「是否跨额度自动唤醒 + 有界 max_resumes 预算」与「任务级 worker 模型 pin」落进任务状态；问答只发生在交互回合，唤醒轮 / 恢复轮绝不弹问；
+6. **精确唤醒并存与建立顺序绝对优先**——recurring 是武装载体与兜底（INV-CONT-03 不变）；remain-waiting 时后继 one-shot 先行（无见证的精确加发，零状态）；arm-before-work 升格为总原则：未来唤醒能力的建立/修复永远先于当下工作推进，唤醒发现 unarmed 的第一动作是自动重建。
 
 ## 任务状态与运行时文件
 
@@ -91,6 +96,8 @@ active task（delegate/full、audit，以及任何需要完成守卫保护的长
 
 授权与武装是两个独立事实：**authorize 是用户许可；bind 是未来激活见证；preflight 是两者齐备的机械确认**。mode=auto 时，`quota_resume.automation_id` 必须在 CreateWorkflow 启动之前、以及任何自动 ResumeWorkflowRun 之前非空——auto 连续性在 automation_id 为空时绝不是 armed（unarmed 即阻断）。武装不是模式的推断结果：bind 绝不推断 mode=auto，授权也绝不虚构 automation id。
 
+**武装建立顺序绝对优先（v2.5 升格为总原则）**：「先武装后开工」的「永远优先」指**建立顺序**，不指授权深度——一旦任务启动问答（orchestration §6.0）确认启用，未来唤醒能力的建立/修复永远先于当下工作推进：武装 PASS 前不开工；唤醒轮发现 unarmed，第一动作是自动重建（CronCreate → `quota-automation-bind` → preflight PASS）而非任何恢复动作，重建失败按 remain-waiting 报告并收轮，绝不弹问。预算仍有限：`max_resumes` 有界语义不变，预算耗尽转 `waiting_user` 等用户重新授权，绝不无限自动复活。
+
 auto/until_done 启动序列（与 orchestration §6.2 一致；调度创建、绑定与预检一律置于 CreateWorkflow 之前）：
 
 ```
@@ -118,7 +125,7 @@ Scheduled Task 创建失败三禁：**绝不谎称已启用**（向用户如实�
 
 ## 原生 Scheduled Task 唤醒（recurring 优先）
 
-无人值守恢复的**首选载体是 recurring 原生 Scheduled Task**：一次创建持续唤醒，保持武装到终态清理、显式取消或运营者批准的策略变更——recurring 激活成功唤醒后**绝不删除、绝不重建**（INV-CONT-03），重复唤醒天然安全（决策幂等）。仅当 recurring 调度不可用或刻意不用时，才退到 one-shot 后备（见下节）。
+无人值守恢复的**首选载体是 recurring 原生 Scheduled Task**：一次创建持续唤醒，保持武装到终态清理、显式取消或运营者批准的策略变更——recurring 激活成功唤醒后**绝不删除、绝不重建**（INV-CONT-03），重复唤醒天然安全（决策幂等）。仅当 recurring 调度不可用或刻意不用时，才退到 one-shot 后备（见下节）。v2.5 起两者**并存**：recurring 兜底之上还引入无见证的辅助精确唤醒——remain-waiting 时后继 one-shot 先行加发（见下「精确唤醒并存」节）；INV-CONT-03 的措辞与语义原样不变。
 
 **唤醒 prompt 必带**（自足稳定标识，凭仓库真相即可恢复；不嵌完整 workflow 源码、不嵌秘密 / 凭证、不嵌过期额度假设——模板见 references/long-horizon.md）：
 
@@ -147,6 +154,14 @@ if waiting_quota:
     刷新额度（quota-resume-decision 新鲜观测）
     决策（no-op / remain-waiting / waiting-user / resume-authorized）
     验 preflight（quota-continuity-preflight）
+    unarmed（auto 且 automation_id 空 / preflight ready=false）：
+        第一动作=自动重建（武装建立顺序绝对优先，先于任何恢复动作）：
+        CronCreate（recurring，同一 resume prompt）
+        -> quota-automation-bind -> quota-continuity-preflight PASS
+        重建失败：按 remain-waiting 报告并收轮，绝不弹问、绝不无武装 resume
+    remain-waiting（EXHAUSTED 且已观测 reset_at）：
+        后继唤醒先行：第一动作=换算 delay 精确加发 one-shot
+        （见「精确唤醒并存」节），然后才本轮收尾
     resume-authorized 且 preflight ready：
         ResumeWorkflowRun（同一 run id）
         宿主接受后 quota-resume-confirm 落账
@@ -162,7 +177,22 @@ if waiting_quota:
 **唤醒轮次是宿主会话中途续入**——事实与含义：
 
 - 触发时宿主把 prompt 作为新的 turn 注入**既有会话**（不是全新上下文的独立代理）：唤醒轮次能看到会话既有上下文，但这不构成恢复依据——恢复仍必须走仓库事实与 state.json（repository > checkpoint > 会话记忆），防止用陈旧会话记忆跳过对账
+- **唤醒轮 / 恢复轮绝不弹问**：任务启动问答（orchestration §6.0）只发生在交互回合；无人值守回合遇到任何本应问答才能解除的阻塞（如 pin 失效、预算耗尽）一律 fail closed——按对应等待态停泊并转等待用户，绝不以弹问制造死锁
 - runtime 自身零宿主调度调用：Scheduled Task 的创建 / 删除等宿主动作由主会话执行；Conductor 只提供幂等决策与武装预检原语
+
+### 精确唤醒并存：后继 one-shot 先行（v2.5，INV-CONT-03 不变）
+
+recurring 是武装载体与兜底（一次武装、绝不删除重建，INV-CONT-03 原样不变）；在此之上引入**无见证的辅助精确唤醒**：唤醒轮决策为 remain-waiting（观测 EXHAUSTED 且已观测到 `reset_at`）时，**第一动作是后继 one-shot 先行**——用最新观测换算精确延迟并加发一次 one-shot，然后才是本轮收尾（INV-CONT-02 的推广：每次 remain-waiting 的第一动作是后继唤醒先行）：
+
+- **换算是确定算术，不是相对推测**：`delay = (reset_at + grace) - now`（分钟，向上取整），`CronCreate` one-shot `delayMinutes`——`reset_at` 是 provider 观测的绝对时刻；「绝不以加 5 小时推导下一窗口」禁令不变
+- **delay <= 0 不调度**：窗口已到 / 已过，本轮即按决策处理（额度已恢复则走 resume 路径）
+- **one-shot 加发零状态**：不 bind、不落 state、不清理——触发即自失效；加发与武装无关，recurring 的 armed 事实不受影响
+- **重复加发幂等兜底**：早醒无害——醒早 → 新观测 → 再加发；醒晚 → 额度已恢复 → 直接 resume；重复加发由决策幂等兜底
+- **绝不用 CronUpdate**：间歇故障史 + 改 cron 丢原周期的回落复杂度——调整唤醒时机一律走新 one-shot 加发，绝不改既有 recurring 的周期
+- **窗口变动天然免疫**：每次 remain-waiting 都强制刷新重新观测，绝不硬信旧 reset_at——每次加发都基于当次新鲜观测
+- **终态清理次序不变**：task.complete → 宿主删 recurring → `quota-automation-clear` 清绑定；one-shot 加发已自失效，无需清理
+
+并存路径同样受问答边界约束：唤醒轮 / 恢复轮**绝不弹问**——问答（orchestration §6.0）只发生在交互回合。
 
 ### one-shot 后备（仅 recurring 不可用或刻意不用时）
 

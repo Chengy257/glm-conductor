@@ -214,6 +214,24 @@ delete or recreate it on a successful wake. If a one-shot activation was
 consumed, create and bind the successor activation and pass the
 continuity preflight BEFORE resuming.
 
+If the task remains waiting on quota with an observed reset_at, the
+first action is the successor one-shot dispatch: compute
+delay_minutes = ceil((reset_at + grace) - now) and create an auxiliary
+one-shot CronCreate with that delay. If delay <= 0, do not schedule.
+This dispatch is zero-state — no bind, no state write, no cleanup; never
+CronUpdate the recurring activation. Re-observe the quota freshly on
+every wake and never trust a stale reset_at.
+
+Authorizations recorded by the launch interview hold for the whole task
+lifetime: auto continuity was enabled with a bounded max_resumes budget,
+and the worker model pin (worker_model in task state) is the
+user-authorized task-level default for any new workflow submission — a
+preference, not the task identity. Consume it via workflow-model-select
+--task-ref against the current host model list; if the pin is no longer
+on the list, the selection is rejected: block the submission and wait
+for the user. Never fall back to auto-selection, never switch models
+silently, and NEVER ask questions on an unattended wake/recovery turn.
+
 Repository state is authoritative over checkpoint state.
 
 Continue under the stored route, ownership, validation, and review
@@ -231,6 +249,7 @@ delegability or assurance.
 - **载体优先级** = **recurring 优先**：一次创建持续唤醒，激活保持到终态清理、显式取消或运营者批准的策略变更；recurring 激活成功唤醒后**不删、不重建**（INV-CONT-03），重复唤醒天然安全
 - **one-shot 后备**（仅 recurring 不可用或刻意不用时）：one-shot 激活触发即失效，唤醒时必须**先创建后继**——创建后继未来激活 → `quota-automation-bind` 绑后继 → `quota-continuity-preflight` PASS → 才 ResumeWorkflowRun（INV-CONT-02：后继武装先于 resume）
 - **one-shot id 的安全替换序列**（宿主不支持先建后删时）：对账已触发 / 现存 automation → `quota-automation-clear` 清旧 → 创建后继 → bind 后继 → preflight PASS → resume。宿主支持先建后删时，先创建后继再经显式对账序列原子迁移绑定——**绝不在无后继时 clear**（清掉唯一唤醒能力而任务仍需自动续跑，长自动续跑即失去唤醒能力）
+- **精确唤醒 one-shot 加发（与 recurring 并存，v2.5）**：recurring 兜底不动（INV-CONT-03）——唤醒轮决策 remain-waiting 且已观测 `reset_at` 时，第一动作=后继 one-shot 先行：`delay = (reset_at + grace) - now` 分钟向上取整，`CronCreate` one-shot `delayMinutes`；`delay <= 0` 不调度；加发零状态（不 bind、不落 state、不清理，触发即自失效）、重复加发幂等兜底（早醒无害）；**绝不用 CronUpdate**；唤醒轮 / 恢复轮绝不弹问，任务级 worker 模型 pin 与问答授权事实随任务全生命周期生效（pin 失效即阻断等待用户）
 - **下一窗口绝不硬编码推导**：不以「加 5 小时」推算下一次唤醒——只依据 provider 复位证据（观测 reset_at）或受支持的 recurring / retry 计划
 - **每次唤醒任务量要小**：做一轮检查，然后恢复一段工作——避免单次唤醒塞满全部剩余工作
 
