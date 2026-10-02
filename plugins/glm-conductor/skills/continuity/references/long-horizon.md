@@ -222,6 +222,13 @@ This dispatch is zero-state — no bind, no state write, no cleanup; never
 CronUpdate the recurring activation. Re-observe the quota freshly on
 every wake and never trust a stale reset_at.
 
+If the host rejects the one-shot creation because this session already
+owns an automation (observed 2026-10-03: "Cannot create a scheduled task
+inside a session that already belongs to a scheduled task"), report the
+dispatch as unavailable for this round and rely on the recurring
+fallback — never retry storms, never delete/recreate the recurring to
+free the slot, never claim precise wake is armed when it is not.
+
 Authorizations recorded by the launch interview hold for the whole task
 lifetime: auto continuity was enabled with a bounded max_resumes budget,
 and the worker model pin (worker_model in task state) is the

@@ -190,6 +190,7 @@ recurring 是武装载体与兜底（一次武装、绝不删除重建，INV-CON
 - **重复加发幂等兜底**：早醒无害——醒早 → 新观测 → 再加发；醒晚 → 额度已恢复 → 直接 resume；重复加发由决策幂等兜底
 - **绝不用 CronUpdate**：间歇故障史 + 改 cron 丢原周期的回落复杂度——调整唤醒时机一律走新 one-shot 加发，绝不改既有 recurring 的周期
 - **窗口变动天然免疫**：每次 remain-waiting 都强制刷新重新观测，绝不硬信旧 reset_at——每次加发都基于当次新鲜观测
+- **同会话单 automation 宿主约束的降级（2026-10-03 本机实测）**：宿主可能拒绝在已归属某 scheduled task 的会话内再次创建 scheduled task（实测报文 `Cannot create a scheduled task inside a session that already belongs to a scheduled task`——会话内建 recurring 后再建 one-shot 即触发）。加发被拒即如实报告本轮精确加发不可用并依赖 recurring 兜底继续唤醒：绝不重试风暴、绝不删除重建 recurring 来腾位、绝不谎称精确唤醒已就绪；部署拓扑上可将 recurring 养在专用小会话（会话卫生既有惯例），使主会话保有 one-shot 加发能力
 - **终态清理次序不变**：task.complete → 宿主删 recurring → `quota-automation-clear` 清绑定；one-shot 加发已自失效，无需清理
 
 并存路径同样受问答边界约束：唤醒轮 / 恢复轮**绝不弹问**——问答（orchestration §6.0）只发生在交互回合。
