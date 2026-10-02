@@ -1,9 +1,11 @@
 # GlobalQuotaClock v0.1 — Minimal Implementation Plan
 
-> **Status:** PLANNED — 2026-10-03 讨论锁定：GQC 独立立项，保持简单
-> **实施仓库:** `Chengy257/ZcodeGlobalQuotaClock`（已建于 GitHub，2026-09-21 交接；本地未克隆，实施从 G1 交接核对开始）
+> **Status:** G1 COMPLETE（2026-10-03）— 交接核对已完成，**实施权威移交独立仓库自有计划**
+> **实施仓库:** `Chengy257/ZcodeGlobalQuotaClock`（已克隆至 `C:\Users\user\ZCodeProject\ZcodeGlobalQuotaClock`；main=fd4ca38，纯文档 10 提交零代码）
+> **G1 结论:** 独立仓库已有实施级自有计划（`docs/roadmap/V0_1_IMPLEMENTATION_PLAN.md`，464 行：Stage 0 探针先行 → Stage 1 被动观测+四命令 CLI（status/plan/doctor/history）→ Stage 2 物化（默认关闭+按边界幂等预约+crash-safe 七步序）→ Stage 3 调度），**比本计划细一个量级且更保守，G2-G5 实施以其为权威**；本计划五不变量已逐项核对一致（INV-GQC-01 tick 幂等单发↔ARCHITECTURE §8；02 禁直写宿主 SQLite↔SECURITY §9；03 账户级单 state↔profile identity；04 驱动是外部事实↔SCHEDULING §4 便利模式非正确性基底；05 观测不虚构↔SECURITY §4 观测/物化不对称）——**本计划降级为不变量核对地图，不推倒不阻塞**。附带收获：SCHEDULING §4 记录了 Windows 关闭到托盘仍保调度、显式退出才停的宿主行为（与「App 关闭时 Scheduled Task 触发」诚实边界相关）
 > **父文档:** `GLOBAL_QUOTA_CLOCK_STANDALONE_PROJECT_PLAN.md`（总设计）/ `GLOBAL_QUOTA_CLOCK_EXTRACTION_INVENTORY.md`（可迁移资产）/ `GLOBAL_QUOTA_CLOCK_V0_1_IMPLEMENTATION_SPEC.md`（v2.3 时代规格，本计划按 2026-10 讨论收敛后覆盖其范围）
 > **与 glm-conductor 的关系:** 完全独立实施；Conductor 不依赖 gqclock（任务侧唤醒协议独立成立），集成点是 v0.2 议题
+> **下一步:** Stage 0（provider live probe harness）按计划在**独立专用会话**启动（§8 Handoff 既有裁决）
 
 ## 1. Why（2026-10-03 讨论锁定的存在意义）
 
