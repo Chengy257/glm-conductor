@@ -138,7 +138,7 @@ v2.4 有两个真相域：**静态语义真相**（Conductor 任务/DAG state）
   "created_at": "2026-09-21T08:30:00.000Z" }
 ```
 
-主会话的委派启动顺序固化为：`v24-compile` 产码 → **worker 模型选型硬闸**（宿主模型列表 → `workflow-model-select` 选定显式 provider 限定 GLM-5.3-Flash；mode=auto 任务还须先完成连续性武装：建 Scheduled Task → `quota-automation-bind` → `quota-continuity-preflight` PASS，见 §14）→ `writer-acquire` 取仓库写预约 → 宿主 CreateWorkflow（显式 `subagent_model`）启动 run → `record_workflow_run`（state.workflow_run_id + adapter 单据 + journal 事件）。run 的中途状态（进行中 / 卡在 ask / 已完成）一律经宿主 ListWorkflowRuns / GetWorkflowRun 观察，不进 Conductor 账本。
+主会话的委派启动顺序固化为：**任务启动问答**（v2.5：凡建状态任务在 create_task 之前强制一次单轮两问合并的问答——① 跨额度自动唤醒与有界 `max_resumes` 预算，答「启用」先落 `quota-resume-authorize` 再走下方武装序列；② 选型歧义时的 worker 模型，答出即落 `worker-model-pin`，恰一候选自动选定此题不出现；纯会话内小任务不建 state 不问；问答只发生在交互回合，唤醒轮 / 恢复轮绝不弹问，契约见 orchestration §6.0）→ create task → `v24-compile` 产码 → **worker 模型选型硬闸**（宿主模型列表 → `workflow-model-select` 选定显式 provider 限定 GLM-5.3-Flash；带 `--task-ref <task_id>` 时按固定优先级取值：`--model` 显式值 > 任务 pin > 自动选型，pin 失效专门拒绝，见 §14；mode=auto 任务还须先完成连续性武装：建 Scheduled Task → `quota-automation-bind` → `quota-continuity-preflight` PASS）→ `writer-acquire` 取仓库写预约 → 宿主 CreateWorkflow（显式 `subagent_model`）启动 run → `record_workflow_run`（state.workflow_run_id + adapter 单据 + journal 事件）。run 的中途状态（进行中 / 卡在 ask / 已完成）一律经宿主 ListWorkflowRuns / GetWorkflowRun 观察，不进 Conductor 账本。
 
 ## 6. ownership 与编译期冲突处理
 
@@ -190,7 +190,7 @@ waiting_user    → active | blocked | failed | cancelled
 blocked         → active | waiting_quota | waiting_user | failed | cancelled
 ```
 
-顶层 schema（`validate_state` 强制）：`task_id / goal / repository{root 必填} / route{mode 必填, assurance 可选} / dag / status / workflow_run_id / validation / review / quota_resume`；`phase`（`planning / workflow / validating / reviewing`）是唯一可选键——纯描述性标注，无转换矩阵。`validation` / `review` 各只有一条任务级记录（§9 / §11），无逐单元证据。
+顶层 schema（`validate_state` 强制）：`task_id / goal / repository{root 必填} / route{mode 必填, assurance 可选} / dag / status / workflow_run_id / validation / review / quota_resume`；可选键恰两个：`phase`（`planning / workflow / validating / reviewing`——纯描述性标注，无转换矩阵）与 `worker_model`（v2.5 任务级 worker 模型 pin——存在才校验 null 或非空 str，缺省即不写键，旧任务加载零迁移；写入 `task.pin_worker_model`、消费 `workflow-model-select --task-ref`，见 §14）。`validation` / `review` 各只有一条任务级记录（§9 / §11），无逐单元证据。
 
 ```json
 // state.json 示意（委派 high 保障任务，委派运行已启动）
@@ -323,6 +323,11 @@ state 顶层 `quota_resume` 块（冻结初始形状 `{mode: "manual", max_resum
 
 **先武装后开工（v2.4.1，arm-before-work）**：授权与武装是两个独立事实——`authorize` 是用户许可，`bind` 是未来激活见证，`preflight` 是两者齐备的机械确认。mode=auto 的任务必须在首个消耗额度的 Workflow 启动之前、以及任何自动 ResumeWorkflowRun 之前完成武装（`auto_continuity_armed = mode==auto AND automation_id 为非空 str`）。三个任务级 API（`runtime/task.py`）：`bind_quota_automation`（状态限 active/waiting_quota/waiting_user；同 id 幂等、异 id 拒绝不静默替换；绑定绝不推断 mode=auto）、`clear_quota_automation`（精确对账；只清 automation_id 不动 mode/预算；终态允许清理）、`quota_continuity_preflight`（纯读三态判定；只证明持久化绑定存在，绝不证明宿主侧激活仍存活——宿主存在性在恢复边界仍须宿主面核查）。CLI 面：`quota-automation-bind` / `quota-automation-clear` / `quota-continuity-preflight`（ready=false 以退出码 2 报告 = launch/resume 阻断信号）。调度策略：recurring Scheduled Task 优先（成功唤醒后不删不重建，保持到终态清理 / 显式取消）；one-shot 后备必须先创建并绑定后继激活、preflight PASS 后才 resume（INV-CONT-02），且绝不用硬编码周期推算下一窗口。
 
+**v2.5 精确唤醒与任务级 pin**：决策链六步原样不动。两处扩展：
+
+- **决策输出透传 `reset_at`（I4/W3，向后兼容附加键）**：`quota-resume-decision` 的 decision 为 `remain-waiting` 且观测为 EXHAUSTED 时，decision 只读透传本次观测的 `reset_at`（ISO 字符串或 null），供主会话换算后继 one-shot 的 `delayMinutes`（`delay = (reset_at + grace) - now`，分钟向上取整；`delay <= 0` 不调度）——纯诊断透传，不参与任何判定；UNKNOWN / no-op 分支保持既有输出形状绝不透传。唤醒载体并存：recurring 是武装载体与兜底（INV-CONT-03 原样不变），one-shot 精确加发零状态（不 bind、不落 state、不清理，触发即自失效；重复加发由决策幂等兜底）、绝不用 CronUpdate、每次唤醒强制新鲜观测绝不硬信旧 `reset_at`。
+- **任务级 worker 模型 pin（I1）随任务全生命周期生效**：写入 `task.pin_worker_model`（CLI `worker-model-pin`；经 submission 形态约定预检但**绝不查宿主面**——写入时点与提交时点宿主面可能不同，对账留给消费点；非终态才可写、同值幂等、异值显式覆盖带 prev/new；不新增 journal 事件）。唤醒/恢复轮的新 run 提交同样过选型硬闸：`workflow-model-select --task-ref` 消费任务顶层 `worker_model` pin 并**必查**当次 configured 集合——pin 形状非法或不在列表即专门拒绝（退出码 2），绝不回退自动选型、绝不静默换模型；无人值守回合遇 pin 失效一律阻断提交、转等待用户，绝不弹问（fail closed，契约见 orchestration §6.0 / §6.1）。
+
 观测词汇（`QUOTA_VIEW_STATUSES`）恰为 `AVAILABLE / PRESSURE / EXHAUSTED / UNKNOWN` 四态；UNKNOWN 绝不当作可用。配额恢复不改变路由（额度决定"何时"，不决定"谁做"）。
 
 典型时间线（auto 授权 + `max_resumes=1`）：
@@ -384,7 +389,8 @@ runtime CLI 子命令（退出码 0 成功 / 2 校验拒绝 / 1 运行期拒绝�
 | `v24-compile <dag-json> [--task-ref] [--out]` | 静态 DAG → TS Workflow 源（只产码，绝不执行） |
 | `writer-acquire / writer-release [--force] / writer-show` | 仓库写者守卫操作面（§7） |
 | `v24-record-run <task_ref> <run-id>` | 任务 ↔ Workflow run 关联单据（§5） |
-| `workflow-model-select <models-json> [--model <exact-id>]` | worker 模型选型硬闸（INV-MODEL-01；恰一 Flash 自动 / 零候选拒 / 多候选歧义拒；输出 `{subagent_model, model_policy}` 提交契约） |
+| `workflow-model-select <models-json> [--model <exact-id>] [--task-ref <task_id>]` | worker 模型选型硬闸（INV-MODEL-01；恰一 Flash 自动 / 零候选拒 / 多候选歧义拒；`--task-ref` 消费任务 pin：`--model` 显式值 > 任务 pin > 自动选型，pin 失效即拒；输出 `{subagent_model, model_policy}` 提交契约） |
+| `worker-model-pin <repo> <task_id> <exact-id>` | 任务级 worker 模型 pin 写入（§14；形状预检不查宿主面，非终态才可写，同值幂等 / 异值覆盖带 prev/new，无 journal 事件） |
 | `quota-automation-bind / quota-automation-clear / quota-continuity-preflight` | auto 连续性武装操作面（§14；preflight ready=false → 退出码 2 = launch/resume 阻断） |
 | `review-record <repo> <task> <reviewer> <verdict> [note]` | 任务级评审记录（先验证后评审） |
 | `quota-resolve <repo> [--force-refresh]` | 额度四态解析（§17） |

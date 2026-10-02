@@ -2,7 +2,7 @@
 
 **English** | [简体中文](./README.zh-CN.md)
 
-![Version](https://img.shields.io/badge/version-2.4.1-blue.svg)
+![Version](https://img.shields.io/badge/version-2.5.0-blue.svg)
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
 ![ZCode Plugin](https://img.shields.io/badge/ZCode-plugin-green.svg)
 ![Models](https://img.shields.io/badge/models-GLM--5.3%20%2F%20GLM--5.3--Flash-orange.svg)
@@ -65,12 +65,12 @@ The current recommended assignment is intentionally simple:
 | Role | Default model | Responsibility |
 | --- | --- | --- |
 | Main session | **GLM-5.3** | planning, architecture, routing, validation, acceptance |
-| Workflow workers | **GLM-5.3-Flash (explicit, required)** | bounded text implementation inside Native Workflows — every delegate/full submission must carry an explicit provider-qualified `…/GLM-5.3-Flash` `subagent_model` selected through the model preflight (`workflow-model-select`); omitting it silently inherits the main-session model and is a hard protocol violation (v2.4.0 defect A) |
+| Workflow workers | **GLM-5.3-Flash (explicit, required)** | bounded text implementation inside Native Workflows — every delegate/full submission must carry an explicit provider-qualified `…/GLM-5.3-Flash` `subagent_model` selected through the model preflight (`workflow-model-select`); the chosen id can be recorded once as a user-authorized task-level pin (`worker-model-pin`) that later submissions of the same task consume via `--task-ref` — a task-level preference, not the task identity; omitting the model still silently inherits the main-session model and is a hard protocol violation (v2.4.0 defect A) |
 | Visual implementer | **GLM-5.3-Flash** | bounded multimodal implementation (Custom Subagent exception) |
 | Text reviewer | **host/session model** | fresh-context, read-only final review |
 | Visual reviewer | **GLM-5.3-Flash** | fresh-context visual review (pinned multimodal binding; fails closed if unavailable) |
 
-Workflow workers never inherit the session model: the compiled TypeScript is model-agnostic (the host binds one model at run submission), so Conductor makes the explicit Flash selection a launch gate — exactly one configured provider-qualified Flash id is auto-selected, zero candidates fails closed, and multiple candidates require an explicit choice. The text reviewer deliberately carries no pinned model, which keeps it startable across hosts and plans; the two visual roles are pinned to the provider-qualified multimodal GLM-5.3-Flash binding, and the visual high-assurance route fails closed when that binding is unavailable. These are current assignments, not permanent architectural identities.
+Workflow workers never inherit the session model: the compiled TypeScript is model-agnostic (the host binds one model at run submission), so Conductor makes the explicit Flash selection a launch gate — exactly one configured provider-qualified Flash id is auto-selected, zero candidates fails closed, and multiple candidates require an explicit choice: made once in the task launch interview and recorded as the task's `worker_model` pin, or given per submission via `--model`. A pinned id that is no longer on the current host list is rejected outright at consumption time (exit 2) instead of falling back to auto-selection or switching models silently. The text reviewer deliberately carries no pinned model, which keeps it startable across hosts and plans; the two visual roles are pinned to the provider-qualified multimodal GLM-5.3-Flash binding, and the visual high-assurance route fails closed when that binding is unavailable. These are current assignments, not permanent architectural identities.
 
 ## Native Workflow execution
 
@@ -176,7 +176,8 @@ All runtime operations go through one CLI (`python <plugin-root>/runtime/cli.py 
 | --- | --- |
 | `quota-resolve <repo> [--force-refresh]` · `quota-wait` / `quota-resume-authorize` / `quota-resume-decision` / `quota-resume-confirm` | four-state provider quota resolution (read-only) and the bounded resume lifecycle (wait / authorize / decision / confirm) |
 | `quota-automation-bind` / `quota-automation-clear` / `quota-continuity-preflight` | auto-continuity arming lifecycle (bind / clear / preflight; `ready=false` → exit 2 as the launch/resume blocker signal) |
-| `workflow-model-select <models-json> [--model <exact-id>]` | worker-model preflight gate (exactly one configured Flash auto-selected, zero fails closed, multiple require an explicit id; emits the `{subagent_model, model_policy}` submission contract) |
+| `workflow-model-select <models-json> [--model <exact-id>] [--task-ref <task_id>]` | worker-model preflight gate (exactly one configured Flash auto-selected, zero fails closed, multiple require an explicit id or a task pin; `--task-ref` consumes the task's `worker_model` pin — explicit `--model` > pin > auto-selection, an invalid pin is rejected outright; emits the `{subagent_model, model_policy}` submission contract) |
+| `worker-model-pin <repo> <task_id> <exact-id>` | record the user-authorized task-level worker-model pin (launch-interview answer; shape-preflighted write that never queries the host list, non-terminal tasks only, same value idempotent, different value an explicit override) |
 | `v24-compile <dag.json> [--task-ref <id>] [--out <path>]` | compile a canonical DAG into Native Workflow source (generation only, never auto-executes) |
 | `writer-acquire <repo> <task_id> [--run-id <id>]` | acquire the repository write reservation |
 | `writer-release <repo> <task_id> [--force]` | release the reservation (`--force` after explicit inspection) |
@@ -196,7 +197,9 @@ Quota diagnostics additionally ship as `runtime/quota/report.py` (text and `--js
 
 ## Project status and migration
 
-**v2.4.1 is the current line** — a narrow continuity hotfix over the v2.4 re-baseline. It closes two v2.4.0 defects observed in real use: Workflow workers silently inheriting the main-session model when `subagent_model` was omitted (now an explicit provider-qualified GLM-5.3-Flash selection gate before every delegate/full launch), and auto-continuity entering quota wait without a guaranteed future activation (now armed before work: recurring Scheduled Task preferred, one-shot fallback renews its successor before resume, `until_done` remains bounded by `max_resumes`). The v2.3 execution runtime (dispatcher, dispatch permits, per-unit leases, receipts, quota control plane, Global Quota Clock) has been removed. **v2.3 task states are not migrated**: v2.4 detects legacy task directories and refuses them with recovery guidance instead of converting them. Finish or explicitly retire active v2.3 tasks before upgrading; released v2.3.x remains recoverable through Git history and tags. See [Troubleshooting](./docs/troubleshooting.md) for legacy detection guidance.
+**v2.5.0 is the current line** — the task-launch contract & precise-wake release over the v2.4.1 hotfix. Every state-backed task now starts with a mandatory one-round launch interview (cross-quota auto wake with a bounded `max_resumes` budget, plus the worker-model choice when selection is ambiguous); the chosen worker model can be pinned once per task (the optional `worker_model` state key) and is consumed by `workflow-model-select --task-ref` on every later submission — an invalid pin is rejected outright, never silently re-selected; on `waiting_quota` wakes the recurring Scheduled Task stays untouched while a zero-state one-shot is dispatched precisely at the next quota window (recurring fallback + one-shot coexistence, `CronUpdate` never used); questions happen only in interactive turns — wake/recovery turns fail closed instead of asking. Breaking: none; the only schema change is the optional top-level `worker_model` key (absent = no pin, zero migration).
+
+Beneath it, the v2.4.1 continuity hotfix closed two real-use defects: Workflow workers silently inheriting the main-session model when `subagent_model` was omitted (now an explicit provider-qualified GLM-5.3-Flash selection gate before every delegate/full launch), and auto-continuity entering quota wait without a guaranteed future activation (now armed before work: recurring Scheduled Task preferred, one-shot fallback renews its successor before resume, `until_done` remains bounded by `max_resumes`). The v2.3 execution runtime (dispatcher, dispatch permits, per-unit leases, receipts, quota control plane, Global Quota Clock) has been removed. **v2.3 task states are not migrated**: v2.4 detects legacy task directories and refuses them with recovery guidance instead of converting them. Finish or explicitly retire active v2.3 tasks before upgrading; released v2.3.x remains recoverable through Git history and tags. See [Troubleshooting](./docs/troubleshooting.md) for legacy detection guidance.
 
 ## License
 

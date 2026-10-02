@@ -2,7 +2,7 @@
 
 > 面向用户的排障手册：按「现象 → 判定 → 处置」组织，只写结论性行为事实；每条事实标注实现模块路径供核对。架构全貌见 [architecture.md](architecture.md)，概念入门见 [core-concepts.md](core-concepts.md)。
 >
-> runtime CLI 统一入口是 `plugins/glm-conductor/runtime/cli.py`（本文以 `<cli>` 代指；安装后以实际插件缓存路径为准）。用可用的 Python 3 解释器执行（Windows 无 `python3` 启动器时用 `python`）。v2.4.x 的 CLI 子命令仅：`quota-resolve` / `quota-wait` / `quota-resume-authorize` / `quota-resume-decision` / `quota-resume-confirm` / `v24-compile` / `writer-acquire` / `writer-release` / `writer-show` / `v24-record-run` / `review-record` / `workflow-model-select` / `quota-automation-bind` / `quota-automation-clear` / `quota-continuity-preflight`；额度诊断另有独立脚本 `runtime/quota/report.py`。查询本文未列出的子命令（permit / lease / wave / clock / bridge / policy / verify-* / host-check 等）没有意义——那些面连同后端已不存在。
+> runtime CLI 统一入口是 `plugins/glm-conductor/runtime/cli.py`（本文以 `<cli>` 代指；安装后以实际插件缓存路径为准）。用可用的 Python 3 解释器执行（Windows 无 `python3` 启动器时用 `python`）。v2.5.0 的 CLI 子命令仅：`quota-resolve` / `quota-wait` / `quota-resume-authorize` / `quota-resume-decision` / `quota-resume-confirm` / `v24-compile` / `writer-acquire` / `writer-release` / `writer-show` / `v24-record-run` / `review-record` / `workflow-model-select` / `worker-model-pin` / `quota-automation-bind` / `quota-automation-clear` / `quota-continuity-preflight`；额度诊断另有独立脚本 `runtime/quota/report.py`。查询本文未列出的子命令（permit / lease / wave / clock / bridge / policy / verify-* / host-check 等）没有意义——那些面连同后端已不存在。
 
 ## 1. 额度诊断：report.py 双模式与套餐口径
 
@@ -111,19 +111,27 @@ python <cli> writer-release <repo_root> <holder_task_id> --force
 
 ## 5. Workflow worker 模型选型：`workflow-model-select` 拒绝的处置
 
-**现象**：`workflow-model-select` 退出码 2——零 Flash 候选 / 多候选歧义 / 显式 id 未配置 / 给了 `/GLM-5.3` 文本模型；或技能层报「选型失败绝不 CreateWorkflow」。
+**现象**：`workflow-model-select` 退出码 2——零 Flash 候选 / 多候选歧义 / 显式 id 未配置 / 给了 `/GLM-5.3` 文本模型 / 带 `--task-ref` 消费任务 pin 时报「任务 pin 已失效，请重新问答授权」；或技能层报「选型失败绝不 CreateWorkflow」。
 
-**判定**（v2.4.1 起 delegate/full 的提交硬闸，INV-MODEL-01）：
+**判定**（v2.4.1 起 delegate/full 的提交硬闸，INV-MODEL-01；v2.5 起支持任务级 pin 消费）：
 
 ```
-python <cli> workflow-model-select '<JSON 数组或文件路径>' [--model <exact-id>]
+python <cli> workflow-model-select '<JSON 数组或文件路径>' [--model <exact-id>] [--task-ref <task_id>]
 ```
 
 - 输入是主会话从宿主模型列表（ListModels 等）提取的已配置精确 id 集合（内联 `["..."]` 或 JSON 文件均可）；
-- 恰一个 `account:` 前缀且以 `/GLM-5.3-Flash` 结尾的候选 → 自动选定；多个 → 歧义拒绝并列出全部候选（**必须显式 `--model <exact-id>`**）；零个 → 拒绝（检查账号是否配置了 Flash 模型）；
+- 恰一个 `account:` 前缀且以 `/GLM-5.3-Flash` 结尾的候选 → 自动选定；多个 → 歧义拒绝并列出全部候选（必须显式给值：`--model <exact-id>`，或带 `--task-ref` 消费任务 pin）；零个 → 拒绝（检查账号是否配置了 Flash 模型）；
+- **`--task-ref <task_id>`（v2.5）**：读取任务顶层 `worker_model` pin 后按固定优先级取值——`--model` 显式值 > 任务 pin > 自动选型；无 pin 走既有自动选型路径（行为与不带 `--task-ref` 逐字一致）。消费**必查当次宿主列表**：pin 形状非法或不在本次 configured 集合 → 退出码 2「任务 pin 已失效，请重新问答授权」，绝不回退自动选型、绝不静默换模型（写入侧 `worker-model-pin` 只做形状预检、绝不查宿主面——`runtime/cli.py`）；任务缺失 / v2.3 遗留任务 → 退出码 1；
 - 裸 `GLM-5.3-Flash`（无 `account:` 前缀）与任何 `/GLM-5.3` 结尾的文本模型一律拒绝——省略 `subagent_model` 会使 Workflow 继承主会话模型，是 v2.4.0 缺陷 A，协议硬禁止。
 
-**处置**：选型成功后 CreateWorkflow 的 `subagent_model` **逐字取**返回契约的 `subagent_model` 值；选型失败按原因处理（换账号 / 显式指定 / 修复配置），绝不猜测回退、绝不静默改用其他模型、绝不省略参数提交。
+**处置**（按拒绝原因，选型成功后 CreateWorkflow 的 `subagent_model` 一律**逐字取**返回契约值）：
+
+| 拒绝原因 | 处置 |
+| --- | --- |
+| 零候选 | 检查账号是否配置了 Flash 模型 / 修复配置后重试 |
+| 多候选歧义（无显式值亦无任务 pin） | 交互回合走任务启动问答第二题重新授权（orchestration §6.0）→ `worker-model-pin` 落盘 → 后续提交带 `--task-ref`；或本次提交直接 `--model <exact-id>` |
+| **任务 pin 已失效**（退出码 2，v2.5） | 候选集漂移（套餐过期 / 新 plan 加入）属预期安全行为——新候选不自动采用、旧 pin 不自动替换。交互回合内重跑问答第二题重新授权，`worker-model-pin` 异值显式覆盖（输出带 prev/new）后继续；**无人值守唤醒 / 恢复轮绝不弹问**——阻断提交、转等待用户，等用户回来再重新授权 |
+| 显式 id 未配置 / 文本模型 / 裸别名 | 换 provider 全限定 Flash 精确 id；绝不猜测回退、绝不静默改用其他模型、绝不省略参数提交 |
 
 ## 6. 「hook 不拦 Workflow 子代理」：宿主事实与含义
 

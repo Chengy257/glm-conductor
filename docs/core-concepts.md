@@ -6,7 +6,7 @@
 
 两个真相域是全部概念的坐标系：
 
-- **静态语义真相**（Conductor 持有）：任务 / DAG / ownership / change_id / 授权——本词典的七条主词条；
+- **静态语义真相**（Conductor 持有）：任务 / DAG / ownership / change_id / 授权——本词典的八条主词条；
 - **执行运行时真相**（ZCode 持有）：Workflow run 的生命周期、并行、重试、恢复——Conductor 绝不镜像，只保存 run id 关联。
 
 ---
@@ -142,6 +142,7 @@ file <归一路径>\0<sha256:…|missing>   ← 每个相关路径一行（排�
 - **mode**：`manual`（默认）/ `auto`——auto 只能由显式 `authorize_quota_resume(max_resumes)` 落盘授权，绝不推断；`max_resumes=1` 即一次性恢复，`N` 即有界多窗
 - **automation_id**（v2.4.1 语义）：当前关联的未来原生 Scheduled Task 见证——auto 连续性的持久化武装事实；其存在是 preflight 的要求，但绝不独立证明宿主侧激活仍存在
 - **先武装后开工**（v2.4.1，arm-before-work）：`auto_continuity_armed = mode==auto AND automation_id 为非空 str`——mode=auto 的任务在首个消耗额度的 Workflow 启动与任何自动 resume 之前必须完成「创建 Scheduled Task → `quota-automation-bind` → `quota-continuity-preflight` PASS」；recurring 优先（成功唤醒后不删不重建），one-shot 后备先创建后继激活再 resume（绝不硬编码周期推算下一窗）
+- **并存唤醒**（v2.5）：recurring 仍是武装载体与兜底（INV-CONT-03 原样——成功唤醒后不删不重建）；唤醒决策 `remain-waiting` 且已观测 `reset_at` 时**后继 one-shot 先行**——`delay = (reset_at + grace) - now`（分钟向上取整）加发一次零状态 one-shot（不 bind、不落 state、不清理，触发即自失效；`delay <= 0` 不调度）；重复加发由决策幂等兜底（早醒 → 新观测 → 再加发；醒晚 → 额度已恢复 → resume）；**绝不用 CronUpdate**；每次唤醒强制新鲜观测，绝不硬信旧 `reset_at`。配套 CLI 扩展：`quota-resume-decision` 在 EXHAUSTED remain-waiting 时于 decision 只读透传当次观测 `reset_at`（ISO 串或 null，向后兼容附加键；UNKNOWN / no-op 保持既有形状绝不透传）——供换算 `delayMinutes`，不参与判定
 - **等待**：额度耗尽 → `enter_waiting_quota`（七态中的 waiting_quota；`workflow_run_id` 保留；最近观测记入 `last_observation` 供诊断）
 - **定时唤醒决策**（`scheduled_activation_decision`，幂等六步）：非 waiting_quota → `no-op`；观测 EXHAUSTED/UNKNOWN → `remain-waiting`（绝不虚构可用性）；未授权 → `waiting-user`；预算耗尽 → `waiting-user` 且恰一次转 `waiting_user`；auto 且 automation_id 空 → `remain-waiting`（reason 含 `continuity-unarmed`，零写盘零预算消耗）；可用 + 已授权 + 预算有余 + 已武装 → `resume-authorized`（计数仅暂存）
 - **确认落账**：宿主 resume 调用**真正被接受后**才调 `confirm_resume_started`——`resume_count +1` + 转回 active + `quota_resume_confirmed` 事件；未确认的决策绝不消耗预算
@@ -153,7 +154,7 @@ file <归一路径>\0<sha256:…|missing>   ← 每个相关路径一行（排�
 用户 authorize_quota_resume(1) → mode=auto
 创建原生 Scheduled Task → bind → preflight PASS（armed）→ 才许启动（arm-before-work）
 额度耗尽 → waiting_quota
-唤醒 → 观测 EXHAUSTED          → remain-waiting
+唤醒 → 观测 EXHAUSTED          → remain-waiting（后继 one-shot 先行加发，v2.5）
 唤醒 → 观测 AVAILABLE、manual  → waiting-user（未授权）
 用户 authorize_quota_resume(1) → mode=auto
 唤醒 → 可用、auto、预算有余     → resume-authorized（计数暂存 1）
@@ -161,6 +162,16 @@ file <归一路径>\0<sha256:…|missing>   ← 每个相关路径一行（排�
 唤醒 → 观测 EXHAUSTED          → 预算 1/1 耗尽 → waiting-user
 终态 → 删本任务 automation（单次）→ 确认删除后 clear 绑定
 ```
+
+## 8. 任务级授权偏好（worker_model pin）
+
+**是什么**：用户在任务启动问答（orchestration §6.0）中显式授权的**任务级 worker 模型偏好**——授权一次、任务全生命周期默认（含唤醒恢复后的新 run 提交）；是偏好，不是任务身份（任务身份始终是 `task_id`）。
+
+- **形状**：state 顶层可选键 `worker_model`——存在才校验（null 或非空 str），缺省即不写键（未问答授权即无 pin），旧任务加载零迁移（`runtime/state.py`）
+- **写入不查宿主面**：`task.pin_worker_model`（CLI `worker-model-pin`）经 submission 形态约定预检（`account:` 前缀 + Flash 后缀）后落盘——写入时点与提交时点宿主面可能不同，对账留给消费点；非终态才可写，同值幂等（零写盘），异值显式覆盖（输出带 prev/new）；不新增 journal 事件
+- **消费必查宿主面**：`workflow-model-select --task-ref <task_id>` 每次对账当次 configured 集合；选型优先级固定 `--model` 显式值 > 任务 pin > 自动选型；pin 形状非法或不在列表即专门拒绝（退出码 2「任务 pin 已失效，请重新问答授权」）——绝不回退自动选型、绝不静默换模型；候选漂移由此天然安全（新候选不自动采用，旧 pin 不自动替换）
+- **交互回合边界**：问答与重新授权只发生在交互回合；唤醒轮 / 恢复轮绝不弹问——无人值守回合遇 pin 失效一律阻断提交、转等待用户（fail closed）
+- **权威落点**：`runtime/state.py`（键校验）；`runtime/task.py`（`pin_worker_model`）；`runtime/cli.py`（`worker-model-pin` 写入 / `workflow-model-select --task-ref` 消费）
 
 ---
 

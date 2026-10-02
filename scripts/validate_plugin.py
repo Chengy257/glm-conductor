@@ -138,6 +138,17 @@
             （扫描限 plugins/glm-conductor/runtime 生产 .py 模块：
             sqlite 零容忍；Global Quota Clock 仅在含退役/否定词的行
             豁免——journal.py 既有退役注记不属依赖复活）。
+         v2.5 扩展锚（任务启动契约与精确唤醒，规格 §4 W5）——三组
+         必含锚任一缺失即 FAIL：
+         f) 任务启动问答节锚缺失（orchestration/SKILL.md 必含 §6.0
+            节标题、「触发点在 create_task 之前」触发条件、单轮两问
+            合并题形与「唤醒轮 / 恢复轮绝不弹问」无人值守边界措辞）；
+         g) 任务 pin 失效即拒措辞缺失（runtime/cli.py 与
+            orchestration/SKILL.md 必含「pin 已失效，请重新问答授权」
+            专门拒绝与「绝不回退自动选型、绝不静默换模型」禁令）；
+         h) 精确唤醒并存锚缺失（continuity/SKILL.md 必含「精确唤醒
+            并存：后继 one-shot 先行」节标题、recurring 武装载体与
+            兜底措辞与「绝不用 CronUpdate」禁令）。
 
     扫描范围说明：检查 5/6/7/8（及 8 内的旧名负向检查）的扫描范围是显式
     列表——plugins/ 全部文件 + marketplace.json + README.md +
@@ -308,6 +319,7 @@ TEST_QUOTA_ADAPTERS = os.path.join(TESTS_DIR, "test_quota_adapters.py")
 TEST_QUOTA_CREDENTIALS = os.path.join(TESTS_DIR, "test_quota_credentials.py")
 TEST_QUOTA_REPORT = os.path.join(TESTS_DIR, "test_quota_report.py")
 ORCHESTRATION_SKILL = os.path.join(SKILLS_DIR, "orchestration", "SKILL.md")
+CLI_PY = os.path.join(RUNTIME_DIR, "cli.py")
 RUNTIME_REQUIRED_FILES = (
     RUNTIME_INIT, STATE_PY, JOURNAL_PY, OWNERSHIP_PY,
     QUOTA_PARSER_PY, QUOTA_PROVIDER_PY, QUOTA_HTTP_PY, QUOTA_ZAI_PY,
@@ -353,6 +365,8 @@ SKILL_CONTRACT_MARKERS = (
 
 # —— 检查 16：v2.4.1 编排/连续性协议静态契约（continuity hotfix H3，§5.6） ——
 # 六条件任一出现即 FAIL（条件 a-e 的实现拆解见模块 docstring 第 16 项）。
+# v2.5 扩展锚（任务启动问答 / pin 失效即拒 / 精确唤醒并存，规格 §4 W5）
+# 以 16f-16h 追加于函数尾部——既有六契约锚原样保留，只扩展不改动。
 # 16a：模型选型硬闸必含标记（orchestration/SKILL.md，INV-MODEL-01 文档面）
 MODEL_GATE_MARKERS = (
     "workflow-model-select",
@@ -405,6 +419,37 @@ RUNTIME_GQC_TOKENS = ("global quota clock", "global_quota_clock",
 # Global Quota Clock 的退役/否定注释行豁免（journal.py 既有退役注记不属复活）
 GQC_RETIREMENT_WORDS = ("删除", "退役", "移除", "下架",
                         "不", "禁止", "绝不")
+
+# —— 检查 16 v2.5 扩展锚（任务启动契约与精确唤醒，规格 §4 W5） ——
+# 三组必含锚，任一缺失即 FAIL（实现拆解见模块 docstring 第 16 项 f-h）。
+# 既有六契约（16a-16e）锚原样保留，只扩展不改动。
+# 16f：任务启动问答节锚（v2.5 I2 文档面——orchestration §6.0 节存在 +
+# create_task 之前触发条件 + 单轮两问合并题形 + 无人值守禁弹问边界）
+LAUNCH_INTERVIEW_MARKERS = (
+    "### 6.0 任务启动问答（launch interview，v2.5）",
+    "触发点在 create_task 之前",
+    "一次问答两题（AskUserQuestion 单轮两问合并，绝不拆成多轮）",
+    "唤醒轮 / 恢复轮绝不弹问",
+)
+# 16g：任务 pin 失效即拒（v2.5 I1——cli.py 专门拒绝措辞 + 绝不回退
+# 自动选型禁令；orchestration 技能文档面同步锚定消费语义）
+PIN_REJECTION_CLI_MARKERS = (
+    "任务 pin 已失效，请重新问答授权",
+    "绝不回退自动选型、绝不静默换模型",
+)
+PIN_REJECTION_SKILL_MARKERS = (
+    "pin 的消费语义（失效即拒）",
+    "pin 已失效，请重新问答授权",
+    "绝不回退自动选型、绝不静默换模型",
+)
+# 16h：精确唤醒并存锚（v2.5 I4 文档面——continuity「后继 one-shot 先行」
+# 节存在 + recurring 武装载体与兜底不变 + CronUpdate 禁令）
+PRECISE_WAKE_MARKERS = (
+    "### 精确唤醒并存：后继 one-shot 先行（v2.5，INV-CONT-03 不变）",
+    "recurring 是武装载体与兜底",
+    "第一动作是后继 one-shot 先行",
+    "绝不用 CronUpdate",
+)
 
 
 def rel_display(path):
@@ -1257,8 +1302,19 @@ def check_16_v241_protocol(results):
          标记 + 武装命令锚必含 + 逆序措辞禁令；
       e) 生产 runtime 重现 Global Quota Clock / sqlite 直写调度依赖 ——
          扫描限 runtime/ 生产 .py，sqlite 零容忍，GQC 仅退役/否定行豁免。
+
+    v2.5 扩展锚（任务启动契约与精确唤醒，规格 §4 W5）——三组必含锚
+    任一缺失即 FAIL（既有六契约锚原样保留，只扩展不改动）：
+      f) 任务启动问答节锚 —— orchestration §6.0 标题 / create_task 之前
+         触发条件 / 单轮两问合并题形 / 「唤醒轮 / 恢复轮绝不弹问」；
+      g) 任务 pin 失效即拒 —— cli.py 与 orchestration 必含「pin 已失效，
+         请重新问答授权」专门拒绝 + 绝不回退自动选型禁令；
+      h) 精确唤醒并存 —— continuity 必含后继 one-shot 先行节标题 +
+         recurring 武装载体与兜底措辞 + 绝不用 CronUpdate 禁令。
     """
-    title = "v2.4.1 编排/连续性协议静态契约（模型选型硬闸 / arm-before-work / one-shot 后继 / 生产 runtime 禁依赖）"
+    title = ("v2.4.1/v2.5 编排/连续性协议静态契约（模型选型硬闸 / "
+             "arm-before-work / one-shot 后继 / 生产 runtime 禁依赖 / "
+             "任务启动问答 / pin 失效即拒 / 精确唤醒并存）")
     details = []
     ok = True
 
@@ -1395,6 +1451,58 @@ def check_16_v241_protocol(results):
         details.append(
             "PASS: 生产 runtime 扫描 %d 个 .py 模块，无 sqlite 直写调度依赖、"
             "无 Global Quota Clock 复活" % runtime_scanned)
+
+    # —— 16f：任务启动问答节锚（v2.5 I2 文档面，orchestration §6.0） ——
+    # orch_text 已在 16a 读取并做过缺失早退，此处直接复用
+    for marker in LAUNCH_INTERVIEW_MARKERS:
+        if marker in orch_text:
+            details.append("PASS: %s 含任务启动问答锚 `%s`" % (orch_shown, marker))
+        else:
+            details.append(
+                "FAIL: %s 缺少任务启动问答锚 `%s`（§6.0 问答节缺失或"
+                "触发条件/两问题形/禁弹问措辞回退）" % (orch_shown, marker))
+            ok = False
+
+    # —— 16g：任务 pin 失效即拒（v2.5 I1，cli.py + orchestration 双面） ——
+    cli_shown = rel_display(CLI_PY)
+    cli_text = read_text(CLI_PY)
+    if cli_text is None or not os.path.isfile(CLI_PY):
+        details.append("FAIL: %s 不存在或无法读取，无法执行 16g 检查" % cli_shown)
+        ok = False
+    else:
+        for marker in PIN_REJECTION_CLI_MARKERS:
+            if marker in cli_text:
+                details.append("PASS: %s 含 pin 失效即拒锚 `%s`" % (cli_shown, marker))
+            else:
+                details.append(
+                    "FAIL: %s 缺少 pin 失效即拒锚 `%s`（专门拒绝/绝不回退"
+                    "自动选型措辞缺失）" % (cli_shown, marker))
+                ok = False
+    for marker in PIN_REJECTION_SKILL_MARKERS:
+        if marker in orch_text:
+            details.append("PASS: %s 含 pin 失效即拒锚 `%s`" % (orch_shown, marker))
+        else:
+            details.append(
+                "FAIL: %s 缺少 pin 失效即拒锚 `%s`（消费语义/专门拒绝/"
+                "绝不回退自动选型措辞缺失）" % (orch_shown, marker))
+            ok = False
+
+    # —— 16h：精确唤醒并存锚（v2.5 I4 文档面，continuity） ——
+    cont_shown = rel_display(CONTINUITY_SKILL)
+    cont_text = read_text(CONTINUITY_SKILL)
+    if cont_text is None or not os.path.isfile(CONTINUITY_SKILL):
+        details.append("FAIL: %s 不存在或无法读取，无法执行 16h 检查" % cont_shown)
+        ok = False
+    else:
+        for marker in PRECISE_WAKE_MARKERS:
+            if marker in cont_text:
+                details.append("PASS: %s 含精确唤醒并存锚 `%s`" % (cont_shown, marker))
+            else:
+                details.append(
+                    "FAIL: %s 缺少精确唤醒并存锚 `%s`（后继 one-shot 先行"
+                    "节/recurring 兜底/CronUpdate 禁令措辞缺失）"
+                    % (cont_shown, marker))
+                ok = False
 
     results.append((16, title, ok, details))
 

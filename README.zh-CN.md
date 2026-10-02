@@ -2,7 +2,7 @@
 
 [English](./README.md) | **简体中文**
 
-![Version](https://img.shields.io/badge/version-2.4.1-blue.svg)
+![Version](https://img.shields.io/badge/version-2.5.0-blue.svg)
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
 ![ZCode Plugin](https://img.shields.io/badge/ZCode-plugin-green.svg)
 ![Models](https://img.shields.io/badge/models-GLM--5.3%20%2F%20GLM--5.3--Flash-orange.svg)
@@ -65,12 +65,12 @@ ZCode 仍然是底层编码 harness，并拥有执行编排：workflow 运行生
 | 角色 | 默认模型 | 主要职责 |
 | --- | --- | --- |
 | 主会话 | **GLM-5.3** | 规划、架构、路由、验证、验收 |
-| Workflow 工作者 | **GLM-5.3-Flash（显式，必选）** | 原生 Workflow 内的有界文本实施——delegate/full 每次提交都必须携带经选型预检（`workflow-model-select`）选定的显式 provider 限定 `…/GLM-5.3-Flash` `subagent_model`；省略即静默继承主会话模型，是协议硬禁止（v2.4.0 缺陷 A） |
+| Workflow 工作者 | **GLM-5.3-Flash（显式，必选）** | 原生 Workflow 内的有界文本实施——delegate/full 每次提交都必须携带经选型预检（`workflow-model-select`）选定的显式 provider 限定 `…/GLM-5.3-Flash` `subagent_model`；选定的 id 可经 `worker-model-pin` 一次性记录为用户授权的任务级 pin，同任务的后续提交经 `--task-ref` 自动消费——这是任务级偏好，不是任务身份；省略模型仍会静默继承主会话模型，是协议硬禁止（v2.4.0 缺陷 A） |
 | 视觉实施者 | **GLM-5.3-Flash** | 有界的多模态实施（Custom Subagent 例外通道） |
 | 文本审查者 | **宿主/会话模型** | 全新上下文、只读最终审查 |
 | 视觉审查者 | **GLM-5.3-Flash** | 全新上下文视觉审查（固定多模态绑定，不可用即 fail closed） |
 
-Workflow 工作者绝不继承会话模型：编译器 TypeScript 模型无关（宿主在 run 提交时绑定一个模型），Conductor 因此把显式 Flash 选型做成启动硬闸——恰一个已配置的 provider 限定 Flash id 自动选定、零候选 fail closed、多候选必须显式指定。文本审查者刻意不固定 model 字段，从而在不同宿主与套餐下都可启动；两个视觉角色固定为 provider 全限定的多模态 GLM-5.3-Flash 绑定，绑定不可用时视觉高保障路线 fail closed。这些只是当前推荐的模型分配，不是永久架构身份。
+Workflow 工作者绝不继承会话模型：编译器 TypeScript 模型无关（宿主在 run 提交时绑定一个模型），Conductor 因此把显式 Flash 选型做成启动硬闸——恰一个已配置的 provider 限定 Flash id 自动选定、零候选 fail closed、多候选必须显式指定：可在任务启动问答中一次选定并记录为任务的 `worker_model` pin，也可在每次提交时经 `--model` 显式给出。已 pin 的 id 不在当次宿主列表时，消费点直接拒绝（退出码 2），绝不回退自动选型、绝不静默换模型。文本审查者刻意不固定 model 字段，从而在不同宿主与套餐下都可启动；两个视觉角色固定为 provider 全限定的多模态 GLM-5.3-Flash 绑定，绑定不可用时视觉高保障路线 fail closed。这些只是当前推荐的模型分配，不是永久架构身份。
 
 ## 原生 Workflow 执行
 
@@ -176,7 +176,8 @@ reason: implementation is bounded by explicit interfaces, owned files, and deter
 | --- | --- |
 | `quota-resolve <repo> [--force-refresh]` · `quota-wait` / `quota-resume-authorize` / `quota-resume-decision` / `quota-resume-confirm` | 额度四态解析（只读观测）与有界恢复生命周期（等待 / 授权 / 决策 / 确认） |
 | `quota-automation-bind` / `quota-automation-clear` / `quota-continuity-preflight` | auto 连续性武装生命周期（绑定 / 清除 / 预检；`ready=false` → 退出码 2 即启动/恢复阻断信号） |
-| `workflow-model-select <models-json> [--model <exact-id>]` | worker 模型选型硬闸（恰一 Flash 自动选定、零候选拒绝、多候选须显式指定；输出 `{subagent_model, model_policy}` 提交契约） |
+| `workflow-model-select <models-json> [--model <exact-id>] [--task-ref <task_id>]` | worker 模型选型硬闸（恰一 Flash 自动选定、零候选拒绝、多候选须显式指定或任务 pin；`--task-ref` 消费任务的 `worker_model` pin——`--model` 显式值 > pin > 自动选型，pin 失效直接拒绝；输出 `{subagent_model, model_policy}` 提交契约） |
+| `worker-model-pin <repo> <task_id> <exact-id>` | 写入用户授权的任务级 worker 模型 pin（启动问答答后落盘；只做形状预检、绝不查宿主列表；非终态任务才可写，同值幂等，异值显式覆盖） |
 | `v24-compile <dag.json> [--task-ref <id>] [--out <path>]` | 把规范 DAG 编译为原生 Workflow 源码（只生成，绝不自动执行） |
 | `writer-acquire <repo> <task_id> [--run-id <id>]` | 取得仓库写预约 |
 | `writer-release <repo> <task_id> [--force]` | 释放写预约（`--force` 供显式 inspect 之后的清除） |
@@ -196,7 +197,9 @@ reason: implementation is bounded by explicit interfaces, owned files, and deter
 
 ## 项目状态与迁移
 
-**v2.4.1 是当前基线** —— 这是 v2.4 重基线之上的一次窄幅连续性热修。它关闭了实际使用中发现的两个 v2.4.0 缺陷：省略 `subagent_model` 时 Workflow 工作者静默继承主会话模型（现为每次 delegate/full 启动前的显式 provider 限定 GLM-5.3-Flash 选型硬闸），以及 auto 连续性在无保证未来激活的情况下进入额度等待（现为先武装后开工：recurring Scheduled Task 优先、one-shot 后备先续后继再恢复、until_done 恒受 max_resumes 有界）。v2.4 的复杂度重基线本身不变：这是一次基于 ZCode 原生 Workflow 的重基线，不是 v2.3 运行时的增量版本。v2.3 执行运行时（dispatcher、dispatch permit、按单元租约、receipt、额度控制面、Global Quota Clock）已删除。**v2.3 任务态不迁移**：v2.4 会检测遗留任务目录并以恢复指引拒绝，而不是自动转换。升级前请先完成或显式退役活跃的 v2.3 任务；已发布的 v2.3.x 可通过 Git 历史与 tag 找回。legacy 检测指引见[故障排查](./docs/troubleshooting.md)。
+**v2.5.0 是当前基线** —— v2.4.1 热修之上的任务启动契约与精确唤醒版本。凡建状态的任务现在都以一轮强制的启动问答开场（跨额度自动唤醒与有界 `max_resumes` 预算；选型歧义时一并选定 worker 模型）；选定的 worker 模型可按任务一次 pin（state 可选顶层键 `worker_model`），后续提交经 `workflow-model-select --task-ref` 自动消费——pin 失效直接拒绝，绝不静默重新选型；`waiting_quota` 唤醒轮 recurring Scheduled Task 原样不动，同时按下一额度窗口精确加发一个零状态 one-shot（recurring 兜底 + one-shot 并存，绝不用 `CronUpdate`）；问答只发生在交互回合——唤醒/恢复轮遇阻塞一律 fail closed 转等待用户，绝不弹问。Breaking：无；唯一 schema 变更是可选顶层键 `worker_model`（缺省即无 pin，旧任务零迁移）。
+
+其下的 v2.4.1 连续性热修关闭了实际使用中发现的两个缺陷：省略 `subagent_model` 时 Workflow 工作者静默继承主会话模型（现为每次 delegate/full 启动前的显式 provider 限定 GLM-5.3-Flash 选型硬闸），以及 auto 连续性在无保证未来激活的情况下进入额度等待（现为先武装后开工：recurring Scheduled Task 优先、one-shot 后备先续后继再恢复、until_done 恒受 max_resumes 有界）。v2.4 的复杂度重基线本身不变：这是一次基于 ZCode 原生 Workflow 的重基线，不是 v2.3 运行时的增量版本。v2.3 执行运行时（dispatcher、dispatch permit、按单元租约、receipt、额度控制面、Global Quota Clock）已删除。**v2.3 任务态不迁移**：v2.4 会检测遗留任务目录并以恢复指引拒绝，而不是自动转换。升级前请先完成或显式退役活跃的 v2.3 任务；已发布的 v2.3.x 可通过 Git 历史与 tag 找回。legacy 检测指引见[故障排查](./docs/troubleshooting.md)。
 
 ## 许可
 

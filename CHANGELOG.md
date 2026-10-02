@@ -1,5 +1,44 @@
 # Changelog
 
+## 2.5.0
+
+Task-launch contract & precise wake — the four experience gaps left open by v2.4.1, closed without changing the v2.4 re-baseline. All four behaviors were locked as user rulings (2026-10-02/03) before implementation. Companion plan: `docs/roadmap/V2_5_TASK_LAUNCH_CONTRACT_AND_PRECISE_WAKE_PLAN.md`. **Breaking: none** — the only schema change is one optional top-level state key (`worker_model`), absent on existing tasks with zero migration.
+
+### Task launch interview (one round, two questions)
+
+Every state-backed task (delegate/full, audit, any cross-turn long task) now opens with one mandatory launch interview **before `create_task`**; pure in-session small work that creates no state is not asked. One `AskUserQuestion` round, never split into multiple turns:
+
+1. **Cross-quota auto wake** — enable (with a bounded `max_resumes` budget chosen in the same round) or stay `manual`. "Enable" lands `quota-resume-authorize` and then the arm-before-work sequence; budgets stay bounded, an exhausted budget parks at `waiting_user`.
+2. **Worker model** — appears only when selection is ambiguous (multiple provider-qualified Flash candidates on the host model list, all exact ids listed with their plan semantics); with exactly one candidate it is auto-selected and this question never appears. A chosen model lands `worker-model-pin`.
+
+Questions happen in interactive turns only: **wake/recovery turns never ask**. An unattended turn that hits a block only an answer could lift (e.g. an invalid pin) parks in the corresponding waiting state and waits for the user — fail closed, never a deadlock-by-question.
+
+### Task-level worker model pin (authorize once, default for the task)
+
+- `state.json` gains the optional top-level key `worker_model` — validated only when present (null or a non-empty string); absent means "no pin", so legacy tasks load with zero migration. `runtime/workflow/submission.py` is unchanged.
+- New `runtime/task.py::pin_worker_model` (CLI `worker-model-pin <repo_root> <task_id> <exact-id>`): the pin is a user-authorized task-level preference, not the task identity. Writes run a shape preflight reusing the submission form conventions (`account:` prefix + Flash suffix) but **never query the host model list** — write time and submit time can face different host surfaces, so reconciliation belongs to the consumption point. Non-terminal tasks only; same-value re-pin is idempotent (zero writes); a different value is an explicit override whose output carries `prev` and `new`; no journal events are added (`TASK_JOURNAL_EVENTS` stays at exactly ten names). Invalid id shape → exit 2; task-level rejection (missing / v2.3 legacy / terminal) → exit 1.
+- `workflow-model-select` gains `--task-ref <task_id>` with a fixed priority: explicit `--model` > task pin > auto-selection. With `--model` given, the pin does not participate; without any pin, behavior is identical to v2.4.1. Consumption **always reconciles against the current configured set**: a pin that fails the shape check or is absent from the current host list is rejected outright (exit 2, "任务 pin 已失效，请重新问答授权") — never a fallback to auto-selection, never a silent model switch. Candidate drift is therefore safe by construction: new candidates are never auto-adopted, expired pins are never auto-replaced.
+
+### Precise wake: recurring carrier untouched + one-shot dispatch coexists
+
+- The recurring Scheduled Task remains the arming carrier and fallback; INV-CONT-03 (never delete/recreate on a successful wake) is unchanged in wording and semantics. The added one-shot is a **zero-state auxiliary**: on `remain-waiting` with an observed `reset_at`, the first action is dispatching a successor one-shot (`delay = (reset_at + grace) - now`, minutes rounded up, `CronCreate delayMinutes`; `delay <= 0` schedules nothing) — no bind, no state write, no cleanup; it self-expires on firing, repeated dispatches are made safe by decision idempotence (early wake → fresh observation → dispatch again; late wake → quota recovered → resume), `CronUpdate` is never used, and every wake re-observes freshly instead of trusting a stale `reset_at`.
+- `quota-resume-decision` output extension (backward-compatible additional key): when the decision is `remain-waiting` on an `EXHAUSTED` observation, the decision dict read-only passes through that observation's `reset_at` (ISO string or null) for the delay computation — purely diagnostic, never consulted by the decision itself; `UNKNOWN` / no-op branches keep their existing output shape and never pass it through.
+- Arm-before-work is upgraded to a general build-order principle: once the interview enables auto continuity, building or repairing the future wake capability always precedes pushing the current work. A wake turn that finds the task unarmed rebuilds first (CronCreate → `quota-automation-bind` → preflight PASS); a failed rebuild is reported as `remain-waiting` and the turn ends — never a question.
+
+### Granularity anti-pattern (one sentence, no new machinery)
+
+Orchestration §5.2 states it outright: DAG nodes correspond to deliverables, not implementation steps — an objective that can only be phrased as a step sequence (first / then / next) is a step-type node and must be merged upward; implementation order inside a node is the worker's call.
+
+### Static enforcement
+
+`scripts/validate_plugin.py` check 16 gains three must-have anchor groups (16f–16h; the six v2.4.1 contract anchors are kept verbatim): the launch-interview section with its create_task-before trigger, single-round two-question form, and never-ask-on-wake wording; the pin-invalidation rejection wording in both `runtime/cli.py` and the orchestration skill ("任务 pin 已失效，请重新问答授权" plus the never-fall-back / never-switch-silently prohibition); and the precise-wake coexistence section in the continuity skill (successor-one-shot-first heading, recurring-carrier-and-fallback wording, no-CronUpdate prohibition).
+
+### Compatibility
+
+- Breaking: none. Schema adds one optional top-level key `worker_model` (null or non-empty string, validated only when present; absent = no pin); `quota_resume` keeps its frozen four-key shape; `TASK_JOURNAL_EVENTS` stays at exactly ten names; `runtime/workflow/submission.py` is untouched.
+- Exit-code contract keeps the 0 / 2 / 1 shape: exit 2 additionally covers pin-shape and pin-invalidated selection rejections; exit 1 additionally covers task-level rejections of pin writes and pin consumption (missing / legacy / terminal task).
+- Historical entries below are left as written.
+
 ## 2.4.1
 
 Continuity hotfix — two narrow production defects observed in real use after the v2.4.0 closeout, closed without changing the v2.4 architecture. Companion plan/spec: `docs/roadmap/V2_4_1_CONTINUITY_HOTFIX_PLAN.md` + `V2_4_1_CONTINUITY_HOTFIX_IMPLEMENTATION_SPEC.md`; implementation report: `docs/reviews/V2_4_1_CONTINUITY_HOTFIX_REPORT.md`.
