@@ -36,7 +36,10 @@ quota-automation-clear / quota-continuity-preflight）——规格 U6 测试
      prepare_waiting 缺省绑定见证 id）；confirm 恰消耗一预算；
      confirm 前重复 decision 不消耗预算；非 waiting 任务 confirm →
      1；预算耗尽 → waiting-user 且任务转 waiting_user；max_resumes
-     非法（"abc" / "-1"）→ 2。
+     非法（"abc" / "-1"）→ 2。v2.5 精确唤醒（I4/W3）：EXHAUSTED
+     remain-waiting 的 decision 只读透传本次观测 reset_at（ISO 串
+     或 null）；UNKNOWN / no-op 分支绝不透传；resume-authorized
+     保持既有四键形状（绝不附加 reset_at）。
   5. workflow-model-select（v2.4.1 H1，submission 薄壳）：恰一 Flash
      自动选中（stdout 恰 {subagent_model, model_policy=
      "explicit-flash-required"}）；内联数组与文件两形态等价；零候选
@@ -684,6 +687,95 @@ class QuotaLifecycleCliTest(QuotaLifecycleCliFixture):
         self.assertEqual(decision["resume_count_after"], 1)
         # 暂存不落盘：磁盘计数仍为 0
         self.assertEqual(self.load()["quota_resume"]["resume_count"], 0)
+
+    # —— v2.5 精确唤醒（I4/W3）：decision 输出 reset_at 只读透传 ——
+
+    def test_decision_exhausted_remain_waiting_passes_reset_at(self):
+        """EXHAUSTED remain-waiting → decision 只读透传本次观测
+        reset_at（ISO 串；供主会话换算 one-shot delayMinutes）。"""
+        self.prepare_waiting(max_resumes=3)
+        with self.with_detail(
+                fake_detail("EXHAUSTED", windows=self.WINDOWS)):
+            code, payload = self.run_cli_json(
+                "quota-resume-decision", self.repo, self.TID)
+        self.assertEqual(code, 0)
+        decision = payload["decision"]
+        # 既有键不动（remain-waiting 恰 action / reason）+ 附加键透传
+        self.assertEqual(decision["action"], "remain-waiting")
+        self.assertIn("继续等待", decision["reason"])
+        self.assertEqual(decision["reset_at"],
+                         "2026-09-21T17:00:00.000Z")
+        self.assertEqual(set(decision),
+                         {"action", "reason", "reset_at"})
+        # 顶层输出形状不变（恰三键）；透传值与观测 view 同源同值
+        self.assertEqual(set(payload),
+                         {"task_id", "decision", "quota_observation"})
+        self.assertEqual(payload["quota_observation"]["reset_at"],
+                         decision["reset_at"])
+
+    def test_decision_exhausted_without_windows_reset_at_null(self):
+        """EXHAUSTED 无窗口观测 → 透传 reset_at=null（键在场、值为
+        null——ISO 字符串或 null 两态）。"""
+        self.prepare_waiting(max_resumes=3)
+        with self.with_detail(fake_detail("EXHAUSTED")):
+            code, payload = self.run_cli_json(
+                "quota-resume-decision", self.repo, self.TID)
+        self.assertEqual(code, 0)
+        decision = payload["decision"]
+        self.assertEqual(decision["action"], "remain-waiting")
+        self.assertIn("reset_at", decision)
+        self.assertIsNone(decision["reset_at"])
+
+    def test_decision_unknown_no_reset_at_passthrough(self):
+        """UNKNOWN remain-waiting → decision 绝不透传 reset_at（观测
+        view 自身带 reset_at 也不透传，保持既有两键形状）。"""
+        self.prepare_waiting(max_resumes=3)
+        with self.with_detail(
+                fake_detail("UNKNOWN", windows=self.WINDOWS)):
+            code, payload = self.run_cli_json(
+                "quota-resume-decision", self.repo, self.TID)
+        self.assertEqual(code, 0)
+        decision = payload["decision"]
+        self.assertEqual(decision["action"], "remain-waiting")
+        self.assertNotIn("reset_at", decision)
+        self.assertEqual(set(decision), {"action", "reason"})
+        # 观测 view 诊断形状不变（view 照常携带 reset_at）
+        self.assertEqual(payload["quota_observation"]["reset_at"],
+                         "2026-09-21T17:00:00.000Z")
+
+    def test_decision_noop_no_reset_at_passthrough(self):
+        """no-op 分支（任务非 waiting_quota）→ decision 绝不透传
+        reset_at（EXHAUSTED 观测在场也不透传）。"""
+        self.make_task()  # active 任务：决策第一步即 no-op
+        with self.with_detail(
+                fake_detail("EXHAUSTED", windows=self.WINDOWS)):
+            code, payload = self.run_cli_json(
+                "quota-resume-decision", self.repo, self.TID)
+        self.assertEqual(code, 0)
+        decision = payload["decision"]
+        self.assertEqual(decision["action"], "no-op")
+        self.assertNotIn("reset_at", decision)
+        self.assertEqual(set(decision), {"action", "reason"})
+        # 观测 view 诊断形状不变
+        self.assertEqual(payload["quota_observation"]["reset_at"],
+                         "2026-09-21T17:00:00.000Z")
+
+    def test_decision_resume_authorized_keeps_existing_shape(self):
+        """回归：AVAILABLE resume-authorized 保持既有四键形状（观测
+        view 带 reset_at 也绝不附加到 decision）。"""
+        self.prepare_waiting(max_resumes=3)
+        with self.with_detail(
+                fake_detail("AVAILABLE", windows=self.WINDOWS)):
+            code, payload = self.run_cli_json(
+                "quota-resume-decision", self.repo, self.TID)
+        self.assertEqual(code, 0)
+        decision = payload["decision"]
+        self.assertEqual(decision["action"], "resume-authorized")
+        self.assertEqual(decision["workflow_run_id"], "run-cli-42")
+        self.assertEqual(decision["resume_count_after"], 1)
+        self.assertEqual(set(decision),
+                         {"action", "reason", "workflow_run_id",
+                          "resume_count_after"})
 
     def test_confirm_consumes_exactly_one_budget(self):
         """confirm 恰消耗一预算：计数 +1、任务回 active、确认事件落账。"""

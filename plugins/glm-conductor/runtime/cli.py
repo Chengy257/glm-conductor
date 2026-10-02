@@ -7,11 +7,12 @@
     额度只读解析（quota-resolve）、v2.4 audit-fix AF-03 额度等待/恢复
     生命周期操作面（quota-wait / quota-resume-authorize /
     quota-resume-decision / quota-resume-confirm）、v2.4 新路径
-    操作面（v24-compile / writer-* / v24-record-run），以及 v2.4.1
+    操作面（v24-compile / writer-* / v24-record-run）、v2.4.1
     continuity hotfix 操作面（workflow-model-select /
     quota-automation-bind / quota-automation-clear /
-    quota-continuity-preflight）。技能层 runtime 调用一律走本 CLI
-    （禁止 python3 -c 内联）。
+    quota-continuity-preflight），以及 v2.5 任务级 worker 模型 pin
+    操作面（worker-model-pin 写入 + workflow-model-select --task-ref
+    消费）。技能层 runtime 调用一律走本 CLI（禁止 python3 -c 内联）。
 
 v2.4 Phase 2（W6，P2-F）退役面：
     v2.3 执行运行时（派发决策 / permit / 租约 / run 账本 / 恢复清单 /
@@ -75,8 +76,13 @@ v2.4 Phase 3（P3-D/E）收口面：
         同 quota-wait 方式取观测 view，输出单行 JSON {task_id,
         decision, quota_observation}（decision 为任务层原样决策
         dict——action / reason，resume-authorized 时另含
-        workflow_run_id / resume_count_after 暂存计数）。绝不调用
-        宿主 ResumeWorkflowRun（宿主动作归主会话）。
+        workflow_run_id / resume_count_after 暂存计数）。v2.5 精确
+        唤醒输出扩展（I4/W3，向后兼容附加键）：decision 为
+        remain-waiting 且观测为 EXHAUSTED 时，decision 只读透传本次
+        观测的 reset_at（quota_view.reset_at，ISO 字符串或 null）
+        ——纯诊断透传，供主会话换算 one-shot delayMinutes，不参与
+        任何判定；UNKNOWN / no-op 分支保持既有输出形状，绝不透传。
+        绝不调用宿主 ResumeWorkflowRun（宿主动作归主会话）。
     quota-resume-confirm <repo_root> <task_id>
         恢复落账确认（task.confirm_resume_started 薄壳；仅在宿主
         resume 调用真正被接受后使用）：resume_count +1（暂存计数
@@ -128,6 +134,7 @@ v2.4 Phase 3（P3-D/E）收口面：
         （空 id 等，WorkflowRunError）→ 退出码 2。零状态镜像：绝不落
         任何子代理运行时状态（F6 冻结结果）。
     workflow-model-select <models-json> [--model <exact-id>]
+            [--task-ref <task_id>]
         v2.4.1 Workflow 提交 worker 模型选型（H1，INV-MODEL-01；
         runtime.workflow.submission.select_worker_model /
         build_submission_contract 薄壳；绝不写宿主 API 客户端——模型
@@ -136,11 +143,33 @@ v2.4 Phase 3（P3-D/E）收口面：
         JSON 文件路径读取数组（UTF-8）。从已配置 id 集合选定唯一
         provider 限定 Flash worker 模型：显式 --model <exact-id> 校验
         之并要求精确成员（优先于自动选择）；否则恰一 Flash 候选自动
-        选定、零候选 / 多候选歧义拒绝（绝不静默取第一个）。成功输出
-        单行 JSON 提交契约 {subagent_model, model_policy}（
-        model_policy 恒为 "explicit-flash-required"）——CreateWorkflow
-        的 subagent_model 必须取此值。校验 / 配置拒绝（清单不可读 /
-        非法 JSON / 顶层非数组 / WorkflowSubmissionError）→ 退出码 2。
+        选定、零候选 / 多候选歧义拒绝（绝不静默取第一个）。v2.5 起
+        增可选 --task-ref <task_id>（I1 任务级 worker 模型 pin 消费）：
+        选型优先级固定 --model 显式值 > 任务 pin > 自动选型——--model
+        给出时为完全显式覆盖（任务 pin 不参与也不对账）；否则读任务
+        顶层 worker_model pin（账本按当前工作目录解析，调用方须在
+        目标仓库根运行本命令，v24-record-run 同款约定）注入
+        explicit_model_id：pin 形状非法 / pin 不在本次 configured
+        集合 → 专门拒绝（「任务 pin 已失效，请重新问答授权」语义，
+        绝不回退自动选型、绝不静默换模型）；无 pin 走既有自动选型
+        路径（行为与不带 --task-ref 逐字一致）。任务层拒绝（任务
+        缺失 / v2.3 遗留）→ 退出码 1。成功输出单行 JSON 提交契约
+        {subagent_model, model_policy}（model_policy 恒为
+        "explicit-flash-required"）——CreateWorkflow 的
+        subagent_model 必须取此值。校验 / 配置拒绝（清单不可读 /
+        非法 JSON / 顶层非数组 / WorkflowSubmissionError / pin 失效
+        或形状非法）→ 退出码 2。
+    worker-model-pin <repo_root> <task_id> <exact-id>
+        任务级 worker 模型 pin 写入（v2.5 I1，task.pin_worker_model
+        薄壳）：把经形态预检的 exact id 写入任务顶层 worker_model 键
+        （授权问答答后落盘动作；任务全生命周期默认使用）。形状预检
+        采用 submission 形态约定（account: 前缀 / Flash 后缀）但绝不
+        查宿主模型面——写入不查宿主面，对账留给消费点。非终态任务
+        才可写；同值幂等成功（零写盘）；异值显式覆盖（返回值带 prev
+        与 new）。id 形状非法 → 参数值非法，退出码 2；任务层拒绝
+        （任务缺失 / v2.3 遗留 / 终态冻结）→ 退出码 1。绝不新增
+        journal 事件（审计由本输出与 state 落盘承载）。输出单行 JSON
+        {task_id, prev, new}。
     quota-automation-bind <repo_root> <task_id> <automation_id>
         auto 连续性武装（H2，task.bind_quota_automation 薄壳）：把
         未来原生 Scheduled Task 见证 id 绑入
@@ -171,13 +200,16 @@ v2.4 Phase 3（P3-D/E）收口面：
     退出码：
       0 = 成功；
       2 = 校验拒绝（用法错误 / 参数值非法 / save_state 校验闸或状态
-          转换门拒绝——含盘上 state.json 损坏的解析拒绝）；另含
+          转换门拒绝——含盘上 state.json 损坏的解析拒绝；v2.5 起
+          含 worker-model-pin 的 id 形状非法与 workflow-model-select
+          --task-ref 的任务 pin 失效 / 形状非法）；另含
           quota-continuity-preflight 判定 ready=false（非校验错误的
           运行期阻塞信号：主会话机械视作 launch/resume 阻断）；
       1 = 异常（任务不存在 / 审查记录被拒 / 额度等待与恢复生命周期
           操作被 runtime.task 拒绝 / auto 连续性武装操作面被
-          runtime.task 拒绝 / 意外错误；错误 JSON 只含异常类型名与
-          消息，供操作者排查）。
+          runtime.task 拒绝 / v2.5 起 worker-model-pin 写入与任务
+          pin 消费面被任务层拒绝（任务缺失 / v2.3 遗留 / 终态冻结）
+          / 意外错误；错误 JSON 只含异常类型名与消息，供操作者排查）。
 
 依赖方向：
     本模块是薄壳：校验与变换都在 runtime.state / runtime.task /
@@ -215,7 +247,9 @@ USAGE = (
     "writer-release <repo_root> <task_id> [--run-id <id>] [--force] | "
     "writer-show <repo_root> | "
     "v24-record-run <task_ref> <run-id> [--artifact <path>] | "
-    "workflow-model-select <models-json> [--model <exact-id>] | "
+    "workflow-model-select <models-json> [--model <exact-id>] "
+    "[--task-ref <task_id>] | "
+    "worker-model-pin <repo_root> <task_id> <exact-id> | "
     "quota-automation-bind <repo_root> <task_id> <automation_id> | "
     "quota-automation-clear <repo_root> <task_id> [automation_id] | "
     "quota-continuity-preflight <repo_root> <task_id>")
@@ -248,6 +282,21 @@ class _AutomationRejected(Exception):
     空串 id / 异 id 冲突等 ValueError 口径）——运行期拒绝，退出码 1
     （与 _QuotaRejected 同口径；preflight 的 ready=false 阻断信号
     不走本类——那是显式退出码 2，见 _quota_continuity_preflight）。"""
+
+
+class _PinRejected(Exception):
+    """worker-model-pin 写入被 runtime.task 拒绝（任务缺失 / v2.3
+    遗留任务 / 终态冻结等 ValueError 口径）——运行期拒绝，退出码 1
+    （与 _AutomationRejected 同口径；id 形状非法是参数值非法，在
+    CLI 侧先经 submission.validate_worker_model 预检走退出码 2，
+    见 _worker_model_pin）。"""
+
+
+class _PinTaskRejected(Exception):
+    """workflow-model-select --task-ref 的任务 pin 消费面被任务层
+    拒绝（任务缺失 / v2.3 遗留任务——消费对象必须是存在的 v2.4
+    任务）——运行期拒绝，退出码 1（与 _TaskMissing / _PinRejected
+    同口径）。"""
 
 
 def _emit(payload):
@@ -415,7 +464,13 @@ def _quota_resume_decision(repo_root, task_id, force_refresh=False) -> int:
     同 quota-wait 方式取观测 view 传入决策原语；输出单行 JSON
     {task_id, decision, quota_observation}——decision 为任务层原样
     决策 dict（action / reason，resume-authorized 时另含
-    workflow_run_id / resume_count_after 暂存计数）。绝不调用宿主
+    workflow_run_id / resume_count_after 暂存计数）。v2.5 精确唤醒
+    输出扩展（I4/W3，向后兼容附加键）：action=remain-waiting 且观测
+    为 EXHAUSTED 时，decision 只读透传本次观测的 reset_at
+    （quota_view.reset_at，ISO 字符串或 null）——纯诊断透传，供主
+    会话换算 one-shot delayMinutes，不参与任何判定；UNKNOWN / no-op
+    分支保持既有输出形状，绝不透传；既有键（action / reason /
+    workflow_run_id / resume_count_after）一律不动。绝不调用宿主
     ResumeWorkflowRun（宿主动作归主会话；恢复执行与随后的
     quota-resume-confirm 落账由唤醒轮次按连续性技能契约推进）。
     任务层 ValueError（任务缺失 / v2.3 遗留 / 观测词汇外 / 无关联
@@ -427,6 +482,13 @@ def _quota_resume_decision(repo_root, task_id, force_refresh=False) -> int:
                                                       view)
     except ValueError as exc:
         raise _QuotaRejected(str(exc)) from exc
+    if decision.get("action") == "remain-waiting" \
+            and view.get("status") == "EXHAUSTED":
+        # v2.5 精确唤醒（I4/W3）：EXHAUSTED remain-waiting 只读透传
+        # 本次观测 reset_at（ISO 串或 null）——纯诊断字段，绝不参与
+        # 判定；浅拷贝追加附加键，任务层既有键逐字不动
+        decision = dict(decision)
+        decision["reset_at"] = view.get("reset_at")
     _emit({"task_id": task_id, "decision": decision,
            "quota_observation": view})
     return 0
@@ -665,24 +727,121 @@ def _load_configured_model_ids(models_json) -> list:
     return document
 
 
-def _workflow_model_select(models_json, model=None) -> int:
+def _load_task_worker_model_pin(ledger_root, task_id):
+    """workflow-model-select --task-ref 的任务 pin 读取（消费面专用）。
+
+    在账本根 ledger_root 上读任务顶层 worker_model pin：
+      - 任务缺失（无 state.json）→ _PinTaskRejected（退出码 1）；
+      - v2.3 遗留任务 → _PinTaskRejected（退出码 1）——消费对象
+        必须是存在的 v2.4 任务，绝不静默当作「无 pin」回退自动选型；
+      - 无有效 pin（键缺失 / null / 非 str）→ None（无 pin，走
+        既有自动选型路径）；
+      - 其余原样返回 pin 字符串（形状与 configured 对账由调用方
+        _workflow_model_select 做）。
+
+    只读：本函数绝不写盘、绝不查宿主模型面（configured 集合由
+    调用方经 models-json 参数供给）。
+    """
+    st = state.load_state(ledger_root, task_id)
+    if st is None:
+        raise _PinTaskRejected(
+            "workflow-model-select：任务 %s 不存在（%s 下无 "
+            "state.json），无法消费任务 pin"
+            % (task_id, ledger_root))
+    if state.is_legacy_state(st):
+        raise _PinTaskRejected(
+            "workflow-model-select：任务 %s 是 v2.3 遗留任务，无法"
+            "消费任务 pin：%s" % (task_id, state.LEGACY_STATE_GUIDANCE))
+    pin = st.get("worker_model")
+    if not isinstance(pin, str) or pin == "":
+        return None
+    return pin
+
+
+def _workflow_model_select(models_json, model=None, task_ref=None,
+                           ledger_root=None) -> int:
     """workflow-model-select：worker 模型选型 + 提交契约输出
     （submission.select_worker_model / build_submission_contract 薄壳；
     INV-MODEL-01：worker 必须显式选定 provider 限定 Flash 模型，绝不
     继承主会话文本模型，绝不接受裸别名）。
 
     models-json 解析见 _load_configured_model_ids（内联数组与文件两
-    形态等价）。显式 --model <exact-id> 校验之并要求 configured 精确
-    成员（显式选择优先于自动选择）；否则恰一 Flash 候选自动选定、
-    零候选 / 多候选歧义拒绝（绝不静默取第一个）。成功输出单行 JSON
-    提交契约 {subagent_model, model_policy}；校验 / 配置拒绝
-    （WorkflowSubmissionError 是 ValueError 子类）→ 退出码 2；意外
-    → 退出码 1。"""
+    形态等价）。选型优先级固定（v2.5 I1）：--model 显式值 > 任务 pin
+    > 自动选型——
+      - 显式 --model <exact-id>：完全显式覆盖，校验之并要求
+        configured 精确成员（任务 pin 不参与也不对账；不带
+        --task-ref 时行为与 v2.4.1 逐字一致）；
+      - --task-ref <task_id> 且无 --model：读任务 worker_model pin
+        （账本按 ledger_root 解析，缺省当前工作目录——调用方须在
+        目标仓库根运行本命令，v24-record-run 同款约定），pin 经
+        submission.validate_worker_model 形状预检 + configured 精确
+        成员对账后注入 explicit_model_id（消费必查宿主面——pin 形状
+        非法 / 不在本次 configured 集合即专门拒绝：「任务 pin 已失
+        效，请重新问答授权」，绝不回退自动选型、绝不静默换模型）；
+        无 pin 走既有自动选型路径；
+      - 否则恰一 Flash 候选自动选定、零候选 / 多候选歧义拒绝（绝不
+        静默取第一个）。
+    成功输出单行 JSON 提交契约 {subagent_model, model_policy}；校验
+    / 配置拒绝（WorkflowSubmissionError 是 ValueError 子类、pin
+    失效 / 形状非法）→ 退出码 2；任务层拒绝（任务缺失 / v2.3 遗留
+    ，_PinTaskRejected）→ 退出码 1；意外 → 退出码 1。"""
     from runtime.workflow import submission  # 函数内 import：monkeypatch 友好
     configured = _load_configured_model_ids(models_json)
+    if model is None and task_ref is not None:
+        root = (ledger_root if ledger_root is not None
+                else pathlib.Path.cwd())
+        pin = _load_task_worker_model_pin(root, task_ref)
+        if pin is not None:
+            # 消费必查：形状预检（写入点已预检，此处防盘面漂移）+
+            # 当次 configured 精确成员对账；失效即专门拒绝，绝不回退
+            try:
+                submission.validate_worker_model(pin)
+            except submission.WorkflowSubmissionError as exc:
+                raise ValueError(
+                    "workflow-model-select：任务 %s 的 worker_model "
+                    "pin 形状非法——任务 pin 已失效，请重新问答授权"
+                    "（%s）" % (task_ref, exc)) from exc
+            if pin not in configured:
+                raise ValueError(
+                    "workflow-model-select：任务 %s 的 worker_model "
+                    "pin %r 不在本次 configured 集合（共 %d 个模型）"
+                    "——任务 pin 已失效，请重新问答授权；绝不回退自动"
+                    "选型、绝不静默换模型"
+                    % (task_ref, pin, len(configured)))
+            model = pin  # 注入显式选择：任务 pin 优先于自动选型
     selected = submission.select_worker_model(configured,
                                               explicit_model_id=model)
     _emit(submission.build_submission_contract(selected))
+    return 0
+
+
+def _worker_model_pin(repo_root, task_id, model_id) -> int:
+    """worker-model-pin：任务级 worker 模型 pin 写入
+    （task.pin_worker_model 薄壳，v2.5 I1）。
+
+    把经形态预检的 exact id 写入任务顶层 worker_model 键（授权问答
+    答后落盘动作；非终态才可写、同值幂等、异值显式覆盖带 prev/new；
+    绝不查宿主模型面——对账留给消费点；绝不新增 journal 事件）。
+    id 形状非法在 CLI 侧先经 submission.validate_worker_model 预检
+    （参数值非法口径 → 退出码 2，与 review-record 的 verdict 词汇
+    先闸同款）；任务层拒绝（任务缺失 / v2.3 遗留 / 终态冻结）→
+    _PinRejected（退出码 1）。输出单行 JSON {task_id, prev, new}
+    （与 task.pin_worker_model 返回值同源同字段）。"""
+    from runtime import task  # 函数内 import：monkeypatch 友好
+    from runtime.workflow import submission  # 函数内 import：monkeypatch 友好
+    try:
+        submission.validate_worker_model(model_id)
+    except submission.WorkflowSubmissionError as exc:
+        raise ValueError("worker-model-pin：%s" % exc) from exc
+    if state.load_state(repo_root, task_id) is None:
+        raise _TaskMissing(
+            "任务 %s 不存在（%s 下无 state.json），无法写入 worker "
+            "模型 pin" % (task_id, repo_root))
+    try:
+        outcome = task.pin_worker_model(repo_root, task_id, model_id)
+    except ValueError as exc:
+        raise _PinRejected(str(exc)) from exc
+    _emit(outcome)
     return 0
 
 
@@ -895,20 +1054,41 @@ def _dispatch(args) -> int:
             artifact = rest[3]
         return _v24_record_run(rest[0], rest[1], artifact=artifact)
     if cmd == "workflow-model-select":
-        # 位置参数 <models-json> + 旗标对（--model <exact-id>，至多
-        # 一次）→ 一或三个参数
-        if len(rest) not in (1, 3):
+        # 位置参数 <models-json> + 旗标对（--model <exact-id> /
+        # --task-ref <task_id>，各至多一次、顺序不限）→ 一、三或
+        # 五个参数
+        if len(rest) not in (1, 3, 5):
             raise _UsageError(
                 "workflow-model-select 需要 <models-json> "
-                "[--model <exact-id>] 一或三个参数。" + USAGE)
+                "[--model <exact-id>] [--task-ref <task_id>] 一、三或"
+                "五个参数。" + USAGE)
         model = None
-        if len(rest) == 3:
-            if rest[1] != "--model":
+        task_ref = None
+        index = 1
+        while index < len(rest):
+            if index + 1 >= len(rest):
+                raise _UsageError(
+                    "workflow-model-select 的旗标 %r 缺少取值。"
+                    % rest[index] + USAGE)
+            flag, value = rest[index], rest[index + 1]
+            if flag == "--model" and model is None:
+                model = value
+            elif flag == "--task-ref" and task_ref is None:
+                task_ref = value
+            else:
                 raise _UsageError(
                     "workflow-model-select 的可选参数只接受 "
-                    "--model <exact-id>。" + USAGE)
-            model = rest[2]
-        return _workflow_model_select(rest[0], model=model)
+                    "--model <exact-id> 与 --task-ref <task_id>"
+                    "（各至多一次）。" + USAGE)
+            index += 2
+        return _workflow_model_select(rest[0], model=model,
+                                      task_ref=task_ref)
+    if cmd == "worker-model-pin":
+        if len(rest) != 3:
+            raise _UsageError(
+                "worker-model-pin 需要 <repo_root> <task_id> "
+                "<exact-id> 三个参数。" + USAGE)
+        return _worker_model_pin(rest[0], rest[1], rest[2])
     if cmd == "quota-automation-bind":
         if len(rest) != 3:
             raise _UsageError(
@@ -935,13 +1115,16 @@ def main(argv=None) -> int:
     """CLI 入口：返回退出码（0 成功 / 2 校验拒绝 / 1 异常）。
 
     argv 缺省取 sys.argv[1:]；测试可直接传列表调用。异常映射：
-    ValueError（用法 / 参数值 / save_state 校验栈）→ 2；
+    ValueError（用法 / 参数值 / save_state 校验栈 / 任务 pin 失效或
+    形状非法）→ 2；
     _TaskMissing（任务不存在）/ _ReviewRejected（审查记录被
     runtime.task 顺序与状态闸拒绝）/ _QuotaRejected（额度等待与
     恢复生命周期操作被 runtime.task 拒绝）/ _AutomationRejected
-    （auto 连续性武装操作面被 runtime.task 拒绝）→ 1；其余意外异常
-    → 1（错误 JSON 含异常类型名，stdout 契约不破）。preflight 的
-    ready=false 阻断是函数内显式返回 2，不经异常路径。
+    （auto 连续性武装操作面被 runtime.task 拒绝）/ _PinRejected
+    （worker-model-pin 写入被 runtime.task 拒绝）/ _PinTaskRejected
+    （workflow-model-select --task-ref 消费面被任务层拒绝）→ 1；
+    其余意外异常 → 1（错误 JSON 含异常类型名，stdout 契约不破）。
+    preflight 的 ready=false 阻断是函数内显式返回 2，不经异常路径。
     """
     args = list(sys.argv[1:]) if argv is None else list(argv)
     try:
@@ -950,7 +1133,7 @@ def main(argv=None) -> int:
         _emit({"error": str(exc)})
         return 2
     except (_TaskMissing, _ReviewRejected, _QuotaRejected,
-            _AutomationRejected) as exc:
+            _AutomationRejected, _PinRejected, _PinTaskRejected) as exc:
         _emit({"error": str(exc)})
         return 1
     except Exception as exc:  # 意外兜底

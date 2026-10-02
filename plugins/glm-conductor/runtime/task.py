@@ -95,6 +95,17 @@
         阻塞）。输出恒含 ready 布尔键 + mode + automation_id +
         reason。只证明持久化绑定存在，绝不宣称宿主侧激活仍存活
         （宿主存在性在恢复边界仍需宿主面检查）。
+    pin_worker_model(repo_root, task_id, model_id)
+        任务级 worker 模型 pin 写入（v2.5 I1，授权一次任务内默认）：
+        把经形态预检的 exact id 写入顶层 worker_model 键。形状预检
+        采用 runtime.workflow.submission 的形态约定（account: 前缀、
+        account:<账户段>/<模型段> 两段非空、恰以 FLASH_MODEL_SUFFIX
+        结尾、文本模型后缀专门拒绝）但绝不查宿主模型面——写入时点
+        与提交时点宿主面可能不同，对账留给消费点（CLI
+        workflow-model-select --task-ref 每次对账 configured 集合）。
+        非终态任务才可写（终态冻结）；同值幂等成功（零写盘）；异值
+        显式覆盖（返回值带 prev 与 new）；绝不新增 journal 事件名
+        （十名冻结维持——审计由 CLI 输出与 state 落盘承载）。
     complete(repo_root, task_id) / fail(...) / cancel(...)
         终态收尾：迁移到 completed / failed / cancelled + 任务级
         journal 事件（task_completed / task_failed / task_cancelled）
@@ -151,11 +162,15 @@ journal 词汇（TASK_JOURNAL_EVENTS，恰十名，绝不多不少）：
     §3（P3-B 最小恢复授权）与 §4（P3-C 等待/恢复生命周期）
     + docs/roadmap/V2_4_1_CONTINUITY_HOTFIX_IMPLEMENTATION_SPEC.md
     §4（H2：automation 绑定 / 清理 / 连续性预检 + 决策原语的
-    continuity-unarmed 闸——INV-CONT-01 首选强化方案）。
+    continuity-unarmed 闸——INV-CONT-01 首选强化方案）
+    + docs/roadmap/V2_5_TASK_LAUNCH_CONTRACT_AND_PRECISE_WAKE_PLAN.md
+    §2 I1（任务级 worker 模型 pin：写入不查宿主面 / 消费必查宿主面 /
+    失效即拒）与 §4 W1（pin_worker_model 单元规格）。
 """
 
 from runtime import change_id, journal, ownership, state, writer_guard
 from runtime.workflow import adapter as workflow_adapter
+from runtime.workflow import submission as workflow_submission
 
 # —— 任务级 journal 事件词汇（恰十名；本模块追加的事件名绝不出此表） ——
 
@@ -1016,6 +1031,56 @@ def quota_continuity_preflight(repo_root, task_id) -> dict:
         "automation_id": None,
         "reason": "auto continuity is not armed",
     }
+
+
+# —— 任务级 worker 模型 pin（v2.5 I1/W1） ——
+
+def pin_worker_model(repo_root, task_id, model_id) -> dict:
+    """写入任务级 worker 模型 pin（v2.5 I1），返回 {"task_id", "prev",
+    "new"} 记录 dict。
+
+    pin 是用户授权的任务级偏好（授权问答时写入，任务全生命周期默认
+    使用，含唤醒恢复后的新 run 提交），不是任务身份。规则：
+
+    - model_id 形状预检采用 runtime.workflow.submission 的形态约定
+      （account: 前缀、account:<账户段>/<模型段> 两段非空、账户段
+      不含 '/'、全 id 无空白、恰以 FLASH_MODEL_SUFFIX 结尾、文本
+      模型后缀专门拒绝）——经公共函数 validate_worker_model 的纯
+      形状预检（configured 缺省形态），结构性失败转 ValueError
+      （本模块错误口径）；绝不查宿主模型面：写入时点与提交时点
+      宿主 configured 集合可能不同，对账留给消费点
+      （workflow-model-select --task-ref 每次对账当次宿主列表，
+      失效即拒绝不回退自动选型）；
+    - 任务必须存在且为 v2.4（缺失 / v2.3 遗留 → ValueError）；非
+      终态任务才可写（终态冻结，_ensure_not_terminal——终态不得
+      新增事实落账）；
+    - 同值幂等成功（盘上既有有效 pin 与供给相同 → 零写盘原样返回
+      现状）；异值显式覆盖（pin 是用户显式授权的任务级偏好，覆盖
+      即新一次授权，绝不静默拒绝也不静默替换——返回值带 prev 与
+      new 供 CLI 输出与操作者对账）；盘上无有效 pin（键缺失 /
+      null / 非 str 形状异常）→ prev 为 None 的首写；
+    - 经 state.save_state 落盘（其转换门 + 全量校验二次把关——
+      worker_model 键形状由 state._validate_worker_model 收口）；
+    - 绝不新增 journal 事件名（TASK_JOURNAL_EVENTS 十名冻结维持
+      ——pin 审计由 CLI 输出与 state 落盘承载）；绝不持久化秘密 /
+      prompt（本键只是宿主已配置 worker 模型的 id 见证）。
+    """
+    try:
+        workflow_submission.validate_worker_model(model_id)
+    except workflow_submission.WorkflowSubmissionError as exc:
+        raise ValueError(
+            "pin_worker_model：%s" % exc) from exc
+    st = _load_v24_state(repo_root, task_id)
+    _ensure_not_terminal(st, "pin_worker_model")
+    prev = st.get("worker_model")
+    if not isinstance(prev, str) or prev == "":
+        prev = None  # 键缺失 / null / 形状异常均按「无有效 pin」解释
+    if prev == model_id:
+        # 幂等：同值重 pin 零写盘，原样返回现状
+        return {"task_id": task_id, "prev": prev, "new": model_id}
+    st["worker_model"] = model_id
+    state.save_state(repo_root, st)
+    return {"task_id": task_id, "prev": prev, "new": model_id}
 
 
 # —— 终态收尾 ——

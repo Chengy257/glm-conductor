@@ -39,6 +39,10 @@ v2.4 顶层概念（schema 权威清单）：
     的要求，但绝不独立证明宿主侧激活仍存在；v2.4.1 无 epoch/
     subscription 字段、无第二连续性状态机）。
     validation 与 review 是任务级唯一记录（无逐单元证据）。
+    v2.5 起另有可选顶层键 worker_model（I1 任务级 worker 模型 pin）：
+    存在才校验（null 或非空 str），缺省即不写键——未问答授权即无
+    pin，旧任务加载零迁移；写入归 task.pin_worker_model，消费点
+    每次对账当次宿主 configured 集合（失效即拒，绝不回退自动选型）。
 
 durable status 恰为七态：
     active / waiting_quota / waiting_user / blocked / completed /
@@ -147,8 +151,10 @@ TASK_ID_KEYS = ("task_id", "TASK_ID", "CONTINUITY_ID", "continuity_id")
 # （「语义前缀+随机后缀」机械唯一格式的落点约束）
 _TASK_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9-]*$")
 
-# 必填顶层键（缺一即非法；未知顶层键忽略，向前兼容）。phase 是唯一
-# 可选顶层键（缺省即不写键——描述性标注无 null 空档）。
+# 必填顶层键（缺一即非法；未知顶层键忽略，向前兼容）。可选顶层键：
+# phase（缺省即不写键——描述性标注无 null 空档）与 worker_model
+# （v2.5 I1 任务级 worker 模型 pin；缺省即不写键——未问答授权即无
+# pin，存在才校验 null 或非空 str，旧任务加载零迁移）。
 _REQUIRED_TOP_KEYS = ("task_id", "goal", "repository", "route", "dag",
                       "status", "workflow_run_id", "validation", "review",
                       "quota_resume")
@@ -494,14 +500,30 @@ def _validate_quota_resume(block):
     return errors
 
 
+def _validate_worker_model(model_id) -> "list[str]":
+    """校验顶层 worker_model 键（v2.5 I1 任务级 worker 模型 pin）。
+
+    存在才校验：null（无 pin 占位）或非空 str（任务级 worker 模型
+    id pin）。本层只收形状，绝不查宿主模型面——形态约定（account:
+    前缀 / Flash 后缀）归写入点 task.pin_worker_model 经
+    runtime.workflow.submission 预检，消费点每次对账当次 configured
+    集合（失效即拒）；缺省（键不写）按「未授权 pin」解释，旧任务
+    加载零迁移。
+    """
+    if model_id is not None and (
+            not isinstance(model_id, str) or model_id == ""):
+        return ["worker_model 必须是非空字符串或 null"]
+    return []
+
+
 def validate_state(state) -> "list[str]":
     """校验 v2.4 状态 dict，返回错误消息列表（中文，含字段路径）。
 
     空列表 = 合法；不抛异常；state 非 dict → ["state 必须是 JSON 对象"]。
     必填顶层键（_REQUIRED_TOP_KEYS）：task_id / goal / repository /
     route / dag / status / workflow_run_id / validation / review /
-    quota_resume；phase 可选（缺省即不写键）。未知顶层键忽略（向前
-    兼容），不报错。
+    quota_resume；phase 与 worker_model（v2.5 I1 任务级 worker 模型
+    pin）可选（缺省即不写键）。未知顶层键忽略（向前兼容），不报错。
     带 v2.3 标记的遗留 state 在本函数无豁免：缺 v2.4 必填键照常报错
     （绝不自动迁移）——消费方应先经 is_legacy_state / detect_legacy_
     task 识别并按 LEGACY_STATE_GUIDANCE 报告为 v2.3 任务。
@@ -570,6 +592,11 @@ def validate_state(state) -> "list[str]":
     # quota_resume（P3-B 定稿授权块：manual/auto + 预算不变量）
     if "quota_resume" in state:
         errors.extend(_validate_quota_resume(state["quota_resume"]))
+
+    # worker_model（v2.5 I1：任务级 worker 模型 pin，可选键存在才
+    # 校验；缺省即不写键，未知键忽略的向前兼容不变）
+    if "worker_model" in state:
+        errors.extend(_validate_worker_model(state["worker_model"]))
 
     return errors
 
