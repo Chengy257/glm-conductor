@@ -197,7 +197,7 @@ reason: implementation is bounded by explicit interfaces, owned files, and deter
 
 ## 项目状态与迁移
 
-**v2.5.0 是当前基线** —— v2.4.1 热修之上的任务启动契约与精确唤醒版本。凡建状态的任务现在都以一轮强制的启动问答开场（跨额度自动唤醒与有界 `max_resumes` 预算；选型歧义时一并选定 worker 模型）；选定的 worker 模型可按任务一次 pin（state 可选顶层键 `worker_model`），后续提交经 `workflow-model-select --task-ref` 自动消费——pin 失效直接拒绝，绝不静默重新选型；`waiting_quota` 唤醒轮 recurring Scheduled Task 原样不动，同时按下一额度窗口精确加发一个零状态 one-shot（recurring 兜底 + one-shot 并存，绝不用 `CronUpdate`）；问答只发生在交互回合——唤醒/恢复轮遇阻塞一律 fail closed 转等待用户，绝不弹问。Breaking：无；唯一 schema 变更是可选顶层键 `worker_model`（缺省即无 pin，旧任务零迁移）。
+**v2.5.0 是当前基线** —— v2.4.1 热修之上的任务启动契约与精确唤醒版本。凡建状态的任务现在都以一轮强制的启动问答开场（跨额度自动唤醒与有界 `max_resumes` 预算；选型歧义时一并选定 worker 模型）；选定的 worker 模型可按任务一次 pin（state 可选顶层键 `worker_model`），后续提交经 `workflow-model-select --task-ref` 自动消费——pin 失效直接拒绝，绝不静默重新选型；`waiting_quota` 唤醒轮 recurring Scheduled Task 原样不动，同时按下一额度窗口精确加发一个零状态 one-shot（recurring 兜底 + one-shot 并存，绝不用 `CronUpdate`；实测宿主上已持有 recurring 的会话不能再建 one-shot，故加发为机会性——被拒即如实回落 recurring 兜底，recurring 养专用小会话可保留加发能力）；问答只发生在交互回合——唤醒/恢复轮遇阻塞一律 fail closed 转等待用户，绝不弹问。Breaking：无；唯一 schema 变更是可选顶层键 `worker_model`（缺省即无 pin，旧任务零迁移）。
 
 其下的 v2.4.1 连续性热修关闭了实际使用中发现的两个缺陷：省略 `subagent_model` 时 Workflow 工作者静默继承主会话模型（现为每次 delegate/full 启动前的显式 provider 限定 GLM-5.3-Flash 选型硬闸），以及 auto 连续性在无保证未来激活的情况下进入额度等待（现为先武装后开工：recurring Scheduled Task 优先、one-shot 后备先续后继再恢复、until_done 恒受 max_resumes 有界）。v2.4 的复杂度重基线本身不变：这是一次基于 ZCode 原生 Workflow 的重基线，不是 v2.3 运行时的增量版本。v2.3 执行运行时（dispatcher、dispatch permit、按单元租约、receipt、额度控制面、Global Quota Clock）已删除。**v2.3 任务态不迁移**：v2.4 会检测遗留任务目录并以恢复指引拒绝，而不是自动转换。升级前请先完成或显式退役活跃的 v2.3 任务；已发布的 v2.3.x 可通过 Git 历史与 tag 找回。legacy 检测指引见[故障排查](./docs/troubleshooting.md)。
 
