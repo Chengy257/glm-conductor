@@ -157,3 +157,57 @@ python <cli> workflow-model-select '<JSON 数组或文件路径>' [--model <exac
 | 钩子清单 | `plugins/glm-conductor/hooks/hooks.json` | 仅 SessionStart + Stop 两钩子（安装 / 更新后的新会话生效） |
 
 全部在**仓库级** `.glm-conductor/` 下（建议写入 `.git/info/exclude` 本地排除）；该目录是编排器自身账本——不算仓库改动，也永不参与 change_id。账本根的定位口径：钩子进程优先 `ZCODE_PROJECT_DIR`，缺失回退当前工作目录——手工排障时以 `.glm-conductor/tasks/` 所在目录为准。Workflow run 的进行中状态不在上表：那是宿主自有事实，用 ZCode 的 run 观测面查询，Conductor 只存 run id。
+
+## 8. Windows 环境下 `python3` 钩子命令排查
+
+**现象**：在 Windows 平台上，宿主提示无法运行钩子脚本或报 `python3: command not found` / `The system cannot find the file specified`；完成守卫或恢复注入未生效。
+
+**判定**：
+1. `hooks/hooks.json` 依照 ZCode 规范声明使用 `python3` 启动脚本；
+2. Windows 部分纯标准版 Python 安装（未勾选 Python Launcher 或未配置别名）可能仅存在 `python.exe`，而在 PATH 中缺失 `python3.exe`。
+
+**处置**：
+- **自检**：在 PowerShell 中执行：
+  ```powershell
+  Get-Command python3
+  ```
+  若报错未找到命令，说明当前仅有 `python`。
+- **快速建立别名硬链接**（管理员或用户级 PowerShell）：
+  ```powershell
+  $pyPath = (Get-Command python).Source
+  $pyDir = Split-Path $pyPath
+  New-Item -ItemType HardLink -Path "$pyDir\python3.exe" -Value $pyPath
+  ```
+  创建后重新执行 `python3 --version` 验证输出，之后新开 ZCode 会话即可正常调起钩子。
+
+## 9. 超大仓（Monorepo）Git 超时与 `GLM_CONDUCTOR_GIT_TIMEOUT`
+
+**现象**：完成守卫或 change_id 计算时抛错：
+`git 调用失败：status 超时（>3.0 秒...）` 或 `git 调用失败：rev-parse HEAD 超时（>3.0 秒...）`。
+
+**判定**：
+- 为确保在 Stop 钩子的 5 秒硬超时限制内及时给出反馈，`runtime/ownership.py` 与 `runtime/change_id.py` 默认将 git 子进程超时设为 3.0 秒；
+- 在包含数万文件的超大 Monorepo 或网络挂载工作区中，工作区大量未跟踪改动（dirty files）可能导致 `git status --porcelain=v1 -z -uall` 瞬态耗时超出 3.0 秒。
+
+**处置**：
+1. **环境变量动态调整**：通过设置 `GLM_CONDUCTOR_GIT_TIMEOUT`（支持范围 `1.0` ~ `30.0` 秒，浮点数）：
+   - PowerShell: `$env:GLM_CONDUCTOR_GIT_TIMEOUT = "6.0"`
+   - Bash: `export GLM_CONDUCTOR_GIT_TIMEOUT=6.0`
+2. **清理或忽略冗余未跟踪文件**：检查 `.gitignore` 是否将构建产物、缓存目录（如 node_modules、build、tmp）有效排除，减少 `git status` 扫描耗时。
+
+## 10. v2.3 遗留任务一键批量归档工具
+
+**现象**：长期使用由 v2.3 升级而来的仓库，`.glm-conductor/tasks/` 中留存大量旧版本任务目录，恢复摘要或列表提示较多 legacy 任务。
+
+**处置**：
+使用仓库附带的专用归档脚本 [`scripts/archive_legacy_tasks.py`](../scripts/archive_legacy_tasks.py)：
+- **预览待归档遗留任务（Dry-run，默认安全模式，零写盘）**：
+  ```bash
+  python scripts/archive_legacy_tasks.py
+  ```
+- **确认执行物理归档**：
+  ```bash
+  python scripts/archive_legacy_tasks.py --confirm
+  ```
+- **工作机制**：精准复用 `runtime.state.detect_legacy_task` 识别 v2.3 任务，安全平移至 `.glm-conductor/archived-tasks/<task-id>/`。**绝不触碰** v2.4+ 的活跃或已完成任务，**绝不触碰** 损坏目录与非任务目录。
+

@@ -18,7 +18,7 @@ v2.4 分工（冻结）：GLM Conductor 拥有语义编排与验收；ZCode 拥�
 
 回答"守卫是否生效"之前先自检：
 
-1. `python3 --version` 有输出（钩子解释器在 PATH）
+1. `python3 --version` 有输出（钩子解释器在 PATH；Windows 环境若仅有 python 可建立 python3.exe 硬链接别名）
 2. `echo '{}' | python3 ~/.zcode/cli/plugins/cache/glm-conductor/glm-conductor/<version>/hooks/stop_gate.py` 退出码为 0（钩子可独立运行；无活动任务时无任何输出）
 3. 钩子**仅在安装/更新插件后的新会话中生效**——当前会话若早于插件更新，回答"本会话未挂载，新会话起生效"
 

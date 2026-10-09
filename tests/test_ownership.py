@@ -360,5 +360,42 @@ class TestGitTouchedFilesFailure(unittest.TestCase):
             self.assertIn("returncode", str(ctx.exception))
 
 
+# —— Git 超时与环境变量配置 ——
+
+class TestGitTimeout(unittest.TestCase):
+    """get_git_timeout 读取环境变量与默认值回退测试。"""
+
+    def test_default_timeout(self):
+        old = os.environ.pop(ownership.GIT_TIMEOUT_ENV_VAR, None)
+        try:
+            self.assertEqual(ownership.get_git_timeout(), 3.0)
+        finally:
+            if old is not None:
+                os.environ[ownership.GIT_TIMEOUT_ENV_VAR] = old
+
+    def test_env_override_valid(self):
+        old = os.environ.get(ownership.GIT_TIMEOUT_ENV_VAR)
+        try:
+            os.environ[ownership.GIT_TIMEOUT_ENV_VAR] = "6.0"
+            self.assertEqual(ownership.get_git_timeout(), 6.0)
+        finally:
+            if old is not None:
+                os.environ[ownership.GIT_TIMEOUT_ENV_VAR] = old
+            else:
+                os.environ.pop(ownership.GIT_TIMEOUT_ENV_VAR, None)
+
+    def test_env_override_invalid_falls_back(self):
+        old = os.environ.get(ownership.GIT_TIMEOUT_ENV_VAR)
+        try:
+            for bad in ["not-a-number", "-2.0", "0", "0.9", "50.0", ""]:
+                os.environ[ownership.GIT_TIMEOUT_ENV_VAR] = bad
+                self.assertEqual(ownership.get_git_timeout(), 3.0)
+        finally:
+            if old is not None:
+                os.environ[ownership.GIT_TIMEOUT_ENV_VAR] = old
+            else:
+                os.environ.pop(ownership.GIT_TIMEOUT_ENV_VAR, None)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -1,5 +1,26 @@
 # Changelog
 
+## 2.5.1
+
+Quality hardening, Windows compatibility, and legacy task management — patch release building on v2.5.0.
+
+### Configurable Git Timeout for Monorepo and Large Workspaces (P3-B)
+- `runtime/change_id.py` and `runtime/ownership.py` introduce `DEFAULT_GIT_TIMEOUT_SECONDS = 3.0` and `get_git_timeout()`.
+- Supports optional runtime override via `GLM_CONDUCTOR_GIT_TIMEOUT` environment variable (bounded between 1.0s and 30.0s).
+- Enhanced timeout error diagnostics with actionable advice when workspace is unusually large or dirty.
+
+### Windows python3 Command & Hook Diagnostic Guidance (P3-A)
+- Added dedicated troubleshooting guide in `docs/troubleshooting.md` (§8) for Windows environments lacking `python3.exe` alias.
+- Updated prerequisites in `README.md`, `README.zh-CN.md`, and `skills/enforcement/SKILL.md`.
+
+### Legacy v2.3 Task Archiving Tool (P4)
+- Added `scripts/archive_legacy_tasks.py` for safe, precise detection and archiving of v2.3 legacy task directories into `.glm-conductor/archived-tasks/`.
+- Default dry-run preview mode with explicit `--confirm` flag; does not touch v2.4+ active or completed tasks.
+- Added full unit test suite `tests/test_archive_legacy_tasks.py`.
+
+### Compatibility
+- Breaking: none. Pure additive and defensive hardening.
+
 ## 2.5.0
 
 Task-launch contract & precise wake — the four experience gaps left open by v2.4.1, closed without changing the v2.4 re-baseline. All four behaviors were locked as user rulings (2026-10-02/03) before implementation. Companion plan: `docs/roadmap/V2_5_TASK_LAUNCH_CONTRACT_AND_PRECISE_WAKE_PLAN.md`. **Breaking: none** — the only schema change is one optional top-level state key (`worker_model`), absent on existing tasks with zero migration.

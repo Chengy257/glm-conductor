@@ -48,12 +48,31 @@ v2.4 Phase 1 追加（P1-C 编译期阶段规划）：
     + v2 升级计划工作块 B2.1。
 """
 
+import os
 import re
 import subprocess
 
 
 class OwnershipError(Exception):
     """ownership 匹配层的结构性错误（非法模式、git 调用失败等）。"""
+
+
+# 默认 git 子进程超时（秒）；可由环境变量 GLM_CONDUCTOR_GIT_TIMEOUT 覆盖（范围 1.0~30.0 秒）
+DEFAULT_GIT_TIMEOUT_SECONDS = 3.0
+GIT_TIMEOUT_ENV_VAR = "GLM_CONDUCTOR_GIT_TIMEOUT"
+
+
+def get_git_timeout() -> float:
+    """获取 git 子进程超时（秒）。默认 3.0s；支持环境变量覆盖（1.0~30.0s）。"""
+    raw = os.environ.get(GIT_TIMEOUT_ENV_VAR)
+    if raw is not None and raw.strip() != "":
+        try:
+            val = float(raw)
+            if 1.0 <= val <= 30.0:
+                return val
+        except (ValueError, TypeError):
+            pass
+    return DEFAULT_GIT_TIMEOUT_SECONDS
 
 
 # "**" 段的主体占位：零或多段（跨 "/" 的任意段序列，含空串）
@@ -241,16 +260,19 @@ def git_touched_files(repo_root) -> "list[str]":
         "git", "-c", "core.quotepath=false",
         "status", "--porcelain=v1", "-z", "-uall",
     ]
+    timeout = get_git_timeout()
     try:
         proc = subprocess.run(
             command, cwd=str(repo_root),
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=3)
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout)
     except FileNotFoundError as exc:
         raise OwnershipError(
             "git 调用失败：找不到 git 可执行文件（%s）" % exc) from exc
     except subprocess.TimeoutExpired as exc:
         raise OwnershipError(
-            "git 调用失败：status 超时（>3 秒，repo=%s）" % repo_root) from exc
+            "git 调用失败：status 超时（>%.1f 秒，repo=%s；"
+            "如处于超大仓库或工作区脏文件过多，可配置环境变量 GLM_CONDUCTOR_GIT_TIMEOUT 调整阈值）"
+            % (timeout, repo_root)) from exc
     if proc.returncode != 0:
         stderr_summary = proc.stderr.decode("utf-8", errors="replace").strip()
         raise OwnershipError(

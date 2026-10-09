@@ -2,205 +2,311 @@
 
 **English** | [简体中文](./README.zh-CN.md)
 
-![Version](https://img.shields.io/badge/version-2.5.0-blue.svg)
+![Version](https://img.shields.io/badge/version-2.5.1-blue.svg)
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
 ![ZCode Plugin](https://img.shields.io/badge/ZCode-plugin-green.svg)
+![Python](https://img.shields.io/badge/python-3.8%2B-blue.svg)
 ![Models](https://img.shields.io/badge/models-GLM--5.3%20%2F%20GLM--5.3--Flash-orange.svg)
 ![CI](https://github.com/Chengy257/glm-conductor/actions/workflows/validate.yml/badge.svg)
 
 **Selective routing, Native Workflow execution, minimal deterministic assurance, and optional bounded quota resume for GLM coding agents in ZCode.**
 
-GLM Conductor keeps the strong model focused on planning, judgment, and acceptance; delegates bounded implementation to ZCode Native Workflows; and adds independent review when the change warrants it. It owns semantic orchestration and acceptance; ZCode owns execution orchestration.
+GLM Conductor keeps the strong model focused on planning, architecture, and final acceptance; delegates bounded implementation to ZCode Native Workflows; and introduces independent fresh-context review when code changes warrant it. Conductor owns semantic orchestration and acceptance; ZCode owns execution orchestration.
 
-> **Design goal:** lightweight semantic orchestration for personal coding workflows — decide where work should run, compile bounded work into a canonical DAG, and keep only the deterministic checks prompts alone cannot guarantee. v2.4 is not a second task runtime, workflow engine, permission engine, provenance system, scheduler platform, or quota control plane.
+> **Design Goal:** Lightweight semantic orchestration for coding workflows — decide where work should run, compile bounded work into a canonical DAG, and enforce only the deterministic checks that prompts alone cannot guarantee. Conductor avoids duplicating host responsibilities: it is not a second workflow engine, task scheduler, or quota control plane.
 
-## Why GLM Conductor
+---
 
-- **Spend strong-model reasoning where it has the highest value.** GLM-5.3 handles ambiguity, architecture, routing, validation, and final acceptance; bounded implementation moves to workflow workers.
-- **Delegate with explicit contracts.** Delegated work is compiled from a canonical DAG that defines node objectives, dependencies, owned files, interfaces, and constraints before any work starts.
-- **Separate implementation from independent review.** High-assurance changes can receive a fresh-context, read-only final review after the main session has validated the implementation.
-- **Keep quota waits recoverable.** A task can wait for provider quota and resume through a native ZCode Scheduled Task — only when you have authorized it, within a bounded resume budget.
+## Key Highlights
 
-## How it works
+- **Maximize Strong-Model Leverage:** Spend GLM-5.3 reasoning on ambiguity resolution, architecture, routing, validation, and final acceptance; offload bounded implementation to cost-effective workflow workers.
+- **Explicit Delegation Contracts:** Delegated work is compiled from a canonical DAG defining node objectives, dependencies, owned files, interfaces, and constraints before implementation begins.
+- **Deterministic Native Workflow Execution:** Compiles static DAGs directly into deterministic TypeScript workflows executed natively by ZCode with zero runtime state duplication.
+- **Model Selection Hard Gate:** Guarantees worker models use provider-qualified GLM-5.3-Flash bindings (`workflow-model-select`); prevents silent inheritance of the main-session model.
+- **Minimal Deterministic Assurance:**
+  - **`change_id` Freshness:** Cryptographically ties validation and reviews to exact file modifications (`git rev-parse HEAD` + normalized file content hash); any subsequent edit invalidates previous approvals.
+  - **Coarse Repository Writer Guard:** Guarantees at most one active write workflow per repository without arbitrary TTL expirations.
+  - **Four-Check Completion Guard:** A Stop-hook verifies repository writer reservations, strict ownership boundaries, fresh validation, and required high-assurance reviews.
+- **Bounded Quota Continuity:** Tasks awaiting provider quota enter `waiting_quota` and recover via native ZCode Scheduled Tasks under an explicit, bounded user-authorized budget.
+- **Zero Third-Party Dependencies:** 100% standard library Python 3.8+ runtime, thoroughly hardened for Windows and POSIX environments.
+
+---
+
+## Architecture & How It Works
 
 ```text
-                     Main session — GLM-5.3
-               plan · route · validate · accept
-                     /                 \
-                    /                   \
-       solo / audit (main session)   delegate / full
-                ↓                          ↓
-        main-session work        Native Workflow run
-                                 (compiled canonical DAG)
-
-              Minimal deterministic assurance
-   change_id · ownership · completion guard · writer guard
-
-              Optional bounded quota resume
-       waiting_quota → native Scheduled Task wake
+                     Main Session — GLM-5.3
+                (Plan · Route · Validate · Accept)
+                         /              \
+                        /                \
+          solo / audit (Main Session)  delegate / full (Native Workflow)
+                    ↓                            ↓
+            Main-Session Code            v24-compile (Canonical DAG)
+                                                 ↓
+                                         workflow-model-select (Flash Gate)
+                                                 ↓
+                                         writer-acquire (Repo Lock)
+                                                 ↓
+                                         ZCode Native Workflow Run
+                                                 ↓
+                 Minimal Deterministic Assurance
+           change_id · Ownership · Writer Guard · Completion Guard
+                                                 ↓
+                 Main-Session Validation & Independent Review
+                                                 ↓
+                 Optional Bounded Quota Resume (Scheduled Task)
 ```
 
-ZCode remains the underlying coding harness and owns execution orchestration: workflow run lifecycle, child actors, parallel scheduling, retries, background execution, stop/resume mechanics, and run observability. GLM Conductor persists only the semantics the host does not know.
+### Responsibility Split
 
-## Selective routing
-
-Before delegation, the main session evaluates two independent questions:
-
-- **Delegability** — Is the remaining implementation sufficiently bounded and specified to hand off?
-- **Assurance** — After main-session validation, would an independent fresh-context review materially reduce risk?
-
-| Delegability | Assurance | Route | Implementation | Independent review |
-| --- | --- | --- | --- | --- |
-| low | standard | `solo` | main session | no |
-| high | standard | `delegate` | Native Workflow | no |
-| low | high | `audit` | main session | yes |
-| high | high | `full` | Native Workflow | yes |
-
-There is no separate executor axis for ordinary text work: `solo`/`audit` mean main-session implementation, `delegate`/`full` mean Native Workflow implementation. Routing may be reassessed in either direction when new evidence changes the task boundary or risk.
-
-## Model roles
-
-The current recommended assignment is intentionally simple:
-
-| Role | Default model | Responsibility |
+| Domain | GLM Conductor | ZCode Host |
 | --- | --- | --- |
-| Main session | **GLM-5.3** | planning, architecture, routing, validation, acceptance |
-| Workflow workers | **GLM-5.3-Flash (explicit, required)** | bounded text implementation inside Native Workflows — every delegate/full submission must carry an explicit provider-qualified `…/GLM-5.3-Flash` `subagent_model` selected through the model preflight (`workflow-model-select`); the chosen id can be recorded once as a user-authorized task-level pin (`worker-model-pin`) that later submissions of the same task consume via `--task-ref` — a task-level preference, not the task identity; omitting the model still silently inherits the main-session model and is a hard protocol violation (v2.4.0 defect A) |
-| Visual implementer | **GLM-5.3-Flash** | bounded multimodal implementation (Custom Subagent exception) |
-| Text reviewer | **host/session model** | fresh-context, read-only final review |
-| Visual reviewer | **GLM-5.3-Flash** | fresh-context visual review (pinned multimodal binding; fails closed if unavailable) |
+| **Orchestration** | Routing decisions, DAG compilation, review policies | Workflow run lifecycle, child actors, parallel execution |
+| **Execution** | Pure TS code generation from static DAG | Execution scheduling, background workers, stop/resume |
+| **State** | Task state (`state.json`), journal (`events.jsonl`) | In-flight execution state, token accounting, actor logs |
+| **Assurance** | Task change identity (`change_id`), writer guard, stop gate | Process sandboxing, permission policies |
+| **Continuity** | Recovery authorization, bounded budget tracking | Scheduled task triggers, automation engine |
 
-Workflow workers never inherit the session model: the compiled TypeScript is model-agnostic (the host binds one model at run submission), so Conductor makes the explicit Flash selection a launch gate — exactly one configured provider-qualified Flash id is auto-selected, zero candidates fails closed, and multiple candidates require an explicit choice: made once in the task launch interview and recorded as the task's `worker_model` pin, or given per submission via `--model`. A pinned id that is no longer on the current host list is rejected outright at consumption time (exit 2) instead of falling back to auto-selection or switching models silently. The text reviewer deliberately carries no pinned model, which keeps it startable across hosts and plans; the two visual roles are pinned to the provider-qualified multimodal GLM-5.3-Flash binding, and the visual high-assurance route fails closed when that binding is unavailable. These are current assignments, not permanent architectural identities.
+---
 
-## Native Workflow execution
+## Selective Routing Matrix
 
-`delegate` and `full` routes share one execution substrate:
+Before delegating any work, the main session assesses two orthogonal dimensions:
 
-```text
-Canonical Conductor DAG → Workflow Compiler → ZCode Native Workflow
-```
+- **Delegability:** Is the implementation bounded, specified, and verifiable enough to hand off safely?
+- **Assurance:** Would an independent, fresh-context, read-only code review materially reduce risk after main validation?
 
-- A Work Unit is a **static DAG node**: `id`, `objective`, `depends_on`, `ownership`, plus optional `interfaces` / `constraints` / `local_check`. It describes what must be done, not where execution currently is — Conductor persists no per-node runtime state.
-- The compiler validates the DAG, detects ownership overlaps between nodes that could run concurrently (conflicts are serialized or rejected before launch), generates worker instructions from one canonical persona, and emits a deterministic TypeScript workflow. It never auto-executes — launching the run is the main session's host action.
-- Before any delegate/full submission the main session resolves the worker model through a hard preflight gate (`workflow-model-select`): host model list → configured exact ids → explicit provider-qualified GLM-5.3-Flash selection → `CreateWorkflow(subagent_model=<exact id>)`. Selection failure means no launch; the main-session GLM-5.3 is never accepted as a worker fallback.
-- ZCode owns everything about the run: parallelism, retries, stop/resume, background execution, and observability. Conductor records only the task ↔ run-id association.
+| Delegability | Assurance | Route | Implementation Substrate | Independent Review |
+|:---:|:---:|:---:|:---:|:---:|
+| **Low** | Standard | `solo` | GLM-5.3 Main Session | None |
+| **High** | Standard | `delegate` | ZCode Native Workflow | None |
+| **Low** | High | `audit` | GLM-5.3 Main Session | Read-Only Reviewer (`glm-reviewer` / `visual-reviewer`) |
+| **High** | High | `full` | ZCode Native Workflow | Read-Only Reviewer (`glm-reviewer` / `visual-reviewer`) |
 
-## Minimal deterministic assurance
+Routes are declared upfront via a standardized `SELECTIVE ROUTE` block. When new evidence emerges during implementation, routes can be reassessed in either direction via `ROUTE REASSESSMENT`.
 
-Delegation is not accepted on model claims alone, and v2.4 keeps the enforcement surface deliberately small:
+---
 
-- **change_id** — one deterministic task-level change identity (hash of the base revision plus the exact owned files currently changed, resolved from the ownership scopes — never the scope strings themselves). Validation and review records bind to it; if the repository changes afterwards, the validation or review is stale and must be redone.
-- **Completion guard** — a Stop-hook guard checks four invariants before a task may complete: no active write workflow remains, changed paths are inside the union of DAG ownership, required main validation is fresh (change_id matches), and for high-assurance routes a fresh `ship` review exists.
-- **One active write workflow per repository** — a coarse repository writer guard replaces per-unit leases: a second Conductor write workflow cannot acquire the repo until the holder releases it, and delegated run registration and completion refuse a task that skipped acquisition (a Conductor lifecycle invariant; raw host Workflow calls outside the Conductor protocol are outside this guarantee). Workflow-internal parallelism is allowed after compile-time ownership validation.
-- **Small task state** — seven statuses (`active` / `waiting_quota` / `waiting_user` / `blocked` / `completed` / `cancelled` / `failed`). There are no per-unit runtime states, dispatch permits, leases, or verification receipts to reconcile.
+## Model Roles & Selection Governance
 
-The main session still owns final acceptance: worker reports are claims, while repository state, diffs, and reproduced validation are evidence. If a guard cannot evaluate, it degrades visibly rather than silently blocking the session.
+| Role | Default Model Binding | Primary Responsibility |
+| --- | --- | --- |
+| **Main Session** | **GLM-5.3** | Architecture, routing, DAG authoring, validation, final acceptance |
+| **Workflow Workers** | **GLM-5.3-Flash (explicit)** | Bounded text implementation inside compiled Native Workflows |
+| **Visual Implementer** | **GLM-5.3-Flash (multimodal)** | Bounded visual implementation (Custom Subagent capability exception) |
+| **Text Reviewer** | **Host / Session Model** | Fresh-context, read-only final review (`glm-reviewer`) |
+| **Visual Reviewer** | **GLM-5.3-Flash (multimodal)** | Fresh-context visual review (`visual-reviewer`; fails closed if unavailable) |
 
-## Optional bounded quota resume
+### Worker Model Pinning & Hard Gate
+Workflow workers never inherit the session model. Submission requires explicit resolution via `workflow-model-select`:
+1. Exactly one configured provider-qualified Flash model (`account:.../GLM-5.3-Flash`) is auto-selected.
+2. If ambiguous, the user chooses during the task launch interview, recorded once as the task's `worker_model` pin (`worker-model-pin`).
+3. Later submissions consume the pin via `--task-ref`. If the pinned model is no longer configured on the host, submission is rejected outright (exit code 2) rather than silently falling back to the main model.
 
-Quota handling is not a routing axis. A delegated task that runs out of provider quota can enter `waiting_quota` and be woken by a native ZCode Scheduled Task:
+---
 
-- `manual` (default): you resume when you choose. `auto`: continuity is **armed before work** — a future native Scheduled Task is created and its automation id bound to the task (`quota-automation-bind`), and `quota-continuity-preflight` must pass (exit 0) before the first quota-consuming Workflow launch and before every automatic resume; an unarmed auto task fails preflight with exit code 2 and the scheduled decision stays `remain-waiting` (`continuity-unarmed`).
-- Recurring scheduled tasks are preferred (they stay armed across successful wakes); a one-shot fallback must create and bind its successor activation before resuming. Each actual resume consumes one unit of the bounded `max_resumes` budget; once the budget is exhausted, the task transitions to `waiting_user`.
-- No quota epochs, subscriptions, watcher processes, or window bookkeeping exist. Quota diagnostics are read-only (`/glm-conductor:quota` or `quota-resolve`); the resume and arming lifecycle runs through stable CLI commands (`quota-wait` / `quota-resume-authorize` / `quota-resume-decision` / `quota-resume-confirm` / `quota-automation-bind` / `quota-automation-clear` / `quota-continuity-preflight`).
+## Minimal Deterministic Assurance
 
-> The account-level **Global Quota Clock** is no longer part of GLM Conductor. It is planned as a separate future companion project; see its extraction inventory at [`docs/roadmap/GLOBAL_QUOTA_CLOCK_EXTRACTION_INVENTORY.md`](./docs/roadmap/GLOBAL_QUOTA_CLOCK_EXTRACTION_INVENTORY.md).
+1. **`change_id` Freshness Primitive:**
+   A deterministic SHA-256 hash calculated from `git rev-parse HEAD` combined with normalized content of files in the intersection of declared DAG ownership and actual workspace modifications.
+   - Normalizes line endings (`CRLF` -> `LF`), paths, and sorting.
+   - Guarantees that any subsequent code modification automatically invalidates previous validation or review records.
+2. **Coarse Repository Writer Guard:**
+   Ensures at most one active Conductor write workflow runs per Git repository.
+   - Stored in `.glm-conductor/writer_guard.json` using atomic I/O.
+   - **Never auto-expires by time (No TTL):** Avoids lock theft during long tasks. Releases occur only on task completion/failure/cancellation, or via explicit operator `--force` release.
+3. **Four-Check Completion Guard:**
+   Enforced via ZCode's `Stop` hook (`hooks/stop_gate.py`), checking in strict order of severity:
+   - **Check 1 (Writer Guard):** No foreign task holds an active write reservation; delegated runs must still hold their reservation.
+   - **Check 2 (Ownership):** All actual Git modifications (`git status`) lie strictly within the union of DAG node ownership scopes.
+   - **Check 3 (Validation):** Main session has recorded fresh `validation.status == "passed"` with matching `change_id`.
+   - **Check 4 (Review):** High-assurance routes (`audit` / `full`) require a fresh `review.verdict == "ship"` with matching `change_id`.
 
-## Host requirements and limitations
+---
 
-Requirements:
+## Optional Bounded Quota Resume
 
-- **ZCode 3.14+** — v2.4 depends on Native Workflow and native Scheduled Task capabilities (verified against ZCode 3.14.0)
-- A GLM Coding Plan or Z.ai account with GLM-5.3 and GLM-5.3-Flash available
-- Python 3.8+ for the runtime hooks and CLI
+Tasks encountering provider quota exhaustion can safely pause in `waiting_quota` and recover via native ZCode Scheduled Tasks:
+- **Arm-Before-Work Discipline:** When auto-resume is enabled, the future Scheduled Task must be created and bound (`quota-automation-bind`), and `quota-continuity-preflight` must pass (exit code 0) before any quota-consuming workflow begins.
+- **Bounded Budget:** Every automatic resume consumes one unit of the user-authorized `max_resumes` budget. When exhausted, the task transitions to `waiting_user`.
+- **Coexistence of Recurring Carrier & One-Shot Wake:** Recurring automation serves as the reliable anchor and fallback, while an optional zero-state one-shot schedule can provide precise window wakeup based on observed `reset_at`.
 
-Known limitations, stated honestly:
+---
 
-- **Scheduled firing while the ZCode app is closed is unverified.** Scheduled turns observed on the tested host behave as mid-turn continuations of the owning session; the plugin does not claim wake behavior with the app closed.
-- **Reviewer roles are verified on a genuinely fresh session with the final bindings.** After refreshing the plugin cache from the v2.4 tree, a newly opened ZCode session launched both reviewer roles: the text reviewer (no pinned model; inherits the host/session model) produced a conforming `GLM REVIEW` verdict in read-only mode, and the visual reviewer — pinned to the provider-qualified multimodal GLM-5.3-Flash binding — actually read a test image whose contents were never described in its prompt and reported them accurately (blind read, `VISUAL REVIEW` verdict). The visual high-assurance route still fails closed if that binding is unavailable.
-- `visual-implementer` remains a Custom Subagent capability exception, not a Native Workflow worker; the visual feedback topology requires the main session to capture screenshots.
-- Hooks are limited to SessionStart (resume context) and Stop (completion guard). There are no dispatch-permit, ownership-injection, or Bash policy hooks; use ZCode's native permission facilities plus worker constraints for tool policy.
-
-## Installation
+## Prerequisites & Installation
 
 ### Requirements
 
-- [ZCode](https://zcode.z.ai) 3.14 or newer
-- A GLM Coding Plan or Z.ai account with GLM-5.3 and GLM-5.3-Flash available
-- Python 3.8+ for the runtime hooks
+- **[ZCode](https://zcode.z.ai) 3.14+** (Native Workflow & Scheduled Task capabilities verified)
+- A GLM Coding Plan or Z.ai account with GLM-5.3 and GLM-5.3-Flash models enabled
+- **Python 3.8+** for runtime hooks and CLI utilities
+  - *Windows Notice:* Ensure `python3.exe` is available in PATH. If only `python.exe` is present, see the [Windows Setup Guide](./docs/troubleshooting.md#8-windows-环境下-python3-钩子命令排查).
 
-### Install from the ZCode plugin marketplace
+### Installation via ZCode Plugin Marketplace
 
-1. Open a workspace in ZCode.
-2. Go to **Settings → Plugins → Create → Add plugin marketplace**.
-3. Choose the GitHub repository source and enter `https://github.com/Chengy257/glm-conductor`.
+1. Open your workspace in ZCode.
+2. Navigate to **Settings → Plugins → Create → Add plugin marketplace**.
+3. Enter the GitHub repository URL: `https://github.com/Chengy257/glm-conductor`.
 4. Install **glm-conductor** from the **Personal** section.
-5. Create a **new session** after installation or update so agents, skills, and hooks are reloaded.
+5. Create a **new session** so skills, agents, and hooks take effect immediately.
 
-For a local installation, clone the repository and add the repository root — the directory containing `marketplace.json` — as a local marketplace.
+### Local Installation for Developers
 
-> Use the repository-root marketplace manifest. Do not select `plugins/glm-conductor/.zcode-plugin/plugin.json`; that is the plugin manifest, not the marketplace manifest.
+Clone the repository and add the repository root folder (containing `marketplace.json`) as a local marketplace:
 
-## Quick start
+```bash
+git clone https://github.com/Chengy257/glm-conductor.git
+```
 
-For normal orchestration, start a new session and ask GLM Conductor to plan and execute the task:
+> **Note:** Select the repository root manifest (`marketplace.json`), not `plugins/glm-conductor/.zcode-plugin/plugin.json`.
+
+---
+
+## Quick Start
+
+### 1. Initiate Orchestration
+
+In a new session, request GLM Conductor to orchestrate your goal:
 
 ```text
 Use glm-conductor:orchestration to plan and implement this feature. Declare the route first, then validate the result.
 ```
 
-A route declaration looks like:
+### 2. Route Declaration & Launch Interview
+
+The architect outputs a route declaration:
 
 ```text
 SELECTIVE ROUTE
 mode: delegate
 delegability: high
 assurance: standard
-reason: implementation is bounded by explicit interfaces, owned files, and deterministic verification
+reason: Implementation is bounded by explicit interface contracts and covered by unit tests.
 ```
 
-For `delegate`/`full`, the main session then builds the canonical DAG, compiles it with `v24-compile`, resolves the explicit GLM-5.3-Flash worker model through `workflow-model-select` (a hard gate — no launch on selection failure, never omit `subagent_model`), acquires the repository writer guard, launches the Native Workflow, and after the run finishes records the run association and validates the result. Tasks authorized for unattended continuation arm their future scheduled activation before launch (authorize → create Scheduled Task → bind → preflight pass → launch).
+For tasks creating state, the main session performs a single-round launch interview to confirm:
+- Auto-wake continuity enablement & bounded budget (`max_resumes`).
+- Worker model selection if multiple candidates exist.
 
-Useful entry points:
+### 3. Compile & Execute
 
-- `glm-conductor:orchestration` — routing, DAG contracts, and review flow
-- `glm-conductor:continuity` — checkpoints, `waiting_quota`, and bounded resume
-- `glm-conductor:enforcement` — completion guard semantics, diagnostics, and blocked-task recovery
-- `/glm-conductor:quota` — read-only quota diagnostics (`--json` for machine-readable output)
+```bash
+# Compile DAG into TypeScript Native Workflow
+python plugins/glm-conductor/runtime/cli.py v24-compile dag.json --out .glm-conductor/workflow.ts
 
-## Runtime CLI command surface
+# Acquire repository write reservation
+python plugins/glm-conductor/runtime/cli.py writer-acquire . <task_id>
 
-All runtime operations go through one CLI (`python <plugin-root>/runtime/cli.py <subcommand>`; single-line JSON output):
+# Submit run via ZCode CreateWorkflow with explicit subagent_model
+```
 
-| Command | Purpose |
+### 4. Validate & Complete
+
+After the workflow completes:
+1. The main session inspects git diffs and runs integration test commands.
+2. Records validation:
+   ```python
+   # Evaluates change_id and records passed status
+   runtime.task.record_validation(repo_root, task_id, status="passed", summary="All tests pass")
+   ```
+3. Stop hook triggers the four-check completion guard; upon passing, the task completes and releases the writer guard automatically.
+
+---
+
+## Reference & Tooling
+
+### Specialized Skills
+
+- `glm-conductor:orchestration` — Selective routing, static DAG authoring, launch interview, workflow lifecycle, and review flow.
+- `glm-conductor:continuity` — Checkpoints, `waiting_quota` handling, arm-before-work scheduling, and bounded resumes.
+- `glm-conductor:enforcement` — Completion guard four-check semantics, diagnostics, and recovery from blocks.
+- `/glm-conductor:quota` — Read-only quota usage and window reset diagnostics (`--json` supported).
+
+### Runtime CLI Commands
+
+All runtime operations execute through `python <plugin-root>/runtime/cli.py <subcommand>` (single-line JSON output):
+
+| Command | Description |
 | --- | --- |
-| `quota-resolve <repo> [--force-refresh]` · `quota-wait` / `quota-resume-authorize` / `quota-resume-decision` / `quota-resume-confirm` | four-state provider quota resolution (read-only) and the bounded resume lifecycle (wait / authorize / decision / confirm) |
-| `quota-automation-bind` / `quota-automation-clear` / `quota-continuity-preflight` | auto-continuity arming lifecycle (bind / clear / preflight; `ready=false` → exit 2 as the launch/resume blocker signal) |
-| `workflow-model-select <models-json> [--model <exact-id>] [--task-ref <task_id>]` | worker-model preflight gate (exactly one configured Flash auto-selected, zero fails closed, multiple require an explicit id or a task pin; `--task-ref` consumes the task's `worker_model` pin — explicit `--model` > pin > auto-selection, an invalid pin is rejected outright; emits the `{subagent_model, model_policy}` submission contract) |
-| `worker-model-pin <repo> <task_id> <exact-id>` | record the user-authorized task-level worker-model pin (launch-interview answer; shape-preflighted write that never queries the host list, non-terminal tasks only, same value idempotent, different value an explicit override) |
-| `v24-compile <dag.json> [--task-ref <id>] [--out <path>]` | compile a canonical DAG into Native Workflow source (generation only, never auto-executes) |
-| `writer-acquire <repo> <task_id> [--run-id <id>]` | acquire the repository write reservation |
-| `writer-release <repo> <task_id> [--force]` | release the reservation (`--force` after explicit inspection) |
-| `writer-show <repo>` | show the current holder |
-| `v24-record-run <task_ref> <run-id> [--artifact <path>]` | record the task ↔ workflow run-id association |
-| `review-record <repo> <task_id> <reviewer> <verdict> [note]` | record a task-level review verdict (validation-first, change_id-fresh) |
+| `v24-compile <dag-json> [--task-ref <id>] [--out <path>]` | Compiles a canonical DAG into deterministic TypeScript Native Workflow source. |
+| `workflow-model-select <models-json> [--model <id>] [--task-ref <id>]` | Model selection preflight gate; resolves Flash worker model or consumes task pin. |
+| `worker-model-pin <repo> <task_id> <exact-id>` | Persists user-authorized task-level worker model pin. |
+| `writer-acquire <repo> <task_id> [--run-id <id>]` | Acquires coarse repository-level write reservation. |
+| `writer-release <repo> <task_id> [--force]` | Releases write reservation (`--force` for operator cleanup). |
+| `writer-show <repo>` | Inspects current repository write reservation holder. |
+| `v24-record-run <task_ref> <run-id>` | Records task ↔ Native Workflow run-id association. |
+| `review-record <repo> <task_id> <reviewer> <verdict>` | Records fresh task review verdict (`ship` / `fix-first` / `rethink`). |
+| `quota-resolve <repo> [--force-refresh]` | Four-state provider quota resolution (read-only). |
+| `quota-wait <repo> <task_id>` | Enters `waiting_quota` state with normalized observation snapshot. |
+| `quota-resume-authorize <repo> <task_id> <max_resumes>` | Authorizes bounded automatic quota resume. |
+| `quota-resume-decision <repo> <task_id>` | Evaluates idempotent activation decision on scheduled wake. |
+| `quota-resume-confirm <repo> <task_id>` | Commits resume count increment upon accepted host resume. |
+| `quota-automation-bind / clear / preflight` | Manages Scheduled Task continuity arming lifecycle. |
 
-Quota diagnostics additionally ship as `runtime/quota/report.py` (text and `--json` output), surfaced by `/glm-conductor:quota`.
+### Repository Utilities
 
-## Documentation
+- `scripts/archive_legacy_tasks.py` — Safely detects and archives legacy v2.3 tasks into `.glm-conductor/archived-tasks/` (default dry-run, `--confirm` to execute).
+- `scripts/validate_plugin.py` — Static contract validation tool ensuring 16/16 contract anchors are strictly satisfied.
+- `scripts/smoke_plugin_load.py` — Manifest, agent, skill, and hook smoke testing.
 
-- [Core concepts](./docs/core-concepts.md) — conceptual overview of routing, workflow execution, assurance, and quota resume
-- [Architecture](./docs/architecture.md) — authoritative technical reference for the current runtime design
-- [Troubleshooting](./docs/troubleshooting.md) — quota diagnostics, legacy v2.3 task detection, writer-guard stale release, and recovery
-- [Global Quota Clock extraction inventory](./docs/roadmap/GLOBAL_QUOTA_CLOCK_EXTRACTION_INVENTORY.md) — boundary of the future companion project
-- [Changelog](./CHANGELOG.md) — release-level changes
+---
 
-## Project status and migration
+## Repository Structure
 
-**v2.5.0 is the current line** — the task-launch contract & precise-wake release over the v2.4.1 hotfix. Every state-backed task now starts with a mandatory one-round launch interview (cross-quota auto wake with a bounded `max_resumes` budget, plus the worker-model choice when selection is ambiguous); the chosen worker model can be pinned once per task (the optional `worker_model` state key) and is consumed by `workflow-model-select --task-ref` on every later submission — an invalid pin is rejected outright, never silently re-selected; on `waiting_quota` wakes the recurring Scheduled Task stays untouched while a zero-state one-shot is dispatched precisely at the next quota window (recurring fallback + one-shot coexistence, `CronUpdate` never used; on the observed host a session that already owns the recurring cannot create the one-shot, so the dispatch is opportunistic — a rejected dispatch falls back to the recurring wake honestly, and raising the recurring in a dedicated small session keeps the dispatch capability); questions happen only in interactive turns — wake/recovery turns fail closed instead of asking. Breaking: none; the only schema change is the optional top-level `worker_model` key (absent = no pin, zero migration).
+```text
+glm-conductor/
+├── marketplace.json                # Marketplace catalog manifest
+├── .zcode-plugin/                  # Plugin manifest and metadata
+├── plugins/glm-conductor/
+│   ├── agents/                     # Specialized subagents (glm-reviewer, visual-*)
+│   ├── commands/                   # Slash command definitions (/glm-conductor:quota)
+│   ├── hooks/                      # ZCode hooks (session_start.py, stop_gate.py)
+│   ├── skills/                     # Domain skills (orchestration, continuity, enforcement)
+│   └── runtime/                    # Standard library Python runtime
+│       ├── workflow/               # DAG compiler, worker persona, submission gates
+│       ├── quota/                  # Read-only quota providers, parsers, resolvers
+│       ├── change_id.py            # Deterministic change identity hashing
+│       ├── writer_guard.py         # Coarse repository writer guard
+│       ├── ownership.py            # Path glob matching and stage planning
+│       ├── state.py                # 7-state task machine and schema validation
+│       └── cli.py                  # Public runtime CLI interface
+├── scripts/                        # Validation, smoke, and task archiving utilities
+├── tests/                          # Comprehensive unittest test suite (790+ tests)
+└── docs/                           # Architecture specs, core concepts, troubleshooting
+```
 
-Beneath it, the v2.4.1 continuity hotfix closed two real-use defects: Workflow workers silently inheriting the main-session model when `subagent_model` was omitted (now an explicit provider-qualified GLM-5.3-Flash selection gate before every delegate/full launch), and auto-continuity entering quota wait without a guaranteed future activation (now armed before work: recurring Scheduled Task preferred, one-shot fallback renews its successor before resume, `until_done` remains bounded by `max_resumes`). The v2.3 execution runtime (dispatcher, dispatch permits, per-unit leases, receipts, quota control plane, Global Quota Clock) has been removed. **v2.3 task states are not migrated**: v2.4 detects legacy task directories and refuses them with recovery guidance instead of converting them. Finish or explicitly retire active v2.3 tasks before upgrading; released v2.3.x remains recoverable through Git history and tags. See [Troubleshooting](./docs/troubleshooting.md) for legacy detection guidance.
+---
+
+## Documentation Hub
+
+- [Core Concepts](./docs/core-concepts.md) — Comprehensive overview of routing, execution, assurance, and recovery.
+- [Architecture Specification](./docs/architecture.md) — Authoritative technical reference for the v2.5 runtime design.
+- [Troubleshooting & Diagnostics](./docs/troubleshooting.md) — Quota diagnostics, Windows setup, Monorepo Git tuning, and writer-guard recovery.
+- [Global Quota Clock Extraction Inventory](./docs/roadmap/GLOBAL_QUOTA_CLOCK_EXTRACTION_INVENTORY.md) — Boundary definition for the companion project.
+- [Changelog](./CHANGELOG.md) — Detailed version history and migration guides.
+
+---
+
+## Contributing & Quality Gates
+
+Contributions are welcome! Before opening a pull request, verify all automated quality gates:
+
+```bash
+# 1. Run full unit test suite (790+ tests)
+python -m unittest discover -s tests -p "test_*.py"
+
+# 2. Run static contract validator (16/16 checks)
+python scripts/validate_plugin.py
+
+# 3. Run plugin smoke loader
+python scripts/smoke_plugin_load.py
+
+# 4. Run lint check
+ruff check .
+```
+
+---
 
 ## License
 
-[MIT](./LICENSE) © 2026 glm-conductor contributors
+[MIT](./LICENSE) © 2026 GLM Conductor Contributors

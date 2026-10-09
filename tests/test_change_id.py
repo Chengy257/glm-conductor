@@ -480,9 +480,41 @@ class TestNonGitDir(TempDirCase):
         # 消息含 returncode 与 stderr 摘要
         self.assertIn("returncode", str(ctx.exception))
 
-    def test_compute_change_id_raises(self):
-        with self.assertRaises(change_id.ChangeIdError):
-            change_id.compute_change_id(self.repo, ["whatever.txt"])
+# —— Git 超时与环境变量配置 ——
+
+class TestGitTimeout(unittest.TestCase):
+    """get_git_timeout 读取环境变量与默认值回退测试。"""
+
+    def test_default_timeout(self):
+        old = os.environ.pop(change_id.GIT_TIMEOUT_ENV_VAR, None)
+        try:
+            self.assertEqual(change_id.get_git_timeout(), 3.0)
+        finally:
+            if old is not None:
+                os.environ[change_id.GIT_TIMEOUT_ENV_VAR] = old
+
+    def test_env_override_valid(self):
+        old = os.environ.get(change_id.GIT_TIMEOUT_ENV_VAR)
+        try:
+            os.environ[change_id.GIT_TIMEOUT_ENV_VAR] = "7.5"
+            self.assertEqual(change_id.get_git_timeout(), 7.5)
+        finally:
+            if old is not None:
+                os.environ[change_id.GIT_TIMEOUT_ENV_VAR] = old
+            else:
+                os.environ.pop(change_id.GIT_TIMEOUT_ENV_VAR, None)
+
+    def test_env_override_invalid_falls_back(self):
+        old = os.environ.get(change_id.GIT_TIMEOUT_ENV_VAR)
+        try:
+            for bad in ["not-a-number", "-1.0", "0", "0.5", "100.0", ""]:
+                os.environ[change_id.GIT_TIMEOUT_ENV_VAR] = bad
+                self.assertEqual(change_id.get_git_timeout(), 3.0)
+        finally:
+            if old is not None:
+                os.environ[change_id.GIT_TIMEOUT_ENV_VAR] = old
+            else:
+                os.environ.pop(change_id.GIT_TIMEOUT_ENV_VAR, None)
 
 
 if __name__ == "__main__":

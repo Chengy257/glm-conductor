@@ -2,205 +2,310 @@
 
 [English](./README.md) | **简体中文**
 
-![Version](https://img.shields.io/badge/version-2.5.0-blue.svg)
+![Version](https://img.shields.io/badge/version-2.5.1-blue.svg)
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
 ![ZCode Plugin](https://img.shields.io/badge/ZCode-plugin-green.svg)
+![Python](https://img.shields.io/badge/python-3.8%2B-blue.svg)
 ![Models](https://img.shields.io/badge/models-GLM--5.3%20%2F%20GLM--5.3--Flash-orange.svg)
 ![CI](https://github.com/Chengy257/glm-conductor/actions/workflows/validate.yml/badge.svg)
 
 **面向 ZCode 中 GLM 编码智能体的选择性路由、原生 Workflow 执行、最小确定性保障与可选有界额度恢复。**
 
-GLM Conductor 让强模型专注于规划、判断与最终验收，把边界清晰的实施任务交给 ZCode 原生 Workflow，并在改动值得时引入独立审查。Conductor 只拥有语义编排与验收；执行编排归 ZCode 所有。
+GLM Conductor 让强模型专注于架构规划、全局判断与最终验收，把边界清晰的实施任务交由 ZCode 原生 Workflow 高效执行，并在代码改动值得时引入独立、全新上下文的只读审查。Conductor 专注语义编排与验收；执行编排归 ZCode 原生所有。
 
-> **设计目标：** 为个人编码工作流提供轻量的语义编排——决定工作由谁执行、把有界工作编译为规范 DAG，只保留提示词本身无法保证的确定性检查。v2.4 不是第二套任务运行时、workflow 引擎、权限引擎、溯源系统、调度平台或额度控制面。
+> **设计目标：** 为个人与团队编码工作流提供极轻量的语义编排——决定工作由谁执行、把有界工作编译为规范 DAG，且只保留提示词本身无法保证的确定性检查。Conductor 避免重复建模宿主已拥有的执行事实：它不是第二套工作流引擎、任务调度器或额度控制平面。
 
-## 为什么使用 GLM Conductor
+---
 
-- **把强模型推理花在最有价值的地方。** GLM-5.3 负责解决歧义、架构设计、路由、验证与最终验收；边界明确的实施交给 workflow 工作者。
-- **以明确契约进行委派。** 委派工作从规范 DAG 编译而来：节点目标、依赖、文件归属、接口与约束在开工前全部显式定义。
-- **把实施与独立审查分开。** 对高保障任务，在主会话完成验证后，可以再由全新上下文、只读的审查者进行最终审查。
-- **让额度等待始终可恢复。** 任务可以等待 provider 额度，并通过 ZCode 原生 Scheduled Task 恢复——只有在你明确授权、且有界恢复预算之内才会发生。
+## 核心特性亮点
 
-## 工作方式
+- **最大化强模型杠杆率：** 将昂贵的 GLM-5.3 推理算力聚焦于需求澄清、架构设计、路由仲裁、集成验证与最终验收；将边界明确的代码实现委托给经济快速的 Workflow 工作者。
+- **基于显式契约的委派：** 委派实施前先编译规范 DAG，在开工前明确定义节点目标、上下游依赖、文件所有权边界、接口规范与环境约束。
+- **确定性 Native Workflow 执行：** 静态 DAG 纯代码编译为确定性 TypeScript 原生工作流，由 ZCode 原生调度运行，零多余的在途运行状态镜像。
+- **工作者模型选型硬闸：** 强制要求工作者必须解析并绑定 provider 限定的 `/GLM-5.3-Flash`（`workflow-model-select`），从协议层根除意外继承高成本主会话模型的隐患。
+- **最小确定性质量保障：**
+  - **`change_id` 唯一新鲜度原语：** 基于 `git rev-parse HEAD` 与任务所有权范围内的实际改动文件生成 SHA-256 摘要（换行符 CRLF 规范化）；后续任何文件改动必使前置验证或审查自动失效。
+  - **粗粒度仓库写者守卫：** 保证一个 Git 仓库同一时刻至多一个活跃 Conductor 写工作流，无脆弱的按时间自动过期（无 TTL），仅在收尾或人工运维时释放。
+  - **Stop 钩子完成守卫四查：** 严密拦截越界改动、无写预约、验证缺失/过期或高保障审查未达标等完成尝试。
+- **有界可恢复的额度连续性：** 任务遭遇额度耗尽时安全停靠在 `waiting_quota`，通过原生 Scheduled Task 在有界授权预算（`max_resumes`）内自动恢复。
+- **零外部三方依赖：** 100% 纯 Python 3.8+ 标准库实现，深度适配 Windows 与 POSIX 文件系统与进程特性。
+
+---
+
+## 架构与工作流程
 
 ```text
-                        主会话 — GLM-5.3
-                  规划 · 路由 · 验证 · 验收
-                     /                 \
-                    /                   \
-        solo / audit（主会话）      delegate / full
-                ↓                          ↓
-          主会话亲自实施          原生 Workflow 运行
-                                 （规范 DAG 编译产物）
-
-                  最小确定性保障
-   change_id · ownership · 完成守卫 · 仓库写者守卫
-
-                  可选的有界额度恢复
-         waiting_quota → 原生 Scheduled Task 唤醒
+                     主会话 — GLM-5.3
+                (规划 · 路由 · 验证 · 验收)
+                         /              \
+                        /                \
+          solo / audit (主会话亲自实施)  delegate / full (原生 Workflow)
+                    ↓                            ↓
+            主会话代码编写               v24-compile (规范 DAG 编译)
+                                                 ↓
+                                         workflow-model-select (Flash 选型硬闸)
+                                                 ↓
+                                         writer-acquire (仓库写预约)
+                                                 ↓
+                                         ZCode 原生 Workflow 运行
+                                                 ↓
+                 最小确定性质量保障
+           change_id · Ownership · 仓库写者守卫 · 完成守卫
+                                                 ↓
+                 主会话亲自验证 & [可选] 独立审查者审查
+                                                 ↓
+                 可选有界额度恢复 (原生 Scheduled Task 唤醒)
 ```
 
-ZCode 仍然是底层编码 harness，并拥有执行编排：workflow 运行生命周期、子 actor、并行调度、重试、后台执行、停止/恢复机制与运行可观测性。GLM Conductor 只持久化宿主不知道的语义。
+### 职责分工矩阵
 
-## 选择性路由
-
-首次委派前，主会话分别判断两个独立问题：
-
-- **可委派性（Delegability）** —— 剩余实施是否已经足够有界、规格足够完整，可以安全交给工作者？
-- **保障等级（Assurance）** —— 主会话验证之后，再增加一次全新上下文的独立审查，是否能实质降低风险？
-
-| 可委派性 | 保障等级 | 路由 | 实施 | 独立审查 |
-| --- | --- | --- | --- | --- |
-| low | standard | `solo` | 主会话 | 否 |
-| high | standard | `delegate` | 原生 Workflow | 否 |
-| low | high | `audit` | 主会话 | 是 |
-| high | high | `full` | 原生 Workflow | 是 |
-
-普通文本工作没有独立的 executor 轴：`solo`/`audit` 即主会话实施，`delegate`/`full` 即原生 Workflow 实施。当新的证据改变任务边界或风险时，路由可以向任意方向重估。
-
-## 模型角色
-
-当前推荐组合保持简单：
-
-| 角色 | 默认模型 | 主要职责 |
+| 领域 | GLM Conductor 拥有 | ZCode 宿主拥有 |
 | --- | --- | --- |
-| 主会话 | **GLM-5.3** | 规划、架构、路由、验证、验收 |
-| Workflow 工作者 | **GLM-5.3-Flash（显式，必选）** | 原生 Workflow 内的有界文本实施——delegate/full 每次提交都必须携带经选型预检（`workflow-model-select`）选定的显式 provider 限定 `…/GLM-5.3-Flash` `subagent_model`；选定的 id 可经 `worker-model-pin` 一次性记录为用户授权的任务级 pin，同任务的后续提交经 `--task-ref` 自动消费——这是任务级偏好，不是任务身份；省略模型仍会静默继承主会话模型，是协议硬禁止（v2.4.0 缺陷 A） |
-| 视觉实施者 | **GLM-5.3-Flash** | 有界的多模态实施（Custom Subagent 例外通道） |
-| 文本审查者 | **宿主/会话模型** | 全新上下文、只读最终审查 |
-| 视觉审查者 | **GLM-5.3-Flash** | 全新上下文视觉审查（固定多模态绑定，不可用即 fail closed） |
+| **编排层** | 路由策略、DAG 编译、代码审查策略 | Workflow 运行生命周期、子 actor、并行执行机制 |
+| **执行层** | 静态 DAG 到 TypeScript 源码的确定性转换 | 任务调度、后台执行、重试、停止与恢复机制 |
+| **状态层** | 语义任务状态（`state.json`）、溯源审计（`events.jsonl`） | 运行时执行状态、Token 账本、Actor 标准输出日志 |
+| **保障层** | 变更标识（`change_id`）、仓库写者守卫、Stop 完成守卫 | 操作系统沙箱隔离、原生工具调用权限控制 |
+| **连续性** | 恢复授权、有界预算跟踪 | 原生 Scheduled Task 定时触发与自动化调度 |
 
-Workflow 工作者绝不继承会话模型：编译器 TypeScript 模型无关（宿主在 run 提交时绑定一个模型），Conductor 因此把显式 Flash 选型做成启动硬闸——恰一个已配置的 provider 限定 Flash id 自动选定、零候选 fail closed、多候选必须显式指定：可在任务启动问答中一次选定并记录为任务的 `worker_model` pin，也可在每次提交时经 `--model` 显式给出。已 pin 的 id 不在当次宿主列表时，消费点直接拒绝（退出码 2），绝不回退自动选型、绝不静默换模型。文本审查者刻意不固定 model 字段，从而在不同宿主与套餐下都可启动；两个视觉角色固定为 provider 全限定的多模态 GLM-5.3-Flash 绑定，绑定不可用时视觉高保障路线 fail closed。这些只是当前推荐的模型分配，不是永久架构身份。
+---
 
-## 原生 Workflow 执行
+## 双轴选择性路由
 
-`delegate` 与 `full` 路由共享唯一执行基底：
+在委派任何任务前，主会话先独立回答两个正交维度的问题：
 
-```text
-规范 Conductor DAG → Workflow 编译器 → ZCode 原生 Workflow
-```
+- **可委派性（Delegability）：** 剩余实施是否已有界、规格是否完备、验证是否明确？
+- **保障等级（Assurance）：** 主会话完成验证后，增加一次全新上下文的独立只读终审是否能实质降低交付风险？
 
-- Work Unit 是**静态 DAG 节点**：`id`、`objective`、`depends_on`、`ownership`，外加可选的 `interfaces` / `constraints` / `local_check`。它描述"要做什么"，不描述"执行到了哪里"——Conductor 不持久化任何按节点运行时状态。
-- 编译器校验 DAG，检测可能并发执行节点之间的 ownership 重叠（冲突在启动前串行化或拒绝），以单一规范 persona 生成工作者指令，并产出确定性的 TypeScript workflow。它绝不自动执行——启动运行是主会话的宿主侧动作。
-- 任何 delegate/full 提交前，主会话先过硬闸完成 worker 模型选型（`workflow-model-select`）：宿主模型列表 → 配置精确 id → 显式选定 provider 限定 GLM-5.3-Flash → `CreateWorkflow(subagent_model=<精确 id>)`。选型失败即不启动；主会话 GLM-5.3 绝不作为工作者回退。
-- 运行的一切归 ZCode 所有：并行、重试、停止/恢复、后台执行与可观测性。Conductor 只记录任务 ↔ run-id 关联。
+| 可委派性 | 保障等级 | 路由模式 | 实施主体 | 独立审查 |
+|:---:|:---:|:---:|:---:|:---:|
+| **Low** | Standard | `solo` | GLM-5.3 主会话 | 无 |
+| **High** | Standard | `delegate` | ZCode 原生 Workflow | 无 |
+| **Low** | High | `audit` | GLM-5.3 主会话 | 只读审查者（`glm-reviewer` / `visual-reviewer`） |
+| **High** | High | `full` | ZCode 原生 Workflow | 只读审查者（`glm-reviewer` / `visual-reviewer`） |
 
-## 最小确定性保障
+主会话在动作前输出规范的 `SELECTIVE ROUTE` 声明块；实施过程中若出现新证据改变了任务边界，可双向进行 `ROUTE REASSESSMENT` 重估。
 
-委派结果不会仅凭模型的"已完成"声明被接受，而 v2.4 把强制面刻意收窄：
+---
 
-- **change_id** —— 单一确定性的任务级变更身份（基线修订 + 当前实际改动的 owned 文件内容/状态的哈希，由 ownership scope 解析而来——绝不哈希 scope 串本身）。验证与审查记录都绑定它；此后仓库一旦变化，验证或审查即过期，必须重做。
-- **完成守卫（completion guard）** —— Stop 钩子在任务完成前只检查四项不变量：无仍在活跃的写 workflow、改动路径全部落在 DAG ownership 并集内、必需的主会话验证是新鲜的（change_id 匹配）、高保障路由还存在新鲜的 `ship` 审查。
-- **一个仓库至多一个活跃写 workflow** —— 粗粒度的仓库写者守卫取代按单元租约：持有者释放之前，第二个 Conductor 写 workflow 无法取得该仓库；委派 run 的注册与完成都会拒绝跳过取守卫的任务（Conductor 生命周期不变式；协议之外的裸宿主 Workflow 调用不在此保证范围内）。编译期 ownership 校验通过后，workflow 内部并行不受影响。
-- **小任务状态** —— 七个状态（`active` / `waiting_quota` / `waiting_user` / `blocked` / `completed` / `cancelled` / `failed`）。没有需要 reconciliation 的按单元运行时状态、dispatch permit、租约或验证 receipt。
+## 模型角色分工与选型治理
 
-最终验收仍由主会话负责：工作者报告只是声明，仓库实际状态、diff 和主会话重新运行的验证才是证据。如果守卫自身无法评估，它会明确降级，而不是静默阻断会话。
+| 角色 | 默认模型绑定 | 核心职责 |
+| --- | --- | --- |
+| **主会话** | **GLM-5.3** | 架构决策、路由选择、DAG 编制、代码验证、最终验收 |
+| **Workflow 工作者** | **GLM-5.3-Flash（显式指定）** | 原生 Workflow 内的有界文本代码实施 |
+| **视觉实施者** | **GLM-5.3-Flash（多模态）** | 有界前端/UI 代码实施（Custom Subagent 能力例外通道） |
+| **文本审查者** | **宿主/当前会话模型** | 全新上下文、只读终审（`glm-reviewer`） |
+| **视觉审查者** | **GLM-5.3-Flash（多模态）** | 全新上下文视觉读图终审（`visual-reviewer`，不可用即 fail closed） |
+
+### 工作者模型 Pin 与提交硬闸
+Workflow 工作者绝不继承会话模型。提交必须经 `workflow-model-select` 选型硬闸：
+1. 宿主配置中恰有一个 provider 限定的 Flash 模型（`account:.../GLM-5.3-Flash`）时自动选定；
+2. 存在多候选歧义时，在启动问答中由用户一次性选定，并作为任务级 `worker_model` pin 记录；
+3. 后续提交携带 `--task-ref` 自动消费该 pin；若 pin 的模型在当前宿主列表已失效，消费点直接拒绝（退出码 2），绝不静默回退或自动切模。
+
+---
+
+## 最小确定性保障机制
+
+1. **`change_id` 变更标识新鲜度：**
+   通过 `git rev-parse HEAD`（unborn 仓库为 `-`）与声明 ownership 范围内实际变动文件的规范哈希计算得出。
+   - 包含换行符（CRLF → LF）与路径正斜杠规范化；
+   - 任何修复代码都会自动使先前的验证与审查记录过期，杜绝旧证明混充。
+2. **粗粒度仓库写者守卫：**
+   确保一个 Git 仓库同一时刻至多一个活跃 Conductor 写工作流。
+   - 状态写入 `.glm-conductor/writer_guard.json`，并发读写受独占锁保护；
+   - **永不按时间自动过期（无 TTL）：** 杜绝长任务锁被抢占。只有在任务终态收尾或操作者显式 `--force` 时方予释放。
+3. **Stop 钩子完成守卫四查：**
+   通过 ZCode 的 `Stop` 事件钩子（`hooks/stop_gate.py`）按严重级别顺序求值：
+   - **查 1（写者守卫）：** 无其他任务的写预约；委派任务完成前必须仍持有该预约；
+   - **查 2（所有权范围）：** 工作区实际变动路径全部落在 DAG 节点的 ownership 声明范围内；
+   - **查 3（主会话验证）：** 主会话已记录新鲜的 `validation.status == "passed"`；
+   - **查 4（独立审查）：** 高保障任务（`audit` / `full`）必须具有新鲜的 `review.verdict == "ship"`。
+
+---
 
 ## 可选的有界额度恢复
 
-额度处理不是路由轴。额度耗尽的委派任务可以进入 `waiting_quota`，由 ZCode 原生 Scheduled Task 唤醒：
+遇到供应商配额耗尽的委派任务可进入 `waiting_quota` 状态，并经原生 Scheduled Task 唤醒：
+- **先武装后开工（Arm-Before-Work）：** 启用自动恢复的任务必须在工作前创建并绑定原生 Scheduled Task（`quota-automation-bind`），并通过 `quota-continuity-preflight` 预检（退出码 0）。
+- **有界预算保护：** 每次实际恢复消耗 1 次 `max_resumes` 预算；预算耗尽后任务转为 `waiting_user` 停靠，绝不无休止空转。
+- **周期定时载体与精确唤醒并存：** Recurring 定时任务作为武装载体与保底，同时支持按观测到的 `reset_at` 加发零状态 one-shot 精确唤醒。
 
-- `manual`（默认）：由你选择何时恢复。`auto`：连续性**先武装后开工**——创建未来原生 Scheduled Task 并把 automation id 绑定到任务（`quota-automation-bind`），`quota-continuity-preflight` 必须通过（退出码 0）后才允许首个消耗额度的 Workflow 启动与每次自动恢复；未武装的 auto 任务预检以退出码 2 阻断，定时决策保持 `remain-waiting`（`continuity-unarmed`）。
-- recurring Scheduled Task 优先（成功唤醒后保持武装不删不重建）；one-shot 后备必须先创建并绑定后继激活再恢复。每次真实恢复消耗一单位有界 `max_resumes` 预算；预算耗尽后任务转为 `waiting_user`。
-- 不存在 quota epoch、订阅、常驻 watcher 进程或窗口记账。额度诊断是只读的（`/glm-conductor:quota` 或 `quota-resolve`）；恢复与武装生命周期经稳定 CLI 子命令执行（`quota-wait` / `quota-resume-authorize` / `quota-resume-decision` / `quota-resume-confirm` / `quota-automation-bind` / `quota-automation-clear` / `quota-continuity-preflight`）。
+---
 
-> 账号级 **Global Quota Clock** 已不属于 GLM Conductor。它计划作为独立的未来伴生项目；拆离清单见 [`docs/roadmap/GLOBAL_QUOTA_CLOCK_EXTRACTION_INVENTORY.md`](./docs/roadmap/GLOBAL_QUOTA_CLOCK_EXTRACTION_INVENTORY.md)。
-
-## 宿主要求与限制
-
-环境要求：
-
-- **ZCode 3.14+** —— v2.4 依赖原生 Workflow 与原生 Scheduled Task 能力（已在 ZCode 3.14.0 验证）
-- GLM Coding Plan 或 Z.ai 账号，可使用 GLM-5.3 与 GLM-5.3-Flash
-- Python 3.8+，用于运行时钩子与 CLI
-
-如实声明的已知限制：
-
-- **关闭 ZCode 应用时的定时触发未经实证。** 已测宿主上观察到的定时回合表现为所属会话的回合中续跑；本插件不宣称、也不保证 App 关闭时的唤醒行为。
-- **审查者双角色已在最终绑定上经真正新开会话实证。** 从 v2.4 树刷新插件缓存后，新开的 ZCode 会话成功启动两个审查者角色：文本审查者（不固定 model 字段，继承宿主/会话模型）以只读方式产出符合契约的 `GLM REVIEW` 裁决；视觉审查者（固定 provider 全限定的多模态 GLM-5.3-Flash 绑定）对一张提示词从未描述过内容的测试图完成真实读图并准确描述画面（盲测，`VISUAL REVIEW` 裁决）。绑定不可用时视觉高保障路线仍 fail closed。
-- `visual-implementer` 仍是 Custom Subagent 能力例外，不是 Native Workflow 工作者；视觉反馈拓扑需要主会话采集截图。
-- 钩子只剩 SessionStart（恢复上下文）与 Stop（完成守卫）。没有 dispatch permit、ownership 注入或 Bash 策略钩子；工具策略请使用 ZCode 原生权限设施加工作者约束。
-
-## 安装
+## 环境要求与安装配置
 
 ### 环境要求
 
-- [ZCode](https://zcode.z.ai) 3.14 或更新
-- GLM Coding Plan 或 Z.ai 账号，可使用 GLM-5.3 与 GLM-5.3-Flash
-- Python 3.8+，用于运行时钩子
+- **[ZCode](https://zcode.z.ai) 3.14+**（已在 Native Workflow 与 Scheduled Task 上深度实测）
+- GLM Coding Plan 或 Z.ai 账号，可访问 GLM-5.3 与 GLM-5.3-Flash
+- **Python 3.8+**，用于运行时钩子与 CLI 工具
+  - *Windows 提示：* 请确保 PATH 中可直接执行 `python3.exe`。若环境仅有 `python.exe`，请参见 [Windows 排障指引](./docs/troubleshooting.md#8-windows-环境下-python3-钩子命令排查)。
 
 ### 从 ZCode 插件市场安装
 
-1. 在 ZCode 中打开一个工作区。
-2. 进入 **Settings → Plugins → Create → Add plugin marketplace**。
-3. 选择 GitHub 仓库来源，输入 `https://github.com/Chengy257/glm-conductor`。
-4. 在 **Personal** 分区安装 **glm-conductor**。
-5. 安装或更新完成后创建一个**新会话**，使 agents、skills 和 hooks 重新加载。
+1. 打开 ZCode 工作区；
+2. 点击 **Settings → Plugins → Create → Add plugin marketplace**；
+3. 输入 GitHub 仓库源地址：`https://github.com/Chengy257/glm-conductor`；
+4. 在 **Personal** 分区中点击安装 **glm-conductor**；
+5. 安装或更新后新建一个**新会话**以加载最新的 skills、agents 与 hooks。
 
-本地安装时，克隆仓库后，将包含 `marketplace.json` 的仓库根目录添加为本地 marketplace。
+### 本地克隆开发安装
 
-> 应选择仓库根目录的 marketplace manifest。不要选择 `plugins/glm-conductor/.zcode-plugin/plugin.json`；后者是插件自身 manifest，不是 marketplace manifest。
+克隆仓库后，将包含 `marketplace.json` 的项目根目录添加为本地 marketplace：
 
-## 快速开始
+```bash
+git clone https://github.com/Chengy257/glm-conductor.git
+```
 
-日常编排不需要额外配置。新建会话后，可以直接要求 GLM Conductor 规划并执行任务：
+> **提示：** 请选择根目录的 `marketplace.json`，而非 `plugins/glm-conductor/.zcode-plugin/plugin.json`。
+
+---
+
+## 快速上手
+
+### 1. 启动编排
+
+在新建的 ZCode 会话中直接下达目标：
 
 ```text
 使用 glm-conductor:orchestration 规划并实现这个功能。先声明路由，再完成验证。
 ```
 
-典型路由声明如下：
+### 2. 路由声明与启动问答
+
+主会话声明路由：
 
 ```text
 SELECTIVE ROUTE
 mode: delegate
 delegability: high
 assurance: standard
-reason: implementation is bounded by explicit interfaces, owned files, and deterministic verification
+reason: 需求边界清晰，具有明确接口与单元测试覆盖。
 ```
 
-`delegate`/`full` 路由下，主会话随后构建规范 DAG，用 `v24-compile` 编译，经 `workflow-model-select` 硬闸选定显式 GLM-5.3-Flash 工作者模型（选型失败不启动、绝不省略 `subagent_model`），取得仓库写者守卫，启动原生 Workflow；运行结束后记录运行关联并验证结果。授权无人值守续跑的任务在启动前先完成未来定时激活的武装（授权 → 建 Scheduled Task → bind → 预检通过 → 启动）。
+对于持久化任务，主会话在开工前自动进行单轮合并问答：
+- 确认是否开启跨额度自动唤醒及 `max_resumes` 预算；
+- 在模型候选项歧义时指定工作者模型。
 
-常用入口：
+### 3. 编译并提交工作流
 
-- `glm-conductor:orchestration` —— 路由、DAG 契约与审查流程
-- `glm-conductor:continuity` —— checkpoint、`waiting_quota` 与有界恢复
-- `glm-conductor:enforcement` —— 完成守卫语义、诊断与被拦截任务的恢复
-- `/glm-conductor:quota` —— 只读额度诊断（`--json` 输出机器可读结果）
+```bash
+# 将静态 DAG 编译为 Native Workflow 源码
+python plugins/glm-conductor/runtime/cli.py v24-compile dag.json --out .glm-conductor/workflow.ts
 
-## 运行时 CLI 命令面
+# 取得仓库写预约
+python plugins/glm-conductor/runtime/cli.py writer-acquire . <task_id>
 
-所有运行时操作经统一 CLI（`python <plugin-root>/runtime/cli.py <子命令>`；单行 JSON 输出）：
+# 主会话通过 ZCode CreateWorkflow(subagent_model=...) 提交执行
+```
 
-| 命令 | 用途 |
+### 4. 验证与完成交付
+
+工作流执行完毕后：
+1. 主会话亲自检查代码 diff 并执行验证测试命令；
+2. 记录验证通过结果：
+   ```python
+   runtime.task.record_validation(repo_root, task_id, status="passed", summary="集成测试全绿")
+   ```
+3. Stop 钩子触发完成守卫四查，全绿放行并自动完成任务与释放写预约。
+
+---
+
+## 参考与命令速查
+
+### 专业技能库
+
+- `glm-conductor:orchestration` —— 路由决策、静态 DAG 编制、启动问答、工作流提交与审查流程。
+- `glm-conductor:continuity` —— 断点恢复、`waiting_quota` 停靠、先武装后开工调度与有界恢复。
+- `glm-conductor:enforcement` —— Stop 完成守卫四查契约、诊断分析与拦截恢复。
+- `/glm-conductor:quota` —— 只读额度余量与窗口重置时间诊断（支持 `--json`）。
+
+### 运行时 CLI 子命令
+
+所有底层操作统一经 `python <plugin-root>/runtime/cli.py <子命令>` 执行：
+
+| 子命令 | 功能说明 |
 | --- | --- |
-| `quota-resolve <repo> [--force-refresh]` · `quota-wait` / `quota-resume-authorize` / `quota-resume-decision` / `quota-resume-confirm` | 额度四态解析（只读观测）与有界恢复生命周期（等待 / 授权 / 决策 / 确认） |
-| `quota-automation-bind` / `quota-automation-clear` / `quota-continuity-preflight` | auto 连续性武装生命周期（绑定 / 清除 / 预检；`ready=false` → 退出码 2 即启动/恢复阻断信号） |
-| `workflow-model-select <models-json> [--model <exact-id>] [--task-ref <task_id>]` | worker 模型选型硬闸（恰一 Flash 自动选定、零候选拒绝、多候选须显式指定或任务 pin；`--task-ref` 消费任务的 `worker_model` pin——`--model` 显式值 > pin > 自动选型，pin 失效直接拒绝；输出 `{subagent_model, model_policy}` 提交契约） |
-| `worker-model-pin <repo> <task_id> <exact-id>` | 写入用户授权的任务级 worker 模型 pin（启动问答答后落盘；只做形状预检、绝不查宿主列表；非终态任务才可写，同值幂等，异值显式覆盖） |
-| `v24-compile <dag.json> [--task-ref <id>] [--out <path>]` | 把规范 DAG 编译为原生 Workflow 源码（只生成，绝不自动执行） |
-| `writer-acquire <repo> <task_id> [--run-id <id>]` | 取得仓库写预约 |
-| `writer-release <repo> <task_id> [--force]` | 释放写预约（`--force` 供显式 inspect 之后的清除） |
-| `writer-show <repo>` | 查看当前持有者 |
-| `v24-record-run <task_ref> <run-id> [--artifact <path>]` | 记录任务 ↔ workflow run-id 关联 |
-| `review-record <repo> <task_id> <reviewer> <verdict> [note]` | 记录任务级审查裁决（先验证后评审，change_id 新鲜度锚定） |
+| `v24-compile <dag-json> [--task-ref <id>] [--out <path>]` | 将规范静态 DAG 编译为确定性 TypeScript 原生工作流代码。 |
+| `workflow-model-select <models-json> [--model <id>] [--task-ref <id>]` | 工作者模型选型硬闸，自动筛选 Flash 模型或消费任务 pin。 |
+| `worker-model-pin <repo> <task_id> <exact-id>` | 写入用户授权的任务级 worker 模型 pin。 |
+| `writer-acquire <repo> <task_id> [--run-id <id>]` | 获取仓库级写预约（独占写入保护）。 |
+| `writer-release <repo> <task_id> [--force]` | 释放仓库写预约（`--force` 供运维强制清理残留）。 |
+| `writer-show <repo>` | 查询当前仓库写预约持有者信息。 |
+| `v24-record-run <task_ref> <run-id>` | 记录任务与 Native Workflow run-id 的关联单据。 |
+| `review-record <repo> <task_id> <reviewer> <verdict>` | 记录任务级审查裁决（`ship` / `fix-first` / `rethink`）。 |
+| `quota-resolve <repo> [--force-refresh]` | 额度四态只读解析（缓存 → provider → 陈旧缓存 → UNKNOWN）。 |
+| `quota-wait <repo> <task_id>` | 停泊至 `waiting_quota` 并记录归一化观测快照。 |
+| `quota-resume-authorize <repo> <task_id> <max_resumes>` | 授权有界自动恢复预算。 |
+| `quota-resume-decision <repo> <task_id>` | 定时唤醒时的幂等决策（无副作用判断）。 |
+| `quota-resume-confirm <repo> <task_id>` | 在宿主成功接收 resume 调用后确认落账恢复计数。 |
+| `quota-automation-bind / clear / preflight` | 管理 Scheduled Task 连续性武装生命周期。 |
 
-额度诊断另有 `runtime/quota/report.py`（文本与 `--json` 双输出），由 `/glm-conductor:quota` 呈现。
+### 仓库运维工具
 
-## 文档
+- `scripts/archive_legacy_tasks.py` —— 识别并将 v2.3 遗留任务安全归档至 `.glm-conductor/archived-tasks/`（默认 dry-run 预览，`--confirm` 正式执行）。
+- `scripts/validate_plugin.py` —— 纯静态契约校验器，机械校验 16/16 契约锚点。
+- `scripts/smoke_plugin_load.py` —— 插件 manifest、agents、skills、hooks 与运行时装载冒烟测试。
 
-- [核心概念](./docs/core-concepts.md) —— 路由、workflow 执行、保障与额度恢复的概念说明
-- [架构](./docs/architecture.md) —— 当前运行时设计的权威技术参考
-- [故障排查](./docs/troubleshooting.md) —— 额度诊断、v2.3 遗留任务检测、写者守卫陈旧释放与恢复
-- [Global Quota Clock 拆离清单](./docs/roadmap/GLOBAL_QUOTA_CLOCK_EXTRACTION_INVENTORY.md) —— 未来伴生项目的边界
-- [更新日志](./CHANGELOG.md) —— 发布级变更记录
+---
 
-## 项目状态与迁移
+## 代码仓库布局
 
-**v2.5.0 是当前基线** —— v2.4.1 热修之上的任务启动契约与精确唤醒版本。凡建状态的任务现在都以一轮强制的启动问答开场（跨额度自动唤醒与有界 `max_resumes` 预算；选型歧义时一并选定 worker 模型）；选定的 worker 模型可按任务一次 pin（state 可选顶层键 `worker_model`），后续提交经 `workflow-model-select --task-ref` 自动消费——pin 失效直接拒绝，绝不静默重新选型；`waiting_quota` 唤醒轮 recurring Scheduled Task 原样不动，同时按下一额度窗口精确加发一个零状态 one-shot（recurring 兜底 + one-shot 并存，绝不用 `CronUpdate`；实测宿主上已持有 recurring 的会话不能再建 one-shot，故加发为机会性——被拒即如实回落 recurring 兜底，recurring 养专用小会话可保留加发能力）；问答只发生在交互回合——唤醒/恢复轮遇阻塞一律 fail closed 转等待用户，绝不弹问。Breaking：无；唯一 schema 变更是可选顶层键 `worker_model`（缺省即无 pin，旧任务零迁移）。
+```text
+glm-conductor/
+├── marketplace.json                # 插件市场 catalog 描述清单
+├── .zcode-plugin/                  # 插件 manifest 与元数据配置
+├── plugins/glm-conductor/
+│   ├── agents/                     # 原生 Subagent 定义 (glm-reviewer, visual-*)
+│   ├── commands/                   # 斜杠命令定义 (/glm-conductor:quota)
+│   ├── hooks/                      # ZCode 钩子实现 (session_start.py, stop_gate.py)
+│   ├── skills/                     # 领域技能 (orchestration, continuity, enforcement)
+│   └── runtime/                    # 纯标准库 Python 运行时核心
+│       ├── workflow/               # DAG 编译器、工作者 persona、提交选型闸
+│       ├── quota/                  # 只读额度适配器、解析器与探测报告
+│       ├── change_id.py            # 确定性变更标识哈希计算
+│       ├── writer_guard.py         # 仓库写者守卫原子读写
+│       ├── ownership.py            # 文件所有权匹配与阶段规划
+│       ├── state.py                # 七态任务状态机与 schema 校验
+│       └── cli.py                  # 运行时 CLI 统一操作入口
+├── scripts/                        # 契约校验、冒烟测试与遗留任务归档脚本
+├── tests/                          # 完备的单元测试套件 (790+ 项测试)
+└── docs/                           # 架构规格文档、核心概念、排障手册与路线图
+```
 
-其下的 v2.4.1 连续性热修关闭了实际使用中发现的两个缺陷：省略 `subagent_model` 时 Workflow 工作者静默继承主会话模型（现为每次 delegate/full 启动前的显式 provider 限定 GLM-5.3-Flash 选型硬闸），以及 auto 连续性在无保证未来激活的情况下进入额度等待（现为先武装后开工：recurring Scheduled Task 优先、one-shot 后备先续后继再恢复、until_done 恒受 max_resumes 有界）。v2.4 的复杂度重基线本身不变：这是一次基于 ZCode 原生 Workflow 的重基线，不是 v2.3 运行时的增量版本。v2.3 执行运行时（dispatcher、dispatch permit、按单元租约、receipt、额度控制面、Global Quota Clock）已删除。**v2.3 任务态不迁移**：v2.4 会检测遗留任务目录并以恢复指引拒绝，而不是自动转换。升级前请先完成或显式退役活跃的 v2.3 任务；已发布的 v2.3.x 可通过 Git 历史与 tag 找回。legacy 检测指引见[故障排查](./docs/troubleshooting.md)。
+---
 
-## 许可
+## 文档索引
 
-[MIT](./LICENSE) © 2026 glm-conductor contributors
+- [核心概念](./docs/core-concepts.md) —— 深入了解选择性路由、工作流执行、保障机制与额度恢复。
+- [权威架构规格](./docs/architecture.md) —— v2.5 运行时设计的唯一架构真相源。
+- [故障排查手册](./docs/troubleshooting.md) —— 额度诊断、Windows 环境配置、超大仓 Git 超时调优与写者守卫运维。
+- [Global Quota Clock 拆离清单](./docs/roadmap/GLOBAL_QUOTA_CLOCK_EXTRACTION_INVENTORY.md) —— 独立伴随项目的边界定义。
+- [更新日志](./CHANGELOG.md) —— 详尽的版本演进历史与发版说明。
+
+---
+
+## 质量验证与贡献指引
+
+欢迎提交 Issue 与 Pull Request！在提交代码前，请确保通过全套质量门禁：
+
+```bash
+# 1. 运行全部单元测试 (790+ 测试)
+python -m unittest discover -s tests -p "test_*.py"
+
+# 2. 运行静态契约校验 (16/16 检查)
+python scripts/validate_plugin.py
+
+# 3. 运行插件装载冒烟测试
+python scripts/smoke_plugin_load.py
+
+# 4. 运行代码规范检查
+ruff check .
+```
+
+---
+
+## 开源许可
+
+[MIT](./LICENSE) © 2026 GLM Conductor Contributors
