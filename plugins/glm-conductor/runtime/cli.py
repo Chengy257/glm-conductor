@@ -58,9 +58,10 @@ v2.4 Phase 3（P3-D/E）收口面：
         含 snapshot），组装归一化诊断 view {status, source,
         observed_at, reset_at}——observed_at 取 detail.fetched_at
         （provider 层即 evaluated_at；none 层 None 绝不虚构）、
-        reset_at 取 snapshot["windows"] 各窗口 reset_at（ISO 字符串）
-        的字典序最大值（无窗口 / 全 None → None；纯诊断字段，不参与
-        任何判定）——再以 quota_view 进入 waiting_quota（幂等语义
+        reset_at 取 EXHAUSTED 阻塞窗 reset_at 的字典序最大值
+        （v2.5.2 阻塞窗口径，经 parser.evaluate 求逐窗态后过滤；
+        无阻塞窗 → None；纯诊断字段，不参与任何判定）——再以
+        quota_view 进入 waiting_quota（幂等语义
         不变；workflow_run_id 不动）。语义：任务已遭遇额度相关执行
         停止后的显式停靠命令，不是自动额度失败探测器。任务层拒绝 →
         退出码 1。输出单行 JSON {task_id, status, quota_observation}。
@@ -79,9 +80,10 @@ v2.4 Phase 3（P3-D/E）收口面：
         workflow_run_id / resume_count_after 暂存计数）。v2.5 精确
         唤醒输出扩展（I4/W3，向后兼容附加键）：decision 为
         remain-waiting 且观测为 EXHAUSTED 时，decision 只读透传本次
-        观测的 reset_at（quota_view.reset_at，ISO 字符串或 null）
-        ——纯诊断透传，供主会话换算 one-shot delayMinutes，不参与
-        任何判定；UNKNOWN / no-op 分支保持既有输出形状，绝不透传。
+        观测的 reset_at（quota_view.reset_at，ISO 字符串或 null，
+        v2.5.2 起为阻塞窗口径）——纯诊断透传，供主会话按睡眠模板
+        换算精度层睡眠目标，不参与任何判定；UNKNOWN / no-op 分支
+        保持既有输出形状，绝不透传。
         绝不调用宿主 ResumeWorkflowRun（宿主动作归主会话）。
     quota-resume-confirm <repo_root> <task_id>
         恢复落账确认（task.confirm_resume_started 薄壳；仅在宿主
@@ -134,21 +136,23 @@ v2.4 Phase 3（P3-D/E）收口面：
         （空 id 等，WorkflowRunError）→ 退出码 2。零状态镜像：绝不落
         任何子代理运行时状态（F6 冻结结果）。
     workflow-model-select <models-json> [--model <exact-id>]
-            [--task-ref <task_id>]
+            [--task-ref <task_id>] [--repo-root <path>]
         v2.4.1 Workflow 提交 worker 模型选型（H1，INV-MODEL-01；
         runtime.workflow.submission.select_worker_model /
         build_submission_contract 薄壳；绝不写宿主 API 客户端——模型
         发现面归宿主，id 集合由调用方供给）。models-json 参数：能按
         JSON 解析为数组则直接采用（支持内联 '["..."]' 形态），否则按
-        JSON 文件路径读取数组（UTF-8）。从已配置 id 集合选定唯一
+        JSON 文件路径读取数组（UTF-8；推荐路径：ListModels 输出写
+        临时 JSON 文件后传文件路径）。从已配置 id 集合选定唯一
         provider 限定 Flash worker 模型：显式 --model <exact-id> 校验
         之并要求精确成员（优先于自动选择）；否则恰一 Flash 候选自动
         选定、零候选 / 多候选歧义拒绝（绝不静默取第一个）。v2.5 起
         增可选 --task-ref <task_id>（I1 任务级 worker 模型 pin 消费）：
         选型优先级固定 --model 显式值 > 任务 pin > 自动选型——--model
         给出时为完全显式覆盖（任务 pin 不参与也不对账）；否则读任务
-        顶层 worker_model pin（账本按当前工作目录解析，调用方须在
-        目标仓库根运行本命令，v24-record-run 同款约定）注入
+        顶层 worker_model pin（账本根按 --repo-root <path> 解析，
+        v2.5.2 W3 起提供；缺省当前工作目录保持兼容，v24-record-run
+        同款约定）注入
         explicit_model_id：pin 形状非法 / pin 不在本次 configured
         集合 → 专门拒绝（「任务 pin 已失效，请重新问答授权」语义，
         绝不回退自动选型、绝不静默换模型）；无 pin 走既有自动选型
@@ -191,6 +195,37 @@ v2.4 Phase 3（P3-D/E）收口面：
         「非校验类」退出码 2 面，判定本身即阻塞信号）。只证明持久化
         绑定存在，绝不宣称宿主侧激活仍存活。任务层拒绝（任务缺失 /
         v2.3 遗留）→ 退出码 1。输出单行 JSON {task_id, preflight}。
+    task-create <repo_root> <task_id> <goal> <mode> <assurance>
+            [--dag <path>]
+        任务创建（v2.5.2 W2，task.create_task 薄壳）：CLI 侧先闸
+        goal 非空 / mode ∈ ROUTE_MODES / assurance ∈
+        ASSURANCE_LEVELS（违规 → 退出码 2）；--dag 读 DAG JSON 文件
+        （顶层节点数组或 {nodes: [...]} 对象，兼容 v24-compile 同款
+        格式；文件不可读 / 非法 JSON / 节点形状 / 依赖图错误聚合
+        报出 → 退出码 2）。runtime.task 拒绝（任务已存在等）→
+        退出码 1。成功输出 {task_id, status, route} 并落
+        route_selected 事件。
+    record-validation <repo_root> <task_id> <passed|failed>
+            [--summary <s>] [--commands <s>] ...
+        任务级验证记录（v2.5.2 W2，task.record_validation 薄壳）：
+        status 词汇 CLI 侧先闸（退出码 2）；--summary 至多一次；
+        --commands 可重复、每次恰一条命令（空串 → 退出码 2）。
+        change_id 现算现存（见 runtime.task.record_validation）。
+        runtime.task 拒绝（任务缺失 / v2.3 遗留 / 终态冻结）→
+        退出码 1。输出 {task_id, validation}。
+    task-complete | task-fail | task-cancel <repo_root> <task_id>
+        终态收尾（v2.5.2 W2，task.complete / fail / cancel 薄壳）：
+        终态迁移 + 专属 journal 事件 + 写者守卫幂等释放；同终态重放
+        放行、跨终态迁移拒绝（退出码 1，任务缺失 / v2.3 遗留同）。
+        输出 {task_id, status}。set_status / set_phase 保持内部原语
+        不上 CLI——生命周期迁移一律走具名命令。
+    exit-waiting <repo_root> <task_id>
+        手动恢复出等待（v2.5.2 W2，task.exit_waiting_quota 薄壳）：
+        waiting_quota → active 并落 waiting_quota 事件（direction:
+        exit）；原状态 active 幂等。自动恢复路径的落账走既有
+        quota-resume-confirm（本命令是 manual 恢复与运维对账通道）。
+        runtime.task 拒绝（迁移矩阵外来源如 waiting_user）→ 退出码
+        1。输出 {task_id, status}。
 
 输出与退出码契约：
     stdout 恒为单行 JSON（json.dumps(..., ensure_ascii=True)，中文以
@@ -209,6 +244,9 @@ v2.4 Phase 3（P3-D/E）收口面：
           操作被 runtime.task 拒绝 / auto 连续性武装操作面被
           runtime.task 拒绝 / v2.5 起 worker-model-pin 写入与任务
           pin 消费面被任务层拒绝（任务缺失 / v2.3 遗留 / 终态冻结）
+          / v2.5.2 起任务生命周期操作面（task-create /
+          record-validation / task-complete / task-fail /
+          task-cancel / exit-waiting）被 runtime.task 拒绝
           / 意外错误；错误 JSON 只含异常类型名与消息，供操作者排查）。
 
 依赖方向：
@@ -248,11 +286,19 @@ USAGE = (
     "writer-show <repo_root> | "
     "v24-record-run <task_ref> <run-id> [--artifact <path>] | "
     "workflow-model-select <models-json> [--model <exact-id>] "
-    "[--task-ref <task_id>] | "
+    "[--task-ref <task_id>] [--repo-root <path>] | "
     "worker-model-pin <repo_root> <task_id> <exact-id> | "
     "quota-automation-bind <repo_root> <task_id> <automation_id> | "
     "quota-automation-clear <repo_root> <task_id> [automation_id] | "
-    "quota-continuity-preflight <repo_root> <task_id>")
+    "quota-continuity-preflight <repo_root> <task_id> | "
+    "task-create <repo_root> <task_id> <goal> <mode> <assurance> "
+    "[--dag <path>] | "
+    "record-validation <repo_root> <task_id> <passed|failed> "
+    "[--summary <s>] [--commands <s>] ... | "
+    "task-complete <repo_root> <task_id> | "
+    "task-fail <repo_root> <task_id> | "
+    "task-cancel <repo_root> <task_id> | "
+    "exit-waiting <repo_root> <task_id>")
 
 
 class _UsageError(ValueError):
@@ -297,6 +343,15 @@ class _PinTaskRejected(Exception):
     拒绝（任务缺失 / v2.3 遗留任务——消费对象必须是存在的 v2.4
     任务）——运行期拒绝，退出码 1（与 _TaskMissing / _PinRejected
     同口径）。"""
+
+
+class _TaskRejected(Exception):
+    """任务生命周期操作面（task-create / record-validation /
+    task-complete / task-fail / task-cancel / exit-waiting）被
+    runtime.task 拒绝（任务已存在 / 任务缺失 / v2.3 遗留任务 /
+    终态冻结 / 状态迁移矩阵外来源等 ValueError 口径）——运行期
+    拒绝，退出码 1（与 _QuotaRejected / _AutomationRejected 同口径；
+    参数值非法在 CLI 侧先闸走退出码 2，见各子命令实现）。"""
 
 
 def _emit(payload):
@@ -380,22 +435,32 @@ def _quota_observation_view(repo_root, force_refresh=False) -> dict:
         的 detail 恒含此两键 + snapshot + fetched_at）；
       - observed_at：detail.fetched_at（底层数据抓取时刻——provider
         层即 evaluated_at；none 层为 None，绝不虚构）；
-      - reset_at：snapshot["windows"] 各窗口 reset_at（ISO 字符串）
-        的字典序最大值（ISO 串字典序即时间序）；无窗口 / 全 None →
-        None。
+      - reset_at（v2.5.2 阻塞窗口径）：snapshot 先经 quota.parser.
+        evaluate 求逐窗四态（snapshot 的 §27 原始窗口不带逐窗
+        status），再取 EXHAUSTED 阻塞窗 reset_at（ISO 字符串）的
+        字典序最大值（ISO 串字典序即时间序；与 parser.plan_resume
+        的 _blocked_resets 同口径——未耗尽窗口的 reset 绝不参与，
+        避免未耗尽周窗把等待目标推迟数天）；无阻塞窗 / 无窗口 /
+        阻塞窗全 None → None。
     纯诊断字段：view 不参与任务层任何授权 / 预算判定（runtime.task
     的 _validate_quota_view 只闸 status 词汇）。
     """
+    from runtime.quota import parser as quota_parser  # 函数内 import
     from runtime.quota import resolver  # 函数内 import：monkeypatch 友好
     detail = resolver.resolve_quota_detail(repo_root,
                                            force_refresh=force_refresh)
     snapshot = detail.get("snapshot")
-    windows = snapshot.get("windows") if isinstance(snapshot, dict) else None
+    evaluation = (quota_parser.evaluate(snapshot)
+                  if isinstance(snapshot, dict) else None)
+    windows = (evaluation.get("windows")
+               if isinstance(evaluation, dict) else None)
     reset_values = []
     if isinstance(windows, list):
         for window in windows:
-            value = window.get("reset_at") if isinstance(window, dict) \
-                else None
+            if not isinstance(window, dict) \
+                    or window.get("status") != "EXHAUSTED":
+                continue  # v2.5.2：只有阻塞窗（EXHAUSTED）的 reset 参与
+            value = window.get("reset_at")
             if isinstance(value, str) and value != "":
                 reset_values.append(value)
     return {
@@ -464,11 +529,12 @@ def _quota_resume_decision(repo_root, task_id, force_refresh=False) -> int:
     同 quota-wait 方式取观测 view 传入决策原语；输出单行 JSON
     {task_id, decision, quota_observation}——decision 为任务层原样
     决策 dict（action / reason，resume-authorized 时另含
-    workflow_run_id / resume_count_after 暂存计数）。v2.5 精确唤醒
-    输出扩展（I4/W3，向后兼容附加键）：action=remain-waiting 且观测
-    为 EXHAUSTED 时，decision 只读透传本次观测的 reset_at
-    （quota_view.reset_at，ISO 字符串或 null）——纯诊断透传，供主
-    会话换算 one-shot delayMinutes，不参与任何判定；UNKNOWN / no-op
+    workflow_run_id / resume_count_after 暂存计数）。v2.5.2 双通道
+    唤醒输出扩展（I4/W3，向后兼容附加键）：action=remain-waiting 且
+    观测为 EXHAUSTED 时，decision 只读透传本次观测的 reset_at
+    （quota_view.reset_at，ISO 字符串或 null，阻塞窗口径）——纯诊断
+    透传，供主会话按精度层睡眠模板换算后台睡眠目标（reset_at +
+    grace），不参与任何判定；UNKNOWN / no-op
     分支保持既有输出形状，绝不透传；既有键（action / reason /
     workflow_run_id / resume_count_after）一律不动。绝不调用宿主
     ResumeWorkflowRun（宿主动作归主会话；恢复执行与随后的
@@ -602,8 +668,7 @@ def _v24_compile(dag_json_path, task_ref=None, out_path=None) -> int:
 
     # 5) 输出
     if out_path is not None:
-        with open(out_path, "w", encoding="utf-8", newline="\n") as handle:
-            handle.write(source)
+        pathlib.Path(out_path).write_bytes(source.encode("utf-8"))
         _emit({"ok": True, "stages": len(stages), "nodes": len(nodes),
                "out": out_path})
     else:
@@ -900,6 +965,155 @@ def _quota_continuity_preflight(repo_root, task_id) -> int:
     return 0 if report.get("ready") is True else 2
 
 
+# —— v2.5.2 W2（D1）：任务生命周期 CLI 面 ——
+#
+# 六个子命令全部是 runtime.task 既有公共 API 的薄壳（完善命令与文档，
+# 模型不需要自己找、不允许冲突命令）：CLI 侧只做词汇 / 参数值 /
+# --dag 文件形状的先闸（参数值非法 → 退出码 2，与 review-record 的
+# verdict 先闸同口径），runtime.task 的 ValueError 拒绝 → _TaskRejected
+# （退出码 1）。set_status / set_phase 保持内部原语不上面——生命周期
+# 迁移一律走具名命令（task-complete / task-fail / task-cancel /
+# exit-waiting）。
+
+def _load_dag_nodes(dag_path):
+    """task-create --dag 的 DAG JSON 读入：兼容 v24-compile 同款
+    {nodes: [...]} 对象与裸节点数组两种形态，返回节点列表。
+
+    文件不可读 / 非法 JSON / 既非对象又非数组 / nodes 非 array →
+    ValueError（参数值非法口径，退出码 2）。节点形状与全图依赖校验
+    （work_unit.validate_node + dependency.graph_errors，错误聚合
+    一次报出）同在本函数完成——与 v24-compile 对同一文件格式的
+    处理一致。"""
+    from runtime import dependency, work_unit  # 函数内 import
+    try:
+        with open(dag_path, "r", encoding="utf-8") as handle:
+            document = json.load(handle)
+    except OSError as exc:
+        raise ValueError(
+            "task-create：无法读取 DAG JSON %r：%s" % (dag_path, exc)
+        ) from exc
+    except ValueError as exc:  # json.JSONDecodeError 是 ValueError 子类
+        raise ValueError(
+            "task-create：DAG JSON 解析失败（%s）：%s"
+            % (dag_path, exc)) from exc
+    if isinstance(document, list):
+        nodes = document
+    elif isinstance(document, dict):
+        nodes = document.get("nodes")
+    else:
+        nodes = None
+    if not isinstance(nodes, list):
+        raise ValueError(
+            "task-create：DAG JSON 顶层必须是节点数组或含 nodes 数组的"
+            " JSON 对象，%r 顶层为 %s"
+            % (dag_path, type(document).__name__))
+    errors = []
+    for node in nodes:
+        errors.extend(work_unit.validate_node(node))
+    errors.extend(dependency.graph_errors(nodes))
+    if errors:
+        raise ValueError("task-create：%s" % "；".join(errors))
+    return nodes
+
+
+def _task_create(repo_root, task_id, goal, mode, assurance,
+                 dag_path=None) -> int:
+    """task-create：创建并持久化 v2.4 任务（task.create_task 薄壳）。
+
+    CLI 侧先闸（参数值非法 → 退出码 2）：goal 非空；mode ∈
+    state.ROUTE_MODES；assurance ∈ state.ASSURANCE_LEVELS；--dag
+    文件形状见 _load_dag_nodes。runtime.task 拒绝（任务已存在 /
+    状态非法聚合）→ _TaskRejected（退出码 1）。成功输出单行 JSON
+    {task_id, status, route} 并落 route_selected 事件。"""
+    from runtime import task  # 函数内 import：monkeypatch 友好
+    if not isinstance(goal, str) or goal == "":
+        raise ValueError(
+            "task-create：goal 必须是非空字符串，得到 %r" % (goal,))
+    if mode not in state.ROUTE_MODES:
+        raise ValueError(
+            "task-create：mode %r 不在合法取值内（%s）"
+            % (mode, ", ".join(state.ROUTE_MODES)))
+    if assurance not in state.ASSURANCE_LEVELS:
+        raise ValueError(
+            "task-create：assurance %r 不在合法取值内（%s）"
+            % (assurance, ", ".join(state.ASSURANCE_LEVELS)))
+    dag_nodes = _load_dag_nodes(dag_path) if dag_path is not None else ()
+    try:
+        st = task.create_task(
+            repo_root, task_id, goal,
+            {"mode": mode, "assurance": assurance}, dag_nodes=dag_nodes)
+    except ValueError as exc:
+        raise _TaskRejected(str(exc)) from exc
+    _emit({"task_id": task_id, "status": st.get("status"),
+           "route": st.get("route")})
+    return 0
+
+
+def _record_validation(repo_root, task_id, raw_status, summary=None,
+                       commands=None) -> int:
+    """record-validation：记录任务级验证结果（task.record_validation
+    薄壳）。
+
+    CLI 侧先闸（参数值非法 → 退出码 2）：status ∈
+    state.VALIDATION_STATUSES；summary 给出时非空；commands 各项
+    非空（--commands 可重复，每次恰一条命令）。runtime.task 拒绝
+    （任务缺失 / v2.3 遗留 / 终态冻结 / change_id 结构性错误）→
+    _TaskRejected（退出码 1）。成功输出单行 JSON {task_id,
+    validation}（validation 块与 state 落盘、journal
+    validation_recorded 事件同源同字段）。"""
+    from runtime import task  # 函数内 import：monkeypatch 友好
+    if raw_status not in state.VALIDATION_STATUSES:
+        raise ValueError(
+            "record-validation：status %r 不在合法取值内（%s）"
+            % (raw_status, ", ".join(state.VALIDATION_STATUSES)))
+    if summary is not None and summary == "":
+        raise ValueError(
+            "record-validation：summary 必须是非空字符串（省略即 None）")
+    if commands is not None:
+        for item in commands:
+            if not isinstance(item, str) or item == "":
+                raise ValueError(
+                    "record-validation：commands 的各项必须是非空字符串"
+                    "（--commands 每次恰一条命令）")
+    try:
+        st = task.record_validation(repo_root, task_id, raw_status,
+                                    summary=summary, commands=commands)
+    except ValueError as exc:
+        raise _TaskRejected(str(exc)) from exc
+    _emit({"task_id": task_id, "validation": st.get("validation")})
+    return 0
+
+
+def _task_terminal(repo_root, task_id, finish_func, func_name) -> int:
+    """task-complete / task-fail / task-cancel 的公共终态薄壳：
+    调用 task.complete / fail / cancel（终态迁移 + 专属 journal 事件
+    + 写者守卫幂等释放 + 同终态重放放行），runtime.task 拒绝（任务
+    缺失 / v2.3 遗留 / 跨终态迁移）→ _TaskRejected（退出码 1）。
+    成功输出单行 JSON {task_id, status}。"""
+    try:
+        st = finish_func(repo_root, task_id)
+    except ValueError as exc:
+        raise _TaskRejected("%s：%s" % (func_name, exc)) from exc
+    _emit({"task_id": task_id, "status": st.get("status")})
+    return 0
+
+
+def _exit_waiting(repo_root, task_id) -> int:
+    """exit-waiting：从 waiting_quota 手动恢复回 active
+    （task.exit_waiting_quota 薄壳；自动恢复路径落账走既有
+    quota-resume-confirm）。原状态已 active 幂等；runtime.task 拒绝
+    （任务缺失 / v2.3 遗留 / 迁移矩阵外来源如 waiting_user）→
+    _TaskRejected（退出码 1）。成功输出单行 JSON {task_id, status}
+    并在真实迁移时落 waiting_quota 事件（direction: exit）。"""
+    from runtime import task  # 函数内 import：monkeypatch 友好
+    try:
+        st = task.exit_waiting_quota(repo_root, task_id)
+    except ValueError as exc:
+        raise _TaskRejected(str(exc)) from exc
+    _emit({"task_id": task_id, "status": st.get("status")})
+    return 0
+
+
 def _dispatch(args) -> int:
     """argv 分发；子命令 / 参数个数错误抛 _UsageError（退出码 2）。"""
     if not args:
@@ -1055,15 +1269,16 @@ def _dispatch(args) -> int:
         return _v24_record_run(rest[0], rest[1], artifact=artifact)
     if cmd == "workflow-model-select":
         # 位置参数 <models-json> + 旗标对（--model <exact-id> /
-        # --task-ref <task_id>，各至多一次、顺序不限）→ 一、三或
-        # 五个参数
-        if len(rest) not in (1, 3, 5):
+        # --task-ref <task_id> / --repo-root <path>，各至多一次、
+        # 顺序不限）→ 一、三、五或七个参数
+        if len(rest) not in (1, 3, 5, 7):
             raise _UsageError(
                 "workflow-model-select 需要 <models-json> "
-                "[--model <exact-id>] [--task-ref <task_id>] 一、三或"
-                "五个参数。" + USAGE)
+                "[--model <exact-id>] [--task-ref <task_id>] "
+                "[--repo-root <path>] 一、三、五或七个参数。" + USAGE)
         model = None
         task_ref = None
+        repo_root = None
         index = 1
         while index < len(rest):
             if index + 1 >= len(rest):
@@ -1075,14 +1290,17 @@ def _dispatch(args) -> int:
                 model = value
             elif flag == "--task-ref" and task_ref is None:
                 task_ref = value
+            elif flag == "--repo-root" and repo_root is None:
+                repo_root = value
             else:
                 raise _UsageError(
                     "workflow-model-select 的可选参数只接受 "
-                    "--model <exact-id> 与 --task-ref <task_id>"
-                    "（各至多一次）。" + USAGE)
+                    "--model <exact-id>、--task-ref <task_id> 与 "
+                    "--repo-root <path>（各至多一次）。" + USAGE)
             index += 2
         return _workflow_model_select(rest[0], model=model,
-                                      task_ref=task_ref)
+                                      task_ref=task_ref,
+                                      ledger_root=repo_root)
     if cmd == "worker-model-pin":
         if len(rest) != 3:
             raise _UsageError(
@@ -1108,6 +1326,75 @@ def _dispatch(args) -> int:
                 "quota-continuity-preflight 需要 <repo_root> <task_id> "
                 "两个参数。" + USAGE)
         return _quota_continuity_preflight(rest[0], rest[1])
+    if cmd == "task-create":
+        # 位置参数 <repo_root> <task_id> <goal> <mode> <assurance> +
+        # 可选旗标对 --dag <path> → 五或七个参数
+        if len(rest) not in (5, 7):
+            raise _UsageError(
+                "task-create 需要 <repo_root> <task_id> <goal> <mode> "
+                "<assurance> [--dag <path>] 五或七个参数。" + USAGE)
+        dag_path = None
+        if len(rest) == 7:
+            if rest[5] != "--dag":
+                raise _UsageError(
+                    "task-create 的可选参数只接受 --dag <path>。" + USAGE)
+            dag_path = rest[6]
+        return _task_create(rest[0], rest[1], rest[2], rest[3], rest[4],
+                            dag_path=dag_path)
+    if cmd == "record-validation":
+        # 位置参数 <repo_root> <task_id> <passed|failed> + 旗标对
+        # （--summary <s> 至多一次；--commands <s> 可重复，每次恰
+        # 一条命令）——旗标恒成对出现在位置参数之后
+        if len(rest) < 3 or (len(rest) - 3) % 2 != 0:
+            raise _UsageError(
+                "record-validation 需要 <repo_root> <task_id> "
+                "<passed|failed> [--summary <s>] [--commands <s>] ..."
+                "（旗标成对出现）。" + USAGE)
+        summary = None
+        commands = []
+        index = 3
+        while index < len(rest):
+            flag, value = rest[index], rest[index + 1]
+            if flag == "--summary" and summary is None:
+                summary = value
+            elif flag == "--commands":
+                commands.append(value)
+            else:
+                raise _UsageError(
+                    "record-validation 的可选参数只接受 --summary <s>"
+                    "（至多一次）与 --commands <s>（可重复，每次恰一条"
+                    "命令）。" + USAGE)
+            index += 2
+        return _record_validation(rest[0], rest[1], rest[2],
+                                  summary=summary,
+                                  commands=commands if commands else None)
+    if cmd == "task-complete":
+        if len(rest) != 2:
+            raise _UsageError(
+                "task-complete 需要 <repo_root> <task_id> 两个参数。"
+                + USAGE)
+        from runtime import task  # 函数内 import：monkeypatch 友好
+        return _task_terminal(rest[0], rest[1], task.complete,
+                              "task-complete")
+    if cmd == "task-fail":
+        if len(rest) != 2:
+            raise _UsageError(
+                "task-fail 需要 <repo_root> <task_id> 两个参数。" + USAGE)
+        from runtime import task  # 函数内 import：monkeypatch 友好
+        return _task_terminal(rest[0], rest[1], task.fail, "task-fail")
+    if cmd == "task-cancel":
+        if len(rest) != 2:
+            raise _UsageError(
+                "task-cancel 需要 <repo_root> <task_id> 两个参数。"
+                + USAGE)
+        from runtime import task  # 函数内 import：monkeypatch 友好
+        return _task_terminal(rest[0], rest[1], task.cancel, "task-cancel")
+    if cmd == "exit-waiting":
+        if len(rest) != 2:
+            raise _UsageError(
+                "exit-waiting 需要 <repo_root> <task_id> 两个参数。"
+                + USAGE)
+        return _exit_waiting(rest[0], rest[1])
     raise _UsageError("未知子命令 %r。" % cmd + USAGE)
 
 
@@ -1122,7 +1409,9 @@ def main(argv=None) -> int:
     恢复生命周期操作被 runtime.task 拒绝）/ _AutomationRejected
     （auto 连续性武装操作面被 runtime.task 拒绝）/ _PinRejected
     （worker-model-pin 写入被 runtime.task 拒绝）/ _PinTaskRejected
-    （workflow-model-select --task-ref 消费面被任务层拒绝）→ 1；
+    （workflow-model-select --task-ref 消费面被任务层拒绝）/
+    _TaskRejected（v2.5.2 任务生命周期操作面被 runtime.task 拒绝）
+    → 1；
     其余意外异常 → 1（错误 JSON 含异常类型名，stdout 契约不破）。
     preflight 的 ready=false 阻断是函数内显式返回 2，不经异常路径。
     """
@@ -1133,7 +1422,8 @@ def main(argv=None) -> int:
         _emit({"error": str(exc)})
         return 2
     except (_TaskMissing, _ReviewRejected, _QuotaRejected,
-            _AutomationRejected, _PinRejected, _PinTaskRejected) as exc:
+            _AutomationRejected, _PinRejected, _PinTaskRejected,
+            _TaskRejected) as exc:
         _emit({"error": str(exc)})
         return 1
     except Exception as exc:  # 意外兜底
