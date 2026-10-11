@@ -99,8 +99,9 @@
         任务级 worker 模型 pin 写入（v2.5 I1，授权一次任务内默认）：
         把经形态预检的 exact id 写入顶层 worker_model 键。形状预检
         采用 runtime.workflow.submission 的形态约定（account: 前缀、
-        account:<账户段>/<模型段> 两段非空、恰以 FLASH_MODEL_SUFFIX
-        结尾、文本模型后缀专门拒绝）但绝不查宿主模型面——写入时点
+        account:<账户段>/<模型段> 两段非空、模型段以 Flash 档后缀
+        "-Flash" 结尾——v2.5.2 W5 起为版本无关档位判据、非 Flash 档
+        专门拒绝）但绝不查宿主模型面——写入时点
         与提交时点宿主面可能不同，对账留给消费点（CLI
         workflow-model-select --task-ref 每次对账 configured 集合）。
         非终态任务才可写（终态冻结）；同值幂等成功（零写盘）；异值
@@ -1044,8 +1045,9 @@ def pin_worker_model(repo_root, task_id, model_id) -> dict:
 
     - model_id 形状预检采用 runtime.workflow.submission 的形态约定
       （account: 前缀、account:<账户段>/<模型段> 两段非空、账户段
-      不含 '/'、全 id 无空白、恰以 FLASH_MODEL_SUFFIX 结尾、文本
-      模型后缀专门拒绝）——经公共函数 validate_worker_model 的纯
+      不含 '/'、全 id 无空白、模型段以 Flash 档后缀 "-Flash" 结尾
+      且长于后缀本身——v2.5.2 W5 版本无关档位判据，非 Flash 档
+      模型专门拒绝）——经公共函数 validate_worker_model 的纯
       形状预检（configured 缺省形态），结构性失败转 ValueError
       （本模块错误口径）；绝不查宿主模型面：写入时点与提交时点
       宿主 configured 集合可能不同，对账留给消费点

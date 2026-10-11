@@ -2,12 +2,11 @@
 
 [English](./README.md) | **简体中文**
 
-![Version](https://img.shields.io/badge/version-2.5.1-blue.svg)
+![Version](https://img.shields.io/badge/version-2.5.2-blue.svg)
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
 ![ZCode Plugin](https://img.shields.io/badge/ZCode-plugin-green.svg)
 ![Python](https://img.shields.io/badge/python-3.8%2B-blue.svg)
 ![Models](https://img.shields.io/badge/models-GLM--5.3%20%2F%20GLM--5.3--Flash-orange.svg)
-![CI](https://github.com/Chengy257/glm-conductor/actions/workflows/validate.yml/badge.svg)
 
 **面向 ZCode 中 GLM 编码智能体的选择性路由、原生 Workflow 执行、最小确定性保障与可选有界额度恢复。**
 
@@ -22,7 +21,7 @@ GLM Conductor 让强模型专注于架构规划、全局判断与最终验收，
 - **最大化强模型杠杆率：** 将昂贵的 GLM-5.3 推理算力聚焦于需求澄清、架构设计、路由仲裁、集成验证与最终验收；将边界明确的代码实现委托给经济快速的 Workflow 工作者。
 - **基于显式契约的委派：** 委派实施前先编译规范 DAG，在开工前明确定义节点目标、上下游依赖、文件所有权边界、接口规范与环境约束。
 - **确定性 Native Workflow 执行：** 静态 DAG 纯代码编译为确定性 TypeScript 原生工作流，由 ZCode 原生调度运行，零多余的在途运行状态镜像。
-- **工作者模型选型硬闸：** 强制要求工作者必须解析并绑定 provider 限定的 `/GLM-5.3-Flash`（`workflow-model-select`），从协议层根除意外继承高成本主会话模型的隐患。
+- **工作者模型选型硬闸：** 强制要求工作者必须解析并绑定 provider 限定的 Flash 档模型（版本无关 `-Flash` 档位判据，`workflow-model-select`），从协议层根除意外继承高成本主会话模型的隐患。
 - **最小确定性质量保障：**
   - **`change_id` 唯一新鲜度原语：** 基于 `git rev-parse HEAD` 与任务所有权范围内的实际改动文件生成 SHA-256 摘要（换行符 CRLF 规范化）；后续任何文件改动必使前置验证或审查自动失效。
   - **粗粒度仓库写者守卫：** 保证一个 Git 仓库同一时刻至多一个活跃 Conductor 写工作流，无脆弱的按时间自动过期（无 TTL），仅在收尾或人工运维时释放。
@@ -99,7 +98,7 @@ GLM Conductor 让强模型专注于架构规划、全局判断与最终验收，
 
 ### 工作者模型 Pin 与提交硬闸
 Workflow 工作者绝不继承会话模型。提交必须经 `workflow-model-select` 选型硬闸：
-1. 宿主配置中恰有一个 provider 限定的 Flash 模型（`account:.../GLM-5.3-Flash`）时自动选定；
+1. 宿主配置中恰有一个 provider 限定的 Flash 模型（`account:.../<模型段>-Flash`）时自动选定；
 2. 存在多候选歧义时，在启动问答中由用户一次性选定，并作为任务级 `worker_model` pin 记录；
 3. 后续提交携带 `--task-ref` 自动消费该 pin；若 pin 的模型在当前宿主列表已失效，消费点直接拒绝（退出码 2），绝不静默回退或自动切模。
 
@@ -129,7 +128,7 @@ Workflow 工作者绝不继承会话模型。提交必须经 `workflow-model-sel
 遇到供应商配额耗尽的委派任务可进入 `waiting_quota` 状态，并经原生 Scheduled Task 唤醒：
 - **先武装后开工（Arm-Before-Work）：** 启用自动恢复的任务必须在工作前创建并绑定原生 Scheduled Task（`quota-automation-bind`），并通过 `quota-continuity-preflight` 预检（退出码 0）。
 - **有界预算保护：** 每次实际恢复消耗 1 次 `max_resumes` 预算；预算耗尽后任务转为 `waiting_user` 停靠，绝不无休止空转。
-- **周期定时载体与精确唤醒并存：** Recurring 定时任务作为武装载体与保底，同时支持按观测到的 `reset_at` 加发零状态 one-shot 精确唤醒。
+- **双通道额度唤醒（v2.5.2）：** 启动即建的 Recurring 定时任务作为终身地板载体（抗应用重启、创建后不再变更），阻塞窗 `reset_at` + grace 的后台睡眠提供秒级精确唤醒——两种触发源共用同一统一唤醒协议。
 
 ---
 
@@ -228,7 +227,7 @@ python plugins/glm-conductor/runtime/cli.py writer-acquire . <task_id>
 | 子命令 | 功能说明 |
 | --- | --- |
 | `v24-compile <dag-json> [--task-ref <id>] [--out <path>]` | 将规范静态 DAG 编译为确定性 TypeScript 原生工作流代码。 |
-| `workflow-model-select <models-json> [--model <id>] [--task-ref <id>]` | 工作者模型选型硬闸，自动筛选 Flash 模型或消费任务 pin。 |
+| `workflow-model-select <models-json> [--model <id>] [--task-ref <id>] [--repo-root <path>]` | 工作者模型选型硬闸，自动筛选 Flash 模型或消费任务 pin。 |
 | `worker-model-pin <repo> <task_id> <exact-id>` | 写入用户授权的任务级 worker 模型 pin。 |
 | `writer-acquire <repo> <task_id> [--run-id <id>]` | 获取仓库级写预约（独占写入保护）。 |
 | `writer-release <repo> <task_id> [--force]` | 释放仓库写预约（`--force` 供运维强制清理残留）。 |
@@ -241,6 +240,10 @@ python plugins/glm-conductor/runtime/cli.py writer-acquire . <task_id>
 | `quota-resume-decision <repo> <task_id>` | 定时唤醒时的幂等决策（无副作用判断）。 |
 | `quota-resume-confirm <repo> <task_id>` | 在宿主成功接收 resume 调用后确认落账恢复计数。 |
 | `quota-automation-bind / clear / preflight` | 管理 Scheduled Task 连续性武装生命周期。 |
+| `task-create <repo> <task_id> <goal> <mode> <assurance> [--dag <path>]` | 经生命周期 CLI 创建任务（`runtime.task` 薄壳映射）。 |
+| `record-validation <repo> <task_id> <passed\|failed> [--summary <s>] [--commands <s>]` | 在任务台账上记录新鲜验证结果。 |
+| `task-complete / task-fail / task-cancel <repo> <task_id>` | 终态生命周期迁移（成功 / 失败 / 用户取消）。 |
+| `exit-waiting <repo> <task_id>` | 手动退出 `waiting_quota`（自动路径走 `quota-resume-confirm`）。 |
 
 ### 仓库运维工具
 
@@ -270,7 +273,6 @@ glm-conductor/
 │       ├── state.py                # 七态任务状态机与 schema 校验
 │       └── cli.py                  # 运行时 CLI 统一操作入口
 ├── scripts/                        # 契约校验、冒烟测试与遗留任务归档脚本
-├── tests/                          # 完备的单元测试套件 (790+ 项测试)
 └── docs/                           # 架构规格文档、核心概念、排障手册与路线图
 ```
 

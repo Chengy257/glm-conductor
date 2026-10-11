@@ -5,26 +5,32 @@
 ## Lifecycle
 
 ```
-任务开始（orchestration 声明 SELECTIVE ROUTE，create_task 落 state.json）
+任务开始（orchestration 声明 SELECTIVE ROUTE，§6.0 单轮三问问答，
+   task-create 落 state.json）
    |
    v
-[武装]（仅 auto/until_done，arm-before-work：quota-resume-authorize
-   -> 创建原生未来 Scheduled Task -> quota-automation-bind
-   -> quota-continuity-preflight PASS——调度创建失败绝不谎称已启用）
+[武装]（仅 auto/until_done；arm-before-work + 建立动作优先：问答确认
+   即同批建立，全部先于 CreateWorkflow——quota-resume-authorize
+   -> 宿主 CronCreate 地板载体（intervalUnit=hourly, interval=问答
+   第三问确认值（默认 1）, recurring=true，终身不变）-> quota-automation-bind
+   -> quota-continuity-preflight PASS -> 发首个精度睡眠到阻塞窗
+   reset_at+300s——睡眠模板见下「精度层睡眠模板」；创建失败绝不谎称已启用）
    |
    v
-[执行] delegate/full → 原生 Workflow 运行（显式 Flash 模型选型 ->
-   CreateWorkflow(subagent_model=精确 Flash id) -> record_workflow_run 绑定 run id）
+[执行] delegate/full → 原生 Workflow 运行（显式 Flash 档模型选型 ->
+   CreateWorkflow(subagent_model=选型返回值) -> v24-record-run 绑 run id）
    |
    v（实质性里程碑 -> 写 CONTINUITY CHECKPOINT）
    |
    v（中断：会话结束 / 额度耗尽 -> waiting_quota / Workflow 停摆）
-[再激活]（SessionStart 恢复注入 / 原生 Scheduled Task 唤醒 / 用户手动恢复）
+[再激活]（SessionStart 恢复注入 / 双通道唤醒——精度睡眠退出或地板触发，
+   同一唤醒协议 / 用户手动恢复）
    |
    v
 八步恢复检查（repository > checkpoint > 会话记忆）
    |
-   +-- 目标已完成 -> 终态清理（先删 automation、确认删除才清绑定，再删本任务目录）
+   +-- 目标已完成 -> 终态清理（删除尝试按三态规律预期失败 -> 如实上报
+   |     automation id -> 用户手动删除 -> 确认后才清绑定，再删本任务目录）
    +-- 可恢复 -> 同 run id resume（额度可用 + 授权 + 预算有余 + auto 已武装/preflight ready 时）
    +-- 不可恢复（额度耗尽 / run 已死）-> 停泊等待或按仓库现状重建
 ```
@@ -166,19 +172,19 @@ events.jsonl 任务级事件词汇恰十个（`runtime.task.TASK_JOURNAL_EVENTS`
 5. **判断先前变更是否仍在**：checkpoint 声称已完成的改动，是否能在 diff 与仓库中观察到
 6. **判断目标是否已完成**：已完成则停止实施，进入 Completion Cleanup
 7. **检查最新验证状态**：validation 记录是否仍新鲜（change_id 与当前一致）、还剩哪些验证未做
-8. **从 NEXT ACTION 恢复**：重新输出 SELECTIVE ROUTE 声明后，从 NEXT ACTION 继续执行（委派任务先走「同 run id resume」，见 SKILL.md；auto 唤醒路径必经幂等决策 `resume-authorized` **且** `quota-continuity-preflight` ready 两道硬闸才许 ResumeWorkflowRun，one-shot 路径先创建后继再 resume）
+8. **从 NEXT ACTION 恢复**：重新输出 SELECTIVE ROUTE 声明后，从 NEXT ACTION 继续执行（委派任务先走「同 run id resume」，见 SKILL.md；auto 唤醒路径必经幂等决策 `resume-authorized` **且** `quota-continuity-preflight` ready 两道硬闸才许 ResumeWorkflowRun；收尾必滚动续臂——发下一个精度睡眠到本次观测阻塞窗 reset_at+300s，凡任务未终态）
 
 两条禁令：
 
 - 禁止唤醒后盲目重播旧指令
 - 禁止为恢复 checkpoint 回滚仓库新改动——checkpoint 与仓库不一致时，分析变化来源、更新认知、以仓库为准
 
-## 结构化 Resume Prompt（定时任务用）
+## 结构化 Resume Prompt（地板载体触发内容）
 
-以下 prompt 用作宿主原生 Scheduled Task 的触发内容。它必须自包含：不依赖任何会话上下文，凭此 prompt + 指定任务状态 + 仓库状态即可恢复。**占位符必须在创建定时任务时替换为真实值**。prompt 只携带稳定标识与恢复指令——绝不嵌入完整 workflow 源码、秘密 / 凭证、或过期额度假设（额度在唤醒时现测）：
+以下 prompt 用作地板 recurring Scheduled Task 的触发内容。它必须自包含：不依赖任何会话上下文，凭此 prompt + 指定任务状态 + 仓库状态即可恢复。**占位符必须在创建载体时替换为真实值**。prompt 只携带稳定标识与恢复指令——绝不嵌入完整 workflow 源码、秘密 / 凭证、过期额度假设（额度在唤醒时现测）、**绝不枚举工具清单**（动作优先，去 priming）：
 
 ```
-Resume GLM Conductor task:
+Resume GLM Conductor task. First action: run the idempotent wake decision.
 
 TASK_ID: <id>
 REPOSITORY ROOT: <repo_root>
@@ -189,45 +195,32 @@ First load the current task state (.glm-conductor/tasks/<id>/state.json),
 the specified checkpoint, and the current repository state. Load task
 state before taking any action.
 
-Refresh the quota observation at this wake (quota-resume-decision carries
-a fresh observation; never rely on stale quota assumptions).
+Run the wake decision first, with a fresh quota observation:
+cli.py quota-resume-decision <repo_root> <task_id> --force-refresh
 
-Inspect the exact workflow_run_id recorded in task state.
+Then follow the unified wake protocol by that decision:
+- resume-authorized AND quota-continuity-preflight ready: resume the
+  exact workflow_run_id from task state via the host resume action,
+  then record it via cli.py quota-resume-confirm <repo_root> <task_id>
+  once the host accepts.
+- active with a healthy run: no-op.
+- active with a stalled run: treat as recovery — resume if the run is
+  resumable, otherwise rebuild from repository reality; never replay
+  finished work.
+- remain-waiting: wait (the decision output carries this observation's
+  blocking-window reset_at for the re-arm target).
+- waiting-user or terminal: no-op (terminal proceeds to cleanup).
 
-If a workflow_run_id is recorded and resumable, follow the resume gates
-below. Otherwise rebuild from repository reality; never replay finished
-work.
+Unless the task is terminal, finish this wake turn by re-arming the
+precision sleep: copy the background sleep template verbatim from the
+continuity long-horizon contract, targeting the blocking-window
+reset_at from this turn's decision output plus 300 seconds. If
+reset_at is null or already past, skip the sleep. Never compute the
+delay yourself — the template computes it in bash.
 
-Run quota-continuity-preflight before any automatic resume. Resume the
-same run id via ResumeWorkflowRun only when BOTH hold: the decision is
-resume-authorized AND the preflight is ready. After the host accepts the
-resume, record it via quota-resume-confirm.
-
-If the task is already terminal, perform no further implementation:
-delete the scheduled automation bound to this task once, clear the bound
-automation id only after the deletion is confirmed, then stop.
-
-If the task is waiting on the user, do not resume automatically.
-
-If recurring scheduling is in use, keep the activation in place — do not
-delete or recreate it on a successful wake. If a one-shot activation was
-consumed, create and bind the successor activation and pass the
-continuity preflight BEFORE resuming.
-
-If the task remains waiting on quota with an observed reset_at, the
-first action is the successor one-shot dispatch: compute
-delay_minutes = ceil((reset_at + grace) - now) and create an auxiliary
-one-shot CronCreate with that delay. If delay <= 0, do not schedule.
-This dispatch is zero-state — no bind, no state write, no cleanup; never
-CronUpdate the recurring activation. Re-observe the quota freshly on
-every wake and never trust a stale reset_at.
-
-If the host rejects the one-shot creation because this session already
-owns an automation (observed 2026-10-03: "Cannot create a scheduled task
-inside a session that already belongs to a scheduled task"), report the
-dispatch as unavailable for this round and rely on the recurring
-fallback — never retry storms, never delete/recreate the recurring to
-free the slot, never claim precise wake is armed when it is not.
+The recurring floor automation bound to this task stays in place for
+its whole lifetime — never update, delete, or recreate it from a wake
+turn.
 
 Authorizations recorded by the launch interview hold for the whole task
 lifetime: auto continuity was enabled with a bounded max_resumes budget,
@@ -248,16 +241,32 @@ Perform ROUTE REASSESSMENT only when newly observed evidence changes
 delegability or assurance.
 ```
 
-## Scheduled Trigger（原生 Scheduled Task）
+## 精度层睡眠模板（抄写式——bash 动态计算秒数，模型零算术）
 
-无人值守恢复映射到宿主原生定时任务：
+启动轮武装与每次唤醒轮 / 停靠轮收尾（凡任务未终态）时，把 `<reset_at>` 代换为**本次观测阻塞窗 reset_at**（quota-resume-decision 输出的 `decision.reset_at`，ISO 字符串，如 `2026-10-11T14:33:42Z`；v2.5.2 起为阻塞窗口径——未耗尽窗口的 reset 绝不参与），以 Bash 工具 **run_in_background 后台**逐字执行：
 
-- **触发内容** = 上述结构化 resume prompt（已替换 TASK_ID、REPOSITORY ROOT 与路径占位符）
-- **载体优先级** = **recurring 优先**：一次创建持续唤醒，激活保持到终态清理、显式取消或运营者批准的策略变更；recurring 激活成功唤醒后**不删、不重建**（INV-CONT-03），重复唤醒天然安全
-- **one-shot 后备**（仅 recurring 不可用或刻意不用时）：one-shot 激活触发即失效，唤醒时必须**先创建后继**——创建后继未来激活 → `quota-automation-bind` 绑后继 → `quota-continuity-preflight` PASS → 才 ResumeWorkflowRun（INV-CONT-02：后继武装先于 resume）
-- **one-shot id 的安全替换序列**（宿主不支持先建后删时）：对账已触发 / 现存 automation → `quota-automation-clear` 清旧 → 创建后继 → bind 后继 → preflight PASS → resume。宿主支持先建后删时，先创建后继再经显式对账序列原子迁移绑定——**绝不在无后继时 clear**（清掉唯一唤醒能力而任务仍需自动续跑，长自动续跑即失去唤醒能力）
-- **精确唤醒 one-shot 加发（与 recurring 并存，v2.5）**：recurring 兜底不动（INV-CONT-03）——唤醒轮决策 remain-waiting 且已观测 `reset_at` 时，第一动作=后继 one-shot 先行：`delay = (reset_at + grace) - now` 分钟向上取整，`CronCreate` one-shot `delayMinutes`；`delay <= 0` 不调度；加发零状态（不 bind、不落 state、不清理，触发即自失效）、重复加发幂等兜底（早醒无害）；**绝不用 CronUpdate**；唤醒轮 / 恢复轮绝不弹问，任务级 worker 模型 pin 与问答授权事实随任务全生命周期生效（pin 失效即阻断等待用户）
-- **下一窗口绝不硬编码推导**：不以「加 5 小时」推算下一次唤醒——只依据 provider 复位证据（观测 reset_at）或受支持的 recurring / retry 计划
+```
+echo "precision-sleep until <reset_at>+300s, launched $(date -u +%Y-%m-%dT%H:%M:%SZ)"; sleep $(( $(date -u -d "<reset_at>" +%s) + 300 - $(date -u +%s) )); echo "precision-wake $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+```
+
+模板纪律：
+
+- **模型零算术**：目标秒数由 bash 现算（`date -u -d` 解析 ISO 时刻 + 300 宽限 − 当前时刻），模型绝不自己换算毫秒 / 分钟 / 时区
+- **后台运行**：以 run_in_background 发起——任务退出自动唤起会话（实测秒级精确 + 8-11s 唤起延迟）；等待期零模型轮、零额度消耗
+- **reset_at 为 null / 缺失**（无阻塞窗）→ 不发睡眠，等待地板节奏
+- **差值 <= 0**（目标已过）→ 不发睡眠，本轮按决策处理（额度已恢复则走 resume 路径）
+- **重复睡眠无害**：启动臂与停靠补发并存由决策幂等吸收（早醒 → 新观测 → 新决策）
+- **不抗应用重启**：重启杀掉睡眠后由地板兜底，首个地板唤醒收尾续臂即自愈——不是故障
+
+## Scheduled Trigger（双通道：地板载体 + 精度层睡眠）
+
+无人值守恢复由两条正交通道承载（v2.5.2；宿主事实与活体实测证据见 `docs/reviews/WAKE_TOPOLOGY_PROBE_RESULTS.md`）：
+
+- **地板载体**：启动即建的 recurring 原生 Scheduled Task——间隔经启动问答第三问确认（默认 1h，不得等于窗口长度 5h——会与 reset 秒级竞速），抗应用重启，**创建后终身不变**（不删、不改、不重建，INV-CONT-03）；工作期每次触发通常是一次 no-op 小唤醒（决策幂等吸收）
+- **精度层睡眠**：上方模板的后台 sleep——睡到阻塞窗 reset_at + 300s，退出即唤起；与 automation 状态机完全正交（零 Cron 交互）；不抗重启（地板兜底）
+- **触发内容** = 上方结构化 resume prompt（已替换 TASK_ID、REPOSITORY ROOT 与路径占位符；动作优先，绝不枚举工具清单）
+- **滚动续臂**：每次唤醒轮收尾（凡任务未终态）必发下一个精度睡眠到**本次观测** reset_at+300s——唤醒机制的建立 / 续臂动作永远先于工作推进；额度若死在回合之间（静默耗尽），在臂睡眠恰好覆盖下一窗口边界
+- **下一窗口绝不硬编码推导**：只依据 provider 复位证据（观测 reset_at，阻塞窗口径）——不以「加 5 小时」推算下一次唤醒
 - **每次唤醒任务量要小**：做一轮检查，然后恢复一段工作——避免单次唤醒塞满全部剩余工作
 
 **调度触发即存活探针**：唤醒成功启动即说明模型执行当前可用；唤醒失败或未启动则不会产生任何仓库改动，自然等待下次触发或用户恢复。
@@ -272,20 +281,22 @@ delegability or assurance.
 
 ## Completion Cleanup
 
-目标完成并验收后的动作清单（只作用于本任务，次序固定——**先删后清**）：
+目标完成并验收后的动作清单（只作用于本任务，次序固定——**先删后清；删除按三态规律预期失败**）：
 
-1. 对本任务绑定的 automation（按 state 里记录的 automation_id 定位）做宿主侧删除尝试——**会话侧单次尝试**动作（绝不重试，无重试风暴）；**确认删除成功后才** `quota-automation-clear` 清除绑定 id；删除失败则如实上报 stale 关联（哪个 automation_id 仍悬挂），绝不假装已清理干净
-2. **绝不删他人 automation**：只删本任务绑定的这一个；删除全局调度面或其他任务的 automation 是禁止操作
-3. 删除本任务目录 `.glm-conductor/tasks/<task-id>/`（仅此目录，不得触碰其他任务的状态）；既有清理流程删除任务目录时，次序绝不在宿主删除尝试之前抹掉 automation_id
-4. 向用户报告最终状态
+1. 对本任务绑定的 automation（按 state 里记录的 automation_id 定位）做宿主侧删除尝试——**会话侧单次尝试**（绝不重试，无重试风暴）；**预期结果即失败**：载体一旦触发过，该会话的 Cron 删除发射会静默退化（三态规律，活体实测），模型侧无法完成删除。删除失败不是错误：**如实上报 automation id 与标题**，用户在 Automations 页面手动删除是**预期运营动作**
+2. **用户确认手动删除后才** `quota-automation-clear` 清除绑定 id；未确认前绑定 id 保留待对账，绝不假装已清理干净
+3. **绝不删他人 automation**：只删本任务绑定的这一个；删除全局调度面或其他任务的 automation 是禁止操作
+4. 删除本任务目录 `.glm-conductor/tasks/<task-id>/`（仅此目录，不得触碰其他任务的状态）；既有清理流程删除任务目录时，次序绝不在宿主删除尝试之前抹掉 automation_id
+5. 向用户报告最终状态（含待手动删除的 automation id）
 
-宿主调度动作（创建 / 删除定时任务）由主会话执行；runtime 自身零宿主调度调用。窗口/预算语义与 automation 存活解耦：授权与计数只发生在 `authorize_quota_resume` / `confirm_resume_started` 两个落盘点，武装与解绑只发生在 `bind_quota_automation` / `clear_quota_automation` 两个绑定点。
+宿主调度动作（创建 / 删除定时任务、发起后台睡眠）由主会话执行；runtime 自身零宿主调度调用。窗口/预算语义与 automation 存活解耦：授权与计数只发生在 `authorize_quota_resume` / `confirm_resume_started` 两个落盘点，武装与解绑只发生在 `bind_quota_automation` / `clear_quota_automation` 两个绑定点。
 
 ## Failure Cases
 
 - **定时能力不可用**：auto 连续性保持未武装（`quota-continuity-preflight` ready=false）——不得声称已启用连续性、绝不绑假 id、绝不按 auto/until_done 承诺继续；保留本任务 checkpoint 目录，向用户报告手动可恢复，并附恢复方法——新建会话输入"读取 .glm-conductor/tasks/<task-id>/checkpoint.md 并按八步恢复流程继续"（SessionStart 恢复注入会自动提示）
-- **唤醒发现 auto 未武装**（绑定丢失 / 宿主激活已消失）：按 `continuity-unarmed` 的 remain-waiting 处理——先经宿主重建激活、bind + preflight PASS 才恢复；绝不虚构 activation、绝不无武装 resume
-- **唤醒发现任务已终态**：走终态清理（先删 automation、确认删除才清绑定），不重开实施
+- **唤醒发现 auto 未武装**（绑定丢失 / 宿主激活已消失）：单次重建尝试（宿主 CronCreate 地板 → bind → preflight PASS）；创建被会话归属拒绝（会话名下其实仍有存活载体、只是账本见证缺失）→ 按现状报告并依赖宿主节奏，绝不重试风暴；绝不虚构 activation、绝不无武装 resume
+- **精度睡眠不在臂**（应用重启 / 会话重建后）：任何唤醒轮收尾按模板续臂即自愈——不视为故障
+- **唤醒发现任务已终态**：走终态清理（删除尝试预期失败 → 上报 automation id 交用户手动删除），不重开实施
 - **实施通道缺失**（如 visual-implementer 不可用）：fail-closed，不自动换成其他执行者，交回用户处理
 - **唤醒后 checkpoint 与仓库严重不一致**：以仓库为准，向用户报告差异后继续；不得回滚仓库新改动
 - **Workflow run 不可 resume**：宿主报告 run 不存在或不可恢复时，按 SKILL.md「Workflow 恢复」第 4 步以仓库现状重建（未实施节点重新编译提交），绝不重放已完成工作

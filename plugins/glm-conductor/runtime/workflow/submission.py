@@ -4,19 +4,21 @@
 
 职责：
     delegate/full 原生 Workflow 启动前的 worker 模型选型与提交契约构造
-    （INV-MODEL-01：worker 必须显式选定 provider 限定的 Flash 模型，
+    （INV-MODEL-01：worker 必须显式选定 provider 限定的 Flash 档模型，
     绝不继承主会话文本模型，绝不接受裸别名）：
       - validate_worker_model(model_id, configured_model_ids=None)：
         单个 worker 模型 id 预检——非空 str、account: 前缀、
         account:<账户段>/<模型段> 形态（两段均非空、账户段不含 '/'、
-        全 id 无空白）、恰以 FLASH_MODEL_SUFFIX 结尾、绝不由
-        TEXT_MODEL_SUFFIX 结尾（主会话文本模型是 v2.4.0 缺陷 A 的
-        误继承源，给专门拒绝原因）；configured 集合给出时要求精确
-        成员，且集合形状非法即拒；成功原样返回该 id（归一即恒等），
-        失败抛 WorkflowSubmissionError（携人读原因）；
+        全 id 无空白）、模型段恰以 FLASH_TIER_SUFFIX（"-Flash"）结尾
+        且长于后缀本身（v2.5.2 W5：版本无关的 Flash 档机械判据，取代
+        v2.4.1 的 /GLM-5.3-Flash 字面后缀等值；非 Flash 档模型——含
+        主会话文本模型，v2.4.0 缺陷 A 的误继承源——给专门拒绝原因）；
+        configured 集合给出时要求精确成员，且集合形状非法即拒；成功
+        原样返回该 id（归一即恒等），失败抛 WorkflowSubmissionError
+        （携人读原因）；
       - select_worker_model(configured_model_ids, explicit_model_id=None)：
         从主会话自宿主模型发现面提取的已配置 id 集合中选定唯一
-        worker 模型——先校验集合形状，再收集 Flash 候选；显式给出
+        worker 模型——先校验集合形状，再收集 Flash 档候选；显式给出
         explicit_model_id 则校验之并要求精确成员（显式选择优先于
         自动选择）；否则恰一候选自动选定、零候选拒绝、多候选歧义
         拒绝并列出全部候选 id——绝不静默取第一个；
@@ -25,11 +27,12 @@
         前的最后预检与诊断输出；无秘密、无时间戳、无会话 id、
         无配额数据。
 
-接口（公共面冻结，规格 §3.1）：
-    两常量 FLASH_MODEL_SUFFIX / TEXT_MODEL_SUFFIX +
-    WorkflowSubmissionError + 上述三函数，仅此五项公共名。调用方按
-    模块路径导入本模块使用（不经 runtime.workflow 包 __init__ 重导出，
-    包 __init__ 保持不动）。
+接口（公共面，v2.5.2 W5 起为五项）：
+    常量 FLASH_TIER_SUFFIX + WorkflowSubmissionError + 上述三函数，
+    仅此五项公共名（v2.4.1 的 FLASH_MODEL_SUFFIX / TEXT_MODEL_SUFFIX
+    字面后缀常量已随档位判据解绑移除）。调用方按模块路径导入本模块
+    使用（不经 runtime.workflow 包 __init__ 重导出，包 __init__ 保持
+    不动）。
 
 依赖：
     零导入、零 I/O：纯 Python（3.7 兼容语法）内存计算——本文件不含
@@ -41,14 +44,19 @@
 来源：
     docs/roadmap/V2_4_1_CONTINUITY_HOTFIX_IMPLEMENTATION_SPEC.md
     §3.1（新模块语义）/ §3.4（H1 最低测试集）
-    + docs/roadmap/V2_4_1_CONTINUITY_HOTFIX_PLAN.md I1 / H1。
+    + docs/roadmap/V2_4_1_CONTINUITY_HOTFIX_PLAN.md I1 / H1
+    + docs/roadmap/V2_5_2_PRECISE_WAKE_AND_MODEL_ADAPTATION_PLAN.md
+    §6 W5（D5：候选判定解绑 GLM-5.3-Flash 字面后缀，改版本无关
+    Flash 档机械判据；歧义 ≥2 候选必经启动问答由用户选定——问答面
+    在 orchestration §6.0，本模块只负责机械候选收敛）。
 """
 
 
-# Provider 限定 Flash 后缀（INV-MODEL-01：worker 模型 id 恰以此结尾才合法）
-FLASH_MODEL_SUFFIX = "/GLM-5.3-Flash"
-# 主会话文本模型后缀（以此结尾的 id 绝不可用作 Workflow worker 模型）
-TEXT_MODEL_SUFFIX = "/GLM-5.3"
+# Flash 档机械判据（v2.5.2 W5 / D5：解绑字面版本后缀）——worker 模型
+# id 的模型段（首个 '/' 之后）恰以 "-Flash" 结尾且长于后缀本身：
+# GLM-5.3-Flash / GLM-6-Flash / 任一未来版本代际的同档模型均命中，
+# 版本无关；非 Flash 档（含主会话文本模型）一律拒绝。
+FLASH_TIER_SUFFIX = "-Flash"
 
 # account: 方案前缀（形态约定，非具体账户名；具体账户名绝不硬编码）
 _ACCOUNT_SCHEME_PREFIX = "account:"
@@ -69,14 +77,16 @@ def _reject_reason(model_id):
     """纯形状预检：id 合法返回 None；否则返回人读拒绝原因（不查 configured 集合）。
 
     接受形态恰为：account:<账户段>/<模型段>，两段均非空、账户段不含
-    '/'、全 id 无空白字符，且恰以 FLASH_MODEL_SUFFIX 结尾。文本模型
-    后缀与 Flash 后缀互不为后缀（拒绝集合不因检查次序改变），文本模型
-    先判以给出专门的缺陷 A 拒绝原因。
+    '/'、全 id 无空白字符，且模型段恰以 Flash 档后缀 FLASH_TIER_SUFFIX
+    结尾并长于后缀本身（v2.5.2 W5：版本无关的档位机械判据，取代
+    v2.4.1 的 /GLM-5.3-Flash 字面后缀等值——新版本代际 Flash 模型
+    无需改本模块即命中）。非 Flash 档模型（含主会话文本模型——
+    v2.4.0 缺陷 A 的误继承源）一律拒绝并给专门原因。
     """
     if not isinstance(model_id, str):
         return "model_id 必须是非空字符串，实际为 %s" % type(model_id).__name__
     if model_id == "":
-        return "model_id 不能为空字符串"
+        return "model_id 不能是空字符串"
     if not model_id.startswith(_ACCOUNT_SCHEME_PREFIX):
         return ("模型 id 必须以 %r 前缀开头（provider 限定，拒绝裸别名）：%r"
                 % (_ACCOUNT_SCHEME_PREFIX, model_id))
@@ -86,12 +96,11 @@ def _reject_reason(model_id):
     if not sep or account_seg == "" or model_seg == "":
         return ("模型 id 必须是 account:<账户段>/<模型段> 形态（两段均非空，"
                 "账户段不含 '/'）：%r" % (model_id,))
-    if model_id.endswith(TEXT_MODEL_SUFFIX):
-        return ("模型 id 以文本模型后缀 %s 结尾——主会话文本模型绝不可用作 "
-                "Workflow worker 模型：%r" % (TEXT_MODEL_SUFFIX, model_id))
-    if not model_id.endswith(FLASH_MODEL_SUFFIX):
-        return ("模型 id 未以 provider 限定 Flash 后缀 %s 结尾：%r"
-                % (FLASH_MODEL_SUFFIX, model_id))
+    if not model_seg.endswith(FLASH_TIER_SUFFIX) \
+            or len(model_seg) <= len(FLASH_TIER_SUFFIX):
+        return ("模型段必须以 Flash 档后缀 %s 结尾且长于后缀本身（版本无关"
+                "档位判据）——主会话文本模型等非 Flash 档模型绝不可用作 "
+                "Workflow worker 模型：%r" % (FLASH_TIER_SUFFIX, model_id))
     return None
 
 
@@ -145,17 +154,16 @@ def select_worker_model(configured_model_ids, explicit_model_id=None):
     """
     configured = _validated_configured(configured_model_ids)
     flash_candidates = tuple(
-        mid for mid in configured
-        if _reject_reason(mid) is None and mid.endswith(FLASH_MODEL_SUFFIX))
+        mid for mid in configured if _reject_reason(mid) is None)
     if explicit_model_id is not None:
         return validate_worker_model(explicit_model_id, configured)
     if len(flash_candidates) == 1:
         return flash_candidates[0]
     if not flash_candidates:
         raise WorkflowSubmissionError(
-            "configured 集合（共 %d 个模型）中没有任何以 %s 结尾的 provider "
-            "限定 Flash 候选，拒绝静默回退"
-            % (len(configured), FLASH_MODEL_SUFFIX))
+            "configured 集合（共 %d 个模型）中没有任何模型段以 %s 结尾的 "
+            "provider 限定 Flash 档候选，拒绝静默回退"
+            % (len(configured), FLASH_TIER_SUFFIX))
     listing = ", ".join('"%s"' % mid for mid in flash_candidates)
     raise WorkflowSubmissionError(
         "Flash 候选有 %d 个，选择歧义——必须显式给出 exact id，绝不静默取"

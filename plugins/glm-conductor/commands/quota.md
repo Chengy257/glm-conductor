@@ -44,6 +44,8 @@ python3 <插件根>/runtime/cli.py quota-resolve <repo_root> [--force-refresh]
 - UNKNOWN 不是错误：凭证不可得 / provider 不可用时按不可知处理，编排侧继续等待或问用户，不虚构可用性
 - 退出码：0 成功 / 2 用法错误 / 1 运行期异常（错误 JSON 只含异常类型名与消息）
 
+**reset_at 语义（v2.5.2 阻塞窗口径）**：`quota-wait` / `quota-resume-decision` 观测 view 与 remain-waiting 决策透传的 `reset_at` 均为 **EXHAUSTED 阻塞窗 reset_at 的字典序最大值**（snapshot 经逐窗四态评估后只取耗尽窗，与 parser.plan_resume 同口径）——未耗尽窗口（如健康周窗）的更晚 reset 绝不参与，避免把等待目标推迟数天。精度层睡眠目标换算一律以此值为准（+300s 宽限，模板见 continuity 技能）。
+
 ## 边界
 
 - 只读观测：两个面都不转态、不拦截；脚本零凭证输出（不打印 key / Authorization / 响应体）

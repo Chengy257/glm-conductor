@@ -1,5 +1,61 @@
 # Changelog
 
+## 2.5.2
+
+Precise wake re-architected on live-verified host facts + model-adaptation hardening — patch release closing the two audited defects of v2.5.1: (a) cross-quota precise wake that could never fire under the default topology (same-session automation ownership + post-fire mutation degradation + model-unresponsive-when-exhausted); (b) contract-surface contradictions that forced the model to hunt for commands and do its own time arithmetic. Companion plan: `docs/roadmap/V2_5_2_PRECISE_WAKE_AND_MODEL_ADAPTATION_PLAN.md` (v4.1); host-fact evidence: `docs/reviews/WAKE_TOPOLOGY_PROBE_RESULTS.md` (P-C / three-state emission law / P-B1/P-B2 background-sleep channel / P-R1 end-to-end rehearsal: zero-drift wake + new-window anchoring to the second). **Breaking: none** — state schema, task lifecycle API, and guard semantics unchanged.
+
+### Dual-Channel Wake: Floor Carrier + Precision Sleep (W1 / D0)
+
+- **Floor**: launch-time recurring Scheduled Task (`intervalUnit=hourly`, interval confirmed in the launch interview Q3, default 1h, must not equal the 5h window length), survives app restarts, **never touched again after creation** (no update/delete/recreate — INV-CONT-03 restated; the three-state emission law can never bite).
+- **Precision layer**: background Bash sleep to **blocking-window `reset_at` + 300s grace**, armed at launch **before CreateWorkflow** and re-armed at the end of every wake turn (rolling re-arm); exit auto-reinvokes the session (live-measured second-level precision + 8-11s latency); orthogonal to the automation state machine; does not survive restarts (floor backstops; first floor wake re-arms — self-healing loop).
+- **Unified wake protocol** for both trigger sources: idempotent decision first; `resume-authorized` + preflight → same-run resume + confirm; **active branch now checks run health** (stalled run = silent-exhaustion self-heal path); every non-terminal wake turn ends with the next precision sleep.
+- **Establish-actions-first principle**: floor + first sleep are armed in the same batch immediately after interview authorization, always before work proceeds — silent exhaustion between turns is covered by the in-flight sleep.
+- De-priming rule: wake prompts are action-first and **never enumerate tool inventories**.
+- Terminal cleanup written realistically (D7): carrier deletion **expected to fail** under the three-state law → report the automation id → **user manual deletion is the expected operation** → confirm, then clear binding. Boundary honesty (D8): one automation per session ⇒ at most one auto task in the main session.
+- Removed: the entire v2.5 one-shot dispatch / one-shot fallback chain (proven unexecutable in the default topology).
+
+### reset_at Blocking-Window Semantics Fix (W1 runtime)
+
+- `cli.py _quota_observation_view`: `reset_at` in `quota-wait` / `quota-resume-decision` views and the remain-waiting passthrough is now the **max over EXHAUSTED (blocking) windows only** (snapshot evaluated per-window via `parser.evaluate`, aligned with `plan_resume`) — a healthy weekly window can no longer push the sleep target days into the future.
+
+### CLI Lifecycle Surface Completed (W2 / D1)
+
+- Six new subcommands as thin shells over `runtime.task` public APIs: `task-create` / `record-validation` / `task-complete` / `task-fail` / `task-cancel` / `exit-waiting` (lifecycle transitions always via named commands; `set_status` / `set_phase` stay internal).
+- Authoritative command surface kept drift-free across USAGE, contracts, and `docs/troubleshooting.md`; validator anchor 16i enforces.
+
+### workflow-model-select Adaptations (W3 / D2)
+
+- New optional `--repo-root <path>` (defaults to cwd, backward compatible) — task ledger resolution no longer requires running from the repo root; models-json file form (write ListModels output to a temp JSON file) documented as the recommended path.
+
+### Launch Interview: Mandatory, Three Questions, Zero Judgment (W4 / D3+D4)
+
+- Every implementation task launch asks once (single round, three questions): ① cross-quota auto-wake + bounded budget; ② worker model (only when ambiguous); ③ **floor carrier interval** (default 1h, adjustable). The small-task exemption is **deleted** — zero model judgment, accepted cost: tiny tasks get asked too.
+- Launch sequences and wake protocols rewritten as runbooks with exact command lines and parameter shapes (incl. the floor CronCreate parameters and the verbatim sleep template).
+
+### Worker Model Rule Unbound from Version Suffix (W5 / D5)
+
+- `runtime/workflow/submission.py`: candidate rule changed from exact `/GLM-5.3-Flash` suffix equality to the version-agnostic **Flash tier marker** (`FLASH_TIER_SUFFIX = "-Flash"` on the model segment) — future-generation Flash models (e.g. `GLM-6-Flash`) match out of the box; non-Flash (incl. main-session text models) still rejected with the defect-A reason; ambiguity (≥2 candidates, cross-generation included) still goes to the interview; single-candidate still auto-selects; pin consumption semantics (fail-on-invalid, never fall back) unchanged. Public face: five names (`FLASH_TIER_SUFFIX` + error + three functions).
+
+### Visual Reviewer Binding Limitation Documented (W6 / D6)
+
+- `docs/troubleshooting.md` §11: on this host `visual-reviewer` binding fails at startup (account-connection-unavailable) → visual high-assurance stays fail-closed, manual acceptance as the substitute, pending host fix. Zero plugin code.
+
+### Release Truth Surfaces Synced (independent final review)
+
+- `README.md` / `README.zh-CN.md`: version badge 2.5.2; CLI command tables gained the six lifecycle subcommands and `workflow-model-select [--repo-root <path>]`; Flash-tier wording made version-agnostic; quota-wake highlight rewritten to the dual-channel architecture; test count refreshed.
+- `docs/architecture.md` / `docs/core-concepts.md`: stale v2.5 one-shot wake narration (successor-chain, `delayMinutes` conversion, CronUpdate prohibition) rewritten to the v2.5.2 dual-channel contract; timelines updated (dual-channel arming, D7 realistic terminal cleanup).
+- `runtime/cli.py` `_quota_resume_decision` docstring: reset_at passthrough consumer description aligned with the sleep-template contract; `runtime/workflow/submission.py` header: public-face count corrected to five names, segment-boundary comment matched to the first-slash partition implementation.
+
+### Tests & Validation
+
+- New: `tests/test_cli_lifecycle.py` (31 cases — blocking-window semantics + six subcommands), `tests/test_workflow_model_repo_root.py` (4 cases), W5 tier-rule cases in `tests/test_workflow_submission.py`; `tests/test_cli_v24.py` quota fixtures re-anchored to blocking-window semantics.
+- Validator check 16 re-anchored to the v2.5.2 contract (16d establish-first, 16f three-question, 16h dual-channel) with new anchors 16i (CLI surface) and 16j (sleep template).
+- Gates: full pytest suite, validator, smoke, ruff — all green.
+- Owner decision (2026-10-12): the `tests/` directory is no longer distributed in the repository — it remains local-only for development (`/tests/` in `.gitignore`); all gates run locally before each release. Local test fixtures were also migrated from `open(<variable-path>)` writes to `Path.write_bytes()` (byte-identical output).
+
+### Compatibility
+- Breaking: none. State schema unchanged; existing tasks load with zero migration; the wake contract is skill-layer text + one diagnostic-field semantics fix.
+
 ## 2.5.1
 
 Quality hardening, Windows compatibility, and legacy task management — patch release building on v2.5.0.

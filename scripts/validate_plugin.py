@@ -126,29 +126,40 @@
             select / subagent_model / 绝不省略 subagent_model / 绝不替换
             主会话 / 选型失败绝不 必含；继承/省略措辞仅在含否定词的行
             允许——glm-reviewer 继承宿主/会话模型是另一合法事实，不在
-            token 集）；
+            token 集内）；
          b) auto/until_done 启动序列未把 scheduling/bind/preflight 置于
             CreateWorkflow 之前（authorize→bind→preflight→CreateWorkflow
             顺序链在 orchestration 与 continuity 两技能文档均须成立）；
          c) continuity 文档称 auto 可在 automation_id null 时 armed
             （claim 形禁令 token 零容忍，出现即 FAIL——无否定行豁免）；
-         d) one-shot 路径先 resume 后 successor 武装（正向标记
-            「先创建后继」必含 + 逆序措辞禁令（零容忍）+ 武装命令锚必含）；
+         d) 先 resume 后武装的逆序措辞（v2.5.2 重锚：one-shot 后继链已
+            随双通道设计删除；正向标记 = 建立动作优先 + 武装命令锚，
+            逆序措辞零容忍保留）；
          e) 生产 runtime 重现 Global Quota Clock 或 sqlite 直写调度依赖
             （扫描限 plugins/glm-conductor/runtime 生产 .py 模块：
             sqlite 零容忍；Global Quota Clock 仅在含退役/否定词的行
             豁免——journal.py 既有退役注记不属依赖复活）。
-         v2.5 扩展锚（任务启动契约与精确唤醒，规格 §4 W5）——三组
-         必含锚任一缺失即 FAIL：
+         v2.5 扩展锚（任务启动契约，规格 §4 W5）+ v2.5.2 改锚（精确
+         唤醒与模型适配计划 §2.4）——任一缺失即 FAIL：
          f) 任务启动问答节锚缺失（orchestration/SKILL.md 必含 §6.0
-            节标题、「触发点在 create_task 之前」触发条件、单轮两问
-            合并题形与「唤醒轮 / 恢复轮绝不弹问」无人值守边界措辞）；
+            节标题、「触发点在 create_task 之前」触发条件、「没有
+            豁免条款」强制零判断、单轮三问合并题形、「地板载体间隔」
+            第三问与「唤醒轮 / 恢复轮绝不弹问」无人值守边界措辞）；
          g) 任务 pin 失效即拒措辞缺失（runtime/cli.py 与
             orchestration/SKILL.md 必含「pin 已失效，请重新问答授权」
             专门拒绝与「绝不回退自动选型、绝不静默换模型」禁令）；
-         h) 精确唤醒并存锚缺失（continuity/SKILL.md 必含「精确唤醒
-            并存：后继 one-shot 先行」节标题、recurring 武装载体与
-            兜底措辞与「绝不用 CronUpdate」禁令）。
+         h) 双通道唤醒锚缺失（v2.5.2 W1：continuity/SKILL.md 必含
+            「双通道唤醒：地板载体 + 精度层睡眠」节标题、「终身不再
+            触碰」载体不变措辞、「reset_at + 300s」睡眠目标、「绝不
+            枚举工具清单」去 priming 规则与「滚动续臂」收尾措辞——
+            v2.5 的 one-shot 加发 / CronUpdate 禁令锚随设计删除退役）；
+         i) CLI 生命周期命令面锚缺失（v2.5.2 W2/D1：task-create /
+            record-validation / task-complete / task-fail / task-cancel /
+            exit-waiting 六个子命令须同时见于 runtime/cli.py 与
+            docs/troubleshooting.md 权威命令面）；
+         j) 精度层睡眠模板锚缺失（v2.5.2 W1：long-horizon.md 必含
+            「精度层睡眠模板」节、run_in_background 后台形态与
+            date -u -d bash 动态计算标记——模型零算术契约的落点）。
 
     扫描范围说明：检查 5/6/7/8（及 8 内的旧名负向检查）的扫描范围是显式
     列表——plugins/ 全部文件 + marketplace.json + README.md +
@@ -400,18 +411,22 @@ ARMED_NULL_TOKENS = (
     "armed with automation_id null",
     "未绑定即视为已武装", "为空即视为已武装")
 ARMED_NULL_FILES = (CONTINUITY_SKILL, LONG_HORIZON)
-# 16d：one-shot 后继先于 resume（INV-CONT-02 文档面）——正向标记必含 +
-# 逆序措辞禁令（claim 形 token 零容忍，同 16c 口径）+ 武装命令锚必含
-ONE_SHOT_ORDER_TOKENS = (
+# 16d（v2.5.2 重锚，INV-CONT-02 精神延续——唤醒机制建立/续臂先于工作推进）：
+# v2.5 的 one-shot 后继链已随双通道设计整体删除；正向标记改为「建立动作
+# 优先总原则 + 武装命令锚」；逆序措辞禁令（先 resume 后武装类）原样保留。
+ESTABLISH_FIRST_MARKER_PLANS = (
+    (CONTINUITY_SKILL,
+     ("arm-before-work", "建立动作优先",
+      "quota-automation-bind", "quota-continuity-preflight")),
+    (LONG_HORIZON,
+     ("建立 / 续臂动作永远先于工作推进",
+      "quota-automation-bind", "quota-continuity-preflight")),
+)
+# 逆序措辞禁令（claim 形 token 零容忍，同 16c 口径）——先恢复后武装类
+ORDER_FORBIDDEN_TOKENS = (
     "先 resume 后", "先 ResumeWorkflowRun 后", "先恢复后武装",
     "resume 后再创建后继")
-ONE_SHOT_MARKER_PLANS = (
-    (CONTINUITY_SKILL,
-     ("arm-before-work", "先创建后继", "quota-automation-bind",
-      "quota-continuity-preflight")),
-    (LONG_HORIZON,
-     ("先创建后继", "quota-automation-bind", "quota-continuity-preflight")),
-)
+ORDER_FORBIDDEN_FILES = (CONTINUITY_SKILL, LONG_HORIZON)
 # 16e：生产 runtime 禁依赖（扫描限 plugins/glm-conductor/runtime 生产 .py）
 RUNTIME_SQLITE_TOKEN = "sqlite"  # 直写调度依赖：零容忍（生产 runtime 现零命中）
 RUNTIME_GQC_TOKENS = ("global quota clock", "global_quota_clock",
@@ -422,13 +437,17 @@ GQC_RETIREMENT_WORDS = ("删除", "退役", "移除", "下架",
 
 # —— 检查 16 v2.5 扩展锚（任务启动契约与精确唤醒，规格 §4 W5） ——
 # 三组必含锚，任一缺失即 FAIL（实现拆解见模块 docstring 第 16 项 f-h）。
-# 既有六契约（16a-16e）锚原样保留，只扩展不改动。
-# 16f：任务启动问答节锚（v2.5 I2 文档面——orchestration §6.0 节存在 +
-# create_task 之前触发条件 + 单轮两问合并题形 + 无人值守禁弹问边界）
+# v2.5.2（精确唤醒与模型适配计划）将 f/g/h 三组锚随契约重写同步改锚，
+# 并追加 i（CLI 生命周期命令面）与 j（精度层睡眠模板）两组。
+# 16f：任务启动问答节锚（v2.5.2 D3/D4 文档面——orchestration §6.0 节
+# 存在 + create_task 之前触发 + 强制零判断（豁免删除）+ 单轮三问题形 +
+# 第三问（地板间隔）+ 无人值守禁弹问边界）
 LAUNCH_INTERVIEW_MARKERS = (
-    "### 6.0 任务启动问答（launch interview，v2.5）",
+    "### 6.0 任务启动问答（launch interview，v2.5.2）",
     "触发点在 create_task 之前",
-    "一次问答两题（AskUserQuestion 单轮两问合并，绝不拆成多轮）",
+    "没有豁免条款",
+    "单轮三问（AskUserQuestion 单轮三问合并，绝不拆成多轮）",
+    "地板载体间隔",
     "唤醒轮 / 恢复轮绝不弹问",
 )
 # 16g：任务 pin 失效即拒（v2.5 I1——cli.py 专门拒绝措辞 + 绝不回退
@@ -442,13 +461,28 @@ PIN_REJECTION_SKILL_MARKERS = (
     "pin 已失效，请重新问答授权",
     "绝不回退自动选型、绝不静默换模型",
 )
-# 16h：精确唤醒并存锚（v2.5 I4 文档面——continuity「后继 one-shot 先行」
-# 节存在 + recurring 武装载体与兜底不变 + CronUpdate 禁令）
-PRECISE_WAKE_MARKERS = (
-    "### 精确唤醒并存：后继 one-shot 先行（v2.5，INV-CONT-03 不变）",
-    "recurring 是武装载体与兜底",
-    "第一动作是后继 one-shot 先行",
-    "绝不用 CronUpdate",
+# 16h：双通道唤醒锚（v2.5.2 W1 文档面——continuity「地板载体 + 精度层
+# 睡眠」节存在 + 载体终身不变 + 续臂收尾 + 去 priming 规则；v2.5 的
+# one-shot 加发 / CronUpdate 禁令锚随该设计删除同步退役）
+DUAL_CHANNEL_MARKERS = (
+    "## 双通道唤醒：地板载体 + 精度层睡眠（启动即武装 + 滚动续臂）",
+    "终身不再触碰",
+    "reset_at + 300s",
+    "绝不枚举工具清单",
+    "滚动续臂",
+)
+# 16i：CLI 生命周期命令面锚（v2.5.2 W2/D1——六个新子命令必须同时
+# 出现在 cli.py USAGE 与 troubleshooting 权威命令面，防三处漂移）
+CLI_LIFECYCLE_SUBCOMMANDS = (
+    "task-create", "record-validation", "task-complete",
+    "task-fail", "task-cancel", "exit-waiting")
+TROUBLESHOOTING_DOC = os.path.join(REPO_ROOT, "docs", "troubleshooting.md")
+# 16j：精度层睡眠模板锚（v2.5.2 W1——long-horizon 模板节存在 +
+# bash 动态计算（模型零算术）+ 后台运行形态）
+SLEEP_TEMPLATE_MARKERS = (
+    "## 精度层睡眠模板",
+    "run_in_background",
+    "date -u -d",
 )
 
 
@@ -1298,23 +1332,29 @@ def check_16_v241_protocol(results):
          顺序链（两技能文档均须成立）；
       c) continuity 文档称 auto 可在 automation_id null 时 armed ——
          claim 形禁令 token 仅否定行；
-      d) one-shot 先 resume 后 successor 武装 —— 「先创建后继」正向
-         标记 + 武装命令锚必含 + 逆序措辞禁令；
+      d) 先 resume 后武装的逆序措辞（v2.5.2 重锚：one-shot 后继链已
+         删除，建立动作优先正向标记 + 逆序禁令 + 武装命令锚）；
       e) 生产 runtime 重现 Global Quota Clock / sqlite 直写调度依赖 ——
          扫描限 runtime/ 生产 .py，sqlite 零容忍，GQC 仅退役/否定行豁免。
 
-    v2.5 扩展锚（任务启动契约与精确唤醒，规格 §4 W5）——三组必含锚
-    任一缺失即 FAIL（既有六契约锚原样保留，只扩展不改动）：
-      f) 任务启动问答节锚 —— orchestration §6.0 标题 / create_task 之前
-         触发条件 / 单轮两问合并题形 / 「唤醒轮 / 恢复轮绝不弹问」；
+    v2.5/v2.5.2 扩展锚——任一缺失即 FAIL（既有六契约锚原样保留）：
+      f) 任务启动问答节锚（v2.5.2 D3/D4）—— §6.0 标题 / create_task
+         之前 / 豁免删除 / 单轮三问题形 / 第三问（地板间隔）/
+         「唤醒轮 / 恢复轮绝不弹问」；
       g) 任务 pin 失效即拒 —— cli.py 与 orchestration 必含「pin 已失效，
          请重新问答授权」专门拒绝 + 绝不回退自动选型禁令；
-      h) 精确唤醒并存 —— continuity 必含后继 one-shot 先行节标题 +
-         recurring 武装载体与兜底措辞 + 绝不用 CronUpdate 禁令。
+      h) 双通道唤醒锚（v2.5.2 W1）—— continuity 必含「地板载体 + 精度层
+         睡眠」节标题 + 载体终身不变 + reset_at+300s + 去 priming +
+         滚动续臂；
+      i) CLI 生命周期命令面（v2.5.2 W2/D1）—— 六个新子命令须同时见于
+         cli.py 与 troubleshooting 权威命令面；
+      j) 精度层睡眠模板（v2.5.2 W1）—— long-horizon 必含模板节 +
+         run_in_background + bash 动态计算标记。
     """
-    title = ("v2.4.1/v2.5 编排/连续性协议静态契约（模型选型硬闸 / "
-             "arm-before-work / one-shot 后继 / 生产 runtime 禁依赖 / "
-             "任务启动问答 / pin 失效即拒 / 精确唤醒并存）")
+    title = ("v2.4.1/v2.5/v2.5.2 编排/连续性协议静态契约（模型选型硬闸 / "
+             "arm-before-work / 建立动作优先 / 生产 runtime 禁依赖 / "
+             "任务启动三问 / pin 失效即拒 / 双通道唤醒 / CLI 命令面 / "
+             "睡眠模板）")
     details = []
     ok = True
 
@@ -1388,8 +1428,8 @@ def check_16_v241_protocol(results):
         details.append(
             "PASS: continuity 文档无「automation_id 为空/null 即已武装」措辞")
 
-    # —— 16d：one-shot 后继先于 resume ——
-    for path, markers in ONE_SHOT_MARKER_PLANS:
+    # —— 16d：建立动作优先（v2.5.2 重锚：one-shot 后继链已删除） ——
+    for path, markers in ESTABLISH_FIRST_MARKER_PLANS:
         shown = rel_display(path)
         text = read_text(path)
         if text is None or not os.path.isfile(path):
@@ -1401,25 +1441,25 @@ def check_16_v241_protocol(results):
                 details.append("PASS: %s 含 `%s`" % (shown, marker))
             else:
                 details.append(
-                    "FAIL: %s 缺少 one-shot 后继先于 resume 标记 `%s`"
+                    "FAIL: %s 缺少建立动作优先标记 `%s`"
                     % (shown, marker))
                 ok = False
     order_hits = []
-    for path in ARMED_NULL_FILES:
+    for path in ORDER_FORBIDDEN_FILES:
         text = read_text(path)
         if not text:
             continue
         shown = rel_display(path)
         for lineno, line in enumerate(text.splitlines(), 1):
-            hit = [tok for tok in ONE_SHOT_ORDER_TOKENS if tok in line]
+            hit = [tok for tok in ORDER_FORBIDDEN_TOKENS if tok in line]
             if hit:
                 order_hits.append((shown, lineno, line.strip(), hit))
     if order_hits:
         for shown, lineno, line, hit in order_hits:
             details.append(
-                "FAIL: %s:%d one-shot 路径先 resume 后 successor 武装的措辞 "
+                "FAIL: %s:%d 先 resume 后武装的逆序措辞 "
                 "（`%s`）: %s" % (shown, lineno, "/".join(hit), line))
-        ok = False
+            ok = False
     else:
         details.append("PASS: continuity 文档无「先 resume 后武装」逆序措辞")
 
@@ -1487,21 +1527,61 @@ def check_16_v241_protocol(results):
                 "绝不回退自动选型措辞缺失）" % (orch_shown, marker))
             ok = False
 
-    # —— 16h：精确唤醒并存锚（v2.5 I4 文档面，continuity） ——
+    # —— 16h：双通道唤醒锚（v2.5.2 W1 文档面，continuity） ——
     cont_shown = rel_display(CONTINUITY_SKILL)
     cont_text = read_text(CONTINUITY_SKILL)
     if cont_text is None or not os.path.isfile(CONTINUITY_SKILL):
         details.append("FAIL: %s 不存在或无法读取，无法执行 16h 检查" % cont_shown)
         ok = False
     else:
-        for marker in PRECISE_WAKE_MARKERS:
+        for marker in DUAL_CHANNEL_MARKERS:
             if marker in cont_text:
-                details.append("PASS: %s 含精确唤醒并存锚 `%s`" % (cont_shown, marker))
+                details.append("PASS: %s 含双通道唤醒锚 `%s`" % (cont_shown, marker))
             else:
                 details.append(
-                    "FAIL: %s 缺少精确唤醒并存锚 `%s`（后继 one-shot 先行"
-                    "节/recurring 兜底/CronUpdate 禁令措辞缺失）"
+                    "FAIL: %s 缺少双通道唤醒锚 `%s`（地板+精度层节/载体"
+                    "终身不变/续臂/去 priming 措辞缺失）"
                     % (cont_shown, marker))
+                ok = False
+
+    # —— 16i：CLI 生命周期命令面（v2.5.2 W2/D1，cli.py + troubleshooting
+    #      双面同锚——权威命令面三处同步的机械防线） ——
+    ts_shown = rel_display(TROUBLESHOOTING_DOC)
+    ts_text = read_text(TROUBLESHOOTING_DOC)
+    if ts_text is None or not os.path.isfile(TROUBLESHOOTING_DOC):
+        details.append("FAIL: %s 不存在或无法读取，无法执行 16i 检查" % ts_shown)
+        ok = False
+    else:
+        for path, text, shown in ((CLI_PY, cli_text, cli_shown),
+                                  (TROUBLESHOOTING_DOC, ts_text, ts_shown)):
+            if text is None:
+                continue  # 缺失已在 16g/上方报告
+            for marker in CLI_LIFECYCLE_SUBCOMMANDS:
+                if marker in text:
+                    details.append("PASS: %s 含 CLI 生命周期命令 `%s`"
+                                   % (shown, marker))
+                else:
+                    details.append(
+                        "FAIL: %s 缺少 CLI 生命周期命令 `%s`（权威命令面"
+                        "漂移——USAGE/troubleshooting 与实现不同步）"
+                        % (shown, marker))
+                    ok = False
+
+    # —— 16j：精度层睡眠模板锚（v2.5.2 W1，long-horizon） ——
+    lh_shown = rel_display(LONG_HORIZON)
+    lh_text = read_text(LONG_HORIZON)
+    if lh_text is None or not os.path.isfile(LONG_HORIZON):
+        details.append("FAIL: %s 不存在或无法读取，无法执行 16j 检查" % lh_shown)
+        ok = False
+    else:
+        for marker in SLEEP_TEMPLATE_MARKERS:
+            if marker in lh_text:
+                details.append("PASS: %s 含睡眠模板锚 `%s`" % (lh_shown, marker))
+            else:
+                details.append(
+                    "FAIL: %s 缺少睡眠模板锚 `%s`（模板节/后台形态/bash "
+                    "动态计算缺失——模型零算术契约失锚）"
+                    % (lh_shown, marker))
                 ok = False
 
     results.append((16, title, ok, details))

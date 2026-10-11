@@ -2,12 +2,11 @@
 
 **English** | [简体中文](./README.zh-CN.md)
 
-![Version](https://img.shields.io/badge/version-2.5.1-blue.svg)
+![Version](https://img.shields.io/badge/version-2.5.2-blue.svg)
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
 ![ZCode Plugin](https://img.shields.io/badge/ZCode-plugin-green.svg)
 ![Python](https://img.shields.io/badge/python-3.8%2B-blue.svg)
 ![Models](https://img.shields.io/badge/models-GLM--5.3%20%2F%20GLM--5.3--Flash-orange.svg)
-![CI](https://github.com/Chengy257/glm-conductor/actions/workflows/validate.yml/badge.svg)
 
 **Selective routing, Native Workflow execution, minimal deterministic assurance, and optional bounded quota resume for GLM coding agents in ZCode.**
 
@@ -22,7 +21,7 @@ GLM Conductor keeps the strong model focused on planning, architecture, and fina
 - **Maximize Strong-Model Leverage:** Spend GLM-5.3 reasoning on ambiguity resolution, architecture, routing, validation, and final acceptance; offload bounded implementation to cost-effective workflow workers.
 - **Explicit Delegation Contracts:** Delegated work is compiled from a canonical DAG defining node objectives, dependencies, owned files, interfaces, and constraints before implementation begins.
 - **Deterministic Native Workflow Execution:** Compiles static DAGs directly into deterministic TypeScript workflows executed natively by ZCode with zero runtime state duplication.
-- **Model Selection Hard Gate:** Guarantees worker models use provider-qualified GLM-5.3-Flash bindings (`workflow-model-select`); prevents silent inheritance of the main-session model.
+- **Model Selection Hard Gate:** Guarantees worker models use provider-qualified Flash-tier bindings (version-agnostic `-Flash` tier marker, `workflow-model-select`); prevents silent inheritance of the main-session model.
 - **Minimal Deterministic Assurance:**
   - **`change_id` Freshness:** Cryptographically ties validation and reviews to exact file modifications (`git rev-parse HEAD` + normalized file content hash); any subsequent edit invalidates previous approvals.
   - **Coarse Repository Writer Guard:** Guarantees at most one active write workflow per repository without arbitrary TTL expirations.
@@ -99,7 +98,7 @@ Routes are declared upfront via a standardized `SELECTIVE ROUTE` block. When new
 
 ### Worker Model Pinning & Hard Gate
 Workflow workers never inherit the session model. Submission requires explicit resolution via `workflow-model-select`:
-1. Exactly one configured provider-qualified Flash model (`account:.../GLM-5.3-Flash`) is auto-selected.
+1. Exactly one configured provider-qualified Flash model (`account:.../<model>-Flash`) is auto-selected.
 2. If ambiguous, the user chooses during the task launch interview, recorded once as the task's `worker_model` pin (`worker-model-pin`).
 3. Later submissions consume the pin via `--task-ref`. If the pinned model is no longer configured on the host, submission is rejected outright (exit code 2) rather than silently falling back to the main model.
 
@@ -129,7 +128,7 @@ Workflow workers never inherit the session model. Submission requires explicit r
 Tasks encountering provider quota exhaustion can safely pause in `waiting_quota` and recover via native ZCode Scheduled Tasks:
 - **Arm-Before-Work Discipline:** When auto-resume is enabled, the future Scheduled Task must be created and bound (`quota-automation-bind`), and `quota-continuity-preflight` must pass (exit code 0) before any quota-consuming workflow begins.
 - **Bounded Budget:** Every automatic resume consumes one unit of the user-authorized `max_resumes` budget. When exhausted, the task transitions to `waiting_user`.
-- **Coexistence of Recurring Carrier & One-Shot Wake:** Recurring automation serves as the reliable anchor and fallback, while an optional zero-state one-shot schedule can provide precise window wakeup based on observed `reset_at`.
+- **Dual-Channel Quota Wake (v2.5.2):** A launch-time recurring Scheduled Task is the lifetime floor carrier (survives restarts; never mutated after creation), while a background sleep to the blocking-window `reset_at` + grace provides second-precise wakeup — both trigger sources share one unified wake protocol.
 
 ---
 
@@ -229,7 +228,7 @@ All runtime operations execute through `python <plugin-root>/runtime/cli.py <sub
 | Command | Description |
 | --- | --- |
 | `v24-compile <dag-json> [--task-ref <id>] [--out <path>]` | Compiles a canonical DAG into deterministic TypeScript Native Workflow source. |
-| `workflow-model-select <models-json> [--model <id>] [--task-ref <id>]` | Model selection preflight gate; resolves Flash worker model or consumes task pin. |
+| `workflow-model-select <models-json> [--model <id>] [--task-ref <id>] [--repo-root <path>]` | Model selection preflight gate; resolves Flash worker model or consumes task pin. |
 | `worker-model-pin <repo> <task_id> <exact-id>` | Persists user-authorized task-level worker model pin. |
 | `writer-acquire <repo> <task_id> [--run-id <id>]` | Acquires coarse repository-level write reservation. |
 | `writer-release <repo> <task_id> [--force]` | Releases write reservation (`--force` for operator cleanup). |
@@ -242,6 +241,10 @@ All runtime operations execute through `python <plugin-root>/runtime/cli.py <sub
 | `quota-resume-decision <repo> <task_id>` | Evaluates idempotent activation decision on scheduled wake. |
 | `quota-resume-confirm <repo> <task_id>` | Commits resume count increment upon accepted host resume. |
 | `quota-automation-bind / clear / preflight` | Manages Scheduled Task continuity arming lifecycle. |
+| `task-create <repo> <task_id> <goal> <mode> <assurance> [--dag <path>]` | Creates a task via the lifecycle CLI (thin shell over `runtime.task`). |
+| `record-validation <repo> <task_id> <passed\|failed> [--summary <s>] [--commands <s>]` | Records fresh validation outcome on the task ledger. |
+| `task-complete / task-fail / task-cancel <repo> <task_id>` | Terminal lifecycle transitions (success / failure / user-cancelled). |
+| `exit-waiting <repo> <task_id>` | Manual exit from `waiting_quota` (the automatic path uses `quota-resume-confirm`). |
 
 ### Repository Utilities
 
@@ -271,7 +274,6 @@ glm-conductor/
 │       ├── state.py                # 7-state task machine and schema validation
 │       └── cli.py                  # Public runtime CLI interface
 ├── scripts/                        # Validation, smoke, and task archiving utilities
-├── tests/                          # Comprehensive unittest test suite (790+ tests)
 └── docs/                           # Architecture specs, core concepts, troubleshooting
 ```
 

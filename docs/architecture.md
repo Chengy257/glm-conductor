@@ -321,11 +321,11 @@ state 顶层 `quota_resume` 块（冻结初始形状 `{mode: "manual", max_resum
 预算耗尽后任务停在 waiting_user 等用户；不再有自动动作
 ```
 
-**先武装后开工（v2.4.1，arm-before-work）**：授权与武装是两个独立事实——`authorize` 是用户许可，`bind` 是未来激活见证，`preflight` 是两者齐备的机械确认。mode=auto 的任务必须在首个消耗额度的 Workflow 启动之前、以及任何自动 ResumeWorkflowRun 之前完成武装（`auto_continuity_armed = mode==auto AND automation_id 为非空 str`）。三个任务级 API（`runtime/task.py`）：`bind_quota_automation`（状态限 active/waiting_quota/waiting_user；同 id 幂等、异 id 拒绝不静默替换；绑定绝不推断 mode=auto）、`clear_quota_automation`（精确对账；只清 automation_id 不动 mode/预算；终态允许清理）、`quota_continuity_preflight`（纯读三态判定；只证明持久化绑定存在，绝不证明宿主侧激活仍存活——宿主存在性在恢复边界仍须宿主面核查）。CLI 面：`quota-automation-bind` / `quota-automation-clear` / `quota-continuity-preflight`（ready=false 以退出码 2 报告 = launch/resume 阻断信号）。调度策略：recurring Scheduled Task 优先（成功唤醒后不删不重建，保持到终态清理 / 显式取消）；one-shot 后备必须先创建并绑定后继激活、preflight PASS 后才 resume（INV-CONT-02），且绝不用硬编码周期推算下一窗口。
+**先武装后开工（v2.4.1，arm-before-work）**：授权与武装是两个独立事实——`authorize` 是用户许可，`bind` 是未来激活见证，`preflight` 是两者齐备的机械确认。mode=auto 的任务必须在首个消耗额度的 Workflow 启动之前、以及任何自动 ResumeWorkflowRun 之前完成武装（`auto_continuity_armed = mode==auto AND automation_id 为非空 str`）。三个任务级 API（`runtime/task.py`）：`bind_quota_automation`（状态限 active/waiting_quota/waiting_user；同 id 幂等、异 id 拒绝不静默替换；绑定绝不推断 mode=auto）、`clear_quota_automation`（精确对账；只清 automation_id 不动 mode/预算；终态允许清理）、`quota_continuity_preflight`（纯读三态判定；只证明持久化绑定存在，绝不证明宿主侧激活仍存活——宿主存在性在恢复边界仍须宿主面核查）。CLI 面：`quota-automation-bind` / `quota-automation-clear` / `quota-continuity-preflight`（ready=false 以退出码 2 报告 = launch/resume 阻断信号）。调度策略（v2.5.2 双通道）：recurring Scheduled Task 是**唯一武装载体**——启动问答授权后即建于干净会话状态（默认 hourly 1h 地板，间隔由启动问答第三问确认），创建后终身不动（三态规律：载体首触发后本会话一切 Cron 变更失效，故成功唤醒后不删不改不重建，保持到终态清理 / 显式取消，INV-CONT-03）；精度由正交的**后台睡眠层**承担（每次唤醒轮收尾按阻塞窗 `reset_at`+grace 续臂，建立/续臂动作永远先于工作推进——完整 runbook 见 continuity 技能「双通道唤醒」节）；v2.5 的 one-shot 后继链已随双通道设计整体删除。
 
-**v2.5 精确唤醒与任务级 pin**：决策链六步原样不动。两处扩展：
+**v2.5.2 双通道唤醒与任务级 pin**：决策链六步原样不动。两处扩展：
 
-- **决策输出透传 `reset_at`（I4/W3，向后兼容附加键）**：`quota-resume-decision` 的 decision 为 `remain-waiting` 且观测为 EXHAUSTED 时，decision 只读透传本次观测的 `reset_at`（ISO 字符串或 null），供主会话换算后继 one-shot 的 `delayMinutes`（`delay = (reset_at + grace) - now`，分钟向上取整；`delay <= 0` 不调度）——纯诊断透传，不参与任何判定；UNKNOWN / no-op 分支保持既有输出形状绝不透传。唤醒载体并存：recurring 是武装载体与兜底（INV-CONT-03 原样不变），one-shot 精确加发零状态（不 bind、不落 state、不清理，触发即自失效；重复加发由决策幂等兜底）、绝不用 CronUpdate、每次唤醒强制新鲜观测绝不硬信旧 `reset_at`。同会话单 automation 宿主约束（2026-10-03 活体实测）：已归属某 scheduled task 的会话内不能再建（报文 `Cannot create a scheduled task inside a session that already belongs to a scheduled task`）——默认拓扑（recurring 建于主会话）下 one-shot 加发为机会性，被拒即如实报告本轮不可用并依赖 recurring 兜底（降级契约见 continuity 技能）；recurring 养专用小会话可保留主会话的加发能力。
+- **决策输出透传 `reset_at`（I4/W3，向后兼容附加键）**：`quota-resume-decision` 的 decision 为 `remain-waiting` 且观测为 EXHAUSTED 时，decision 只读透传本次观测的 `reset_at`（ISO 字符串或 null）——**阻塞窗（EXHAUSTED）max 口径**（与 `plan_resume` 对齐，健康周窗不参与，避免把睡眠目标推迟数天）——供主会话按精度层睡眠模板换算后台睡眠目标（`reset_at` + 300s grace；bash 模板动态计算，模型零算术）；纯诊断透传，不参与任何判定；UNKNOWN / no-op 分支保持既有输出形状绝不透传。唤醒架构（v2.5.2 双通道，宿主事实证据见 `docs/reviews/WAKE_TOPOLOGY_PROBE_RESULTS.md`）：**地板** = 启动即建的 recurring 载体（抗应用重启；首触发后终身不动——三态规律使响后变更失效，载体禁令自然满足）；**精度层** = 后台睡眠（退出自动唤起会话，实测秒级精确 + 8-11s 延迟；不抗应用重启，由地板兜底，首个地板唤醒重臂——自愈闭环）；两种触发源走同一统一唤醒协议（active 分支含 run 健康检查，停摆按恢复处理）。同会话单 automation 宿主约束（2026-10-03 活体实测，报文 `Cannot create a scheduled task inside a session that already belongs to a scheduled task`）：载体必须在干净会话状态（启动时）一次建成，此后绝无任何载体变更动作；边界写实（D8）：主会话同时至多一个 auto 任务。终态清理写实（D7）：载体试删预期失败（三态规律）→ 如实上报 automation id → 用户手动删除为预期运营动作 → 确认后 `quota-automation-clear`。
 - **任务级 worker 模型 pin（I1）随任务全生命周期生效**：写入 `task.pin_worker_model`（CLI `worker-model-pin`；经 submission 形态约定预检但**绝不查宿主面**——写入时点与提交时点宿主面可能不同，对账留给消费点；非终态才可写、同值幂等、异值显式覆盖带 prev/new；不新增 journal 事件）。唤醒/恢复轮的新 run 提交同样过选型硬闸：`workflow-model-select --task-ref` 消费任务顶层 `worker_model` pin 并**必查**当次 configured 集合——pin 形状非法或不在列表即专门拒绝（退出码 2），绝不回退自动选型、绝不静默换模型；无人值守回合遇 pin 失效一律阻断提交、转等待用户，绝不弹问（fail closed，契约见 orchestration §6.0 / §6.1）。
 
 观测词汇（`QUOTA_VIEW_STATUSES`）恰为 `AVAILABLE / PRESSURE / EXHAUSTED / UNKNOWN` 四态；UNKNOWN 绝不当作可用。配额恢复不改变路由（额度决定"何时"，不决定"谁做"）。
@@ -334,7 +334,8 @@ state 顶层 `quota_resume` 块（冻结初始形状 `{mode: "manual", max_resum
 
 ```
 用户 authorize_quota_resume(max_resumes=1) → mode=auto
-创建原生未来 Scheduled Task → bind_quota_automation → preflight PASS（armed）
+创建地板载体（recurring）+ 发首个精度睡眠（同批、建立动作优先）
+→ bind_quota_automation → preflight PASS（armed）
 → 才许 CreateWorkflow 启动（arm-before-work）
 额度耗尽 → waiting_quota（last_observation 记入）
 定时唤醒 #1 → 观测 EXHAUSTED → remain-waiting（零改写）
@@ -343,7 +344,8 @@ state 顶层 `quota_resume` 块（冻结初始形状 `{mode: "manual", max_resum
 定时唤醒 #3 → resume-authorized（暂存 resume_count_after=1）
 宿主 resume 被接受 → confirm_resume_started → resume_count=1、active
 定时唤醒 #4 → 观测 EXHAUSTED → 预算 1/1 耗尽 → waiting-user（恰一次转态）
-终态 → 删除本任务绑定的 automation（单次）→ 确认删除后才 clear 绑定
+终态 → 载体试删一次（三态规律下预期失败）→ 上报 automation id
+→ 用户手动删除（预期运营动作）→ 确认后 clear 绑定
 ```
 
 ## 15. Global Quota Clock 拆离

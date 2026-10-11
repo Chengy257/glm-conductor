@@ -141,8 +141,8 @@ file <归一路径>\0<sha256:…|missing>   ← 每个相关路径一行（排�
 - **形状**：state 顶层恰四键 `{mode, max_resumes, resume_count, automation_id}`，初始 `{manual, 0, 0, null}`；预算不变量 `resume_count <= max_resumes` 保存时强制
 - **mode**：`manual`（默认）/ `auto`——auto 只能由显式 `authorize_quota_resume(max_resumes)` 落盘授权，绝不推断；`max_resumes=1` 即一次性恢复，`N` 即有界多窗
 - **automation_id**（v2.4.1 语义）：当前关联的未来原生 Scheduled Task 见证——auto 连续性的持久化武装事实；其存在是 preflight 的要求，但绝不独立证明宿主侧激活仍存在
-- **先武装后开工**（v2.4.1，arm-before-work）：`auto_continuity_armed = mode==auto AND automation_id 为非空 str`——mode=auto 的任务在首个消耗额度的 Workflow 启动与任何自动 resume 之前必须完成「创建 Scheduled Task → `quota-automation-bind` → `quota-continuity-preflight` PASS」；recurring 优先（成功唤醒后不删不重建），one-shot 后备先创建后继激活再 resume（绝不硬编码周期推算下一窗）
-- **并存唤醒**（v2.5）：recurring 仍是武装载体与兜底（INV-CONT-03 原样——成功唤醒后不删不重建）；唤醒决策 `remain-waiting` 且已观测 `reset_at` 时**后继 one-shot 先行**——`delay = (reset_at + grace) - now`（分钟向上取整）加发一次零状态 one-shot（不 bind、不落 state、不清理，触发即自失效；`delay <= 0` 不调度）；重复加发由决策幂等兜底（早醒 → 新观测 → 再加发；醒晚 → 额度已恢复 → resume）；**绝不用 CronUpdate**；每次唤醒强制新鲜观测，绝不硬信旧 `reset_at`。配套 CLI 扩展：`quota-resume-decision` 在 EXHAUSTED remain-waiting 时于 decision 只读透传当次观测 `reset_at`（ISO 串或 null，向后兼容附加键；UNKNOWN / no-op 保持既有形状绝不透传）——供换算 `delayMinutes`，不参与判定。同会话单 automation 约束（2026-10-03 实测）：已持有 scheduled task 的会话不能再建——加发会话须不持有 recurring；被拒即如实报告、依赖 recurring 兜底，绝不重试风暴、绝不删 recurring 腾位
+- **先武装后开工**（v2.4.1，arm-before-work）：`auto_continuity_armed = mode==auto AND automation_id 为非空 str`——mode=auto 的任务在首个消耗额度的 Workflow 启动与任何自动 resume 之前必须完成「创建 Scheduled Task → `quota-automation-bind` → `quota-continuity-preflight` PASS」；载体（recurring）启动即建、首触发后终身不动（v2.5.2 双通道：one-shot 后继链已整体删除，精度由后台睡眠层承担）
+- **双通道唤醒**（v2.5.2）：**地板** = recurring 武装载体（启动问答后即建，hourly 默认 1h，间隔经启动问答第三问确认，抗应用重启；三态规律——载体首触发后本会话一切 Cron 变更（改/删/建）失效——故创建后终身不动，INV-CONT-03 原样：成功唤醒后不删不重建）；**精度层** = 后台睡眠到阻塞窗 `reset_at` + 300s grace（启动即武装 + 每次唤醒轮收尾滚动续臂，建立/续臂动作永远先于工作推进；退出自动唤起会话，实测秒级精确；不抗应用重启——由地板兜底，首个地板唤醒重臂，自愈闭环）。`quota-resume-decision` 在 EXHAUSTED remain-waiting 时于 decision 只读透传当次观测 `reset_at`（**阻塞窗口径**，ISO 串或 null，向后兼容附加键；UNKNOWN / no-op 保持既有形状绝不透传）——供睡眠模板换算后台睡眠目标（bash 模板动态计算，模型零算术），不参与判定；每次唤醒强制新鲜观测，绝不硬信旧 `reset_at`。同会话单 automation 约束（2026-10-03 实测）⇒ 主会话同时至多一个 auto 任务（D8）；终态载体试删预期失败 → 上报 automation id → 用户手动删除（预期运营动作，D7）→ 确认后 clear 绑定
 - **等待**：额度耗尽 → `enter_waiting_quota`（七态中的 waiting_quota；`workflow_run_id` 保留；最近观测记入 `last_observation` 供诊断）
 - **定时唤醒决策**（`scheduled_activation_decision`，幂等六步）：非 waiting_quota → `no-op`；观测 EXHAUSTED/UNKNOWN → `remain-waiting`（绝不虚构可用性）；未授权 → `waiting-user`；预算耗尽 → `waiting-user` 且恰一次转 `waiting_user`；auto 且 automation_id 空 → `remain-waiting`（reason 含 `continuity-unarmed`，零写盘零预算消耗）；可用 + 已授权 + 预算有余 + 已武装 → `resume-authorized`（计数仅暂存）
 - **确认落账**：宿主 resume 调用**真正被接受后**才调 `confirm_resume_started`——`resume_count +1` + 转回 active + `quota_resume_confirmed` 事件；未确认的决策绝不消耗预算
@@ -154,13 +154,13 @@ file <归一路径>\0<sha256:…|missing>   ← 每个相关路径一行（排�
 用户 authorize_quota_resume(1) → mode=auto
 创建原生 Scheduled Task → bind → preflight PASS（armed）→ 才许启动（arm-before-work）
 额度耗尽 → waiting_quota
-唤醒 → 观测 EXHAUSTED          → remain-waiting（后继 one-shot 先行加发，v2.5）
+唤醒 → 观测 EXHAUSTED          → remain-waiting（精度层睡眠续臂至下一窗，v2.5.2）
 唤醒 → 观测 AVAILABLE、manual  → waiting-user（未授权）
 用户 authorize_quota_resume(1) → mode=auto
 唤醒 → 可用、auto、预算有余     → resume-authorized（计数暂存 1）
 宿主 resume 被接受 → confirm_resume_started → resume_count=1、active
 唤醒 → 观测 EXHAUSTED          → 预算 1/1 耗尽 → waiting-user
-终态 → 删本任务 automation（单次）→ 确认删除后 clear 绑定
+终态 → 载体试删一次（三态规律下预期失败）→ 上报 automation id → 用户手动删除 → 确认后 clear 绑定
 ```
 
 ## 8. 任务级授权偏好（worker_model pin）

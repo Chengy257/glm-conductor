@@ -7,3 +7,5 @@ __pycache__/
 .zcode/
 .glm-conductor/
 .local-dev/
+/release-kit-252/
+/tests/
