@@ -7,6 +7,16 @@
 - **Delivery:** local Codex implementation; this commit is documentation only, **not** implementation, verification, or a new release
 - **Input:** owner-provided "v2.5.2 发布后全量审查报告（2026-10-13）"; existing v2.5.2 architecture, runtime, and host-probe evidence
 
+## 中文实施摘要
+
+本规格是 **v2.5.2 发布后的后续实施任务**，不代表代码已修复，也不修改历史 v2.5.2 交付事实。优先修复 state.json 并发读改写、精确唤醒、Stop 守卫与 Workflow run 注册，再完成模型选择解耦，最后统一清理审查报告 P3 项。
+
+**精确唤醒裁决：** 对外只有一个 reset_at，来自 provider 真实观测的有效下一窗口复位时刻；无论额度处于 AVAILABLE、PRESSURE、EXHAUSTED 还是 UNKNOWN，只要观测有效，都要向主会话透传。额度状态只负责是否可继续或恢复，不负责决定能否查询/透传时间。自动延续授权成立后，必须立即建立 **ZCode 原生 recurring 定时任务（默认 1 小时兜底）+ 后台终端 sleep（reset_at + 300 秒精确唤醒）**，先武装后执行。后续唤醒轮核查并滚动续臂，停靠轮仅补发/纠偏，不能依赖额度耗尽后模型仍能建立首个 sleep。保留原有三态/UNKNOWN 诊断、恢复预算、同 run id 恢复与双通道架构。
+
+**模型裁决：** 主模型继承当前主会话，仅提示选择高能力模型；实际子代理模型全部从宿主当前模型列表列出，在统一实施前问询轮由用户最终确认（单一候选也确认）。优先推荐 Flash 但不绑定 Flash、GLM 代际或账户名。任务级授权持久化，恢复时重新验证，不允许 CLI 显式参数绕开 pin 或模型失效后自行替换。视觉代理按宿主真实能力绑定；若宿主不支持动态指定模型，明确阻塞，不伪装为已经可用。
+
+**本地实施要求：** 严格按 §7 工作包顺序，逐阶段测试、提交和审查；不得引入新的额度状态机、第二个 reset_at 字段、通用模型注册系统或 Workflow 节点级模型绑定。详细修改位置、行为验收、回归测试和交付提示见以下各节。
+
 ## 0. Authority, scope, and decisions
 
 This specification defines the **next implementation after v2.5.2**, without rewriting the historical completed-release document:
@@ -58,7 +68,7 @@ Source of truth is the provider's *observed* nextResetTime in the existing stand
 
 Retain the already public, singular **quota_observation.reset_at** / **decision.reset_at** field. Do not introduce next_window_reset_at, blocking_resume_at, reset_time_v2, or a second external reset timestamp.
 
-There may be multiple raw provider windows (five_hour and weekly). For the *precision sleep anchor* choose the **earliest valid future observed reset_at among recognized windows**, independent of their AVAILABLE/PRESSURE/EXHAUSTED/UNKNOWN status. The next observed window boundary is a safe wake/checkpoint; a wake does not imply the exhausted constraint has cleared. On each wake, re-observe and rearm toward the next valid future boundary. This avoids incorrectly targeting a nonexhausted weekly window days away and does not change plan_resume's existing conservative blocking-window calculation. This window-selection rule is a *proposed deterministic implementation of the owner's “current window reset_at”*, not an assertion that the provider has only one raw window.
+There may be multiple raw provider windows (five_hour and weekly). For the *precision sleep anchor* choose the **earliest valid future observed reset_at among recognized windows**, independent of their AVAILABLE/PRESSURE/EXHAUSTED/UNKNOWN status. The next observed window boundary is a safe wake/checkpoint; a wake does not imply the exhausted constraint has cleared. On each wake, re-observe and rearm toward the next valid future boundary. This avoids incorrectly targeting a nonexhausted weekly window days away and does not change plan_resume's existing conservative blocking-window calculation. This is the deterministic selection rule for the owner's single outward-facing “current window reset_at”; the provider may still report several raw quota windows.
 
 - Normalize/compare timestamps as UTC instants, not raw lexical strings if formats vary.
 - Use only recognized, parseable, **future** timestamps. On already-past/invalid/stale observations, force refresh once; if still not available set reset_at=null and disclose **floor-only degraded precision**, rather than invent a reset.
