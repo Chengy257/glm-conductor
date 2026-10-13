@@ -43,7 +43,8 @@
         后评审）；change_id 同上现算。
     set_status(repo_root, task_id, new_status)
         状态迁移（严格按 state.TASK_TRANSITIONS 矩阵；终态不得静默
-        重开）。经 state.save_state 的转换门落盘，不追加 journal 事件
+        重开）。经 state.update_task_state 状态事务落盘（锁内对新鲜
+        state 复核迁移门），不追加 journal 事件
         （任务级词汇无通用状态名；enter_waiting_quota / complete /
         fail / cancel 各自带专属事件）。
     set_phase(repo_root, task_id, phase)
@@ -126,9 +127,25 @@ journal 词汇（TASK_JOURNAL_EVENTS，恰十名，绝不多不少）：
     名（暂存恢复计数落账 + 转回 active 的事实记录）。本模块追加的
     事件名绝不出此表；也绝不经由 state.transition_task_status 迁移
     状态（其 status_changed 事件不在任务级词汇内）——状态门用
-    state.TASK_TRANSITIONS + state.save_state 自己走。v2.4.1 的
+    state.TASK_TRANSITIONS 自己走，落盘一律经 state.update_task_state
+    状态事务（v2.6.0 WP-R1）。v2.4.1 的
     bind / clear / preflight 三 API 对 journal 零新增（绑定事实由
     state 落盘记录，预检纯读）。
+
+状态写盘纪律（v2.6.0 WP-R1，per-task 状态事务）：
+    本模块全部状态变更入口（create / record_workflow_run /
+    record_validation / record_review / set_status / set_phase /
+    enter·exit_waiting_quota / authorize_quota_resume /
+    scheduled_activation_decision 的转态分支 / confirm_resume_started /
+    bind·clear_quota_automation / pin_worker_model / complete·fail·
+    cancel）一律经 state.update_task_state 单锁事务落盘：任务缺失 /
+    v2.3 遗留的结构性拒绝与全部慢观察（change_id 的 git 现算、写者
+    守卫 inspect / acquire / release）在锁外执行，操作专属变更在锁内
+    对新鲜 state 应用并复核既有前置（终态冻结 / 迁移门 / 顺序闸 /
+    预算不变量）——过时整态 dict 绝不覆盖盘上无关新字段。同值幂等
+    入口（bind 同 id / clear 未武装 / pin 同值 / 终态同态重放）在
+    取锁前零写盘原样返回。journal 事件仅在事务提交成功后追加
+    （事件名见下节词汇表）。
 
 变更标识的相关改动文件集（W4 完成守卫共用的同一派生）：
     ownership_scopes(task_state) = dag 全节点 ownership scope 并集
@@ -249,8 +266,9 @@ def _ensure_transition_allowed(st, new_status, op) -> None:
     """按 state.TASK_TRANSITIONS 校验一次 status 迁移；非法 → ValueError。
 
     与 state._transition_errors 同一矩阵、同一规则（旧 == 新放行；终态
-    无表项 = 任何变化拒绝），但落盘走 state.save_state（其转换门会再
-    校验一次），不触发 transition_task_status 的 status_changed 事件。
+    无表项 = 任何变化拒绝），但落盘走 state.update_task_state 状态事务
+    （其转换门会对锁内新鲜 state 再校验一次），不触发
+    transition_task_status 的 status_changed 事件。
     """
     old_status = st.get("status")
     if old_status == new_status:
@@ -347,7 +365,9 @@ def create_task(repo_root, task_id, goal, route, dag_nodes=()) -> dict:
     """校验并持久化一个新 v2.4 任务，返回构造出的完整状态 dict。
 
     - 持久化前显式 validate_state（聚合中文错误，任一错误即拒绝且零
-      落盘）；state.save_state 的再校验与转换门（首存放行）二次把关；
+      落盘）；state.update_task_state 状态事务（首存放行）的再校验
+      二次把关；锁内复核任务仍不存在——预检与提交之间被并发创建的
+      任务绝不以过时整态 dict 覆盖；
     - route 摘取口径与 state.new_task_state 一致：只取 mode 与
       assurance 两键写入 route 块（assurance ∈ standard/high 时一并
       存入；词汇外值由 validate_state 拒绝）；route 非 dict 抛
@@ -359,7 +379,8 @@ def create_task(repo_root, task_id, goal, route, dag_nodes=()) -> dict:
     - 仓库根绑定（RB-2）：repository.root 记为 repo_root 的归一绝对
       路径；写者守卫关联发生在 Workflow 启动时（record_workflow_run /
       宿主侧 acquire），本函数绝不 acquire；
-    - 成功后落 route_selected 事件（含 mode / assurance）。
+    - 成功后落 route_selected 事件（含 mode / assurance；仅在状态
+      事务提交成功后追加）。
     """
     if state.load_state(repo_root, task_id) is not None:
         raise ValueError(
@@ -372,7 +393,17 @@ def create_task(repo_root, task_id, goal, route, dag_nodes=()) -> dict:
     if errors:
         raise ValueError("create_task：任务状态非法，拒绝持久化：%s"
                          % "；".join(errors))
-    state.save_state(repo_root, st)
+
+    def _mutate(current):
+        # 锁内新鲜盘面复核：预检与提交之间任务被并发创建即拒绝，
+        # 绝不以过时整态 dict 覆盖既有账本
+        if current is not None:
+            raise ValueError(
+                "create_task：任务 %s 已存在（盘上已有 state.json），"
+                "拒绝重建（绝不覆盖既有账本）" % task_id)
+        return st
+
+    state.update_task_state(repo_root, task_id, _mutate, allow_missing=True)
     journal.append_event(
         repo_root, task_id,
         {"event": "route_selected",
@@ -414,7 +445,8 @@ def record_workflow_run(repo_root, task_id, workflow_run_id) -> dict:
          请先经宿主侧 writer-acquire 取得写预约）；预约属其它任务 →
          ValueError（报出持有者 task_id / workflow_run_id）。
          solo/audit 不持有写 Workflow，无此前置；
-      1. state.workflow_run_id 落盘（非空 str 强制；终态任务冻结）；
+      1. state.workflow_run_id 经 state.update_task_state 状态事务落盘
+         （非空 str 强制；终态任务冻结——锁内对新鲜 state 复核）；
       2. 镜像到 runtime.workflow.adapter.record_run（run-id 关联单据，
          同任务重复调用整条替换——「一任务一活跃 run」口径）；
       3. 落 workflow_started 事件（含 workflow_run_id）；
@@ -451,8 +483,14 @@ def record_workflow_run(repo_root, task_id, workflow_run_id) -> dict:
                 "委派 run"
                 % (holder.get("task_id"),
                    holder.get("workflow_run_id"), task_id))
-    st["workflow_run_id"] = workflow_run_id
-    state.save_state(repo_root, st)
+    def _mutate(current):
+        # 锁内新鲜盘面复核终态冻结（预检与提交之间任务不得已收尾）；
+        # run 关联施加在锁内新鲜 state 上（过时整态绝不覆盖无关新字段）
+        _ensure_not_terminal(current, "record_workflow_run")
+        current["workflow_run_id"] = workflow_run_id
+        return current
+
+    new_state = state.update_task_state(repo_root, task_id, _mutate)
     workflow_adapter.record_run(task_id, workflow_run_id)
     journal.append_event(
         repo_root, task_id,
@@ -470,10 +508,23 @@ def record_workflow_run(repo_root, task_id, workflow_run_id) -> dict:
                 "本次注册"
                 % (conflict.get("task_id"),
                    conflict.get("workflow_run_id")))
-    return st
+    return new_state
 
 
 # —— 任务级最小验证 / 审查记录（P2-C） ——
+
+def _require_validation_record(st, task_id) -> None:
+    """先验证后评审顺序闸：validation 完整记录（status 与 change_id
+    齐备）才放行，否则 ValueError（record_review 预检与锁内复核共用）。"""
+    validation = st.get("validation")
+    if not isinstance(validation, dict) \
+            or validation.get("status") is None \
+            or not isinstance(validation.get("change_id"), str) \
+            or validation.get("change_id") == "":
+        raise ValueError(
+            "record_review：任务 %s 尚无 validation 记录，拒绝记录 review"
+            "（先验证后评审；请先 record_validation）" % task_id)
+
 
 def record_validation(repo_root, task_id, status, summary=None,
                       commands=None) -> dict:
@@ -490,7 +541,11 @@ def record_validation(repo_root, task_id, status, summary=None,
     - summary：可选非空 str 或 None；commands：可选非空字符串数组
       （允许空数组）或 None——纯人读诊断摘要，不要求 stdout 捕获、
       runner 身份或任何逐命令证据（P2-C 红线）；
-    - 成功后落 validation_recorded 事件（含 status 与 change_id）。
+    - change_id 的 git 观察（relevant_changed_files / compute_change_id
+      的子进程 I/O）在状态锁外执行，记录块在 state.update_task_state
+      事务内对锁内新鲜 state 应用（终态冻结锁内复核）；
+    - 成功后落 validation_recorded 事件（含 status 与 change_id；仅在
+      状态事务提交成功后追加）。
     """
     if status not in state.VALIDATION_STATUSES:
         raise ValueError(
@@ -512,19 +567,27 @@ def record_validation(repo_root, task_id, status, summary=None,
                     "record_validation：commands 的各项必须是非空字符串")
     st = _load_v24_state(repo_root, task_id)
     _ensure_not_terminal(st, "record_validation")
+    # git 观察（change_id 现算）在状态锁外执行（慢 I/O 绝不入锁），
+    # 记录块在锁内事务中对新鲜 state 应用
     change_id_value = _compute_change_id(st, repo_root)
-    st["validation"] = {
+    validation_record = {
         "status": status,
         "change_id": change_id_value,
         "summary": summary,
         "commands": list(commands) if commands is not None else None,
     }
-    state.save_state(repo_root, st)
+
+    def _mutate(current):
+        _ensure_not_terminal(current, "record_validation")
+        current["validation"] = validation_record
+        return current
+
+    new_state = state.update_task_state(repo_root, task_id, _mutate)
     journal.append_event(
         repo_root, task_id,
         {"event": "validation_recorded", "status": status,
          "change_id": change_id_value})
-    return st
+    return new_state
 
 
 def record_review(repo_root, task_id, reviewer, verdict, findings=None) -> dict:
@@ -536,9 +599,11 @@ def record_review(repo_root, task_id, reviewer, verdict, findings=None) -> dict:
       status 非 null 且 validation.change_id 为非空 str（完整记录，
       只经 record_validation 产生），否则拒绝（先验证后评审；
       fix-first / rethink 修复后主验证必须先刷新）；
-    - change_id 现算现存（与 record_validation 同一派生与实现）；
+    - change_id 现算现存（与 record_validation 同一派生与实现；git
+      观察在状态锁外执行，记录块在 state.update_task_state 事务内对
+      锁内新鲜 state 应用，终态冻结与先验证后评审两闸锁内复核）；
     - 成功后落 review_recorded 事件（含 reviewer / verdict /
-      change_id）。
+      change_id；仅在状态事务提交成功后追加）。
     """
     if not isinstance(reviewer, str) or reviewer == "":
         raise ValueError(
@@ -554,27 +619,28 @@ def record_review(repo_root, task_id, reviewer, verdict, findings=None) -> dict:
             % (findings,))
     st = _load_v24_state(repo_root, task_id)
     _ensure_not_terminal(st, "record_review")
-    validation = st.get("validation")
-    if not isinstance(validation, dict) \
-            or validation.get("status") is None \
-            or not isinstance(validation.get("change_id"), str) \
-            or validation.get("change_id") == "":
-        raise ValueError(
-            "record_review：任务 %s 尚无 validation 记录，拒绝记录 review"
-            "（先验证后评审；请先 record_validation）" % task_id)
+    _require_validation_record(st, task_id)
+    # git 观察（change_id 现算）在状态锁外执行，记录块锁内应用
     change_id_value = _compute_change_id(st, repo_root)
-    st["review"] = {
+    review_record = {
         "reviewer": reviewer,
         "verdict": verdict,
         "change_id": change_id_value,
         "findings": findings,
     }
-    state.save_state(repo_root, st)
+
+    def _mutate(current):
+        _ensure_not_terminal(current, "record_review")
+        _require_validation_record(current, task_id)
+        current["review"] = review_record
+        return current
+
+    new_state = state.update_task_state(repo_root, task_id, _mutate)
     journal.append_event(
         repo_root, task_id,
         {"event": "review_recorded", "reviewer": reviewer,
          "verdict": verdict, "change_id": change_id_value})
-    return st
+    return new_state
 
 
 # —— 状态 / phase 推进 ——
@@ -583,8 +649,10 @@ def set_status(repo_root, task_id, new_status) -> dict:
     """把任务状态迁移到 new_status（严格按 TASK_TRANSITIONS），返回迁移后的状态。
 
     - new_status ∈ state.TASK_STATUSES（七态词汇），词汇外拒绝；
-    - 迁移门与 state.save_state 的转换门同一矩阵（旧 == 新放行；终态
+    - 迁移门与 state.TASK_TRANSITIONS 同一矩阵（旧 == 新放行；终态
       无表项——终态不得静默重开，显式重开走 state.reopen_task）；
+      迁移经 state.update_task_state 状态事务落盘：锁内对新鲜 state
+      复核迁移门（其转换门二次把关），再施加变更；
     - 不追加 journal 事件：任务级词汇无通用状态名（enter_waiting_quota
       与 complete / fail / cancel 各自带专属事件）。
     """
@@ -594,9 +662,14 @@ def set_status(repo_root, task_id, new_status) -> dict:
             % (new_status, ", ".join(state.TASK_STATUSES)))
     st = _load_v24_state(repo_root, task_id)
     _ensure_transition_allowed(st, new_status, "set_status")
-    st["status"] = new_status
-    state.save_state(repo_root, st)
-    return st
+
+    def _mutate(current):
+        # 锁内新鲜盘面复核迁移门（update_task_state 的转换门二次把关）
+        _ensure_transition_allowed(current, new_status, "set_status")
+        current["status"] = new_status
+        return current
+
+    return state.update_task_state(repo_root, task_id, _mutate)
 
 
 def set_phase(repo_root, task_id, phase) -> dict:
@@ -604,8 +677,9 @@ def set_phase(repo_root, task_id, phase) -> dict:
 
     - phase ∈ state.TASK_PHASES（planning / workflow / validating /
       reviewing）或 None；None = 清除标注（phase 无 null 空档——缺省
-      即不写键）；词汇外拒绝；终态任务冻结；
-    - 纯描述性标注（无转换矩阵），不追加 journal 事件。
+      即不写键）；词汇外拒绝；终态任务冻结（锁内对新鲜 state 复核）；
+    - 纯描述性标注（无转换矩阵），经 state.update_task_state 状态事务
+      落盘，不追加 journal 事件。
     """
     if phase is not None and phase not in state.TASK_PHASES:
         raise ValueError(
@@ -613,12 +687,16 @@ def set_phase(repo_root, task_id, phase) -> dict:
             % (phase, ", ".join(state.TASK_PHASES)))
     st = _load_v24_state(repo_root, task_id)
     _ensure_not_terminal(st, "set_phase")
-    if phase is None:
-        st.pop("phase", None)
-    else:
-        st["phase"] = phase
-    state.save_state(repo_root, st)
-    return st
+
+    def _mutate(current):
+        _ensure_not_terminal(current, "set_phase")
+        if phase is None:
+            current.pop("phase", None)
+        else:
+            current["phase"] = phase
+        return current
+
+    return state.update_task_state(repo_root, task_id, _mutate)
 
 
 # —— 额度等待进出 / 恢复授权与定时唤醒决策（P3-B/C） ——
@@ -648,7 +726,9 @@ def enter_waiting_quota(repo_root, task_id, quota_view=None) -> dict:
 
     原状态已是 waiting_quota（无实际迁移）时只返回现状：不重复落
     事件、也不刷新观测（重入安全）；迁移合法性归
-    TASK_TRANSITIONS（终态与词汇外来源自然被拒）。
+    TASK_TRANSITIONS（终态与词汇外来源自然被拒）。迁移与观测记入在
+    同一次 state.update_task_state 状态事务内完成（锁内对新鲜 state
+    判定重入与施加变更），waiting_quota 事件仅在事务提交成功后追加。
 
     quota_view（可选）：归一化配额观测 dict（status ∈
     QUOTA_VIEW_STATUSES + reset_at/source/observed_at，宿主从
@@ -659,25 +739,38 @@ def enter_waiting_quota(repo_root, task_id, quota_view=None) -> dict:
     """
     if quota_view is not None:
         _validate_quota_view(quota_view)
+    observation = None
+    if quota_view is not None:
+        observation = {
+            "status": quota_view.get("status"),
+            "reset_at": quota_view.get("reset_at"),
+            "observed_at": quota_view.get("observed_at"),
+        }
     st = _load_v24_state(repo_root, task_id)
-    old_status = st.get("status")
-    st = set_status(repo_root, task_id, "waiting_quota")
-    if old_status != "waiting_quota":
-        if quota_view is not None:
-            block = st.get("quota_resume")
+    _ensure_transition_allowed(st, "waiting_quota", "set_status")
+    committed = {"entered": False}
+
+    def _mutate(current):
+        if current.get("status") == "waiting_quota":
+            # 重入安全：无实际迁移不落事件、不刷新观测
+            return current
+        _ensure_transition_allowed(current, "waiting_quota", "set_status")
+        current["status"] = "waiting_quota"
+        if observation is not None:
+            block = current.get("quota_resume")
             if not isinstance(block, dict):
                 block = state.default_quota_resume()
-                st["quota_resume"] = block
-            block["last_observation"] = {
-                "status": quota_view.get("status"),
-                "reset_at": quota_view.get("reset_at"),
-                "observed_at": quota_view.get("observed_at"),
-            }
-            state.save_state(repo_root, st)
+                current["quota_resume"] = block
+            block["last_observation"] = observation
+        committed["entered"] = True
+        return current
+
+    new_state = state.update_task_state(repo_root, task_id, _mutate)
+    if committed["entered"]:
         journal.append_event(
             repo_root, task_id,
             {"event": "waiting_quota", "direction": "enter"})
-    return st
+    return new_state
 
 
 def exit_waiting_quota(repo_root, task_id) -> dict:
@@ -685,16 +778,29 @@ def exit_waiting_quota(repo_root, task_id) -> dict:
 
     原状态已是 active（无实际迁移）时只返回现状、不重复落事件；
     迁移合法性归 TASK_TRANSITIONS（如 waiting_user → waiting_quota 这类
-    矩阵外迁移自然被拒）。
+    矩阵外迁移自然被拒）。迁移经 state.update_task_state 状态事务落盘
+    （锁内对新鲜 state 判定重入与施加变更），waiting_quota 事件仅在
+    事务提交成功后追加。
     """
     st = _load_v24_state(repo_root, task_id)
-    old_status = st.get("status")
-    st = set_status(repo_root, task_id, "active")
-    if old_status != "active":
+    _ensure_transition_allowed(st, "active", "set_status")
+    committed = {"exited": False}
+
+    def _mutate(current):
+        if current.get("status") == "active":
+            # 无实际迁移：不落事件（重复恢复安全）
+            return current
+        _ensure_transition_allowed(current, "active", "set_status")
+        current["status"] = "active"
+        committed["exited"] = True
+        return current
+
+    new_state = state.update_task_state(repo_root, task_id, _mutate)
+    if committed["exited"]:
         journal.append_event(
             repo_root, task_id,
             {"event": "waiting_quota", "direction": "exit"})
-    return st
+    return new_state
 
 
 def authorize_quota_resume(repo_root, task_id, max_resumes) -> dict:
@@ -706,35 +812,43 @@ def authorize_quota_resume(repo_root, task_id, max_resumes) -> dict:
     - max_resumes 不得小于已用 resume_count（落盘态必须满足预算
       不变量 resume_count <= max_resumes）；
     - quota_resume 缺失 / 非 dict（手写盘面异常）→ 按默认块重建后
-      落两键（state.save_state 的全量校验兜底其余形状）；
+      落两键（state.update_task_state 事务的全量校验兜底其余形状）；
     - 授权由本调用的显式落盘记录（mode=auto），绝不推断；auto 不
       需要附加字段；本函数不追加 journal 事件（授权事实在 state），
       也绝不重置已用计数（新 provider 窗口不自动重置预算）。
+
+    状态与预算两道闸对锁内新鲜 state 复核（先经 _load_v24_state 在
+    锁外拒绝缺失 / v2.3 遗留），两键经 state.update_task_state 状态
+    事务落盘。
     """
     if isinstance(max_resumes, bool) or not isinstance(max_resumes, int) \
             or max_resumes < 0:
         raise ValueError(
             "authorize_quota_resume：max_resumes 必须是 >= 0 的整数，"
             "得到 %r" % (max_resumes,))
-    st = _load_v24_state(repo_root, task_id)
-    status = st.get("status")
-    if status not in ("waiting_quota", "active"):
-        raise ValueError(
-            "authorize_quota_resume：任务 %s 处于 %r，授权要求任务处于"
-            " waiting_quota 或 active" % (task_id, status))
-    block = st.get("quota_resume")
-    if not isinstance(block, dict):
-        block = state.default_quota_resume()
-        st["quota_resume"] = block
-    if max_resumes < block.get("resume_count", 0):
-        raise ValueError(
-            "authorize_quota_resume：max_resumes %d 不得小于已用 "
-            "resume_count %r（预算不变量：resume_count <= max_resumes）"
-            % (max_resumes, block.get("resume_count", 0)))
-    block["mode"] = "auto"
-    block["max_resumes"] = max_resumes
-    state.save_state(repo_root, st)
-    return st
+    _load_v24_state(repo_root, task_id)  # 缺失 / v2.3 遗留先拒（锁外）
+
+    def _apply_authorize(current):
+        status = current.get("status")
+        if status not in ("waiting_quota", "active"):
+            raise ValueError(
+                "authorize_quota_resume：任务 %s 处于 %r，授权要求任务"
+                "处于 waiting_quota 或 active" % (task_id, status))
+        block = current.get("quota_resume")
+        if not isinstance(block, dict):
+            block = state.default_quota_resume()
+            current["quota_resume"] = block
+        if max_resumes < block.get("resume_count", 0):
+            raise ValueError(
+                "authorize_quota_resume：max_resumes %d 不得小于已用 "
+                "resume_count %r（预算不变量：resume_count <= "
+                "max_resumes）"
+                % (max_resumes, block.get("resume_count", 0)))
+        block["mode"] = "auto"
+        block["max_resumes"] = max_resumes
+        return current
+
+    return state.update_task_state(repo_root, task_id, _apply_authorize)
 
 
 def scheduled_activation_decision(repo_root, task_id, quota_view) -> dict:
@@ -752,9 +866,10 @@ def scheduled_activation_decision(repo_root, task_id, quota_view) -> dict:
       3. mode 非 auto（manual 未授权）→ {"action": "waiting-user"}——
          等用户显式授权，不改状态；
       4. 预算耗尽（resume_count >= max_resumes）→ {"action":
-         "waiting-user"}，且恰一次把任务转 waiting_user（迁移本身
-         不落 journal——任务级词汇无通用状态名；幂等性由第 1 步保证：
-         再次唤醒时任务已非 waiting_quota → no-op）；
+         "waiting-user"}，且恰一次把任务转 waiting_user（经
+         state.update_task_state 状态事务落盘，锁内复核迁移门；迁移
+         本身不落 journal——任务级词汇无通用状态名；幂等性由第 1 步
+         保证：再次唤醒时任务已非 waiting_quota → no-op）；
       5. v2.4.1 连续性闸（INV-CONT-01 首选强化）：mode=auto 且
          automation_id 为空 / 非 str → {"action": "remain-waiting"}，
          reason 恒含 "continuity-unarmed"——auto 连续性未武装，绝不
@@ -802,8 +917,16 @@ def scheduled_activation_decision(repo_root, task_id, quota_view) -> dict:
     if resume_count >= max_resumes:
         _ensure_transition_allowed(st, "waiting_user",
                                    "scheduled_activation_decision")
-        st["status"] = "waiting_user"
-        state.save_state(repo_root, st)
+
+        def _mutate(current):
+            # 转态分支经 state.update_task_state 状态事务落盘：锁内对
+            # 新鲜 state 复核迁移门再施加变更（其转换门二次把关）
+            _ensure_transition_allowed(current, "waiting_user",
+                                       "scheduled_activation_decision")
+            current["status"] = "waiting_user"
+            return current
+
+        state.update_task_state(repo_root, task_id, _mutate)
         return {
             "action": "waiting-user",
             "reason": "自动恢复预算已耗尽（resume_count=%d >= "
@@ -850,56 +973,117 @@ def confirm_resume_started(repo_root, task_id) -> dict:
          即 workflow 执行阶段）；
       3. 落 quota_resume_confirmed 事件（含 resume_count /
          max_resumes / workflow_run_id）。
+    三项变更在 state.update_task_state 状态事务内对锁内新鲜 state
+    一次施加（四道闸锁内复核，事件载荷取提交后落盘值）；事件仅在
+    事务提交成功后追加。
     结构性拒绝（ValueError，先于一切写盘）：任务不处于 waiting_quota
     （含重复确认——确认后任务已 active，二次确认无暂存决策可落账，
     绝不重复消耗预算）/ mode 非 auto（未授权）/ 计数形状异常 /
     预算已耗尽（resume_count >= max_resumes，落账必破预算不变量）。
     """
-    st = _load_v24_state(repo_root, task_id)
-    status = st.get("status")
-    if status != "waiting_quota":
-        raise ValueError(
-            "confirm_resume_started：任务 %s 处于 %r，非 waiting_quota"
-            "——无暂存恢复决策可落账（重复确认安全：确认后任务已转"
-            " active）" % (task_id, status))
-    block = st.get("quota_resume")
-    if not isinstance(block, dict) or block.get("mode") != "auto":
-        raise ValueError(
-            "confirm_resume_started：任务 %s 的 quota_resume.mode=%r，"
-            "未授权自动恢复，拒绝落账"
-            % (task_id,
-               block.get("mode") if isinstance(block, dict) else None))
+    _load_v24_state(repo_root, task_id)  # 缺失 / v2.3 遗留先拒（锁外）
 
-    def _bad_count(value):
-        return isinstance(value, bool) or not isinstance(value, int) \
-            or value < 0
+    def _apply_confirm(current):
+        """四道闸 + 落账三变更（对锁内新鲜盘面执行）。"""
+        status = current.get("status")
+        if status != "waiting_quota":
+            raise ValueError(
+                "confirm_resume_started：任务 %s 处于 %r，非 waiting_quota"
+                "——无暂存恢复决策可落账（重复确认安全：确认后任务已转"
+                " active）" % (task_id, status))
+        block = current.get("quota_resume")
+        if not isinstance(block, dict) or block.get("mode") != "auto":
+            raise ValueError(
+                "confirm_resume_started：任务 %s 的 quota_resume.mode=%r，"
+                "未授权自动恢复，拒绝落账"
+                % (task_id,
+                   block.get("mode") if isinstance(block, dict) else None))
 
-    resume_count = block.get("resume_count")
-    max_resumes = block.get("max_resumes")
-    if _bad_count(resume_count) or _bad_count(max_resumes):
-        raise ValueError(
-            "confirm_resume_started：任务 %s 的 quota_resume 计数形状"
-            "非法（resume_count=%r / max_resumes=%r），拒绝落账"
-            % (task_id, resume_count, max_resumes))
-    if resume_count >= max_resumes:
-        raise ValueError(
-            "confirm_resume_started：任务 %s 预算已耗尽（resume_count="
-            "%d >= max_resumes=%d），无暂存决策可落账"
-            % (task_id, resume_count, max_resumes))
-    block["resume_count"] = resume_count + 1
-    st["status"] = "active"
-    st["phase"] = "workflow"
-    state.save_state(repo_root, st)
+        def _bad_count(value):
+            return isinstance(value, bool) or not isinstance(value, int) \
+                or value < 0
+
+        resume_count = block.get("resume_count")
+        max_resumes = block.get("max_resumes")
+        if _bad_count(resume_count) or _bad_count(max_resumes):
+            raise ValueError(
+                "confirm_resume_started：任务 %s 的 quota_resume 计数形状"
+                "非法（resume_count=%r / max_resumes=%r），拒绝落账"
+                % (task_id, resume_count, max_resumes))
+        if resume_count >= max_resumes:
+            raise ValueError(
+                "confirm_resume_started：任务 %s 预算已耗尽（resume_count="
+                "%d >= max_resumes=%d），无暂存决策可落账"
+                % (task_id, resume_count, max_resumes))
+        block["resume_count"] = resume_count + 1
+        current["status"] = "active"
+        current["phase"] = "workflow"
+        return current
+
+    new_state = state.update_task_state(repo_root, task_id, _apply_confirm)
+    committed_block = new_state["quota_resume"]
     journal.append_event(
         repo_root, task_id,
         {"event": "quota_resume_confirmed",
-         "resume_count": resume_count + 1,
-         "max_resumes": max_resumes,
-         "workflow_run_id": st.get("workflow_run_id")})
-    return st
+         "resume_count": committed_block["resume_count"],
+         "max_resumes": committed_block["max_resumes"],
+         "workflow_run_id": new_state.get("workflow_run_id")})
+    return new_state
 
 
 # —— auto 连续性武装：绑定 / 清理 / 预检（v2.4.1 H2） ——
+
+def _bind_automation_state(st, task_id, automation_id):
+    """bind 的状态限 + 冲突闸 + 绑定落块（预检与锁内复核共用同一实现）。
+
+    automation_id 参数合法性由调用方先闸（非空 str）。返回 None =
+    存量同 id 幂等（零变更）；否则就地写入并返回 st。
+    """
+    status = st.get("status")
+    if status not in AUTOMATION_BIND_STATUSES:
+        raise ValueError(
+            "bind_quota_automation：任务 %s 处于 %r，绑定要求任务处于"
+            " %s（终态不得新增绑定事实；终态清理走 clear_quota_"
+            "automation）"
+            % (task_id, status, " / ".join(AUTOMATION_BIND_STATUSES)))
+    block = st.get("quota_resume")
+    if not isinstance(block, dict):
+        block = state.default_quota_resume()
+        st["quota_resume"] = block
+    current = block.get("automation_id")
+    if current == automation_id:
+        return None  # 幂等：同 id 重绑零变更
+    if current is not None:
+        raise ValueError(
+            "bind_quota_automation：任务 %s 已绑定 automation_id %r，"
+            "拒绝静默替换为 %r（替换必须先经宿主侧生命周期对账，再走"
+            "显式 clear_quota_automation → bind_quota_automation 序列）"
+            % (task_id, current, automation_id))
+    block["automation_id"] = automation_id
+    return st
+
+
+def _clear_automation_state(st, task_id, automation_id):
+    """clear 的精确对账闸 + 清零（预检与锁内复核共用同一实现）。
+
+    返回 None = 存量本就未武装（幂等零变更）；否则清为 None 并返回
+    st。绝不改 mode / max_resumes / resume_count。
+    """
+    block = st.get("quota_resume")
+    if not isinstance(block, dict):
+        block = state.default_quota_resume()
+        st["quota_resume"] = block
+    current = block.get("automation_id")
+    if current is None:
+        return None  # 幂等：本就未武装，零变更
+    if automation_id is not None and automation_id != current:
+        raise ValueError(
+            "clear_quota_automation：给定 automation_id %r 与任务 %s "
+            "的存量绑定 %r 不一致，拒绝清理（精确对账口径；无预期时"
+            "传 None 表示无条件清除现存绑定）"
+            % (automation_id, task_id, current))
+    block["automation_id"] = None
+    return st
 
 def bind_quota_automation(repo_root, task_id, automation_id) -> dict:
     """绑定未来原生 Scheduled Task 见证 id（v2.4.1，INV-CONT-01）。
@@ -917,7 +1101,9 @@ def bind_quota_automation(repo_root, task_id, automation_id) -> dict:
       clear-then-bind 序列，且宿主侧生命周期先对账）；
     - 绝不推断 mode=auto：绑定 ≠ 授权自动恢复（授权与武装是两个
       独立事实，授权只能走 authorize_quota_resume 的显式落盘）；
-    - 经 state.save_state 落盘（其转换门 + 全量校验二次把关）；
+    - 经 state.update_task_state 状态事务落盘（转换门 + 全量校验
+      二次把关；绑定块在锁内对新鲜 state 施加，状态限与冲突闸锁内
+      复核；同 id 幂等在取锁前零写盘原样返回现状）；
     - 不追加 journal 事件（绑定事实由 state 落盘记录）；绝不持久化
       秘密 / prompt（本参数只是宿主定时激活的 id 见证）。
     """
@@ -926,30 +1112,16 @@ def bind_quota_automation(repo_root, task_id, automation_id) -> dict:
             "bind_quota_automation：automation_id 必须是非空字符串，"
             "得到 %r" % (automation_id,))
     st = _load_v24_state(repo_root, task_id)
-    status = st.get("status")
-    if status not in AUTOMATION_BIND_STATUSES:
-        raise ValueError(
-            "bind_quota_automation：任务 %s 处于 %r，绑定要求任务处于"
-            " %s（终态不得新增绑定事实；终态清理走 clear_quota_"
-            "automation）"
-            % (task_id, status, " / ".join(AUTOMATION_BIND_STATUSES)))
-    block = st.get("quota_resume")
-    if not isinstance(block, dict):
-        block = state.default_quota_resume()
-        st["quota_resume"] = block
-    current = block.get("automation_id")
-    if current == automation_id:
+    if _bind_automation_state(st, task_id, automation_id) is None:
         # 幂等：同 id 重绑零写盘，原样返回现状
         return st
-    if current is not None:
-        raise ValueError(
-            "bind_quota_automation：任务 %s 已绑定 automation_id %r，"
-            "拒绝静默替换为 %r（替换必须先经宿主侧生命周期对账，再走"
-            "显式 clear_quota_automation → bind_quota_automation 序列）"
-            % (task_id, current, automation_id))
-    block["automation_id"] = automation_id
-    state.save_state(repo_root, st)
-    return st
+
+    def _mutate(current):
+        result = _bind_automation_state(current, task_id, automation_id)
+        # 存量同 id（并发竞态兜底）：零变更，原样返回新鲜现状
+        return current if result is None else result
+
+    return state.update_task_state(repo_root, task_id, _mutate)
 
 
 def clear_quota_automation(repo_root, task_id, automation_id=None) -> dict:
@@ -965,27 +1137,21 @@ def clear_quota_automation(repo_root, task_id, automation_id=None) -> dict:
       resume_count（授权与预算是独立事实，清理武装不动授权）；
     - 终态任务允许清理（完成后才能删绑定；终态冻结的是 validation /
       review / run 关联等新事实，武装解除是对既有事实的对账收尾）；
-    - 任务必须存在且为 v2.4；经 state.save_state 落盘；不追加
-      journal 事件。
+    - 任务必须存在且为 v2.4；清除经 state.update_task_state 状态事务
+      落盘（对账闸锁内复核；存量 None 幂等在取锁前零写盘返回）；
+      不追加 journal 事件。
     """
     st = _load_v24_state(repo_root, task_id)
-    block = st.get("quota_resume")
-    if not isinstance(block, dict):
-        block = state.default_quota_resume()
-        st["quota_resume"] = block
-    current = block.get("automation_id")
-    if current is None:
+    if _clear_automation_state(st, task_id, automation_id) is None:
         # 幂等：本就未武装，零写盘原样返回现状
         return st
-    if automation_id is not None and automation_id != current:
-        raise ValueError(
-            "clear_quota_automation：给定 automation_id %r 与任务 %s "
-            "的存量绑定 %r 不一致，拒绝清理（精确对账口径；无预期时"
-            "传 None 表示无条件清除现存绑定）"
-            % (automation_id, task_id, current))
-    block["automation_id"] = None
-    state.save_state(repo_root, st)
-    return st
+
+    def _mutate(current):
+        result = _clear_automation_state(current, task_id, automation_id)
+        # 存量 None（并发竞态兜底）：零变更，原样返回新鲜现状
+        return current if result is None else result
+
+    return state.update_task_state(repo_root, task_id, _mutate)
 
 
 def quota_continuity_preflight(repo_root, task_id) -> dict:
@@ -1061,8 +1227,10 @@ def pin_worker_model(repo_root, task_id, model_id) -> dict:
       即新一次授权，绝不静默拒绝也不静默替换——返回值带 prev 与
       new 供 CLI 输出与操作者对账）；盘上无有效 pin（键缺失 /
       null / 非 str 形状异常）→ prev 为 None 的首写；
-    - 经 state.save_state 落盘（其转换门 + 全量校验二次把关——
-      worker_model 键形状由 state._validate_worker_model 收口）；
+    - 经 state.update_task_state 状态事务落盘（转换门 + 全量校验
+      二次把关——worker_model 键形状由 state._validate_worker_model
+      收口；pin 在锁内对新鲜 state 施加，终态冻结锁内复核；同值
+      幂等在取锁前零写盘返回现状）；
     - 绝不新增 journal 事件名（TASK_JOURNAL_EVENTS 十名冻结维持
       ——pin 审计由 CLI 输出与 state 落盘承载）；绝不持久化秘密 /
       prompt（本键只是宿主已配置 worker 模型的 id 见证）。
@@ -1080,8 +1248,13 @@ def pin_worker_model(repo_root, task_id, model_id) -> dict:
     if prev == model_id:
         # 幂等：同值重 pin 零写盘，原样返回现状
         return {"task_id": task_id, "prev": prev, "new": model_id}
-    st["worker_model"] = model_id
-    state.save_state(repo_root, st)
+
+    def _mutate(current):
+        _ensure_not_terminal(current, "pin_worker_model")
+        current["worker_model"] = model_id
+        return current
+
+    state.update_task_state(repo_root, task_id, _mutate)
     return {"task_id": task_id, "prev": prev, "new": model_id}
 
 
@@ -1092,9 +1265,11 @@ def _finish(repo_root, task_id, terminal_status, event_name) -> dict:
 
     - 迁移门同 set_status（旧 == 目标终态 → 同终态重放放行：不重复
       落盘，但事件与守卫释放幂等重做——hook 重入安全；跨终态迁移
-      一律拒绝）；
+      一律拒绝）；实际迁移经 state.update_task_state 状态事务落盘
+      （锁内对新鲜 state 复核迁移门再施加，其转换门二次把关）；
     - 事件名限于 TASK_JOURNAL_EVENTS（task_completed / task_failed /
-      task_cancelled），含 from 字段记录收尾前状态；
+      task_cancelled），含 from 字段记录收尾前状态（提交路径取锁内
+      新鲜盘面的收尾前状态；事件仅在状态事务提交成功后追加）；
     - 双根分工（FR-01）：state.json / journal 留在账本根 repo_root；
       写者守卫在生效仓库根上释放（state.resolve_repository_root：
       repository.root 绑定优先、账本根回退）——账本根与绑定仓库根
@@ -1106,13 +1281,25 @@ def _finish(repo_root, task_id, terminal_status, event_name) -> dict:
     """
     st = _load_v24_state(repo_root, task_id)
     old_status = st.get("status")
+    event_from = {"value": old_status}
     if old_status != terminal_status:
         _ensure_transition_allowed(st, terminal_status, event_name)
-        st["status"] = terminal_status
-        state.save_state(repo_root, st)
+
+        def _mutate(current):
+            # 锁内新鲜盘面复核迁移门（update_task_state 的转换门二次
+            # 把关），终态施加在新鲜 state 上
+            event_from["value"] = current.get("status")
+            _ensure_transition_allowed(current, terminal_status, event_name)
+            current["status"] = terminal_status
+            return current
+
+        st = state.update_task_state(repo_root, task_id, _mutate)
+    # 同终态重放不重复落盘（事件与守卫释放幂等重做）；journal 仅在
+    # 状态提交成功后追加
     journal.append_event(
         repo_root, task_id,
-        {"event": event_name, "from": old_status, "to": terminal_status})
+        {"event": event_name, "from": event_from["value"],
+         "to": terminal_status})
     writer_guard.release(
         state.resolve_repository_root(st, repo_root), task_id)
     return st

@@ -12,14 +12,27 @@
         异常）；dag 数组逐节点经 runtime.work_unit.validate_node 校验
         （错误前缀 dag[i].），整图经 runtime.dependency.graph_errors
         校验（nodes[i] 路径统一改写为 dag[i] 路径）；
-      - 保存 / 读取：save_state() 先校验再经 runtime.durable_io 原子写
-        （每次调用唯一临时名 + os.replace + PermissionError 有界重试），
-        并按 v2.4 顶层状态转换表（TASK_TRANSITIONS）拒绝非法迁移——
-        终态不得静默重开；load_state() 读取并归一任务标识，JSON 损坏
-        抛 ValueError 不静默；
-      - 迁移 / 重开：transition_task_status() 公共迁移入口（记
-        status_changed 事件）；reopen_task() 显式重开通道——终态重开
-        只能走它，必须落 task_reopened 事件，绝不静默改写；
+      - 保存 / 读取：save_state() 先校验，再在 <state.json>.lock 独占
+        锁内严格重读盘上现状、过状态转换门后经 runtime.durable_io
+        原子写（每次调用唯一临时名 + os.replace + PermissionError 有
+        界重试），并按 v2.4 顶层状态转换表（TASK_TRANSITIONS）拒绝非
+        法迁移——终态不得静默重开；load_state() 读取并归一任务标识，
+        JSON 损坏抛 ValueError 不静默；
+      - 状态事务（v2.6.0 WP-R1，P1-1 并发读改写修复）：update_task_
+        state() 是 per-task 读-改-校验-写事务原语——durable_io 独占
+        锁内严格重读当前字节（缺失仅在显式允许处放行；JSON 损坏 /
+        任务标识错位 / schema 残缺一律 ValueError，损坏盘面绝不被覆
+        盖），对新鲜 state 施加操作专属变更后再过转换门、全量校验、
+        原子替换。锁内零 git / 子进程 I/O（慢观察一律锁外取快照、锁
+        内应用）；save_state / transition_task_status / reopen_task
+        三个变更入口与 update_task_state 共用同一把锁且各为单锁单事
+        务（绝不嵌套取锁）；journal 事件仅在状态提交成功并释放锁后追
+        加——状态与账本是两个文件，跨文件非 ACID（崩溃窗口如实存在，
+        绝不宣称多文件原子性）；
+      - 迁移 / 重开：transition_task_status() 公共迁移入口（锁内完成
+        读-门-改-写，提交成功后记 status_changed 事件）；reopen_task()
+        显式重开通道——终态重开只能走它，与变更入口同一把锁内完成，
+        必须落 task_reopened 事件，绝不静默改写；
       - 发现：discover_tasks() 对 tasks_root 全部子目录四分类
         （active / terminal / corrupt / orphaned）；find_active_tasks()
         保留为兼容 helper；
@@ -81,8 +94,9 @@ schema 来源：
     + runtime.work_unit（静态节点 validate_node，Phase 1 P1-B；
       本模块单向导入它，它不导入本模块，无循环导入）
     + runtime.dependency（图校验 graph_errors，Phase 1 P1-B；同上）
-    + runtime.durable_io（共享原子写原语 atomic_write_json；它不导入
-      runtime 包内任何模块，无循环导入），
+    + runtime.durable_io（共享原子写原语 atomic_write_json + 独占锁
+      exclusive_lock 与锁名常量 LOCK_SUFFIX；它不导入 runtime 包内任
+      何模块，无循环导入），
     零第三方依赖，`python3 -S` 可运行。
 """
 
@@ -92,7 +106,8 @@ import pathlib
 import re
 
 from runtime.dependency import graph_errors
-from runtime.durable_io import atomic_write_json
+from runtime.durable_io import (LOCK_SUFFIX, atomic_write_json,
+                                exclusive_lock)
 from runtime.work_unit import validate_node
 
 # —— 路径常量与定位 ——
@@ -769,6 +784,111 @@ def _transition_errors(previous, new_status):
             % (old_status, new_status, old_status, targets))
 
 
+# —— per-task 状态事务（v2.6.0 WP-R1：P1-1 并发读改写修复） ——
+
+def _state_lock_path(repo_root, task_id) -> pathlib.Path:
+    """返回任务 state.json 的 durable_io 独占锁路径（<state.json>.lock，
+    与目标同目录——与 durable_io.atomic_update_json 的锁命名同一约定）。
+    全部状态变更入口（save_state / transition_task_status / reopen_task /
+    update_task_state）共用这一把锁，单锁单事务、绝不嵌套取锁。"""
+    path = state_path(repo_root, task_id)
+    return pathlib.Path(str(path) + LOCK_SUFFIX)
+
+
+def _transaction_state(repo_root, task_id, *, allow_missing) -> "dict | None":
+    """事务内严格重读当前盘上 state（仅供独占锁持有方调用）。
+
+    锁内严格读口径（「损坏不被覆盖」不变式的读取侧收口）：
+      - state.json 缺失 → None 仅当 allow_missing=True（显式允许首存 /
+        创建的入口才可放行缺失），否则 ValueError；
+      - JSON 损坏 / 任务标识归一失败 → ValueError（load_state 不静默，
+        绝不以默认值顶替）；
+      - 任务身份校验：盘上内容归一标识必须等于目标 task_id（目录与
+        内容错位的账本拒绝作为事务基底）；
+      - schema 校验：validate_state 非空即 ValueError——schema 残缺的
+        盘面绝不作为事务基底，也绝不被整体态默认值静默覆盖。
+    """
+    current = load_state(repo_root, task_id)
+    if current is None:
+        if allow_missing:
+            return None
+        raise ValueError(
+            "state 事务：任务 %s 不存在（无 state.json），拒绝读写" % task_id)
+    disk_id = normalize_task_id(current)
+    if disk_id != task_id:
+        raise ValueError(
+            "state 事务：盘上 state.json 归一任务标识 %r 与目标 %r 不一致"
+            "，拒绝在错位账本上写入" % (disk_id, task_id))
+    errors = validate_state(current)
+    if errors:
+        raise ValueError(
+            "state 事务：盘上 state.json schema 非法，拒绝在其上写入"
+            "（损坏不被覆盖）：%s" % "；".join(errors))
+    return current
+
+
+def _transaction_commit(path, task_id, new_state) -> pathlib.Path:
+    """事务内提交：全量校验 + 内容身份复核 + 原子替换（仅供锁持有方）。
+
+    - validate_state 非空 → ValueError（零副作用，盘面不被触碰）；
+    - new_state["task_id"] 必须等于事务目标 task_id（P1-9 同源口径）；
+    - atomic_write_json 原子替换（唯一临时名 + os.replace）。
+    锁内只做纯内存校验与写盘，绝不执行 git / 子进程等慢 I/O——慢观
+    察一律锁外取快照，锁内基于新鲜 state 应用（避免数秒级锁持有串行
+    阻塞全部写者）。
+    """
+    errors = validate_state(new_state)
+    if errors:
+        raise ValueError("state 非法，无法保存：%s" % "；".join(errors))
+    if new_state.get("task_id") != task_id:
+        raise ValueError(
+            "state 事务：新 state.task_id %r 与事务目标 %r 不一致，拒绝"
+            "提交（P1-9：目录与内容的任务标识必须一致）"
+            % (new_state.get("task_id"), task_id))
+    atomic_write_json(path, new_state, sort_keys=False)
+    return path
+
+
+def update_task_state(repo_root, task_id, mutate, *,
+                      allow_missing=False) -> dict:
+    """per-task 读-改-校验-写状态事务（v2.6.0 WP-R1 复用原语）。
+
+    单锁单事务（本函数是唯一锁持有者，绝不嵌套取锁）：
+      1. 取目标 state.json 的 durable_io 独占锁（<state.json>.lock）；
+      2. 锁内严格重读当前字节（_transaction_state：缺失仅在
+         allow_missing=True 时放行；JSON 损坏 / 任务标识错位 / schema
+         残缺一律 ValueError——损坏盘面绝不被覆盖）；
+      3. mutate(current) 对新鲜 state 施加操作专属变更——current 为
+         盘上 state dict（allow_missing=True 且缺失时为 None）。mutate
+         必须是纯内存函数并返回完整新 state dict：锁内零 git / 子进程
+         I/O，也绝不调用 save_state / transition_task_status /
+         reopen_task / update_task_state（独占锁不可重入，嵌套取锁会
+         有界等待至 LockBusyError）；慢观察（git 快照等）一律锁外先取；
+      4. 转换门：_transition_errors(盘上现状, 新 status)——旧 == 新
+         （同态含同终态重放）幂等放行；终态（completed / cancelled /
+         failed）任何变化拒绝，绝不静默重开（显式重开走 reopen_task
+         ——同一把锁）；
+      5. _transaction_commit：全量校验 + 内容身份复核 + 原子替换；
+      6. 释放锁，返回新 state。
+
+    journal 事件由调用方在本函数成功返回（提交成功）后追加——状态与
+    账本跨文件非 ACID（崩溃窗口如实存在）。锁忙超时（默认 10 秒）以
+    durable_io.LockBusyError 原样上抛（确定型失败，绝不无限等待）。
+    """
+    path = state_path(repo_root, task_id)
+    with exclusive_lock(_state_lock_path(repo_root, task_id)):
+        current = _transaction_state(repo_root, task_id,
+                                     allow_missing=allow_missing)
+        new_state = mutate(current)
+        if not isinstance(new_state, dict):
+            raise ValueError(
+                "update_task_state：mutate 必须返回完整 state dict，得到 %s"
+                % type(new_state).__name__)
+        _transition_errors(current, new_state.get("status"))
+        _transaction_commit(path, task_id, new_state)
+    return new_state
+
+
 def save_state(repo_root, state, *, task_id=None) -> pathlib.Path:
     """校验并原子保存状态文件，返回最终路径。
 
@@ -777,15 +897,22 @@ def save_state(repo_root, state, *, task_id=None) -> pathlib.Path:
     - 目录/内容一致性（P1-9）：显式 task_id 参数非 None 时必须等于
       state["task_id"]，不一致 → ValueError（目录与内容的任务标识
       必须一致；如需迁移请以内容 ID 为准重建目录）；
-    - 状态转换门：写盘前读盘上现有 state.json（不存在视为首存），
-      status 变化必须落在 TASK_TRANSITIONS 内；终态一律不得静默重开
-      （显式重开请走 reopen_task）；盘上文件损坏（load_state 抛
-      ValueError）自然向上传播，不覆盖损坏文件；
+    - per-task 事务（v2.6.0 WP-R1）：先取 <state.json>.lock 独占锁，
+      锁内严格重读盘上现状（缺失视为首存放行；JSON 损坏 / 任务标识
+      错位 / schema 残缺一律 ValueError——损坏盘面绝不被覆盖），再过
+      状态转换门（TASK_TRANSITIONS；终态一律不得静默重开，显式重开
+      请走 reopen_task；旧 == 新同态重放放行），最后原子替换落盘并
+      释放锁——转换判定与落盘在同一把锁内完成，不再有「锁外读门、
+      锁内写盘」的竞态窗口；
+    - 本函数是「整体态替换」语义：写入调用方提供的完整 state（过期
+      整态 dict 会覆盖盘上无关新字段——字段级并发安全必须走
+      update_task_state 的读-改-写事务，把变更施加到锁内新鲜 state）；
     - 目录不存在自动创建（durable_io 负责）；
     - 原子写：复用 runtime.durable_io.atomic_write_json——每次调用
       唯一临时名（<目标名>.durable-tmp.<pid>.<uuid>.tmp）+ os.replace，
       UTF-8、ensure_ascii=False、缩进 2、固定 \n 换行，PermissionError
-      有界重试；读方永不见撕裂文件。
+      有界重试；读方永不见撕裂文件；
+    - 锁忙超时（默认 10 秒）以 durable_io.LockBusyError 原样上抛。
 
     （历史注：v2.3 曾有 finalizing→completed 的完成门内部提交通道
     （save_state 的 _gate_commit 私有形参）；v2.4 已无该通道——
@@ -804,9 +931,12 @@ def save_state(repo_root, state, *, task_id=None) -> pathlib.Path:
             "（P1-9：目录与内容的任务标识必须一致；如需迁移请以内容 ID "
             "为准重建目录）" % (task_id, state.get("task_id")))
     path = state_path(repo_root, tid)
-    # 转换门先于落盘：盘上损坏文件在此抛 ValueError，不会被覆盖
-    _transition_errors(load_state(repo_root, tid), state.get("status"))
-    atomic_write_json(path, state, sort_keys=False)
+    # 事务：转换门与落盘在同一把独占锁内完成（锁内严格重读——盘上
+    # 损坏 / 错位 / schema 残缺在此抛 ValueError，不会被覆盖）
+    with exclusive_lock(_state_lock_path(repo_root, tid)):
+        current = _transaction_state(repo_root, tid, allow_missing=True)
+        _transition_errors(current, state.get("status"))
+        _transaction_commit(path, tid, state)
     return path
 
 
@@ -840,66 +970,70 @@ def load_state(repo_root, task_id) -> "dict | None":
 def transition_task_status(repo_root, task_id, new_status) -> dict:
     """按 TASK_TRANSITIONS 把任务状态迁移到 new_status，返回迁移后的状态。
 
-    公共运行时迁移入口：
-      - load_state 缺失（None）→ ValueError；JSON 损坏自然向上传播；
-      - 迁移校验与 save_state 同规则（终态无表项——终态迁移含重开
-        一律拒绝，显式重开走 reopen_task）；
-      - 成功后向任务 journal 追加一条 status_changed 事件
-        （{"event": "status_changed", "from": 旧, "to": 新}），journal
-        在函数内 import（惰性 import 风格，与钩子一致）。
+    per-task 事务入口（v2.6.0 WP-R1）：<state.json>.lock 独占锁内严格
+    重读盘上现状（缺失 → ValueError；JSON 损坏 / 任务标识错位 /
+    schema 残缺一律 ValueError，绝不覆盖损坏盘面）→ 迁移校验与
+    save_state 同规则（终态无表项——终态迁移含重开一律拒绝，显式重开
+    走 reopen_task；旧 == 新同态重放幂等放行）→ 对新鲜副本施加变更 →
+    全量校验后原子替换落盘。成功释放锁后向任务 journal 追加一条
+    status_changed 事件（{"event": "status_changed", "from": 旧,
+    "to": 新}）——journal 仅在状态提交成功后追加，状态与账本跨文件非
+    ACID；journal 在函数内 import（惰性 import 风格，与钩子一致）。
+    锁忙超时（默认 10 秒）以 durable_io.LockBusyError 原样上抛。
     """
     from runtime import journal
 
-    st = load_state(repo_root, task_id)
-    if st is None:
-        raise ValueError(
-            "transition_task_status：任务 %s 不存在（无 state.json），"
-            "无法迁移状态" % task_id)
-    old_status = st.get("status")
-    _transition_errors(st, new_status)
-    st["status"] = new_status
-    save_state(repo_root, st)
+    path = state_path(repo_root, task_id)
+    with exclusive_lock(_state_lock_path(repo_root, task_id)):
+        current = _transaction_state(repo_root, task_id,
+                                     allow_missing=False)
+        old_status = current.get("status")
+        _transition_errors(current, new_status)
+        new_state = dict(current)
+        new_state["status"] = new_status
+        _transaction_commit(path, task_id, new_state)
     journal.append_event(
         repo_root, task_id,
         {"event": "status_changed", "from": old_status, "to": new_status})
-    return st
+    return new_state
 
 
 def reopen_task(repo_root, task_id, *, reason=None) -> dict:
     """显式重开终态任务（completed / cancelled / failed → active）。
 
     终态不得静默重开：save_state / transition_task_status 对终态迁移
-    一律拒绝，本函数是唯一放行通道——重开动作必须落 journal 记录
-    （{"event": "task_reopened", "from": 旧终态, "to": "active",
-    "reason": reason}），绝不静默改写：
-      - load_state 缺失 → ValueError；JSON 损坏自然向上传播；
-      - 盘上 status 非终态 → ValueError（非终态任务无需重开）；
-      - 置 active 后先 validate_state（终态 state 合法则重开态亦合法）
-        再经 durable_io 原子写盘——绕开 save_state 的终态转换门正是本
-        函数的存在意义，校验与原子写约定与 save_state 完全一致；
-      - reason 可空（缺省 None），供调用方留重开缘由。
+    一律拒绝，本函数是唯一放行通道——与全部状态变更入口共用同一把
+    <state.json>.lock 独占锁（v2.6.0 WP-R1：锁内严格重读，缺失 /
+    JSON 损坏 / 任务标识错位 / schema 残缺一律 ValueError），重开动作
+    必须落 journal 记录（{"event": "task_reopened", "from": 旧终态,
+    "to": "active", "reason": reason}），绝不静默改写：
+      - 锁内盘上 status 非终态 → ValueError（非终态任务无需重开）；
+      - 置 active 后经 _transaction_commit 全量校验（终态 state 合法
+        则重开态亦合法）再原子写盘——绕开 TASK_TRANSITIONS 转换表正是
+        本函数的存在意义，校验与原子写约定与 save_state 完全一致；
+      - reason 可空（缺省 None），供调用方留重开缘由；
+      - task_reopened 事件仅在状态提交成功并释放锁后追加（状态与账
+        本跨文件非 ACID，如实文档化）。
     """
     from runtime import journal
 
-    st = load_state(repo_root, task_id)
-    if st is None:
-        raise ValueError(
-            "reopen_task：任务 %s 不存在（无 state.json），无法重开" % task_id)
-    old_status = st.get("status")
-    if old_status not in TERMINAL_STATUSES:
-        raise ValueError(
-            "reopen_task：任务 %s 的 status 为 %r，非终态任务无需重开"
-            "（迁移请走 transition_task_status）" % (task_id, old_status))
-    st["status"] = "active"
-    errors = validate_state(st)
-    if errors:
-        raise ValueError("state 非法，无法保存：%s" % "；".join(errors))
-    atomic_write_json(state_path(repo_root, task_id), st, sort_keys=False)
+    path = state_path(repo_root, task_id)
+    with exclusive_lock(_state_lock_path(repo_root, task_id)):
+        current = _transaction_state(repo_root, task_id,
+                                     allow_missing=False)
+        old_status = current.get("status")
+        if old_status not in TERMINAL_STATUSES:
+            raise ValueError(
+                "reopen_task：任务 %s 的 status 为 %r，非终态任务无需重开"
+                "（迁移请走 transition_task_status）" % (task_id, old_status))
+        new_state = dict(current)
+        new_state["status"] = "active"
+        _transaction_commit(path, task_id, new_state)
     journal.append_event(
         repo_root, task_id,
         {"event": "task_reopened", "from": old_status, "to": "active",
          "reason": reason})
-    return st
+    return new_state
 
 
 # —— 发现 ——
