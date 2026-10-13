@@ -58,9 +58,12 @@ v2.4 Phase 3（P3-D/E）收口面：
         含 snapshot），组装归一化诊断 view {status, source,
         observed_at, reset_at}——observed_at 取 detail.fetched_at
         （provider 层即 evaluated_at；none 层 None 绝不虚构）、
-        reset_at 取 EXHAUSTED 阻塞窗 reset_at 的字典序最大值
-        （v2.5.2 阻塞窗口径，经 parser.evaluate 求逐窗态后过滤；
-        无阻塞窗 → None；纯诊断字段，不参与任何判定）——再以
+        reset_at 为已识别窗口中最早的有效未来观测 reset_at
+        （v2.6.0 单一观测口径，规格 §2.2：snapshot 经 parser.evaluate
+        求逐窗态后由 parser.earliest_future_reset_at 以 UTC instant
+        显式比较选出，与窗口状态无关；已过期 / 无效 / 陈旧观测
+        force refresh 恰一次，仍不可得 → None 如实披露 floor-only
+        降级，绝不虚构；纯诊断字段，不参与任何判定）——再以
         quota_view 进入 waiting_quota（幂等语义
         不变；workflow_run_id 不动）。语义：任务已遭遇额度相关执行
         停止后的显式停靠命令，不是自动额度失败探测器。任务层拒绝 →
@@ -77,13 +80,14 @@ v2.4 Phase 3（P3-D/E）收口面：
         同 quota-wait 方式取观测 view，输出单行 JSON {task_id,
         decision, quota_observation}（decision 为任务层原样决策
         dict——action / reason，resume-authorized 时另含
-        workflow_run_id / resume_count_after 暂存计数）。v2.5 精确
-        唤醒输出扩展（I4/W3，向后兼容附加键）：decision 为
-        remain-waiting 且观测为 EXHAUSTED 时，decision 只读透传本次
-        观测的 reset_at（quota_view.reset_at，ISO 字符串或 null，
-        v2.5.2 起为阻塞窗口径）——纯诊断透传，供主会话按睡眠模板
-        换算精度层睡眠目标，不参与任何判定；UNKNOWN / no-op 分支
-        保持既有输出形状，绝不透传。
+        workflow_run_id / resume_count_after 暂存计数）。v2.6.0 单
+        reset_at 无条件透传（规格 §2.3，向后兼容附加键）：对所有
+        action（no-op / remain-waiting / waiting-user /
+        resume-authorized），decision 恒只读透传本次观测的 reset_at
+        （quota_view.reset_at，ISO 字符串或 null，单一观测口径——
+        已识别窗口最早有效未来 reset，与额度状态无关）——纯诊断
+        透传，供主会话按睡眠模板换算精度层睡眠目标，不参与任何
+        判定；既有键一律不动。
         绝不调用宿主 ResumeWorkflowRun（宿主动作归主会话）。
     quota-resume-confirm <repo_root> <task_id>
         恢复落账确认（task.confirm_resume_started 薄壳；仅在宿主
@@ -427,6 +431,26 @@ def _quota_resolve(repo_root, force_refresh=False) -> int:
 # runtime.task 内，这里只做 argv 解析、观测组装、JSON 输出与退出
 # 码映射（任务层 ValueError 拒绝 → _QuotaRejected，退出码 1）。
 
+def _observation_view_of(detail) -> dict:
+    """单份 resolve_quota_detail 的 detail → 归一化诊断 view（恰四键，
+    v2.6.0 单一观测口径；语义见 _quota_observation_view）。
+
+    view 恒与这一份 detail 同源同批（status / source / observed_at /
+    reset_at 永不跨观测拼装）；reset_at 语义为已识别窗口中最早的
+    有效未来观测 reset_at（规格 §2.2），无候选 → None（floor-only
+    降级如实披露，绝不虚构）。"""
+    from runtime.quota import parser as quota_parser  # 函数内 import
+    snapshot = detail.get("snapshot")
+    evaluation = (quota_parser.evaluate(snapshot)
+                  if isinstance(snapshot, dict) else None)
+    return {
+        "status": detail.get("status"),
+        "source": detail.get("source"),
+        "observed_at": detail.get("fetched_at"),
+        "reset_at": quota_parser.earliest_future_reset_at(evaluation),
+    }
+
+
 def _quota_observation_view(repo_root, force_refresh=False) -> dict:
     """经 resolver.resolve_quota_detail 取观测并组装归一化诊断 view。
 
@@ -435,40 +459,35 @@ def _quota_observation_view(repo_root, force_refresh=False) -> dict:
         的 detail 恒含此两键 + snapshot + fetched_at）；
       - observed_at：detail.fetched_at（底层数据抓取时刻——provider
         层即 evaluated_at；none 层为 None，绝不虚构）；
-      - reset_at（v2.5.2 阻塞窗口径）：snapshot 先经 quota.parser.
-        evaluate 求逐窗四态（snapshot 的 §27 原始窗口不带逐窗
-        status），再取 EXHAUSTED 阻塞窗 reset_at（ISO 字符串）的
-        字典序最大值（ISO 串字典序即时间序；与 parser.plan_resume
-        的 _blocked_resets 同口径——未耗尽窗口的 reset 绝不参与，
-        避免未耗尽周窗把等待目标推迟数天）；无阻塞窗 / 无窗口 /
-        阻塞窗全 None → None。
-    纯诊断字段：view 不参与任务层任何授权 / 预算判定（runtime.task
-    的 _validate_quota_view 只闸 status 词汇）。
+      - reset_at（v2.6.0 单一观测口径，规格 §2.2）：snapshot 先经
+        quota.parser.evaluate 求逐窗四态（snapshot 的 §27 原始窗口
+        不带逐窗 status），再由 quota.parser.earliest_future_reset_at
+        取已识别窗口中最早的有效未来观测 reset_at（UTC instant 显式
+        解析比较，与窗口 AVAILABLE/PRESSURE/EXHAUSTED/UNKNOWN 状态
+        无关——下一个观测到的窗口边界即安全的唤醒 / 检查点；观测
+        字符串原样透传）；无有效未来 reset → None。
+    观测刷新纪律（规格 §2.2）：首次观测未强制刷新、来源为缓存
+    （cache_fresh / cache_stale——观测数据可能已过期 / 陈旧）且窗口
+    无有效未来 reset 时，force refresh 恰一次再组 view；仍不可得 →
+    reset_at=None（floor-only 降级如实披露，绝不虚构）。provider /
+    none 来源不二次刷新（provider 是刚取到的当前事实；none 层
+    provider 已在本轮尝试过——resolver 纪律绝不重试网络；调用方
+    已显式 --force-refresh 时同样恰一次、不叠加）。view 恒与最终
+    一次观测的 detail 同源。纯诊断字段：view 不参与任务层任何
+    授权 / 预算判定（runtime.task 的 _validate_quota_view 只闸
+    status 词汇）。
     """
-    from runtime.quota import parser as quota_parser  # 函数内 import
     from runtime.quota import resolver  # 函数内 import：monkeypatch 友好
     detail = resolver.resolve_quota_detail(repo_root,
                                            force_refresh=force_refresh)
-    snapshot = detail.get("snapshot")
-    evaluation = (quota_parser.evaluate(snapshot)
-                  if isinstance(snapshot, dict) else None)
-    windows = (evaluation.get("windows")
-               if isinstance(evaluation, dict) else None)
-    reset_values = []
-    if isinstance(windows, list):
-        for window in windows:
-            if not isinstance(window, dict) \
-                    or window.get("status") != "EXHAUSTED":
-                continue  # v2.5.2：只有阻塞窗（EXHAUSTED）的 reset 参与
-            value = window.get("reset_at")
-            if isinstance(value, str) and value != "":
-                reset_values.append(value)
-    return {
-        "status": detail.get("status"),
-        "source": detail.get("source"),
-        "observed_at": detail.get("fetched_at"),
-        "reset_at": max(reset_values) if reset_values else None,
-    }
+    view = _observation_view_of(detail)
+    if view["reset_at"] is None and not force_refresh \
+            and view["source"] in ("cache_fresh", "cache_stale"):
+        # v2.6.0 规格 §2.2：已过期 / 无效 / 陈旧观测 force refresh
+        # 恰一次；仍不可得 → reset_at=None 如实披露 floor-only 降级
+        view = _observation_view_of(
+            resolver.resolve_quota_detail(repo_root, force_refresh=True))
+    return view
 
 
 def _quota_wait(repo_root, task_id, force_refresh=False) -> int:
@@ -529,18 +548,19 @@ def _quota_resume_decision(repo_root, task_id, force_refresh=False) -> int:
     同 quota-wait 方式取观测 view 传入决策原语；输出单行 JSON
     {task_id, decision, quota_observation}——decision 为任务层原样
     决策 dict（action / reason，resume-authorized 时另含
-    workflow_run_id / resume_count_after 暂存计数）。v2.5.2 双通道
-    唤醒输出扩展（I4/W3，向后兼容附加键）：action=remain-waiting 且
-    观测为 EXHAUSTED 时，decision 只读透传本次观测的 reset_at
-    （quota_view.reset_at，ISO 字符串或 null，阻塞窗口径）——纯诊断
-    透传，供主会话按精度层睡眠模板换算后台睡眠目标（reset_at +
-    grace），不参与任何判定；UNKNOWN / no-op
-    分支保持既有输出形状，绝不透传；既有键（action / reason /
-    workflow_run_id / resume_count_after）一律不动。绝不调用宿主
-    ResumeWorkflowRun（宿主动作归主会话；恢复执行与随后的
-    quota-resume-confirm 落账由唤醒轮次按连续性技能契约推进）。
-    任务层 ValueError（任务缺失 / v2.3 遗留 / 观测词汇外 / 无关联
-    run 等结构性拒绝）→ _QuotaRejected（退出码 1）。"""
+    workflow_run_id / resume_count_after 暂存计数）。v2.6.0 单
+    reset_at 无条件透传（规格 §2.3，向后兼容附加键）：对所有
+    action（no-op / remain-waiting / waiting-user /
+    resume-authorized），decision 浅拷贝后恒附加本次观测的
+    reset_at（view.get("reset_at")，ISO 字符串或 null，单一观测
+    口径）——纯诊断透传，供主会话按精度层睡眠模板换算后台睡眠
+    目标（reset_at + grace），不参与任何判定；额度状态只管可否
+    继续 / 恢复，不管可否透传时间；既有键（action / reason /
+    workflow_run_id / resume_count_after）与任务层副作用一律不动。
+    绝不调用宿主 ResumeWorkflowRun（宿主动作归主会话；恢复执行与
+    随后的 quota-resume-confirm 落账由唤醒轮次按连续性技能契约
+    推进）。任务层 ValueError（任务缺失 / v2.3 遗留 / 观测词汇外 /
+    无关联 run 等结构性拒绝）→ _QuotaRejected（退出码 1）。"""
     from runtime import task  # 函数内 import：monkeypatch 友好
     view = _quota_observation_view(repo_root, force_refresh=force_refresh)
     try:
@@ -548,13 +568,11 @@ def _quota_resume_decision(repo_root, task_id, force_refresh=False) -> int:
                                                       view)
     except ValueError as exc:
         raise _QuotaRejected(str(exc)) from exc
-    if decision.get("action") == "remain-waiting" \
-            and view.get("status") == "EXHAUSTED":
-        # v2.5 精确唤醒（I4/W3）：EXHAUSTED remain-waiting 只读透传
-        # 本次观测 reset_at（ISO 串或 null）——纯诊断字段，绝不参与
-        # 判定；浅拷贝追加附加键，任务层既有键逐字不动
-        decision = dict(decision)
-        decision["reset_at"] = view.get("reset_at")
+    # v2.6.0 单 reset_at 无条件透传（规格 §2.3）：对所有 action 浅拷
+    # 贝追加附加键——纯诊断字段，绝不参与判定；任务层既有键与副作
+    # 用逐字不动
+    decision = dict(decision)
+    decision["reset_at"] = view.get("reset_at")
     _emit({"task_id": task_id, "decision": decision,
            "quota_observation": view})
     return 0

@@ -159,7 +159,14 @@
             docs/troubleshooting.md 权威命令面）；
          j) 精度层睡眠模板锚缺失（v2.5.2 W1：long-horizon.md 必含
             「精度层睡眠模板」节、run_in_background 后台形态与
-            date -u -d bash 动态计算标记——模型零算术契约的落点）。
+            date -u -d bash 动态计算标记——模型零算术契约的落点）；
+         k) 单一观测口径锚缺失（v2.6.0 WP-R2，规格 §2.2/§2.4/§2.5：
+            reset_at = 已识别窗口中最早的有效未来观测 reset、与额度
+            状态无关、任何 action 无条件透传含 no-op；唤醒首动作
+            quota-resume-decision --force-refresh；floor-only 可见降级
+            措辞——continuity SKILL / long-horizon / orchestration /
+            quota.md 四文档必含），且 v2.5.2 阻塞窗（EXHAUSTED-only）
+            reset 提取口径退役措辞在前三文档 + quota.md 零容忍。
 
     扫描范围说明：检查 5/6/7/8（及 8 内的旧名负向检查）的扫描范围是显式
     列表——plugins/ 全部文件 + marketplace.json + README.md +
@@ -484,6 +491,31 @@ SLEEP_TEMPLATE_MARKERS = (
     "run_in_background",
     "date -u -d",
 )
+# 16k：单一观测口径锚（v2.6.0 WP-R2，规格 §2.2/§2.4/§2.5）——reset_at =
+# 已识别窗口中最早的有效未来观测 reset（与额度状态无关、任何 action 无条件
+# 透传含 no-op）；唤醒首动作 = quota-resume-decision --force-refresh；无有效
+# 未来观测时如实陈述 floor-only 可见降级（绝不谎称精度层已武装）。
+# 各文档锚定面：continuity（语义 + 协议 + 降级）、long-horizon（语义 +
+# 降级）、orchestration（§6.0/§6.2 启动序列同步）、quota.md（语义 +
+# 透传）。
+SINGLE_OBSERVATION_MARKERS = (
+    (CONTINUITY_SKILL,
+     ("最早的有效未来观测", "与额度状态无关", "无条件透传", "floor-only",
+      "quota-resume-decision <repo_root> <task_id> --force-refresh")),
+    (LONG_HORIZON,
+     ("最早的有效未来观测", "与额度状态无关", "floor-only")),
+    (ORCHESTRATION_SKILL,
+     ("最早的有效未来观测", "与额度状态无关", "floor-only")),
+    (QUOTA_COMMAND,
+     ("最早的有效未来观测", "与额度状态无关", "无条件透传", "floor-only")),
+)
+# 16k 负向：v2.5.2 阻塞窗（EXHAUSTED-only）reset 提取口径措辞在文档面
+# 退役（claim 形零容忍，出现即 FAIL——旧口径与 v2.6.0 单一观测口径互斥；
+# 实现面口径改写由 tests/test_quota_*.py 与 runtime 模块自身锚定）
+BLOCKED_WINDOW_RETIRED_TOKENS = (
+    "阻塞窗口径", "EXHAUSTED 阻塞窗", "字典序最大值")
+BLOCKED_WINDOW_RETIRED_FILES = (
+    CONTINUITY_SKILL, LONG_HORIZON, QUOTA_COMMAND)
 
 
 def rel_display(path):
@@ -1349,12 +1381,17 @@ def check_16_v241_protocol(results):
       i) CLI 生命周期命令面（v2.5.2 W2/D1）—— 六个新子命令须同时见于
          cli.py 与 troubleshooting 权威命令面；
       j) 精度层睡眠模板（v2.5.2 W1）—— long-horizon 必含模板节 +
-         run_in_background + bash 动态计算标记。
+         run_in_background + bash 动态计算标记；
+      k) 单一观测口径（v2.6.0 WP-R2）—— 四文档必含「最早的有效未来
+         观测 / 与额度状态无关」语义锚（continuity 另锚唤醒首动作命令
+         与无条件透传，quota.md 另锚无条件透传）；阻塞窗（EXHAUSTED-
+         only）reset 提取口径退役措辞在 continuity / long-horizon /
+         quota.md 零容忍。
     """
-    title = ("v2.4.1/v2.5/v2.5.2 编排/连续性协议静态契约（模型选型硬闸 / "
+    title = ("v2.4.1/v2.5/v2.5.2/v2.6.0 编排/连续性协议静态契约（模型选型硬闸 / "
              "arm-before-work / 建立动作优先 / 生产 runtime 禁依赖 / "
              "任务启动三问 / pin 失效即拒 / 双通道唤醒 / CLI 命令面 / "
-             "睡眠模板）")
+             "睡眠模板 / 单一观测口径）")
     details = []
     ok = True
 
@@ -1583,6 +1620,47 @@ def check_16_v241_protocol(results):
                     "动态计算缺失——模型零算术契约失锚）"
                     % (lh_shown, marker))
                 ok = False
+
+    # —— 16k：单一观测口径锚（v2.6.0 WP-R2，规格 §2.2/§2.4/§2.5） ——
+    single_ok = True
+    for path, markers in SINGLE_OBSERVATION_MARKERS:
+        shown = rel_display(path)
+        text = read_text(path)
+        if text is None or not os.path.isfile(path):
+            details.append("FAIL: %s 不存在或无法读取，无法执行 16k 检查" % shown)
+            single_ok = False
+            continue
+        for marker in markers:
+            if marker in text:
+                details.append("PASS: %s 含单一观测口径锚 `%s`" % (shown, marker))
+            else:
+                details.append(
+                    "FAIL: %s 缺少单一观测口径锚 `%s`（reset_at 语义/无条件"
+                    "透传/floor-only 降级措辞缺失）" % (shown, marker))
+                single_ok = False
+    retired_hits = []
+    for path in BLOCKED_WINDOW_RETIRED_FILES:
+        text = read_text(path)
+        if not text:
+            continue
+        shown = rel_display(path)
+        for lineno, line in enumerate(text.splitlines(), 1):
+            hit = [tok for tok in BLOCKED_WINDOW_RETIRED_TOKENS if tok in line]
+            if hit:
+                retired_hits.append((shown, lineno, line.strip(), hit))
+    if retired_hits:
+        for shown, lineno, line, hit in retired_hits:
+            details.append(
+                "FAIL: %s:%d 出现 v2.5.2 阻塞窗（EXHAUSTED-only）reset 提取"
+                "口径退役措辞（`%s`）: %s"
+                % (shown, lineno, "/".join(hit), line))
+            single_ok = False
+    else:
+        details.append(
+            "PASS: 文档面无 v2.5.2 阻塞窗 reset 提取口径退役措辞（EXHAUSTED-"
+            "only 提取/字典序最大值零命中——v2.6.0 单一观测口径防回潮）")
+    if not single_ok:
+        ok = False
 
     results.append((16, title, ok, details))
 

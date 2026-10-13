@@ -137,7 +137,7 @@ delegate/full 的唯一实施基底是 ZCode 原生 Workflow。主会话按以�
 
 **答后落盘（三题各自独立落）**：
 
-- 第一题答「启用」→ `quota-resume-authorize <repo_root> <task_id> <max_resumes>`，随后立即走双通道武装序列（§6.2 auto 分支 + continuity「双通道唤醒」节；地板载体与首个精度睡眠同批建立、先于 CreateWorkflow，INV-CONT-01）
+- 第一题答「启用」→ `quota-resume-authorize <repo_root> <task_id> <max_resumes>`，随后立即走双通道武装序列（§6.2 auto 分支 + continuity「双通道唤醒」节；授权成立后立即 `quota-resume-decision --force-refresh` 取观测 reset_at——任何额度状态都可观测，单一观测口径：最早的有效未来观测 reset，与额度状态无关；地板载体同批建立，存在有效未来 reset 时首个精度睡眠同批发出，全部先于 CreateWorkflow，INV-CONT-01）
 - 第二题选定模型 → `worker-model-pin <repo_root> <task_id> <exact-id>`——写入任务级 worker 模型 pin（state 顶层键 `worker_model`）。**pin 是用户授权的任务级偏好，不是任务身份**（与 §6.1 第 8 条的区分见该节），任务全生命周期默认使用（含唤醒恢复后的新 run 提交）；写入只做形状校验、不查宿主面，消费必查宿主面（§6.1）
 - 第三题确认值 → 地板 CronCreate 的 `interval` 参数（小时整数；默认 1）——问答确认值即载体终身间隔，创建后不再变更
 
@@ -187,13 +187,21 @@ delegate/full 的唯一实施基底是 ZCode 原生 Workflow。主会话按以�
 问答（§6.0 单轮三问：第一题「启用」+预算；第三题确认地板间隔，默认 1h）
 -> task-create <repo_root> <task_id> <goal> <mode> <assurance> [--dag <path>]
 -> quota-resume-authorize <repo_root> <task_id> <max_resumes>
+-> 立即 quota-resume-decision <repo_root> <task_id> --force-refresh 取观测
+   reset_at（任何额度状态都可观测——单一观测口径：最早的有效未来观测 reset，
+   与额度状态无关；active/no-op 分支同样透传，不要求任务在 waiting_quota）
 -> 宿主 CronCreate 地板载体：intervalUnit=hourly, interval=<问答确认值，默认 1>,
    recurring=true, prompt=统一唤醒协议（动作优先，绝不枚举工具清单；
    模板见 continuity/references/long-horizon.md）
 -> quota-automation-bind <repo_root> <task_id> <真实返回的 automation id>
 -> quota-continuity-preflight <repo_root> <task_id> 必须 PASS（ready=false 即阻断启动）
--> 发首个精度睡眠：后台 sleep 到（当前观测阻塞窗 reset_at + 300s）——命令模板
-   逐字抄写自 long-horizon.md「精度层睡眠模板」（bash 动态计算秒数，模型零算术）
+-> 发首个精度睡眠：后台 sleep 到（观测 reset_at + 300s）——仅当本次观测含有效
+   未来 reset 时发出；reset_at 为 null 时**不发**、如实陈述 floor-only 降级
+   （只有地板在臂），绝不谎称精度层已武装——命令模板逐字抄写自
+   long-horizon.md「精度层睡眠模板」（bash 动态计算秒数，模型零算术；
+   宿主接受后台进程即记录在案）
+-> worker-model-pin <repo_root> <task_id> <精确 id>（问答第二题选定过时；
+   消费语义「失效即拒」见 §6.1）
 -> v24-compile <dag-json> [--task-ref <id>] [--out <path>]
 -> ListModels -> 写临时 JSON 文件
 -> workflow-model-select <models文件> --task-ref <task_id> [--repo-root <repo_root>]
@@ -201,6 +209,8 @@ delegate/full 的唯一实施基底是 ZCode 原生 Workflow。主会话按以�
 -> CreateWorkflow（subagent_model=选型返回值）
 -> v24-record-run <task_ref> <run-id>
 ```
+
+**成功陈述三分（v2.6.0）**：auto 启动成功的汇报必须区分三个独立事实——(a) **auto 授权已落**（mode=auto + 有界预算）；(b) **地板载体已绑定**（真实 automation id 入 state + preflight PASS）；(c) **精度睡眠已实际发出**（宿主接受后台进程）。三者缺一如实陈述缺项：缺 (c) 即 **floor-only 可见降级**（只有地板兜底在臂），绝不是「精度层已武装」；缺 (b) 即 auto 阻断（不开工、按降级报告）。
 
 地板载体创建失败时三禁：**绝不谎称 auto 连续性已启用**；**绝不绑假 id**；**绝不按 auto/until_done 承诺继续**——按调用上下文报告降级（本轮仅手动连续性可用）或交运营者处理。武装、唤醒与终态清理契约见 `skills/continuity`。
 

@@ -11,10 +11,15 @@
    v
 [武装]（仅 auto/until_done；arm-before-work + 建立动作优先：问答确认
    即同批建立，全部先于 CreateWorkflow——quota-resume-authorize
-   -> 宿主 CronCreate 地板载体（intervalUnit=hourly, interval=问答
-   第三问确认值（默认 1）, recurring=true，终身不变）-> quota-automation-bind
-   -> quota-continuity-preflight PASS -> 发首个精度睡眠到阻塞窗
-   reset_at+300s——睡眠模板见下「精度层睡眠模板」；创建失败绝不谎称已启用）
+   -> 立即 quota-resume-decision --force-refresh 取观测 reset_at（任何
+   额度状态都可观测；单一观测口径：最早的有效未来观测 reset，与额度
+   状态无关，active/no-op 分支同样透传）-> 宿主 CronCreate 地板载体
+   （intervalUnit=hourly, interval=问答第三问确认值（默认 1）,
+   recurring=true，终身不变）-> quota-automation-bind
+   -> quota-continuity-preflight PASS -> 存在有效未来 reset 时发首个
+   精度睡眠到观测 reset_at+300s（睡眠模板见下「精度层睡眠模板」；
+   reset_at 为 null → 不发、如实陈述 floor-only 降级，绝不谎称已武装；
+   创建失败绝不谎称已启用）
    |
    v
 [执行] delegate/full → 原生 Workflow 运行（显式 Flash 档模型选型 ->
@@ -172,7 +177,7 @@ events.jsonl 任务级事件词汇恰十个（`runtime.task.TASK_JOURNAL_EVENTS`
 5. **判断先前变更是否仍在**：checkpoint 声称已完成的改动，是否能在 diff 与仓库中观察到
 6. **判断目标是否已完成**：已完成则停止实施，进入 Completion Cleanup
 7. **检查最新验证状态**：validation 记录是否仍新鲜（change_id 与当前一致）、还剩哪些验证未做
-8. **从 NEXT ACTION 恢复**：重新输出 SELECTIVE ROUTE 声明后，从 NEXT ACTION 继续执行（委派任务先走「同 run id resume」，见 SKILL.md；auto 唤醒路径必经幂等决策 `resume-authorized` **且** `quota-continuity-preflight` ready 两道硬闸才许 ResumeWorkflowRun；收尾必滚动续臂——发下一个精度睡眠到本次观测阻塞窗 reset_at+300s，凡任务未终态）
+8. **从 NEXT ACTION 恢复**：重新输出 SELECTIVE ROUTE 声明后，从 NEXT ACTION 继续执行（委派任务先走「同 run id resume」，见 SKILL.md；auto 唤醒路径必经幂等决策 `resume-authorized` **且** `quota-continuity-preflight` ready 两道硬闸才许 ResumeWorkflowRun；收尾必核查在臂睡眠并滚动续臂——对非终态仍授权 auto 的任务，发/续下一个精度睡眠到本次观测 reset_at+300s——当前观测的下一未来窗口边界；陈旧/过去目标不发睡眠、不自旋）
 
 两条禁令：
 
@@ -208,15 +213,26 @@ Then follow the unified wake protocol by that decision:
   resumable, otherwise rebuild from repository reality; never replay
   finished work.
 - remain-waiting: wait (the decision output carries this observation's
-  blocking-window reset_at for the re-arm target).
+  reset_at for the re-arm target — every action, including no-op,
+  carries the currently observed earliest valid future reset).
 - waiting-user or terminal: no-op (terminal proceeds to cleanup).
 
-Unless the task is terminal, finish this wake turn by re-arming the
-precision sleep: copy the background sleep template verbatim from the
-continuity long-horizon contract, targeting the blocking-window
-reset_at from this turn's decision output plus 300 seconds. If
-reset_at is null or already past, skip the sleep. Never compute the
-delay yourself — the template computes it in bash.
+Unless the task is terminal (and only for a still-authorized auto
+task), finish this wake turn by checking whether a suitable precision
+sleep is already in flight; if none is, or its target is stale or
+already past, re-arm one: copy the background sleep template verbatim
+from the continuity long-horizon contract, targeting the reset_at
+from this turn's decision output (the earliest valid future observed
+reset, independent of quota status) plus 300 seconds. If reset_at is
+null or already past, skip the sleep — never spin, never fabricate a
+target — and disclose floor-only degraded precision honestly instead
+of claiming the precision layer is armed. The first sleep is armed at
+launch, before any work; a parking or wake turn only inspects, re-arms
+or corrects it, and never establishes the first sleep. After a host or
+app restart drops all background sleeps, the recurring floor wake
+re-arms the precision sleep (self-healing) — never present a floor
+trigger as a precision-time wake. Never compute the delay yourself —
+the template computes it in bash.
 
 The recurring floor automation bound to this task stays in place for
 its whole lifetime — never update, delete, or recreate it from a wake
@@ -243,7 +259,7 @@ delegability or assurance.
 
 ## 精度层睡眠模板（抄写式——bash 动态计算秒数，模型零算术）
 
-启动轮武装与每次唤醒轮 / 停靠轮收尾（凡任务未终态）时，把 `<reset_at>` 代换为**本次观测阻塞窗 reset_at**（quota-resume-decision 输出的 `decision.reset_at`，ISO 字符串，如 `2026-10-11T14:33:42Z`；v2.5.2 起为阻塞窗口径——未耗尽窗口的 reset 绝不参与），以 Bash 工具 **run_in_background 后台**逐字执行：
+启动轮武装与每次唤醒轮 / 停靠轮收尾（凡非终态且仍授权 auto）时，把 `<reset_at>` 代换为**本次观测 reset_at**（quota-resume-decision 输出的 `decision.reset_at`——v2.6.0 起任何 action 无条件透传、含 no-op，ISO 字符串，如 `2026-10-11T14:33:42Z`；单一观测口径：已识别窗口中最早的有效未来观测 reset，与额度状态无关），以 Bash 工具 **run_in_background 后台**逐字执行：
 
 ```
 echo "precision-sleep until <reset_at>+300s, launched $(date -u +%Y-%m-%dT%H:%M:%SZ)"; sleep $(( $(date -u -d "<reset_at>" +%s) + 300 - $(date -u +%s) )); echo "precision-wake $(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -253,8 +269,8 @@ echo "precision-sleep until <reset_at>+300s, launched $(date -u +%Y-%m-%dT%H:%M:
 
 - **模型零算术**：目标秒数由 bash 现算（`date -u -d` 解析 ISO 时刻 + 300 宽限 − 当前时刻），模型绝不自己换算毫秒 / 分钟 / 时区
 - **后台运行**：以 run_in_background 发起——任务退出自动唤起会话（实测秒级精确 + 8-11s 唤起延迟）；等待期零模型轮、零额度消耗
-- **reset_at 为 null / 缺失**（无阻塞窗）→ 不发睡眠，等待地板节奏
-- **差值 <= 0**（目标已过）→ 不发睡眠，本轮按决策处理（额度已恢复则走 resume 路径）
+- **reset_at 为 null / 缺失**（无有效未来观测）→ 不发睡眠，如实陈述 floor-only 降级（只有地板在臂），等待地板节奏——绝不虚构目标
+- **差值 <= 0**（目标已过）→ 不发睡眠（无负值 sleep、无忙旋——陈旧/过去目标不得自旋），本轮按决策处理（额度已恢复则走 resume 路径）
 - **重复睡眠无害**：启动臂与停靠补发并存由决策幂等吸收（早醒 → 新观测 → 新决策）
 - **不抗应用重启**：重启杀掉睡眠后由地板兜底，首个地板唤醒收尾续臂即自愈——不是故障
 
@@ -263,10 +279,10 @@ echo "precision-sleep until <reset_at>+300s, launched $(date -u +%Y-%m-%dT%H:%M:
 无人值守恢复由两条正交通道承载（v2.5.2；宿主事实与活体实测证据见 `docs/reviews/WAKE_TOPOLOGY_PROBE_RESULTS.md`）：
 
 - **地板载体**：启动即建的 recurring 原生 Scheduled Task——间隔经启动问答第三问确认（默认 1h，不得等于窗口长度 5h——会与 reset 秒级竞速），抗应用重启，**创建后终身不变**（不删、不改、不重建，INV-CONT-03）；工作期每次触发通常是一次 no-op 小唤醒（决策幂等吸收）
-- **精度层睡眠**：上方模板的后台 sleep——睡到阻塞窗 reset_at + 300s，退出即唤起；与 automation 状态机完全正交（零 Cron 交互）；不抗重启（地板兜底）
+- **精度层睡眠**：上方模板的后台 sleep——睡到观测 reset_at + 300s（最早的有效未来观测复位时刻，与额度状态无关；无有效未来观测 → 精度层缺席，floor-only 降级如实披露），退出即唤起；与 automation 状态机完全正交（零 Cron 交互）；不抗重启（地板兜底）
 - **触发内容** = 上方结构化 resume prompt（已替换 TASK_ID、REPOSITORY ROOT 与路径占位符；动作优先，绝不枚举工具清单）
-- **滚动续臂**：每次唤醒轮收尾（凡任务未终态）必发下一个精度睡眠到**本次观测** reset_at+300s——唤醒机制的建立 / 续臂动作永远先于工作推进；额度若死在回合之间（静默耗尽），在臂睡眠恰好覆盖下一窗口边界
-- **下一窗口绝不硬编码推导**：只依据 provider 复位证据（观测 reset_at，阻塞窗口径）——不以「加 5 小时」推算下一次唤醒
+- **滚动续臂**：每次唤醒轮收尾（凡非终态且仍授权 auto）必核查在臂睡眠——无在臂或目标已过/陈旧时发下一个精度睡眠到**当前观测** reset_at+300s（最早的有效未来观测；醒来重观测重续臂、迭代收敛）——唤醒机制的建立 / 续臂动作永远先于工作推进；额度若死在回合之间（静默耗尽），在臂睡眠恰好覆盖下一窗口边界
+- **下一窗口绝不硬编码推导**：只依据 provider 复位证据（观测 reset_at，单一观测口径——最早的有效未来观测，与额度状态无关）——不以「加 5 小时」推算下一次唤醒
 - **每次唤醒任务量要小**：做一轮检查，然后恢复一段工作——避免单次唤醒塞满全部剩余工作
 
 **调度触发即存活探针**：唤醒成功启动即说明模型执行当前可用；唤醒失败或未启动则不会产生任何仓库改动，自然等待下次触发或用户恢复。

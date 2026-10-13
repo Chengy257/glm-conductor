@@ -1,6 +1,6 @@
 ---
 name: continuity
-description: GLM 长任务连续性：原生 Workflow 恢复（同 run id resume）、waiting_quota 额度等待、manual/auto 有界恢复（authorize 授权 + max_resumes 预算 + confirm 确认才计数）、auto 连续性先武装后开工（arm-before-work：授权 → 创建原生未来 Scheduled Task → bind → preflight PASS 才算 armed，才许 CreateWorkflow 与自动 resume；唤醒机制的建立/续臂动作永远先于工作推进）、双通道唤醒（v2.5.2：启动即建 recurring 地板载体——间隔经启动问答确认、默认 1h、终身不变；精度层后台睡眠同批启动即武装到阻塞窗 reset_at+300s，每次唤醒轮收尾必滚动续臂；两种触发源同一唤醒协议——动作优先、绝不枚举工具清单；active 分支含 run 健康检查自愈；终态删除按宿主三态规律预期失败、如实上报 automation id 交用户手动删除；唤醒轮次是宿主会话中途续入、唤醒轮绝不弹问）与终态清理（确认删除才清绑定）。适用于长任务跨会话或跨额度窗口中断后的恢复、额度耗尽后的有界续跑、无人值守的定时唤醒。
+description: GLM 长任务连续性：原生 Workflow 恢复（同 run id resume）、waiting_quota 额度等待、manual/auto 有界恢复（authorize 授权 + max_resumes 预算 + confirm 确认才计数）、auto 连续性先武装后开工（arm-before-work：授权 → 创建原生未来 Scheduled Task → bind → preflight PASS 才算 armed，才许 CreateWorkflow 与自动 resume；唤醒机制的建立/续臂动作永远先于工作推进）、双通道唤醒（v2.6.0：启动即建 recurring 地板载体——间隔经启动问答确认、默认 1h、终身不变；精度层后台睡眠同批启动即武装到观测 reset_at+300s——reset_at 为最早的有效未来观测复位时刻、任何额度状态无条件透传（含 no-op），无有效未来观测时如实陈述 floor-only 降级、绝不谎称已武装，每次唤醒轮收尾必核查在臂并滚动续臂；两种触发源同一唤醒协议——醒来首动作 quota-resume-decision --force-refresh、动作优先、绝不枚举工具清单；active 分支含 run 健康检查自愈；终态删除按宿主三态规律预期失败、如实上报 automation id 交用户手动删除；唤醒轮次是宿主会话中途续入、唤醒轮绝不弹问）与终态清理（确认删除才清绑定）。适用于长任务跨会话或跨额度窗口中断后的恢复、额度耗尽后的有界续跑、无人值守的定时唤醒。
 ---
 
 # GLM 连续性：Workflow 恢复与有界续跑
@@ -19,7 +19,7 @@ v2.4 的连续性由四个机制构成，全部围绕任务状态（state.json�
 v2.5.2 在四机制之上并入两条扩展：
 
 5. **任务启动问答授权落点**——建状态任务启动前的强制一次问答（单轮三问，契约见 orchestration §6.0）把「是否跨额度自动唤醒 + 有界 max_resumes 预算」「worker 模型（仅选型歧义时）」「地板载体间隔（默认 1h）」落进任务状态与武装参数；问答只发生在交互回合，唤醒轮 / 恢复轮绝不弹问；
-6. **双通道唤醒（启动即武装 + 滚动续臂）**——地板（recurring 载体，活性兜底，抗应用重启，创建后终身不再触碰）与精度层（后台睡眠到阻塞窗 reset_at+300s，秒级精确）同批建立；唤醒机制的建立/续臂动作永远先于工作推进，每次唤醒轮收尾必续臂滚动到下一窗口边界（见「双通道唤醒」节）。
+6. **双通道唤醒（启动即武装 + 滚动续臂）**——地板（recurring 载体，活性兜底，抗应用重启，创建后终身不再触碰）与精度层（后台睡眠到观测 reset_at+300s，秒级精确——reset_at 为最早的有效未来观测复位时刻，与额度状态无关；无有效未来观测时精度层缺席、floor-only 降级如实陈述）同批建立；唤醒机制的建立/续臂动作永远先于工作推进，每次唤醒轮收尾必核查在臂睡眠并续臂滚动到当前观测的下一未来窗口边界（见「双通道唤醒」节）。
 
 ## 任务状态与运行时文件
 
@@ -96,7 +96,7 @@ active task（delegate/full、audit，以及任何需要完成守卫保护的长
 
 授权与武装是两个独立事实：**authorize 是用户许可；bind 是未来激活见证；preflight 是两者齐备的机械确认**。mode=auto 时，`quota_resume.automation_id` 必须在 CreateWorkflow 启动之前、以及任何自动 ResumeWorkflowRun 之前非空——auto 连续性在 automation_id 为空时绝不是 armed（unarmed 即阻断）。武装不是模式的推断结果：bind 绝不推断 mode=auto，授权也绝不虚构 automation id。
 
-**建立动作优先（v2.5.2 总原则）**：一旦启动问答（orchestration §6.0）确认启用，唤醒机制的建立 / 续臂永远先于当下工作推进：地板载体 + 首个精度睡眠在 CreateWorkflow 之前同批建立（完整 runbook 见「双通道唤醒」节启动序列）；武装 PASS 前不开工。预算仍有限：`max_resumes` 有界语义不变，预算耗尽转 `waiting_user` 等用户重新授权，绝不无限自动复活。
+**建立动作优先（v2.5.2 总原则，v2.6.0 预防性武装）**：一旦启动问答（orchestration §6.0）确认启用，唤醒机制的建立 / 续臂永远先于当下工作推进：授权确认后立即观测 reset_at（`quota-resume-decision --force-refresh`，任何额度状态），地板载体在 CreateWorkflow 之前同批建立；存在有效未来观测 reset 时首个精度睡眠同批发出（无有效未来观测 → 不发、如实陈述 floor-only 降级，绝不谎称精度层已武装）（完整 runbook 见「双通道唤醒」节启动序列）；武装 PASS 前不开工。预算仍有限：`max_resumes` 有界语义不变，预算耗尽转 `waiting_user` 等用户重新授权，绝不无限自动复活。
 
 **唤醒发现 unarmed**（state 里 automation_id 为空）：单次重建尝试（宿主 CronCreate 地板 → `quota-automation-bind` → preflight PASS）。两种结局都如实处理：创建被会话归属拒绝（会话名下其实仍有存活载体、只是账本见证缺失）→ 按现状报告并继续依赖宿主节奏，绝不重试风暴；创建成功 → bind + preflight 后继续。重建失败按 remain-waiting 报告并收轮，绝不弹问、绝不无武装 resume。
 
@@ -113,11 +113,11 @@ active task（delegate/full、audit，以及任何需要完成守卫保护的长
 无人值守恢复由**两条正交通道**承载（v2.5.2 终态；宿主事实与活体证据见 `docs/reviews/WAKE_TOPOLOGY_PROBE_RESULTS.md`）：
 
 - **地板（floor）**：启动即建的 recurring 原生 Scheduled Task——**间隔经启动问答第三问确认（默认 1h）**，创建后**终身不再触碰**（不删、不改、不重建，INV-CONT-03 原样成立）。职责是活性兜底：抗应用重启（宿主承诺 automation 存活跨重启）、在精度层失联时最迟一个间隔内接住恢复。
-- **精度层（precision sleep）**：后台 Bash 睡眠任务——睡到**阻塞窗口 reset_at + 300s 宽限**，退出即自动唤起会话（实测秒级精确 + 8-11s 唤起延迟）。与 automation 状态机完全正交（零 Cron 交互）；不抗应用重启（由地板兜底）。**授权确认即武装首个睡眠，先于 CreateWorkflow**——静默耗尽（额度死在回合之间）由在臂睡眠天然覆盖。
+- **精度层（precision sleep）**：后台 Bash 睡眠任务——睡到**观测 reset_at + 300s 宽限**（reset_at = 最早的有效未来观测复位时刻，与额度状态无关；无有效未来观测 → 精度层缺席，floor-only 降级如实陈述），退出即自动唤起会话（实测秒级精确 + 8-11s 唤起延迟）。与 automation 状态机完全正交（零 Cron 交互）；不抗应用重启（由地板兜底）。**存在有效未来 reset 时授权确认即武装首个睡眠，先于 CreateWorkflow**——静默耗尽（额度死在回合之间）由在臂睡眠天然覆盖。
 
-设计依据（宿主事实，全部活体实测）：一会话一 automation；载体首触发后该会话一切 Cron 变更（建/改/删）静默失效（三态规律）；**额度耗尽时模型轮不可执行**——等待期连续性只能由宿主侧节奏（automation 触发或后台进程）承担，任何依赖「醒来后做调度动作」的机制在最需要处不可执行；reset_at 全程可知（窗口内首次调用 +5h 锚定），额度耗尽只决定「醒来有无活干」，不决定「该几点醒」。
+设计依据（宿主事实，全部活体实测）：一会话一 automation；载体首触发后该会话一切 Cron 变更（建/改/删）静默失效（三态规律）；**额度耗尽时模型轮不可执行**——等待期连续性只能由宿主侧节奏（automation 触发或后台进程）承担，任何依赖「醒来后做调度动作」的机制在最需要处不可执行；reset_at 由观测面**无条件透传**（v2.6.0 单一观测口径：任何额度状态——AVAILABLE/PRESSURE/EXHAUSTED/UNKNOWN——都透传最早的有效未来观测 reset；额度状态只管可否继续/恢复，不管可否透传时间），额度耗尽只决定「醒来有无活干」，不决定「该几点醒」。
 
-**总原则（建立动作优先）**：唤醒机制的建立 / 续臂动作**永远先于工作推进**——授权确认即同批建立地板与首个精度睡眠（先于 CreateWorkflow）；每次唤醒轮收尾必续臂；停靠轮只做核查与补发。
+**总原则（建立动作优先）**：唤醒机制的建立 / 续臂动作**永远先于工作推进**——授权确认即观测 reset_at 并同批建立地板（存在有效未来 reset 时同批发首个精度睡眠，先于 CreateWorkflow）；每次唤醒轮收尾必核查在臂并续臂；停靠轮只做核查、补发与纠偏，**绝不承担建立首个睡眠**。
 
 ### 启动序列（runbook，arm-before-work）
 
@@ -125,15 +125,25 @@ active task（delegate/full、audit，以及任何需要完成守卫保护的长
 问答（orchestration §6.0，单轮三问：①跨额度唤醒+预算 ②worker 模型（仅歧义） ③地板间隔，默认 1h）
 -> task-create <repo_root> <task_id> <goal> <mode> <assurance> [--dag <path>]
 -> quota-resume-authorize <repo_root> <task_id> <max_resumes>（问答第一题确认的预算）
+-> 立即 quota-resume-decision <repo_root> <task_id> --force-refresh 取观测 reset_at
+   （任何额度状态都可观测——单一观测口径：最早的有效未来观测 reset，与额度状态
+   无关；active/no-op 分支同样透传 reset_at，不要求任务在 waiting_quota）
 -> 宿主 CronCreate 地板载体：intervalUnit=hourly, interval=<问答第三问确认值，默认 1>,
    recurring=true, prompt=统一唤醒协议（见下；动作优先，绝不枚举工具清单）
 -> quota-automation-bind <repo_root> <task_id> <真实返回的 automation id>
 -> quota-continuity-preflight <repo_root> <task_id> 必须 PASS（ready=false 即阻断启动）
--> 发首个精度睡眠：后台 sleep 到（当前观测阻塞窗 reset_at + 300s）——命令模板逐字抄写
-   自 references/long-horizon.md「精度层睡眠模板」（bash 动态计算秒数，模型零算术）
+-> 发首个精度睡眠：后台 sleep 到（观测 reset_at + 300s）——仅当本次观测含有效
+   未来 reset 时发出；reset_at 为 null 时**不发**、如实陈述 floor-only 降级
+   （只有地板在臂），绝不谎称精度层已武装——命令模板逐字抄写自
+   references/long-horizon.md「精度层睡眠模板」（bash 动态计算秒数，模型零算术；
+   宿主接受后台进程即记录在案）
+-> 应用问答第二题的 worker 模型 pin：worker-model-pin <repo_root> <task_id> <精确 id>
+   （第二题出现过时；消费语义「失效即拒」见 orchestration §6.1）
 -> v24-compile -> 显式 worker 模型选型（orchestration §6.1 硬闸） -> writer-acquire
 -> CreateWorkflow（subagent_model=选型返回值） -> v24-record-run <task_ref> <run-id>
 ```
+
+**成功陈述三分（v2.6.0）**：auto 启动成功的汇报必须区分三个独立事实——(a) **auto 授权已落**（mode=auto + 有界预算）；(b) **地板载体已绑定**（真实 automation id 入 state + preflight PASS）；(c) **精度睡眠已实际发出**（宿主接受后台进程）。三者缺一如实陈述缺项：缺 (c) 即 **floor-only 可见降级**（只有地板兜底在臂），绝不是「精度层已武装」；缺 (b) 即 auto 阻断（preflight ready=false 不开工）。
 
 地板载体创建失败三禁不变：**绝不谎称已启用**、**绝不绑假 id**、**绝不按 auto 承诺继续**（本轮降级为仅手动连续性，或交运营者处理）。
 
@@ -142,22 +152,26 @@ active task（delegate/full、audit，以及任何需要完成守卫保护的长
 唤醒轮第一动作永远是幂等决策，分支树固定（逐字执行；**动作优先，绝不枚举工具清单**——见「唤醒 prompt 设计规则」）：
 
 ```
-quota-resume-decision <repo_root> <task_id> --force-refresh
+quota-resume-decision <repo_root> <task_id> --force-refresh（醒来首动作；
+│ v2.6.0 起任何 action 的 decision 都无条件透传本次观测 reset_at，含 no-op）
 ├ resume-authorized 且 preflight PASS（quota-continuity-preflight）：
 │     ResumeWorkflowRun（同一 run id）→ 宿主接受后
 │     quota-resume-confirm <repo_root> <task_id> → 继续工作
 ├ active 且 run 健康（GetWorkflowRun 可查、在推进）：no-op 收轮
 ├ active 且 run 停摆（静默耗尽自愈路径）：按恢复处理——run 可 resume
 │     则同上 resume；否则以仓库现状重建认知后重派发（绝不重放已完成节点）
-├ remain-waiting（EXHAUSTED/UNKNOWN）：等待收轮（决策输出透传本次观测
-│     阻塞窗 reset_at，供续臂目标换算）
+├ remain-waiting（EXHAUSTED/UNKNOWN）：等待收轮（reset_at 照常透传，
+│     供续臂目标换算）
 ├ waiting-user（未授权/预算耗尽）：no-op（等用户，绝不弹问）
 └ terminal：no-op 实施，走终态清理
-收尾动作（各分支处理完，凡任务未终态）：
-    发下一个精度睡眠到（本次观测阻塞窗 reset_at + 300s）——滚动续臂
+收尾动作（各分支处理完，凡非终态且仍授权 auto 的任务）：
+    核查在臂睡眠：已有指向未来窗口的在臂睡眠即不重发（避免重复睡眠）；
+    无在臂、目标已过或陈旧时，发下一个精度睡眠到（本次观测 reset_at + 300s
+    ——当前观测的下一未来窗口边界）——滚动续臂；reset_at 为 null 或已过去
+    → 不发（无负值 sleep、无忙旋），如实报告 floor-only 状态，等待地板节奏
 ```
 
-**唤醒 prompt 必带**（自足稳定标识，凭仓库真相即可恢复；模板见 references/long-horizon.md）：精确 task_id 与仓库根；先载任务态（state.json + checkpoint）再行动；唤醒时刷新额度（decision 自带新鲜观测）；preflight 先行；按任务状态取精确 run id 同 id resume；decision=resume-authorized **且** preflight ready 才 ResumeWorkflowRun；宿主接受后 quota-resume-confirm 落账；收尾必续臂（凡未终态）；终态走清理。**绝不嵌入**完整 workflow 源码、秘密/凭证、过期额度假设、工具清单枚举。
+**唤醒 prompt 必带**（自足稳定标识，凭仓库真相即可恢复；模板见 references/long-horizon.md）：精确 task_id 与仓库根；先载任务态（state.json + checkpoint）再行动；唤醒时刷新额度（decision 自带新鲜观测）；preflight 先行；按任务状态取精确 run id 同 id resume；decision=resume-authorized **且** preflight ready 才 ResumeWorkflowRun；宿主接受后 quota-resume-confirm 落账；收尾必核查在臂睡眠并滚动续臂（凡非终态且仍授权 auto；decision 的 reset_at 含 no-op 分支照常透传；陈旧/过去目标不发睡眠、不自旋）；终态走清理。**绝不嵌入**完整 workflow 源码、秘密/凭证、过期额度假设、工具清单枚举。
 
 **唤醒 prompt 设计规则（去 priming，动作优先）**：唤醒 prompt 恒以**第一个要执行的动作**开头（quota-resume-decision），**绝不以可用工具清单开场、绝不通篇罗列工具名**——宿主发射退化与工具清单 priming 存在相关嫌疑（探针实录），动作优先写法同时消除歧义与 priming 面。
 
@@ -165,7 +179,8 @@ quota-resume-decision <repo_root> <task_id> --force-refresh
 
 - **唤醒轮次是宿主会话中途续入**：触发时宿主把 prompt 作为新 turn 注入既有会话（不是全新上下文的独立代理）——唤醒轮次能看到会话既有上下文，但这不构成恢复依据：恢复仍必须走仓库事实与 state.json（repository > checkpoint > 会话记忆），防止用陈旧会话记忆跳过对账。
 - **唤醒轮 / 恢复轮绝不弹问**：任务启动问答（orchestration §6.0）只发生在交互回合；无人值守回合遇到任何本应问答才能解除的阻塞（如 pin 失效、预算耗尽）一律 fail closed——按对应等待态停泊并转等待用户，绝不以弹问制造死锁。
-- **幂等决策契约**：每次唤醒固定以 `quota-resume-decision <repo_root> <task_id> --force-refresh` 开场——重复唤醒安全（非 waiting_quota 一律 no-op 零副作用；auto 未武装拒绝给出 resume-authorized，`continuity-unarmed`）；resume-authorized 且 preflight ready 才同 id resume，宿主接受后立即 `quota-resume-confirm` 落账；未确认的决策绝不消耗预算。
+- **幂等决策契约**：每次唤醒固定以 `quota-resume-decision <repo_root> <task_id> --force-refresh` 开场——重复唤醒安全（非 waiting_quota 一律 no-op 零副作用；auto 未武装拒绝给出 resume-authorized，`continuity-unarmed`）；**任何 action 的 decision 都无条件透传本次观测 reset_at（含 no-op）**；resume-authorized 且 preflight ready 才同 id resume，宿主接受后立即 `quota-resume-confirm` 落账；未确认的决策绝不消耗预算。
+- **reset_at 不是恢复授权**：决策透传的 reset_at 只是当前观测的下一未来窗口边界（安全的唤醒 / 检查点时刻）——resume 仍只由 decision 封闭四词（`resume-authorized`）与 preflight 硬闸决定；waiting_user / 终态任务绝不因 reset 到点而开新工。
 - **唤醒轮次的工作量要小**：做一轮检查、恢复一段工作，不把剩余工作塞进单次唤醒。
 - runtime 自身零宿主调度调用：Scheduled Task / 后台睡眠的创建等宿主动作由主会话执行；Conductor 只提供幂等决策与武装预检原语。
 
@@ -174,9 +189,12 @@ quota-resume-decision <repo_root> <task_id> --force-refresh
 ```
 quota-wait <repo_root> <task_id> [--force-refresh]
 -> quota-resume-decision <repo_root> <task_id> --force-refresh
--> 核查精度层在臂情况：已有待命睡眠即不重发；reset_at 明显漂移则补发新睡眠
+-> 核查精度层在臂情况：已有指向未来窗口的在臂睡眠即不重发；观测 reset_at
+   漂移（在臂目标已过 / 陈旧）则补发新睡眠到当前观测 reset_at + 300s
 -> 收轮（等待期连续性已由在臂睡眠 + 地板承载）
 ```
+
+**停靠轮边界（v2.6.0）**：停靠轮只做核查、补发与纠偏，**绝不承担建立首个睡眠**——首个睡眠由启动轮武装（授权确认即同批建立）；停靠轮迟到或缺失时连续性由在臂睡眠 + 地板承载，不靠「来得及停靠」。
 
 **静默耗尽边界**：额度若死在回合之间（无停靠轮发生），启动 / 上次唤醒已武装的待命睡眠恰好覆盖下一个窗口边界——无需任何新动作。这是精度睡眠**启动即武装**的根本理由：建立动作不依赖「来得及停靠」。
 
@@ -226,7 +244,7 @@ quota-wait <repo_root> <task_id> [--force-refresh]
 ## 额度观测面（只读）
 
 - `quota-resolve <repo_root> [--force-refresh]`（runtime CLI）：四态解析，输出冻结键 `{status, source, evaluated_at, reason}`；层级 = 新鲜缓存 → provider → 陈旧缓存 → UNKNOWN（绝不默认 AVAILABLE、绝不重试网络）；观测面零任务转态
-- `quota-wait / quota-resume-authorize / quota-resume-decision / quota-resume-confirm`（runtime CLI）：额度等待 / 恢复生命周期操作面，规范用法见上「waiting_quota」与「manual / auto 有界恢复」两节；决策落盘只在任务侧，绝不调用宿主 ResumeWorkflowRun。**reset_at 语义（v2.5.2 阻塞窗口径）**：quota-wait / quota-resume-decision 观测 view 与 remain-waiting 透传的 reset_at 均为 **EXHAUSTED 阻塞窗 reset 的最大值**（未耗尽窗口的 reset 绝不参与）——睡眠目标换算一律以此值为准
+- `quota-wait / quota-resume-authorize / quota-resume-decision / quota-resume-confirm`（runtime CLI）：额度等待 / 恢复生命周期操作面，规范用法见上「waiting_quota」与「manual / auto 有界恢复」两节；决策落盘只在任务侧，绝不调用宿主 ResumeWorkflowRun。**reset_at 语义（v2.6.0 单一观测口径）**：quota-wait / quota-resume-decision 观测 view 的 reset_at 与 decision 透传的 reset_at（**任何 action 无条件透传，含 no-op**）均为**已识别窗口中最早的有效未来观测 reset_at**（UTC instant 显式解析比较，与窗口 AVAILABLE/PRESSURE/EXHAUSTED/UNKNOWN 状态无关；已过期 / 无效 reset 不参与；无有效未来观测 → null，如实陈述 floor-only 降级，绝不虚构）——额度状态只管可否继续 / 恢复，不管可否透传时间；下一个观测到的窗口边界就是安全的唤醒 / 检查点，醒来重观测重续臂、迭代收敛。睡眠目标换算一律以此值为准（+300s 宽限）。`plan_resume` 的 EXHAUSTED 保守 resume_at 口径不变，属另一条独立决策路径，不参与 reset_at 透传与武装
 - `quota-automation-bind / quota-automation-clear / quota-continuity-preflight`（runtime CLI）：auto 连续性武装操作面（bind / clear / preflight），规范用法见上「arm-before-work」节；preflight ready=false 以退出码 2 报告（launch/resume 阻断信号）
 - `runtime/quota/report.py [--json]`：人读诊断（窗口明细 + status + 恢复建议），详见 `/glm-conductor:quota` 命令
 - **凭证**：环境变量 `GLM_CONDUCTOR_QUOTA_API_KEY` 优先，已登录 ZCode 的 `~/.zcode/v2/config.json` provider 配置为文档化回退；凭证零落盘（不进 state.json / events.jsonl / checkpoint / 日志 / 任何输出）；凭证不可得 → UNKNOWN，不虚构
