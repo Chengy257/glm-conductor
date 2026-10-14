@@ -123,8 +123,10 @@
          §5.6）——六条件任一出现即 FAIL：
          a) orchestration 允许 delegate/full 继承模型，或 CreateWorkflow
             序列缺显式 subagent_model（模型选型硬闸标记 workflow-model-
-            select / subagent_model / 绝不省略 subagent_model / 绝不替换
-            主会话 / 选型失败绝不 必含；继承/省略措辞仅在含否定词的行
+            select / subagent_model / 绝不省略 subagent_model /
+            user-authorized-explicit-selection / 选型失败绝不 必含，
+            v2.6.0 WP-M1 起旧「绝不替换主会话」主模型硬门锚随 Flash
+            准入硬门退役同步移除；继承/省略措辞仅在含否定词的行
             允许——glm-reviewer 继承宿主/会话模型是另一合法事实，不在
             token 集内）；
          b) auto/until_done 启动序列未把 scheduling/bind/preflight 置于
@@ -159,7 +161,21 @@
             docs/troubleshooting.md 权威命令面）；
          j) 精度层睡眠模板锚缺失（v2.5.2 W1：long-horizon.md 必含
             「精度层睡眠模板」节、run_in_background 后台形态与
-            date -u -d bash 动态计算标记——模型零算术契约的落点）。
+            date -u -d bash 动态计算标记——模型零算术契约的落点）；
+         k) 单一观测口径锚缺失（v2.6.0 WP-R2，规格 §2.2/§2.4/§2.5：
+            reset_at = 已识别窗口中最早的有效未来观测 reset、与额度
+            状态无关、任何 action 无条件透传含 no-op；唤醒首动作
+            quota-resume-decision --force-refresh；floor-only 可见降级
+            措辞——continuity SKILL / long-horizon / orchestration /
+            quota.md 四文档必含），且 v2.5.2 阻塞窗（EXHAUSTED-only）
+            reset 提取口径退役措辞在前三文档 + quota.md 零容忍；
+         l) 用户授权显式选型锚缺失（v2.6.0 WP-M1，规格 §5.1/§5.2/§5.3
+            + owner 裁决 5/6：Flash 准入硬门降级软推荐后，orchestration
+            必含 Flash 软推荐 / 默认以 max 推理档运行（档位不随 pin
+            存储）/ 单一候选也须用户显式确认 / --model 必须与 pin 一致 /
+            绝不自动重 pin / 主模型继承宿主主会话 / 提交契约
+            model_policy 新值，cli.py 必含有 pin 任务 --model 不得绕过
+            与交互重授权措辞）。
 
     扫描范围说明：检查 5/6/7/8（及 8 内的旧名负向检查）的扫描范围是显式
     列表——plugins/ 全部文件 + marketplace.json + README.md +
@@ -378,12 +394,15 @@ SKILL_CONTRACT_MARKERS = (
 # 六条件任一出现即 FAIL（条件 a-e 的实现拆解见模块 docstring 第 16 项）。
 # v2.5 扩展锚（任务启动问答 / pin 失效即拒 / 精确唤醒并存，规格 §4 W5）
 # 以 16f-16h 追加于函数尾部——既有六契约锚原样保留，只扩展不改动。
-# 16a：模型选型硬闸必含标记（orchestration/SKILL.md，INV-MODEL-01 文档面）
+# 16a：模型选型硬闸必含标记（orchestration/SKILL.md，INV-MODEL-01 文档面；
+# v2.6.0 WP-M1 重基线：Flash 档准入硬门降级为软推荐——提交契约 model_policy
+# 唯一合法值 user-authorized-explicit-selection 接替 explicit-flash-required；
+# 旧「绝不替换主会话」主模型硬门锚随非 Flash 已配置 id 合法化退役移除）
 MODEL_GATE_MARKERS = (
     "workflow-model-select",
     "subagent_model",
     "绝不省略 subagent_model",
-    "绝不替换主会话",
+    "user-authorized-explicit-selection",
     "选型失败绝不",
 )
 # 16a：delegate/full worker 模型继承/省略措辞只在否定行允许。glm-reviewer
@@ -483,6 +502,55 @@ SLEEP_TEMPLATE_MARKERS = (
     "## 精度层睡眠模板",
     "run_in_background",
     "date -u -d",
+)
+# 16k：单一观测口径锚（v2.6.0 WP-R2，规格 §2.2/§2.4/§2.5）——reset_at =
+# 已识别窗口中最早的有效未来观测 reset（与额度状态无关、任何 action 无条件
+# 透传含 no-op）；唤醒首动作 = quota-resume-decision --force-refresh；无有效
+# 未来观测时如实陈述 floor-only 可见降级（绝不谎称精度层已武装）。
+# 各文档锚定面：continuity（语义 + 协议 + 降级）、long-horizon（语义 +
+# 降级）、orchestration（§6.0/§6.2 启动序列同步）、quota.md（语义 +
+# 透传）。
+SINGLE_OBSERVATION_MARKERS = (
+    (CONTINUITY_SKILL,
+     ("最早的有效未来观测", "与额度状态无关", "无条件透传", "floor-only",
+      "quota-resume-decision <repo_root> <task_id> --force-refresh")),
+    (LONG_HORIZON,
+     ("最早的有效未来观测", "与额度状态无关", "floor-only")),
+    (ORCHESTRATION_SKILL,
+     ("最早的有效未来观测", "与额度状态无关", "floor-only")),
+    (QUOTA_COMMAND,
+     ("最早的有效未来观测", "与额度状态无关", "无条件透传", "floor-only")),
+)
+# 16k 负向：v2.5.2 阻塞窗（EXHAUSTED-only）reset 提取口径措辞在文档面
+# 退役（claim 形零容忍，出现即 FAIL——旧口径与 v2.6.0 单一观测口径互斥；
+# 实现面口径改写由 tests/test_quota_*.py 与 runtime 模块自身锚定）
+BLOCKED_WINDOW_RETIRED_TOKENS = (
+    "阻塞窗口径", "EXHAUSTED 阻塞窗", "字典序最大值")
+BLOCKED_WINDOW_RETIRED_FILES = (
+    CONTINUITY_SKILL, LONG_HORIZON, QUOTA_COMMAND)
+# 16l：用户授权显式选型锚（v2.6.0 WP-M1，规格 §5.1/§5.2/§5.3 + owner 裁决
+# 5/6）——Flash 档准入硬门降级为软推荐候选分类后的文档面契约：
+#   orchestration/SKILL.md 必含 Flash 软推荐、「默认以 max 推理档运行」
+#   提示（档位不随 pin 存储）、单一候选也须用户显式确认、pin 一致性
+#   （--model 必须与 pin 一致）、无人值守绝不自动重 pin、主模型继承宿主
+#   主会话（主模型硬门退役后的正名锚）与提交契约 model_policy 新值；
+#   cli.py 必含有 pin 任务 --model 不得绕过与交互重授权措辞（实现面与
+#   文档面双锚防漂移）。
+USER_AUTHORIZED_MODEL_MARKERS = (
+    (ORCHESTRATION_SKILL,
+     ("Flash 软推荐",
+      "默认以 max 推理档运行",
+      "档位不随 pin 存储",
+      "单一候选也须用户显式确认",
+      "必须与 pin 一致",
+      "绝不自动重 pin",
+      "主模型继承宿主主会话",
+      "user-authorized-explicit-selection")),
+    (CLI_PY,
+     ("有 pin 任务的 --model 显式值必须与 pin 一致",
+      "问答重新授权并以 worker-model-pin 更新任务 pin",
+      "user-authorized-explicit-selection",
+      "绝不隐式授权单候选")),
 )
 
 
@@ -1326,7 +1394,10 @@ def check_16_v241_protocol(results):
 
     六条件任一出现即 FAIL：
       a) orchestration 允许 delegate/full 继承模型 / CreateWorkflow 序列
-         缺显式 subagent_model —— 硬闸标记必含 + 继承/省略措辞仅否定行；
+         缺显式 subagent_model —— 硬闸标记必含 + 继承/省略措辞仅否定行
+         （v2.6.0 WP-M1 起：Flash 准入硬门退役，硬闸锚改含提交契约
+         model_policy 新值 user-authorized-explicit-selection，旧
+         「绝不替换主会话」主模型硬门锚同步移除）；
       b) auto/until_done 启动序列未把 scheduling/bind/preflight 置于
          CreateWorkflow 之前 —— authorize→bind→preflight→CreateWorkflow
          顺序链（两技能文档均须成立）；
@@ -1349,12 +1420,22 @@ def check_16_v241_protocol(results):
       i) CLI 生命周期命令面（v2.5.2 W2/D1）—— 六个新子命令须同时见于
          cli.py 与 troubleshooting 权威命令面；
       j) 精度层睡眠模板（v2.5.2 W1）—— long-horizon 必含模板节 +
-         run_in_background + bash 动态计算标记。
+         run_in_background + bash 动态计算标记；
+      k) 单一观测口径（v2.6.0 WP-R2）—— 四文档必含「最早的有效未来
+         观测 / 与额度状态无关」语义锚（continuity 另锚唤醒首动作命令
+         与无条件透传，quota.md 另锚无条件透传）；阻塞窗（EXHAUSTED-
+         only）reset 提取口径退役措辞在 continuity / long-horizon /
+         quota.md 零容忍。
+      l) 用户授权显式选型（v2.6.0 WP-M1，规格 §5.1/§5.2/§5.3）——
+         orchestration 必含 Flash 软推荐 / 默认 max 推理档提示（档位
+         不随 pin 存储）/ 单一候选显式确认 / pin 一致性 / 无人值守
+         绝不自动重 pin / 主模型继承宿主主会话 / model_policy 新值；
+         cli.py 必含有 pin 任务 --model 不得绕过与交互重授权措辞。
     """
-    title = ("v2.4.1/v2.5/v2.5.2 编排/连续性协议静态契约（模型选型硬闸 / "
-             "arm-before-work / 建立动作优先 / 生产 runtime 禁依赖 / "
-             "任务启动三问 / pin 失效即拒 / 双通道唤醒 / CLI 命令面 / "
-             "睡眠模板）")
+    title = ("v2.4.1/v2.5/v2.5.2/v2.6.0 编排/连续性协议静态契约（模型选型硬闸 / "
+             "用户授权显式选型 / arm-before-work / 建立动作优先 / 生产 runtime "
+             "禁依赖 / 任务启动三问 / pin 失效即拒 / 双通道唤醒 / CLI 命令面 / "
+             "睡眠模板 / 单一观测口径）")
     details = []
     ok = True
 
@@ -1582,6 +1663,69 @@ def check_16_v241_protocol(results):
                     "FAIL: %s 缺少睡眠模板锚 `%s`（模板节/后台形态/bash "
                     "动态计算缺失——模型零算术契约失锚）"
                     % (lh_shown, marker))
+                ok = False
+
+    # —— 16k：单一观测口径锚（v2.6.0 WP-R2，规格 §2.2/§2.4/§2.5） ——
+    single_ok = True
+    for path, markers in SINGLE_OBSERVATION_MARKERS:
+        shown = rel_display(path)
+        text = read_text(path)
+        if text is None or not os.path.isfile(path):
+            details.append("FAIL: %s 不存在或无法读取，无法执行 16k 检查" % shown)
+            single_ok = False
+            continue
+        for marker in markers:
+            if marker in text:
+                details.append("PASS: %s 含单一观测口径锚 `%s`" % (shown, marker))
+            else:
+                details.append(
+                    "FAIL: %s 缺少单一观测口径锚 `%s`（reset_at 语义/无条件"
+                    "透传/floor-only 降级措辞缺失）" % (shown, marker))
+                single_ok = False
+    retired_hits = []
+    for path in BLOCKED_WINDOW_RETIRED_FILES:
+        text = read_text(path)
+        if not text:
+            continue
+        shown = rel_display(path)
+        for lineno, line in enumerate(text.splitlines(), 1):
+            hit = [tok for tok in BLOCKED_WINDOW_RETIRED_TOKENS if tok in line]
+            if hit:
+                retired_hits.append((shown, lineno, line.strip(), hit))
+    if retired_hits:
+        for shown, lineno, line, hit in retired_hits:
+            details.append(
+                "FAIL: %s:%d 出现 v2.5.2 阻塞窗（EXHAUSTED-only）reset 提取"
+                "口径退役措辞（`%s`）: %s"
+                % (shown, lineno, "/".join(hit), line))
+            single_ok = False
+    else:
+        details.append(
+            "PASS: 文档面无 v2.5.2 阻塞窗 reset 提取口径退役措辞（EXHAUSTED-"
+            "only 提取/字典序最大值零命中——v2.6.0 单一观测口径防回潮）")
+    if not single_ok:
+        ok = False
+
+    # —— 16l：用户授权显式选型锚（v2.6.0 WP-M1，规格 §5.1/§5.2/§5.3） ——
+    # Flash 准入硬门降级软推荐后的文档面 + 实现面双锚：orchestration 必含
+    # 软推荐/默认 max 提示/单候选确认/pin 一致性/无人值守不重 pin/主模型
+    # 继承宿主/model_policy 新值；cli.py 必含 --model 不绕过 pin 与交互
+    # 重授权措辞。
+    for path, markers in USER_AUTHORIZED_MODEL_MARKERS:
+        shown = rel_display(path)
+        text = read_text(path)
+        if text is None or not os.path.isfile(path):
+            details.append("FAIL: %s 不存在或无法读取，无法执行 16l 检查" % shown)
+            ok = False
+            continue
+        for marker in markers:
+            if marker in text:
+                details.append("PASS: %s 含用户授权显式选型锚 `%s`" % (shown, marker))
+            else:
+                details.append(
+                    "FAIL: %s 缺少用户授权显式选型锚 `%s`（Flash 软推荐/默认 "
+                    "max 推理档提示/单候选确认/pin 一致性/交互重授权措辞缺失）"
+                    % (shown, marker))
                 ok = False
 
     results.append((16, title, ok, details))

@@ -1,8 +1,8 @@
-# GLM Conductor 故障排查（v2.5.2）
+# GLM Conductor 故障排查（v2.6.0）
 
 > 面向用户的排障手册：按「现象 → 判定 → 处置」组织，只写结论性行为事实；每条事实标注实现模块路径供核对。架构全貌见 [architecture.md](architecture.md)，概念入门见 [core-concepts.md](core-concepts.md)。
 >
-> runtime CLI 统一入口是 `plugins/glm-conductor/runtime/cli.py`（本文以 `<cli>` 代指；安装后以实际插件缓存路径为准）。用可用的 Python 3 解释器执行（Windows 无 `python3` 启动器时用 `python`）。v2.5.2 的 CLI 子命令仅（权威命令面，与 `runtime/cli.py` 顶部 USAGE 一致）：`review-record` / `quota-resolve` / `quota-wait` / `quota-resume-authorize` / `quota-resume-decision` / `quota-resume-confirm` / `v24-compile` / `writer-acquire` / `writer-release` / `writer-show` / `v24-record-run` / `workflow-model-select` / `worker-model-pin` / `quota-automation-bind` / `quota-automation-clear` / `quota-continuity-preflight` / `task-create` / `record-validation` / `task-complete` / `task-fail` / `task-cancel` / `exit-waiting`；额度诊断另有独立脚本 `runtime/quota/report.py`。查询本文与 USAGE 未列出的子命令（permit / lease / wave / clock / bridge / policy / verify-* / host-check 等）没有意义——那些面连同后端已不存在。
+> runtime CLI 统一入口是 `plugins/glm-conductor/runtime/cli.py`（本文以 `<cli>` 代指；安装后以实际插件缓存路径为准）。用可用的 Python 3 解释器执行（Windows 无 `python3` 启动器时用 `python`）。v2.6.0 的 CLI 子命令仅（权威命令面，与 `runtime/cli.py` 顶部 USAGE 一致）：`review-record` / `quota-resolve` / `quota-wait` / `quota-resume-authorize` / `quota-resume-decision` / `quota-resume-confirm` / `v24-compile` / `writer-acquire` / `writer-release` / `writer-show` / `task-record-workflow-run` / `v24-record-run`（legacy 低层薄壳）/ `workflow-model-select` / `worker-model-pin` / `quota-automation-bind` / `quota-automation-clear` / `quota-continuity-preflight` / `task-create` / `record-validation` / `task-complete` / `task-fail` / `task-cancel` / `exit-waiting`；额度诊断另有独立脚本 `runtime/quota/report.py`。查询本文与 USAGE 未列出的子命令（permit / lease / wave / clock / bridge / policy / verify-* / host-check 等）没有意义——那些面连同后端已不存在。
 
 ## 1. 额度诊断：report.py 双模式与套餐口径
 
@@ -69,7 +69,7 @@ provider: bigmodel
 
 ## 3. 写者守卫残留：`writer-show` 确认 + `--force` 清除
 
-**现象**：完成守卫查 1 拦截：「仓库写者守卫正被其他任务持有」，但报出的持有任务其实早已消亡（会话崩溃、任务目录被手工删除等）；新委派 `writer-acquire` 冲突；或（AF-04 起）委派任务完成被拦：「完成被阻断：任务 <id> 已注册委派 run，但仓库写者守卫预约缺失（missing writer reservation…）」——有 run id 的委派任务在注册（`runtime.task.record_workflow_run`；CLI `v24-record-run` 是 adapter 单据薄壳，不写 state 也不带守卫前置）与完成两处都要求仍持有本仓库写预约，这是生命周期不变式，不覆盖 Conductor 协议之外的裸宿主 Workflow 调用。
+**现象**：完成守卫查 1 拦截：「仓库写者守卫正被其他任务持有」，但报出的持有任务其实早已消亡（会话崩溃、任务目录被手工删除等）；新委派 `writer-acquire` 冲突；或（AF-04 起）委派任务完成被拦：「完成被阻断：任务 <id> 已注册委派 run，但仓库写者守卫预约缺失（missing writer reservation…）」——有 run id 的委派任务在注册（`runtime.task.record_workflow_run`；规范 CLI 是 `task-record-workflow-run <repo_root> <task_id> <run-id>`——写 state + 守卫前置 + 事件 + repo_root 账本单据；`v24-record-run` 为 legacy 低层薄壳，不写 state 也不带守卫前置）与完成两处都要求仍持有本仓库写预约，这是生命周期不变式，不覆盖 Conductor 协议之外的裸宿主 Workflow 调用。
 
 **判定**：先看当前持有者：
 
@@ -111,7 +111,7 @@ python <cli> writer-release <repo_root> <holder_task_id> --force
 
 ## 5. Workflow worker 模型选型：`workflow-model-select` 拒绝的处置
 
-**现象**：`workflow-model-select` 退出码 2——零 Flash 候选 / 多候选歧义 / 显式 id 未配置 / 给了 `/GLM-5.3` 文本模型 / 带 `--task-ref` 消费任务 pin 时报「任务 pin 已失效，请重新问答授权」；或技能层报「选型失败绝不 CreateWorkflow」。
+**现象**：`workflow-model-select` 退出码 2——零候选 / 多候选歧义 / 显式 id 未配置 / 裸别名（缺 `account:` 前缀）/ `--model` 与任务 pin 不一致 / `--task-ref` 指向无 pin 任务且未给 `--model` / 消费任务 pin 时报「任务 pin 已失效，请重新问答授权」；或技能层报「选型失败绝不 CreateWorkflow」。
 
 **判定**（v2.4.1 起 delegate/full 的提交硬闸，INV-MODEL-01；v2.5 起支持任务级 pin 消费；v2.5.2 起 Flash 档判据版本无关）：
 
@@ -120,18 +120,18 @@ python <cli> workflow-model-select '<JSON 数组或文件路径>' [--model <exac
 ```
 
 - 输入是主会话从宿主模型列表（ListModels 等）提取的已配置精确 id 集合（推荐写入临时 JSON 文件后传文件路径；内联 `["..."]` 亦可）；`--repo-root`（v2.5.2）显式解析任务账本根（缺省当前工作目录）；
-- **Flash 档判据版本无关（v2.5.2 W5）**：候选 = `account:` 前缀且模型段以 `-Flash` 结尾的精确 id（`GLM-5.3-Flash` / `GLM-6-Flash` 等任一版本代际同档模型均命中）；恰一个 → 自动选定；多个（跨版本代际同算）→ 歧义拒绝并列出全部候选（必须显式给值：`--model <exact-id>`，或带 `--task-ref` 消费任务 pin）；零个 → 拒绝（检查账号是否配置了 Flash 档模型）；
-- **`--task-ref <task_id>`（v2.5）**：读取任务顶层 `worker_model` pin 后按固定优先级取值——`--model` 显式值 > 任务 pin > 自动选型；无 pin 走既有自动选型路径（行为与不带 `--task-ref` 逐字一致）。消费**必查当次宿主列表**：pin 形状非法或不在本次 configured 集合 → 退出码 2「任务 pin 已失效，请重新问答授权」，绝不回退自动选型、绝不静默换模型（写入侧 `worker-model-pin` 只做形状预检、绝不查宿主面——`runtime/cli.py`）；任务缺失 / v2.3 遗留任务 → 退出码 1；
-- 裸 `GLM-5.3-Flash`（无 `account:` 前缀）与非 Flash 档模型（含 `/GLM-5.3` 等主会话文本模型）一律拒绝——省略 `subagent_model` 会使 Workflow 继承主会话模型，是 v2.4.0 缺陷 A，协议硬禁止。
+- **Flash 档为软推荐（v2.6.0 WP-M1）**：软推荐候选 = 模型段以 `-Flash` 结尾的已配置精确 id（版本无关）；不带 `--task-ref` 的裸调用恰一个 Flash 候选 → 自动选定（便捷路径）；多个 → 歧义拒绝并列出全部候选；零个 → 拒绝（检查宿主模型配置）；**非 Flash 已配置精确 id 经 `--model` 显式授权或任务 pin 注入一律合法**（角色中性，仅因名字/后缀被拒是 no-go 红线）；
+- **`--task-ref <task_id>`（v2.5；v2.6.0 严口径）**：读取任务顶层 `worker_model` pin，取值优先级 = 任务 pin > `--model` 显式值（**必须与 pin 一致**，不一致即拒——普通 `--model` 不得绕过 pin，变更走交互问答重新授权并以 `worker-model-pin` 更新）> Flash 软推荐自动选型（**仅限不带 `--task-ref` 的裸调用**）；**任务无 pin 且未给 `--model` → 退出码 2 转启动问答**（绝不隐式授权单候选，恰一 Flash 候选也拒）。消费**必查当次宿主列表**：pin 形状非法（含盘面漂移非 str / 空串）或不在本次 configured 集合 → 退出码 2「任务 pin 已失效，请重新问答授权」，绝不回退自动选型、绝不静默换模型（写入侧 `worker-model-pin` 只做形状预检、绝不查宿主面——`runtime/cli.py`）；任务缺失 / v2.3 遗留任务 → 退出码 1；
+- 裸 `GLM-5.3-Flash`（无 `account:` 前缀）与未配置 id 一律拒绝——省略 `subagent_model` 会使 Workflow 继承主会话模型，是 v2.4.0 缺陷 A，协议硬禁止；非 Flash 已配置 id 经显式授权合法（见上）。
 
 **处置**（按拒绝原因，选型成功后 CreateWorkflow 的 `subagent_model` 一律**逐字取**返回契约值）：
 
 | 拒绝原因 | 处置 |
 | --- | --- |
-| 零候选 | 检查账号是否配置了 Flash 模型 / 修复配置后重试 |
+| 零候选 | 检查账号是否配置了 Flash 模型 / 修复配置后重试；亦可经 `--model` 显式授权非 Flash 已配置 id（软推荐候选为零不代表无合法选择） |
 | 多候选歧义（无显式值亦无任务 pin） | 交互回合走任务启动问答第二题重新授权（orchestration §6.0）→ `worker-model-pin` 落盘 → 后续提交带 `--task-ref`；或本次提交直接 `--model <exact-id>` |
 | **任务 pin 已失效**（退出码 2，v2.5） | 候选集漂移（套餐过期 / 新 plan 加入）属预期安全行为——新候选不自动采用、旧 pin 不自动替换。交互回合内重跑问答第二题重新授权，`worker-model-pin` 异值显式覆盖（输出带 prev/new）后继续；**无人值守唤醒 / 恢复轮绝不弹问**——阻断提交、转等待用户，等用户回来再重新授权 |
-| 显式 id 未配置 / 文本模型 / 裸别名 | 换 provider 全限定 Flash 精确 id；绝不猜测回退、绝不静默改用其他模型、绝不省略参数提交 |
+| 显式 id 未配置 / 裸别名 | 换 provider 全限定已配置精确 id（不限 Flash）；绝不猜测回退、绝不静默改用其他模型、绝不省略参数提交 |
 
 ## 6. 「hook 不拦 Workflow 子代理」：宿主事实与含义
 

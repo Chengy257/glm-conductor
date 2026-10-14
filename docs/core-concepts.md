@@ -1,8 +1,8 @@
-# GLM Conductor 核心概念（v2.4）
+# GLM Conductor 核心概念（v2.6.0）
 
 > **GLM Conductor 是面向 ZCode GLM Coding Agent 的轻量语义编排层：GLM Conductor owns semantic orchestration and acceptance; ZCode owns execution orchestration.**
 >
-> 本文是概念词典：逐条定义 v2.4 的核心概念——是什么、长什么样、权威落点在哪。每个词条都可在 [architecture.md](architecture.md)（唯一架构真相源）与 `plugins/glm-conductor/runtime/` 代码中核对；运行面操作契约见插件技能文档。不叙述演化过程，不收录已删除的 v2.3 概念（退役对照见 architecture.md §21）。
+> 本文是概念词典：逐条定义 v2.6.0 的核心概念——是什么、长什么样、权威落点在哪。每个词条都可在 [architecture.md](architecture.md)（唯一架构真相源）与 `plugins/glm-conductor/runtime/` 代码中核对；运行面操作契约见插件技能文档。不叙述演化过程，不收录已删除的 v2.3 概念（退役对照见 architecture.md §21）。
 
 两个真相域是全部概念的坐标系：
 
@@ -142,7 +142,7 @@ file <归一路径>\0<sha256:…|missing>   ← 每个相关路径一行（排�
 - **mode**：`manual`（默认）/ `auto`——auto 只能由显式 `authorize_quota_resume(max_resumes)` 落盘授权，绝不推断；`max_resumes=1` 即一次性恢复，`N` 即有界多窗
 - **automation_id**（v2.4.1 语义）：当前关联的未来原生 Scheduled Task 见证——auto 连续性的持久化武装事实；其存在是 preflight 的要求，但绝不独立证明宿主侧激活仍存在
 - **先武装后开工**（v2.4.1，arm-before-work）：`auto_continuity_armed = mode==auto AND automation_id 为非空 str`——mode=auto 的任务在首个消耗额度的 Workflow 启动与任何自动 resume 之前必须完成「创建 Scheduled Task → `quota-automation-bind` → `quota-continuity-preflight` PASS」；载体（recurring）启动即建、首触发后终身不动（v2.5.2 双通道：one-shot 后继链已整体删除，精度由后台睡眠层承担）
-- **双通道唤醒**（v2.5.2）：**地板** = recurring 武装载体（启动问答后即建，hourly 默认 1h，间隔经启动问答第三问确认，抗应用重启；三态规律——载体首触发后本会话一切 Cron 变更（改/删/建）失效——故创建后终身不动，INV-CONT-03 原样：成功唤醒后不删不重建）；**精度层** = 后台睡眠到阻塞窗 `reset_at` + 300s grace（启动即武装 + 每次唤醒轮收尾滚动续臂，建立/续臂动作永远先于工作推进；退出自动唤起会话，实测秒级精确；不抗应用重启——由地板兜底，首个地板唤醒重臂，自愈闭环）。`quota-resume-decision` 在 EXHAUSTED remain-waiting 时于 decision 只读透传当次观测 `reset_at`（**阻塞窗口径**，ISO 串或 null，向后兼容附加键；UNKNOWN / no-op 保持既有形状绝不透传）——供睡眠模板换算后台睡眠目标（bash 模板动态计算，模型零算术），不参与判定；每次唤醒强制新鲜观测，绝不硬信旧 `reset_at`。同会话单 automation 约束（2026-10-03 实测）⇒ 主会话同时至多一个 auto 任务（D8）；终态载体试删预期失败 → 上报 automation id → 用户手动删除（预期运营动作，D7）→ 确认后 clear 绑定
+- **双通道唤醒**（v2.5.2；reset 口径 v2.6.0 单一观测化）：**地板** = recurring 武装载体（启动问答后即建，hourly 默认 1h，间隔经启动问答第三问确认，抗应用重启；三态规律——载体首触发后本会话一切 Cron 变更（改/删/建）失效——故创建后终身不动，INV-CONT-03 原样：成功唤醒后不删不重建）；**精度层** = 后台睡眠到已识别窗口的最早有效未来 `reset_at` + 300s grace（v2.6.0 单一观测口径，与额度状态无关——预防性武装：不管当前剩余多少都优先建立；启动即武装 + 每次唤醒轮收尾滚动续臂，建立/续臂动作永远先于工作推进；退出自动唤起会话，实测秒级精确；不抗应用重启——由地板兜底，首个地板唤醒重臂，自愈闭环）。`quota-resume-decision` 对**所有 action** 无条件附加 decision `reset_at`（最早未来观测复位时刻，ISO 串或 null；观测面与决策面同源同批，仅 cache 来源无未来 reset 时恰强刷一次，仍无则如实披露 floor-only 降级）——供睡眠模板换算后台睡眠目标（bash 模板动态计算，模型零算术），不参与判定；每次唤醒强制新鲜观测，绝不硬信旧 `reset_at`。同会话单 automation 约束（2026-10-03 实测）⇒ 主会话同时至多一个 auto 任务（D8）；终态载体试删预期失败 → 上报 automation id → 用户手动删除（预期运营动作，D7）→ 确认后 clear 绑定
 - **等待**：额度耗尽 → `enter_waiting_quota`（七态中的 waiting_quota；`workflow_run_id` 保留；最近观测记入 `last_observation` 供诊断）
 - **定时唤醒决策**（`scheduled_activation_decision`，幂等六步）：非 waiting_quota → `no-op`；观测 EXHAUSTED/UNKNOWN → `remain-waiting`（绝不虚构可用性）；未授权 → `waiting-user`；预算耗尽 → `waiting-user` 且恰一次转 `waiting_user`；auto 且 automation_id 空 → `remain-waiting`（reason 含 `continuity-unarmed`，零写盘零预算消耗）；可用 + 已授权 + 预算有余 + 已武装 → `resume-authorized`（计数仅暂存）
 - **确认落账**：宿主 resume 调用**真正被接受后**才调 `confirm_resume_started`——`resume_count +1` + 转回 active + `quota_resume_confirmed` 事件；未确认的决策绝不消耗预算
@@ -168,8 +168,8 @@ file <归一路径>\0<sha256:…|missing>   ← 每个相关路径一行（排�
 **是什么**：用户在任务启动问答（orchestration §6.0）中显式授权的**任务级 worker 模型偏好**——授权一次、任务全生命周期默认（含唤醒恢复后的新 run 提交）；是偏好，不是任务身份（任务身份始终是 `task_id`）。
 
 - **形状**：state 顶层可选键 `worker_model`——存在才校验（null 或非空 str），缺省即不写键（未问答授权即无 pin），旧任务加载零迁移（`runtime/state.py`）
-- **写入不查宿主面**：`task.pin_worker_model`（CLI `worker-model-pin`）经 submission 形态约定预检（`account:` 前缀 + Flash 后缀）后落盘——写入时点与提交时点宿主面可能不同，对账留给消费点；非终态才可写，同值幂等（零写盘），异值显式覆盖（输出带 prev/new）；不新增 journal 事件
-- **消费必查宿主面**：`workflow-model-select --task-ref <task_id>` 每次对账当次 configured 集合；选型优先级固定 `--model` 显式值 > 任务 pin > 自动选型；pin 形状非法或不在列表即专门拒绝（退出码 2「任务 pin 已失效，请重新问答授权」）——绝不回退自动选型、绝不静默换模型；候选漂移由此天然安全（新候选不自动采用，旧 pin 不自动替换）
+- **写入不查宿主面**：`task.pin_worker_model`（CLI `worker-model-pin`）经 submission 角色中性形态约定预检（`account:` 前缀、两段非空、无空白——不限 Flash 后缀）后落盘——写入时点与提交时点宿主面可能不同，对账留给消费点；非终态才可写，同值幂等（零写盘），异值显式覆盖（输出带 prev/new）；不新增 journal 事件
+- **消费必查宿主面**：`workflow-model-select --task-ref <task_id>` 每次对账当次 configured 集合；选型优先级固定 任务 pin > `--model` 显式值（必须与 pin 一致）> Flash 软推荐自动选型（仅裸调用）；任务无 pin 且无 `--model` 即拒转启动问答（绝不隐式授权单候选）；pin 形状非法（含盘面漂移）或不在列表即专门拒绝（退出码 2「任务 pin 已失效，请重新问答授权」）——绝不回退自动选型、绝不静默换模型；候选漂移由此天然安全（新候选不自动采用，旧 pin 不自动替换）
 - **交互回合边界**：问答与重新授权只发生在交互回合；唤醒轮 / 恢复轮绝不弹问——无人值守回合遇 pin 失效一律阻断提交、转等待用户（fail closed）
 - **权威落点**：`runtime/state.py`（键校验）；`runtime/task.py`（`pin_worker_model`）；`runtime/cli.py`（`worker-model-pin` 写入 / `workflow-model-select --task-ref` 消费）
 

@@ -44,7 +44,7 @@ python3 <插件根>/runtime/cli.py quota-resolve <repo_root> [--force-refresh]
 - UNKNOWN 不是错误：凭证不可得 / provider 不可用时按不可知处理，编排侧继续等待或问用户，不虚构可用性
 - 退出码：0 成功 / 2 用法错误 / 1 运行期异常（错误 JSON 只含异常类型名与消息）
 
-**reset_at 语义（v2.5.2 阻塞窗口径）**：`quota-wait` / `quota-resume-decision` 观测 view 与 remain-waiting 决策透传的 `reset_at` 均为 **EXHAUSTED 阻塞窗 reset_at 的字典序最大值**（snapshot 经逐窗四态评估后只取耗尽窗，与 parser.plan_resume 同口径）——未耗尽窗口（如健康周窗）的更晚 reset 绝不参与，避免把等待目标推迟数天。精度层睡眠目标换算一律以此值为准（+300s 宽限，模板见 continuity 技能）。
+**reset_at 语义（v2.6.0 单一观测口径）**：`quota-wait` / `quota-resume-decision` 观测 view 的 `reset_at` 与 decision 透传的 `reset_at`（**任何 action 无条件透传，含 no-op**）均为**已识别窗口中最早的有效未来观测 reset_at**（UTC instant 显式解析比较，与额度状态无关——逐窗 AVAILABLE/PRESSURE/EXHAUSTED/UNKNOWN 状态不参与选择；已过期 / 无效 reset 不参与；陈旧 / 无效观测 force refresh 恰一次，仍不可得 → null，如实披露 floor-only 降级，绝不虚构）——额度状态只管可否继续 / 恢复，不管可否透传时间；下一个观测到的窗口边界即安全的唤醒 / 检查点。精度层睡眠目标换算一律以此值为准（+300s 宽限，模板见 continuity 技能）。
 
 ## 边界
 

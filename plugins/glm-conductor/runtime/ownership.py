@@ -51,6 +51,7 @@ v2.4 Phase 1 追加（P1-C 编译期阶段规划）：
 import os
 import re
 import subprocess
+import time
 
 
 class OwnershipError(Exception):
@@ -73,6 +74,69 @@ def get_git_timeout() -> float:
         except (ValueError, TypeError):
             pass
     return DEFAULT_GIT_TIMEOUT_SECONDS
+
+
+# —— 共享单调截止期与 status 观测共享（Stop 完成守卫 opt-in，v2.6.0 Phase C WP-R3） ——
+#
+# Stop 完成守卫（hooks/stop_gate.py）在本进程内注册共享单调截止期后，
+# 单次 git 子进程超时 = min(env 配置值, 距截止期剩余总预算)——env 调大
+# 也绝不击穿钩子 timeoutMs=5000 总预算。同一守卫回合内同仓库根复用
+# 同一次 git status 输出（拒绝 3s+3s+3s 串行叠加）；回合结束即注销。
+# 未注册 / 未开启（CLI / 直接调用）时行为与历史完全一致。
+
+_DEADLINE = None  # time.monotonic 绝对值或 None（未注册）
+_STATUS_SHARING = False  # 守卫回合内的 status 共享开关
+_SHARED_STATUS = {}  # normcase 绝对仓库根 -> git status --porcelain -z 原始输出
+
+
+def set_git_deadline(deadline) -> None:
+    """注册共享单调截止期（time.monotonic 绝对值；None 注销）。
+
+    仅 Stop 完成守卫进程调用：注册后 git_touched_files 的单次 git
+    超时被 effective_git_timeout() 钳制在剩余总预算内；预算耗尽时不
+    发起子进程、直接抛 OwnershipError（结构性错误，走调用方降级路径）。
+    """
+    global _DEADLINE
+    _DEADLINE = deadline
+
+
+def clear_git_deadline() -> None:
+    """注销共享单调截止期（等价 set_git_deadline(None)；幂等）。"""
+    set_git_deadline(None)
+
+
+def effective_git_timeout() -> float:
+    """单次 git 子进程超时（秒）= min(env 配置值, 距共享截止期剩余预算)。
+
+    未注册截止期时恒等于 get_git_timeout()；已注册且剩余预算更小时
+    取剩余预算——绝不因 env 调大而击穿守卫总预算。返回值可能 ≤0
+    （预算已尽），调用方必须先于 spawn 拒绝。
+    """
+    timeout = get_git_timeout()
+    if _DEADLINE is not None:
+        remaining = _DEADLINE - time.monotonic()
+        if remaining < timeout:
+            timeout = remaining
+    return timeout
+
+
+def begin_status_sharing() -> None:
+    """开启 status 观测共享（Stop 完成守卫回合入口；幂等）。
+
+    开启后同一仓库根的首次 git_touched_files 调用发起真实 git status
+    并缓存原始输出，其后同根调用直接解析缓存（同一观测瞬点，安全
+    复用——求值全程在同一守卫回合内完成）；仅钩子进程开启，CLI /
+    直接调用方零影响。
+    """
+    global _STATUS_SHARING
+    _STATUS_SHARING = True
+
+
+def end_status_sharing() -> None:
+    """关闭并丢弃 status 观测共享（守卫回合 finally 注销；幂等）。"""
+    global _STATUS_SHARING
+    _STATUS_SHARING = False
+    _SHARED_STATUS.clear()
 
 
 # "**" 段的主体占位：零或多段（跨 "/" 的任意段序列，含空串）
@@ -252,15 +316,30 @@ def git_touched_files(repo_root) -> "list[str]":
 
     失败：git 可执行不存在 / 返回非零（非 git 仓库等）/ 超时 → 抛
     OwnershipError（消息含 returncode 与 stderr 摘要）。
-    subprocess 固定 timeout=3 秒——必须小于 Stop 钩子的 timeoutMs=5000：
-    git 挂起时让 OwnershipError 先触发（钩子内 fail-open + ENFORCEMENT
-    DEGRADED 报告），而不是被运行时整进程击杀（那样降级不可见）。
+    单次子进程超时 = min(GLM_CONDUCTOR_GIT_TIMEOUT 配置值（默认 3.0
+    秒，范围 1.0~30.0）, 距 Stop 完成守卫共享单调截止期的剩余总预算)
+    （本模块 set_git_deadline 注册）：env 调大也绝不击穿钩子
+    timeoutMs=5000 总额；git 挂起时 OwnershipError 先于宿主整进程击杀
+    触发（钩子内 fail-open + ENFORCEMENT DEGRADED 报告），而不是被
+    运行时整进程击杀（那样降级不可见）；预算已耗尽则不发起子进程、
+    直接抛 OwnershipError（无界重试不存在）。守卫回合内同仓库根复用
+    同一次 status 输出（begin_status_sharing opt-in；CLI / 直接调用
+    不受影响）。
     """
+    if _STATUS_SHARING:
+        cache_key = os.path.normcase(os.path.abspath(str(repo_root)))
+        cached = _SHARED_STATUS.get(cache_key)
+        if cached is not None:
+            return _parse_porcelain_z(cached)
     command = [
         "git", "-c", "core.quotepath=false",
         "status", "--porcelain=v1", "-z", "-uall",
     ]
-    timeout = get_git_timeout()
+    timeout = effective_git_timeout()
+    if timeout <= 0:
+        raise OwnershipError(
+            "git 观察总预算已耗尽（Stop 完成守卫共享截止期已过），"
+            "跳过 status（repo=%s）" % (repo_root,))
     try:
         proc = subprocess.run(
             command, cwd=str(repo_root),
@@ -278,8 +357,10 @@ def git_touched_files(repo_root) -> "list[str]":
         raise OwnershipError(
             "git 调用失败：status 返回 returncode=%d（repo=%s）；stderr：%s"
             % (proc.returncode, repo_root, stderr_summary[:200]))
-    return _parse_porcelain_z(
-        proc.stdout.decode("utf-8", errors="replace"))
+    stdout_text = proc.stdout.decode("utf-8", errors="replace")
+    if _STATUS_SHARING:
+        _SHARED_STATUS[cache_key] = stdout_text
+    return _parse_porcelain_z(stdout_text)
 
 
 def _parse_porcelain_z(text: str) -> "list[str]":

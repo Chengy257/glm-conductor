@@ -1,67 +1,74 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""GLM Conductor v2.4.1 Workflow 提交模型选型/预检（continuity hotfix 工作包 H1）。
+"""GLM Conductor Workflow 提交模型选型/预检（v2.4.1 H1 底盘；v2.6.0 WP-M1
+用户授权显式选型重基线）。
 
 职责：
     delegate/full 原生 Workflow 启动前的 worker 模型选型与提交契约构造
-    （INV-MODEL-01：worker 必须显式选定 provider 限定的 Flash 档模型，
-    绝不继承主会话文本模型，绝不接受裸别名）：
+    （v2.6.0 重基线：worker 必须是用户显式授权的 provider 全限定精确 id
+    ——形态合法 +（供给 configured 集合时）精确成员；绝不继承主会话
+    文本模型，绝不接受裸别名。Flash 档判据降为**软推荐**候选分类器，
+    不再是准入硬门——非 Flash 已配置模型仅因名字/后缀被拒是 no-go 红线
+    ，规格 §5.2/§7.2）：
       - validate_worker_model(model_id, configured_model_ids=None)：
         单个 worker 模型 id 预检——非空 str、account: 前缀、
         account:<账户段>/<模型段> 形态（两段均非空、账户段不含 '/'、
-        全 id 无空白）、模型段恰以 FLASH_TIER_SUFFIX（"-Flash"）结尾
-        且长于后缀本身（v2.5.2 W5：版本无关的 Flash 档机械判据，取代
-        v2.4.1 的 /GLM-5.3-Flash 字面后缀等值；非 Flash 档模型——含
-        主会话文本模型，v2.4.0 缺陷 A 的误继承源——给专门拒绝原因）；
-        configured 集合给出时要求精确成员，且集合形状非法即拒；成功
-        原样返回该 id（归一即恒等），失败抛 WorkflowSubmissionError
-        （携人读原因）；
+        全 id 无空白；角色中性形状校验，v2.6.0 WP-M1 起不再要求
+        Flash 后缀——未来陌生名字但已配置的 id 一律合法）；configured
+        集合给出时要求精确成员，且集合形状非法即拒；成功原样返回该
+        id（归一即恒等），失败抛 WorkflowSubmissionError（携人读原因）；
       - select_worker_model(configured_model_ids, explicit_model_id=None)：
-        从主会话自宿主模型发现面提取的已配置 id 集合中选定唯一
-        worker 模型——先校验集合形状，再收集 Flash 档候选；显式给出
-        explicit_model_id 则校验之并要求精确成员（显式选择优先于
-        自动选择）；否则恰一候选自动选定、零候选拒绝、多候选歧义
-        拒绝并列出全部候选 id——绝不静默取第一个；
+        从主会话自宿主模型发现面提取的已配置 id 集合中选定 worker
+        模型——先校验集合形状；显式给出 explicit_model_id 则校验之并
+        要求精确成员（显式授权优先，任意已配置精确 id 合法，不限档位
+        ）；否则走软推荐便捷路径：按 Flash 档判据收集候选，恰一候选
+        自动选定（软推荐，非静默指派——多候选/零候选一律拒绝交回启动
+        问答）、零候选拒绝（拒绝静默回退）、多候选歧义拒绝并列出全部
+        候选 id——绝不静默取第一个；
       - build_submission_contract(model_id)：构造恰两键的机器可读
         提交契约（subagent_model + model_policy），供 CreateWorkflow
         前的最后预检与诊断输出；无秘密、无时间戳、无会话 id、
         无配额数据。
 
-接口（公共面，v2.5.2 W5 起为五项）：
+接口（公共面，自 v2.4.1 起五项不变）：
     常量 FLASH_TIER_SUFFIX + WorkflowSubmissionError + 上述三函数，
-    仅此五项公共名（v2.4.1 的 FLASH_MODEL_SUFFIX / TEXT_MODEL_SUFFIX
-    字面后缀常量已随档位判据解绑移除）。调用方按模块路径导入本模块
-    使用（不经 runtime.workflow 包 __init__ 重导出，包 __init__ 保持
-    不动）。
+    仅此五项公共名。FLASH_TIER_SUFFIX 自 v2.6.0 WP-M1 起语义为软推荐
+    候选分类器（自动选型便捷路径的档位判据），不再约束显式授权选择。
+    调用方按模块路径导入本模块使用（不经 runtime.workflow 包 __init__
+    重导出，包 __init__ 保持不动）。
 
 依赖：
     零导入、零 I/O：纯 Python（3.7 兼容语法）内存计算——本文件不含
     任何 import 语句，零宿主 / 网络 / 文件系统调用；确定性——同输入
     重复调用返回值与错误消息逐字全等，无随机、无时间、无环境因素；
     绝不硬编码任何 account/provider 名（provider 身份一律来自宿主
-    配置集合，本模块只认 account: 方案前缀这一形态约定）。
+    配置集合，本模块只认 account: 方案前缀这一形态约定；模型发现归
+    宿主 ListModels，本模块绝不替宿主判断模型能力）。
 
 来源：
     docs/roadmap/V2_4_1_CONTINUITY_HOTFIX_IMPLEMENTATION_SPEC.md
-    §3.1（新模块语义）/ §3.4（H1 最低测试集）
-    + docs/roadmap/V2_4_1_CONTINUITY_HOTFIX_PLAN.md I1 / H1
-    + docs/roadmap/V2_5_2_PRECISE_WAKE_AND_MODEL_ADAPTATION_PLAN.md
-    §6 W5（D5：候选判定解绑 GLM-5.3-Flash 字面后缀，改版本无关
-    Flash 档机械判据；歧义 ≥2 候选必经启动问答由用户选定——问答面
-    在 orchestration §6.0，本模块只负责机械候选收敛）。
+    §3.1（原模块语义）/ §3.4（H1 最低测试集）
+    + docs/roadmap/POST_V2_5_2_RELIABILITY_AND_MODEL_SELECTION_
+    IMPLEMENTATION_SPEC.md §5（WP-M1：v2.5.2 W5 的版本无关 Flash 档
+    准入硬门降级为软推荐候选分类；model_policy 从 explicit-flash-
+    required 改 user-authorized-explicit-selection；角色中性形状校验
+    ——非 Flash 已配置 id 接受；零候选/多候选歧义仍拒绝交回启动问答
+    ——问答面在 orchestration §6.0，本模块只负责机械候选收敛）。
 """
 
 
-# Flash 档机械判据（v2.5.2 W5 / D5：解绑字面版本后缀）——worker 模型
-# id 的模型段（首个 '/' 之后）恰以 "-Flash" 结尾且长于后缀本身：
+# Flash 档软推荐分类器（v2.5.2 W5 引入版本无关判据；v2.6.0 WP-M1 起
+# 从准入硬门降级为软推荐候选分类）——worker 模型 id 的模型段（首个
+# '/' 之后）恰以 "-Flash" 结尾且长于后缀本身即归为 Flash 档候选：
 # GLM-5.3-Flash / GLM-6-Flash / 任一未来版本代际的同档模型均命中，
-# 版本无关；非 Flash 档（含主会话文本模型）一律拒绝。
+# 版本无关；非 Flash 档已配置模型合法可用（用户显式授权即选），只是
+# 不进自动选型候选集。
 FLASH_TIER_SUFFIX = "-Flash"
 
 # account: 方案前缀（形态约定，非具体账户名；具体账户名绝不硬编码）
 _ACCOUNT_SCHEME_PREFIX = "account:"
-# 提交契约 model_policy 的唯一合法值（规格 §3.1 逐字锚定）
-_MODEL_POLICY_VALUE = "explicit-flash-required"
+# 提交契约 model_policy 的唯一合法值（规格 §5.3：用户授权显式选型）
+_MODEL_POLICY_VALUE = "user-authorized-explicit-selection"
 
 
 class WorkflowSubmissionError(ValueError):
@@ -77,11 +84,10 @@ def _reject_reason(model_id):
     """纯形状预检：id 合法返回 None；否则返回人读拒绝原因（不查 configured 集合）。
 
     接受形态恰为：account:<账户段>/<模型段>，两段均非空、账户段不含
-    '/'、全 id 无空白字符，且模型段恰以 Flash 档后缀 FLASH_TIER_SUFFIX
-    结尾并长于后缀本身（v2.5.2 W5：版本无关的档位机械判据，取代
-    v2.4.1 的 /GLM-5.3-Flash 字面后缀等值——新版本代际 Flash 模型
-    无需改本模块即命中）。非 Flash 档模型（含主会话文本模型——
-    v2.4.0 缺陷 A 的误继承源）一律拒绝并给专门原因。
+    '/'、全 id 无空白字符（角色中性形状校验——v2.6.0 WP-M1 起不再
+    要求 Flash 档后缀：非 Flash 已配置模型（含主会话文本模型）合法
+    可用，模型能力/档位判断归用户授权与宿主发现面，绝不按名字/后缀
+    拒绝）。裸别名（无 account: 前缀）仍一律拒绝。
     """
     if not isinstance(model_id, str):
         return "model_id 必须是非空字符串，实际为 %s" % type(model_id).__name__
@@ -96,12 +102,22 @@ def _reject_reason(model_id):
     if not sep or account_seg == "" or model_seg == "":
         return ("模型 id 必须是 account:<账户段>/<模型段> 形态（两段均非空，"
                 "账户段不含 '/'）：%r" % (model_id,))
-    if not model_seg.endswith(FLASH_TIER_SUFFIX) \
-            or len(model_seg) <= len(FLASH_TIER_SUFFIX):
-        return ("模型段必须以 Flash 档后缀 %s 结尾且长于后缀本身（版本无关"
-                "档位判据）——主会话文本模型等非 Flash 档模型绝不可用作 "
-                "Workflow worker 模型：%r" % (FLASH_TIER_SUFFIX, model_id))
     return None
+
+
+def _is_flash_tier_candidate(model_id):
+    """软推荐档位分类：形状合法且模型段恰以 FLASH_TIER_SUFFIX 结尾并
+    长于后缀本身（裸 "-Flash" 模型段无基础名，不算档位命中）。
+
+    只用于 select_worker_model 的自动选型候选收集（软推荐便捷路径）；
+    绝不参与 validate_worker_model 的准入判定——档位不是准入条件。
+    """
+    reason = _reject_reason(model_id)
+    if reason is not None:
+        return False
+    model_seg = model_id[len(_ACCOUNT_SCHEME_PREFIX):].partition("/")[2]
+    return (model_seg.endswith(FLASH_TIER_SUFFIX)
+            and len(model_seg) > len(FLASH_TIER_SUFFIX))
 
 
 def _validated_configured(configured_model_ids):
@@ -129,7 +145,8 @@ def validate_worker_model(model_id, configured_model_ids=None):
     自身形状预检；给出时必须是 list/tuple 的非空字符串，且 model_id
     须为精确成员（精确字符串相等——不做大小写 / 空白归一，集合形状
     非法即拒）。裸别名（无 account: 前缀）即使出现在 configured 集合
-    中也绝不接受。
+    中也绝不接受。角色中性：档位（Flash 与否）不参与准入判定——
+    已配置的任意精确 id 均合法。
     """
     reason = _reject_reason(model_id)
     if reason is not None:
@@ -144,17 +161,19 @@ def validate_worker_model(model_id, configured_model_ids=None):
 
 
 def select_worker_model(configured_model_ids, explicit_model_id=None):
-    """从已配置模型集合中选定唯一 worker 模型 id（预检通过者）。
+    """从已配置模型集合中选定 worker 模型 id（预检通过者）。
 
-    算法（规格 §3.1 select_worker_model）：1) 校验集合形状；2) 依集合
-    原序收集满足 provider 限定 Flash 形态的候选；3) 显式给出
-    explicit_model_id 时校验之并要求精确成员后原样返回（显式选择优先，
-    自动歧义不适用）；4) 否则恰一候选自动选定——零候选拒绝（拒绝静默
-    回退）、多候选歧义拒绝并在消息中列出全部候选 id。绝不静默取第一个。
+    算法（规格 §5.2/§5.3 select_worker_model）：1) 校验集合形状；2)
+    显式给出 explicit_model_id 时校验之（形状 + 精确成员）后原样返回
+    ——用户显式授权优先，任意已配置精确 id 合法、不限档位；3) 否则
+    走软推荐便捷路径：按 Flash 档判据依集合原序收集候选——恰一候选
+    自动选定（软推荐，非静默指派）、零候选拒绝（拒绝静默回退）、多
+    候选歧义拒绝并在消息中列出全部候选 id（选择交回启动问答）。
+    绝不静默取第一个。
     """
     configured = _validated_configured(configured_model_ids)
     flash_candidates = tuple(
-        mid for mid in configured if _reject_reason(mid) is None)
+        mid for mid in configured if _is_flash_tier_candidate(mid))
     if explicit_model_id is not None:
         return validate_worker_model(explicit_model_id, configured)
     if len(flash_candidates) == 1:
@@ -162,21 +181,26 @@ def select_worker_model(configured_model_ids, explicit_model_id=None):
     if not flash_candidates:
         raise WorkflowSubmissionError(
             "configured 集合（共 %d 个模型）中没有任何模型段以 %s 结尾的 "
-            "provider 限定 Flash 档候选，拒绝静默回退"
+            "provider 限定 Flash 档软推荐候选，拒绝静默回退——如需选用非 "
+            "Flash 已配置模型，请经启动问答复核后显式给出 exact id"
             % (len(configured), FLASH_TIER_SUFFIX))
     listing = ", ".join('"%s"' % mid for mid in flash_candidates)
     raise WorkflowSubmissionError(
-        "Flash 候选有 %d 个，选择歧义——必须显式给出 exact id，绝不静默取"
-        "第一个；全部候选：%s" % (len(flash_candidates), listing))
+        "Flash 档软推荐候选有 %d 个，选择歧义——必须显式给出 exact id，"
+        "绝不静默取第一个（选择交回启动问答由用户选定）；全部候选：%s"
+        % (len(flash_candidates), listing))
 
 
 def build_submission_contract(model_id):
     """构造恰两键的机器可读提交契约（CreateWorkflow 前的最终预检产物）。
 
     返回 {"subagent_model": <预检通过的 id>,
-          "model_policy": "explicit-flash-required"}；键序固定、内容确定，
-    无秘密、无时间戳、无会话 id、无配额数据。model_id 先过
-    validate_worker_model 预检，非法即抛 WorkflowSubmissionError。
+          "model_policy": "user-authorized-explicit-selection"}；
+    键序固定、内容确定，无秘密、无时间戳、无会话 id、无配额数据。
+    model_policy 语义（规格 §5.3）：worker 模型是用户在启动问答中
+    显式授权的精确选择（Flash 档为软推荐而非硬性要求），不是策略层
+    硬门结论。model_id 先过 validate_worker_model 预检，非法即抛
+    WorkflowSubmissionError。
     """
     validated = validate_worker_model(model_id)
     return {

@@ -31,7 +31,7 @@
 - 敏感决策尚未解决
 - 实施过程中可能频繁改变设计
 
-delegability: low 时由 GLM-5.3 主会话实施。
+delegability: low 时由主会话实施（主模型继承宿主主会话，不可编程切换）。
 
 ### 轴 B — Assurance（保障等级）
 
@@ -55,14 +55,14 @@ delegability: low 时由 GLM-5.3 主会话实施。
 
 | Delegability | Assurance | Route | 实施 | 独立审查 |
 | --- | --- | --- | --- | --- |
-| low | standard | solo | GLM-5.3 主会话 | 否 |
+| low | standard | solo | 主会话（宿主模型） | 否 |
 | high | standard | delegate | 原生 Workflow（文本工人） | 否 |
-| low | high | audit | GLM-5.3 主会话 | 是 |
+| low | high | audit | 主会话（宿主模型） | 是 |
 | high | high | full | 原生 Workflow（文本工人） | 是 |
 
 语义要点：
 
-- delegate 不是 solo 的风险升级：solo = GLM-5.3 实施，delegate = 原生 Workflow 文本工人实施，delegate 只表达"该实施已足够有界"
+- delegate 不是 solo 的风险升级：solo = 主会话实施（主模型继承宿主主会话），delegate = 原生 Workflow 文本工人实施，delegate 只表达"该实施已足够有界"
 - audit = 主会话实施 + 审查者终审（适合判断密集、敏感、架构重的工作）
 - full = 委派实施 + 审查者终审（适合大规模但有界：机械 API 迁移、清晰规格的 UI 改版、重复性多文件转换）
 - 视觉/交互任务是实施模态的一种能力选择（走 visual-implementer 子智能体通道），不是第五种 route
@@ -137,7 +137,7 @@ A completion claim without evidence is invalid / 无证据的完成声明无效
 
 ## TASK CONTEXT PACK（实施声明的前置上下文包）
 
-复杂或陌生代码域的委派，在实施声明**之前**准备一个上下文包——主会话用昂贵的推理与侦察压缩出的有界上下文，交给实施方做有界执行（这正是异构分工的价值点：GLM-5.3 压缩、执行方执行）。做过 ROUTING PREFLIGHT 时，包内条目直接取自 PREFLIGHT REPORT，不重复侦察。
+复杂或陌生代码域的委派，在实施声明**之前**准备一个上下文包——主会话用昂贵的推理与侦察压缩出的有界上下文，交给实施方做有界执行（这正是异构分工的价值点：强主模型压缩、执行方执行）。做过 ROUTING PREFLIGHT 时，包内条目直接取自 PREFLIGHT REPORT，不重复侦察。
 
 模板（附在实施声明最前，标题行逐字）：
 
@@ -248,6 +248,7 @@ GAPS:
 
 delegate/full 的文本实施由原生 Workflow 运行的文本工人（text worker）执行：
 
+- **worker 模型授权（v2.6.0，规格 §5.2/§5.3）**：worker 模型是用户在 §6.0 启动问答中显式授权的精确选择——宿主全部已配置候选入清单（不限 provider、不限 Flash），Flash 档为软推荐位，**单一候选也须用户显式确认**；**选定模型默认以 max 推理档运行（宿主默认思考档位），档位不随 pin 存储**——任务 pin 只存模型 id；提交经 `workflow-model-select` 产出 `user-authorized-explicit-selection` 提交契约，`subagent_model` 绝不省略——省略即继承主会话模型。有 pin 任务的 `--model` 显式值必须与 pin 一致，变更授权必经交互问答重授权；无人值守唤醒轮绝不自动重 pin
 - **来源**：persona 由 `runtime/workflow/persona.py` 唯一定义，编译器（v24-compile）把它逐字内嵌进生成的 Workflow 源码——宿主 runtime 不消费插件 agent 定义，角色仿真靠脚本内嵌 persona 文本
 - **定位**：有界 objective 的精确执行者——只执行所交付的 objective，不重新设计架构；objective 之外的架构决策、范围扩张与顺手重构一律不做
 - **范围纪律**：只改动节点 ownership 覆盖的仓库相对路径；遵守声明的 interfaces 与 constraints；同一仓库可能有其他代理并行编辑——不回退他人的无关改动
@@ -259,7 +260,7 @@ delegate/full 的文本实施由原生 Workflow 运行的文本工人（text wor
 ## visual-implementer 契约（视觉任务实施者）
 
 - **定位**：视觉/交互任务的有界实施执行者（visual bounded implementation executor）
-- **模型**：GLM-5.3-Flash（多模态），思考档位 high（已固定，不附加覆盖）
+- **模型**：GLM-5.3-Flash（多模态），思考档位 high（已固定，不附加覆盖）——静态绑定事实与维护操作见 agents/visual-implementer.md「绑定维护」节
 - **用途**：仅限视觉/交互任务实施——执行含 VISUAL ACCEPTANCE 扩展的五段式规格
 - **视觉反馈环（跨调用拓扑）**：实施者需要证据时返回 `VISUAL_CAPTURE_REQUEST` 并结束本次调用（不等待、不虚构）→ 主会话用其专属 Browser/Computer Use 采集截图落盘（主会话专用，子代理在 ZCode 策略层被禁止使用）→ 主会话发起携带完整状态的新调用（规范路径：五段式规格含 VISUAL ACCEPTANCE、当前 diff / 改动状态、上一轮 VISUAL_CAPTURE_REQUEST、截图路径、VISUAL_ROUND 轮次号；仅当运行时已验证稳定 resume 机制时才可作为可选优化，协议正确性不依赖 resume） → 实施者用 Read 亲自读取截图判定 → 不符合则修正并再次返回 `VISUAL_CAPTURE_REQUEST` → 每个 VISUAL ACCEPTANCE 验收点以 VISUAL_ROUND（1|2|3）跟踪，最多 3 轮采集-判定循环，禁止无限视觉打磨。协议格式见 agents/visual-implementer.md 的 VISUAL_CAPTURE_REQUEST 节
 - **重估信号**：验收标准不清、规格有歧义或视觉证据不可得时返回 blocked，交回主会话处理；不得以文字推测替代视觉验证
@@ -269,7 +270,7 @@ delegate/full 的文本实施由原生 Workflow 运行的文本工人（text wor
 ## visual-reviewer 契约（视觉任务审查者）
 
 - **定位**：全新上下文、与实施隔离的只读审查者（fresh-context, implementation-isolated reviewer）；独立性来自干净上下文与只读工具白名单，不宣称跨模型独立
-- **模型**：GLM-5.3-Flash（多模态，frontmatter 显式 provider 全限定绑定）——亲自读取截图进行视觉验收是角色契约的一部分；绑定不可用的宿主上本角色不可用（fail closed），绝不静默退回纯文本模型假装视觉审查
+- **模型**：GLM-5.3-Flash（多模态，frontmatter 显式 provider 全限定绑定）——亲自读取截图进行视觉验收是角色契约的一部分；绑定不可用的宿主上本角色不可用（fail closed），绝不静默退回纯文本模型假装视觉审查；静态绑定事实与维护操作见 agents/visual-reviewer.md「绑定维护」节
 - **思考档位**：max（已固定）
 - **用途**：仅限视觉任务的 audit/full 路由，且必须在主会话验证之后调用；主职是独立视觉验收（截图证据 + VISUAL ACCEPTANCE + 用户可见回归），代码 diff 作为上下文读取，不替代主会话的代码审查
 - **职责分工**：主会话负责完整 diff、代码正确性、功能验证与范围/接口核验；visual-reviewer 负责视觉验收、交互证据、截图证据与用户可见回归
@@ -324,7 +325,7 @@ delegate/full 的文本实施由原生 Workflow 运行的文本工人（text wor
 
 ## 主会话（架构师）契约
 
-主会话（GLM-5.3）保留以下职责，不外派：
+主会话保留以下职责（主模型继承宿主主会话、不可编程切换——Conductor 绝不要求、也绝不检查主会话的具体模型名；问询轮对架构/规划/验证软性建议强档模型，不阻塞其他已配置选择），以下职责不外派：
 
 - 需求与歧义解决
 - 架构与路由判断
@@ -335,4 +336,4 @@ delegate/full 的文本实施由原生 Workflow 运行的文本工人（text wor
 
 辅助工作是替代而非重复主会话的工作：委派实施后主会话不再重复写实现，只做验证与验收。
 
-**能力边界**：GLM-5.3 是纯文本模型。在视觉链路中主会话只能承担驱动与采集（启动应用、驱动浏览器/桌面、截图落盘），不得声称自己做了视觉判定；视觉判定由 Flash 系多模态角色（visual-implementer / visual-reviewer）完成。
+**能力边界**：主模型继承宿主主会话，Conductor 绝不仅凭模型名字或版本号断言其强弱与模态能力。视觉链路中主会话承担驱动与采集（启动应用、驱动浏览器/桌面、截图落盘），不得声称自己做了视觉判定；视觉判定由显式绑定多模态模型的视觉角色（visual-implementer / visual-reviewer）完成。

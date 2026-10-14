@@ -16,7 +16,11 @@
       - evaluate()：§28 四态评估（snapshot → 逐窗 AVAILABLE /
         PRESSURE / EXHAUSTED / UNKNOWN + 总体 status + 中文 reason）；
       - plan_resume()：§29-§33 恢复规划（评估 → {action, resume_at,
-        force_refresh_before_resume, reason}，action ∈ RESUME_ACTIONS）。
+        force_refresh_before_resume, reason}，action ∈ RESUME_ACTIONS）；
+      - earliest_future_reset_at()：v2.6.0 观测透传面的单一 reset_at
+        选择（已识别窗口中最早的有效未来观测 reset_at，UTC instant
+        显式比较、与窗口状态无关的纯函数；绝不改变 plan_resume 的
+        EXHAUSTED 保守 resume_at 口径）。
 
 判窗纪律（§26，本模块的核心规则）：
     绝不按 type 字段或数组位置判窗（TOKENS_LIMIT / CREDIT_LIMIT /
@@ -536,3 +540,71 @@ def plan_resume(evaluation, snapshot=None, *, now=None,
             "force_refresh_before_resume": True,
             "reason": "窗口已耗尽：等到 %s 之后再恢复（最晚 reset 加 %s 秒"
                       "宽限），唤醒后必须强制刷新额度" % (resume_at, grace_text)}
+
+
+# —— v2.6.0 Phase B（WP-R2）：单一观测 reset_at 的确定性窗口选择 ——
+# （规格 §2.2：精度睡眠锚点 = 已识别窗口中最早的有效未来观测
+# reset_at，与窗口 AVAILABLE/PRESSURE/EXHAUSTED/UNKNOWN 状态无关；
+# 下一个观测到的窗口边界就是安全的唤醒/检查点。本函数绝不改变
+# plan_resume 的 EXHAUSTED 保守 resume_at 口径——那是另一条独立
+# 决策路径（最晚阻塞窗 + grace），不被本函数替换或复用。）
+
+def _observation_now(now):
+    """归一 earliest_future_reset_at 的 now 注入参数（None → 当前
+    UTC；datetime / ISO8601 串 → 时刻；非法 → ValueError，文案锚定
+    本函数名——时间原语不合并异锚文案，对齐 time_utils 同名近亲纪律）。"""
+    if now is None:
+        return datetime.now(timezone.utc)
+    if isinstance(now, datetime):
+        if now.tzinfo is None:
+            return now.replace(tzinfo=timezone.utc)
+        return now
+    moment = _parse_iso_utc(now)
+    if moment is None:
+        raise ValueError(
+            "earliest_future_reset_at：now 必须是 datetime 或 ISO8601 "
+            "字符串，得到 %r" % (now,))
+    return moment
+
+
+def earliest_future_reset_at(evaluation, *, now=None):
+    """已识别窗口中最早的有效未来观测 reset_at（纯函数，零 I/O）。
+
+    参数：
+      - evaluation：parser.evaluate() 的输出 dict；None / 形状不全
+        （非 dict / windows 非 list）一律按「无候选」返回 None，
+        绝不抛错；
+      - now：参考时刻注入（None → 当前 UTC；datetime / ISO8601
+        字符串），仅供测试；非法 → ValueError。
+
+    选择规则（规格 §2.2 确定性窗口选择）：
+      - 只认已识别窗口（kind ∈ WINDOW_KINDS）；非 dict 窗口跳过；
+      - reset_at 必须可解析为 UTC instant（_parse_iso_utc 显式时刻
+        比较——绝不依赖字符串字典序巧合）且严格晚于 now；
+      - 多个候选取更早（按时刻取 min，返回该窗口的观测字符串
+        原样——绝不重排格式、绝不虚构）；
+      - 已过期 / 无效（缺失 / 不可解析）的 reset 一律不参与；
+      - 无候选 → None（调用方按 floor-only 降级如实披露，绝不
+        虚构 reset）。
+    """
+    moment = _observation_now(now)
+    if not isinstance(evaluation, dict):
+        return None
+    windows = evaluation.get("windows")
+    if not isinstance(windows, list):
+        return None
+    best_moment = None
+    best_raw = None
+    for window in windows:
+        if not isinstance(window, dict):
+            continue
+        if window.get("kind") not in WINDOW_KINDS:
+            continue  # 只认已识别窗口（five_hour / weekly）
+        raw = window.get("reset_at")
+        parsed = _parse_iso_utc(raw)
+        if parsed is None or not parsed > moment:
+            continue  # 无效 / 已过期：绝不参与、绝不虚构
+        if best_moment is None or parsed < best_moment:
+            best_moment = parsed
+            best_raw = raw
+    return best_raw

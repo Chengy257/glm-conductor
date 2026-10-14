@@ -1,6 +1,6 @@
-# GLM Conductor 架构（权威文档，v2.4）
+# GLM Conductor 架构（权威文档，v2.6.0）
 
-> 本文档是 GLM Conductor 的**唯一架构真相源**，描述插件**当前**（v2.4.0）的实际运行时行为——每一节回答"系统现在是什么"，不叙述开发历程；已删除的模块不写成"deprecated 运行路径"——它们不存在了（退役对照见 §21）。
+> 本文档是 GLM Conductor 的**唯一架构真相源**，描述插件**当前**（v2.6.0）的实际运行时行为——每一节回答"系统现在是什么"，不叙述开发历程；已删除的模块不写成"deprecated 运行路径"——它们不存在了（退役对照见 §21）。
 > 一句话定位：**GLM Conductor owns semantic orchestration and acceptance; ZCode owns execution orchestration.**
 > 契约细节以插件目录为准（`plugins/glm-conductor/` 下的 agents 与 skills）；本文档与其保持一致，冲突时以修复到一致为准。概念入门见 [core-concepts.md](core-concepts.md)，排障指引见 [troubleshooting.md](troubleshooting.md)。
 
@@ -103,7 +103,7 @@ local_check:
 
 **编译器不做**（这些是宿主 Native Workflow 的职责，Conductor 不再造）：就绪队列、dispatch wave、并发调度器、后台管理器、重试管理器、子 actor 生命周期账本、ask 回放、Workflow resume 引擎。编译器只生成源码、只做静态断言——**绝不启动任何 Workflow**；执行是主会话经宿主 CreateWorkflow 发起的事（CLI 入口 `v24-compile`，只产码或落盘）。
 
-**编译器 TypeScript 模型无关（v2.4.1 明确）**：生成源不携带、也设置不了 worker 模型——`subagent_model` 是宿主在 CreateWorkflow 提交时刻绑定的 run 级提交属性。因此 worker 模型选择只能发生在提交边界：主会话经宿主模型列表 → `workflow-model-select`（`runtime/workflow/submission.py`，INV-MODEL-01）选定显式 provider 限定 GLM-5.3-Flash 后随 CreateWorkflow 提交；省略 `subagent_model` 会使 run 继承主会话模型（v2.4.0 缺陷 A），Conductor 协议把它列为硬禁止。
+**编译器 TypeScript 模型无关（v2.4.1 明确）**：生成源不携带、也设置不了 worker 模型——`subagent_model` 是宿主在 CreateWorkflow 提交时刻绑定的 run 级提交属性。因此 worker 模型选择只能发生在提交边界：主会话经宿主模型列表 → `workflow-model-select`（`runtime/workflow/submission.py`，INV-MODEL-01；v2.6.0 起用户授权显式选型——全候选角色中性、Flash 档降为软推荐、单一候选也须用户显式确认）后随 CreateWorkflow 提交；省略 `subagent_model` 会使 run 继承主会话模型（v2.4.0 缺陷 A），Conductor 协议把它列为硬禁止。
 
 生成源形态（节选示意，实际产物以编译器输出为准）：
 
@@ -129,7 +129,7 @@ return [allResults["parser"], allResults["types"] /* 按节点 id 升序 */];
 
 v2.4 有两个真相域：**静态语义真相**（Conductor 任务/DAG state）与**执行运行时真相**（ZCode Workflow run）。Conductor 不持久化任何 per-node 运行状态（running / completed 等）——那是宿主 `GetWorkflowRun` 的自有事实。
 
-唯一的持久关联是 `runtime/workflow/adapter.py` 的 run-id 单据：`record_run(task_ref, workflow_run_id)` 把「任务 ↔ Workflow run」写为 `.glm-conductor/workflow-runs/` 下单一 JSON 记录（同任务重写整条替换——一任务一活跃 run；可选 `artifact_path` / `node_map`），`load_run` 读回。**零状态镜像红线**：子 actor running/完成状态、重试计数、token 账目、后台任务状态、宿主健康度一律不落盘。任务侧对应物是 `state.workflow_run_id`（委派启动前为 null），由 `runtime.task.record_workflow_run` 落盘 + 镜像 adapter + `workflow_started` 事件。
+唯一的持久关联是 `runtime/workflow/adapter.py` 的 run-id 单据：`record_run(repo_root, task_ref, workflow_run_id)` 把「任务 ↔ Workflow run」写为 repo_root 下 `.glm-conductor/workflow-runs/` 单一 JSON 记录（v2.6.0 起显式 repo_root 参数，缺省兼容 legacy CWD 口径；同任务重写整条替换——一任务一活跃 run；可选 `artifact_path` / `node_map`），`load_run` 读回。规范 CLI 入口是 `task-record-workflow-run`（AF-04 写者守卫前置、任意 CWD 落 repo_root 账本、失败零假事件）；`v24-record-run` 为 legacy 低层薄壳。**零状态镜像红线**：子 actor running/完成状态、重试计数、token 账目、后台任务状态、宿主健康度一律不落盘。任务侧对应物是 `state.workflow_run_id`（委派启动前为 null），由 `runtime.task.record_workflow_run` 落盘 + 镜像 adapter + `workflow_started` 事件。
 
 ```json
 // .glm-conductor/workflow-runs/run-<task_ref 百分号编码>.json
@@ -138,7 +138,7 @@ v2.4 有两个真相域：**静态语义真相**（Conductor 任务/DAG state）
   "created_at": "2026-09-21T08:30:00.000Z" }
 ```
 
-主会话的委派启动顺序固化为：**任务启动问答**（v2.5：凡建状态任务在 create_task 之前强制一次单轮两问合并的问答——① 跨额度自动唤醒与有界 `max_resumes` 预算，答「启用」先落 `quota-resume-authorize` 再走下方武装序列；② 选型歧义时的 worker 模型，答出即落 `worker-model-pin`，恰一候选自动选定此题不出现；纯会话内小任务不建 state 不问；问答只发生在交互回合，唤醒轮 / 恢复轮绝不弹问，契约见 orchestration §6.0）→ create task → `v24-compile` 产码 → **worker 模型选型硬闸**（宿主模型列表 → `workflow-model-select` 选定显式 provider 限定 GLM-5.3-Flash；带 `--task-ref <task_id>` 时按固定优先级取值：`--model` 显式值 > 任务 pin > 自动选型，pin 失效专门拒绝，见 §14；mode=auto 任务还须先完成连续性武装：建 Scheduled Task → `quota-automation-bind` → `quota-continuity-preflight` PASS）→ `writer-acquire` 取仓库写预约 → 宿主 CreateWorkflow（显式 `subagent_model`）启动 run → `record_workflow_run`（state.workflow_run_id + adapter 单据 + journal 事件）。run 的中途状态（进行中 / 卡在 ask / 已完成）一律经宿主 ListWorkflowRuns / GetWorkflowRun 观察，不进 Conductor 账本。
+主会话的委派启动顺序固化为：**任务启动问答**（v2.5.2：凡建状态任务在 create_task 之前强制一次单轮三问合并的问答（第三题为 auto 启用时的条件题，manual 分支两问）——① 跨额度自动唤醒与有界 `max_resumes` 预算，答「启用」先落 `quota-resume-authorize` 再走下方武装序列；② worker 模型（凡有实施委派必问：宿主全候选展示+显式确认，单一候选也确认；solo 等无委派任务不问），答出即落 `worker-model-pin`；问答只发生在交互回合，唤醒轮 / 恢复轮绝不弹问，契约见 orchestration §6.0）→ create task → `v24-compile` 产码 → **worker 模型选型硬闸**（宿主模型列表 → `workflow-model-select` 选定用户显式授权的 provider 全限定精确 id（不限档位，Flash 为软推荐）；带 `--task-ref <task_id>` 时按固定优先级取值：任务 pin > `--model` 显式值（必须与 pin 一致）> Flash 软推荐自动选型（仅裸调用），无 pin 无 `--model` 即拒转问答、pin 失效专门拒绝，见 §14；mode=auto 任务还须先完成连续性武装：建 Scheduled Task → `quota-automation-bind` → `quota-continuity-preflight` PASS）→ `writer-acquire` 取仓库写预约 → 宿主 CreateWorkflow（显式 `subagent_model`）启动 run → `record_workflow_run`（state.workflow_run_id + adapter 单据 + journal 事件）。run 的中途状态（进行中 / 卡在 ask / 已完成）一律经宿主 ListWorkflowRuns / GetWorkflowRun 观察，不进 Conductor 账本。
 
 ## 6. ownership 与编译期冲突处理
 
@@ -321,11 +321,11 @@ state 顶层 `quota_resume` 块（冻结初始形状 `{mode: "manual", max_resum
 预算耗尽后任务停在 waiting_user 等用户；不再有自动动作
 ```
 
-**先武装后开工（v2.4.1，arm-before-work）**：授权与武装是两个独立事实——`authorize` 是用户许可，`bind` 是未来激活见证，`preflight` 是两者齐备的机械确认。mode=auto 的任务必须在首个消耗额度的 Workflow 启动之前、以及任何自动 ResumeWorkflowRun 之前完成武装（`auto_continuity_armed = mode==auto AND automation_id 为非空 str`）。三个任务级 API（`runtime/task.py`）：`bind_quota_automation`（状态限 active/waiting_quota/waiting_user；同 id 幂等、异 id 拒绝不静默替换；绑定绝不推断 mode=auto）、`clear_quota_automation`（精确对账；只清 automation_id 不动 mode/预算；终态允许清理）、`quota_continuity_preflight`（纯读三态判定；只证明持久化绑定存在，绝不证明宿主侧激活仍存活——宿主存在性在恢复边界仍须宿主面核查）。CLI 面：`quota-automation-bind` / `quota-automation-clear` / `quota-continuity-preflight`（ready=false 以退出码 2 报告 = launch/resume 阻断信号）。调度策略（v2.5.2 双通道）：recurring Scheduled Task 是**唯一武装载体**——启动问答授权后即建于干净会话状态（默认 hourly 1h 地板，间隔由启动问答第三问确认），创建后终身不动（三态规律：载体首触发后本会话一切 Cron 变更失效，故成功唤醒后不删不改不重建，保持到终态清理 / 显式取消，INV-CONT-03）；精度由正交的**后台睡眠层**承担（每次唤醒轮收尾按阻塞窗 `reset_at`+grace 续臂，建立/续臂动作永远先于工作推进——完整 runbook 见 continuity 技能「双通道唤醒」节）；v2.5 的 one-shot 后继链已随双通道设计整体删除。
+**先武装后开工（v2.4.1，arm-before-work）**：授权与武装是两个独立事实——`authorize` 是用户许可，`bind` 是未来激活见证，`preflight` 是两者齐备的机械确认。mode=auto 的任务必须在首个消耗额度的 Workflow 启动之前、以及任何自动 ResumeWorkflowRun 之前完成武装（`auto_continuity_armed = mode==auto AND automation_id 为非空 str`）。三个任务级 API（`runtime/task.py`）：`bind_quota_automation`（状态限 active/waiting_quota/waiting_user；同 id 幂等、异 id 拒绝不静默替换；绑定绝不推断 mode=auto）、`clear_quota_automation`（精确对账；只清 automation_id 不动 mode/预算；终态允许清理）、`quota_continuity_preflight`（纯读三态判定；只证明持久化绑定存在，绝不证明宿主侧激活仍存活——宿主存在性在恢复边界仍须宿主面核查）。CLI 面：`quota-automation-bind` / `quota-automation-clear` / `quota-continuity-preflight`（ready=false 以退出码 2 报告 = launch/resume 阻断信号）。调度策略（v2.5.2 双通道）：recurring Scheduled Task 是**唯一武装载体**——启动问答授权后即建于干净会话状态（默认 hourly 1h 地板，间隔由启动问答第三问确认），创建后终身不动（三态规律：载体首触发后本会话一切 Cron 变更失效，故成功唤醒后不删不改不重建，保持到终态清理 / 显式取消，INV-CONT-03）；精度由正交的**后台睡眠层**承担（每次唤醒轮收尾按已识别窗口的最早有效未来 `reset_at`（v2.6.0 单一观测口径，与额度状态无关）+grace 续臂，建立/续臂动作永远先于工作推进——完整 runbook 见 continuity 技能「双通道唤醒」节）；v2.5 的 one-shot 后继链已随双通道设计整体删除。
 
 **v2.5.2 双通道唤醒与任务级 pin**：决策链六步原样不动。两处扩展：
 
-- **决策输出透传 `reset_at`（I4/W3，向后兼容附加键）**：`quota-resume-decision` 的 decision 为 `remain-waiting` 且观测为 EXHAUSTED 时，decision 只读透传本次观测的 `reset_at`（ISO 字符串或 null）——**阻塞窗（EXHAUSTED）max 口径**（与 `plan_resume` 对齐，健康周窗不参与，避免把睡眠目标推迟数天）——供主会话按精度层睡眠模板换算后台睡眠目标（`reset_at` + 300s grace；bash 模板动态计算，模型零算术）；纯诊断透传，不参与任何判定；UNKNOWN / no-op 分支保持既有输出形状绝不透传。唤醒架构（v2.5.2 双通道，宿主事实证据见 `docs/reviews/WAKE_TOPOLOGY_PROBE_RESULTS.md`）：**地板** = 启动即建的 recurring 载体（抗应用重启；首触发后终身不动——三态规律使响后变更失效，载体禁令自然满足）；**精度层** = 后台睡眠（退出自动唤起会话，实测秒级精确 + 8-11s 延迟；不抗应用重启，由地板兜底，首个地板唤醒重臂——自愈闭环）；两种触发源走同一统一唤醒协议（active 分支含 run 健康检查，停摆按恢复处理）。同会话单 automation 宿主约束（2026-10-03 活体实测，报文 `Cannot create a scheduled task inside a session that already belongs to a scheduled task`）：载体必须在干净会话状态（启动时）一次建成，此后绝无任何载体变更动作；边界写实（D8）：主会话同时至多一个 auto 任务。终态清理写实（D7）：载体试删预期失败（三态规律）→ 如实上报 automation id → 用户手动删除为预期运营动作 → 确认后 `quota-automation-clear`。
+- **决策输出无条件透传 `reset_at`（I4/W3 → v2.6.0 单一观测口径）**：`quota-resume-decision` 对**所有 action**（no-op / remain-waiting / waiting-user / resume-authorized）无条件附加 decision `reset_at`（ISO 字符串或 null）——**已识别窗口中最早的有效未来观测复位时刻**（UTC instant 显式解析比较，与额度状态无关——预防性武装：不管当前剩余多少都优先建立唤醒；`parser.plan_resume` 内部的 EXHAUSTED 保守口径保留，不对外）——供主会话按精度层睡眠模板换算后台睡眠目标（`reset_at` + 300s grace；bash 模板动态计算，模型零算术）；纯诊断透传，不参与任何判定；观测面与决策面同源同批（`_observation_view_of`），仅 cache 来源且无未来 reset 时恰强制刷新一次，仍无则如实披露 floor-only 降级，绝不虚构。唤醒架构（v2.5.2 双通道，宿主事实证据见 `docs/reviews/WAKE_TOPOLOGY_PROBE_RESULTS.md`）：**地板** = 启动即建的 recurring 载体（抗应用重启；首触发后终身不动——三态规律使响后变更失效，载体禁令自然满足）；**精度层** = 后台睡眠（退出自动唤起会话，实测秒级精确 + 8-11s 延迟；不抗应用重启，由地板兜底，首个地板唤醒重臂——自愈闭环）；两种触发源走同一统一唤醒协议（active 分支含 run 健康检查，停摆按恢复处理）。同会话单 automation 宿主约束（2026-10-03 活体实测，报文 `Cannot create a scheduled task inside a session that already belongs to a scheduled task`）：载体必须在干净会话状态（启动时）一次建成，此后绝无任何载体变更动作；边界写实（D8）：主会话同时至多一个 auto 任务。终态清理写实（D7）：载体试删预期失败（三态规律）→ 如实上报 automation id → 用户手动删除为预期运营动作 → 确认后 `quota-automation-clear`。
 - **任务级 worker 模型 pin（I1）随任务全生命周期生效**：写入 `task.pin_worker_model`（CLI `worker-model-pin`；经 submission 形态约定预检但**绝不查宿主面**——写入时点与提交时点宿主面可能不同，对账留给消费点；非终态才可写、同值幂等、异值显式覆盖带 prev/new；不新增 journal 事件）。唤醒/恢复轮的新 run 提交同样过选型硬闸：`workflow-model-select --task-ref` 消费任务顶层 `worker_model` pin 并**必查**当次 configured 集合——pin 形状非法或不在列表即专门拒绝（退出码 2），绝不回退自动选型、绝不静默换模型；无人值守回合遇 pin 失效一律阻断提交、转等待用户，绝不弹问（fail closed，契约见 orchestration §6.0 / §6.1）。
 
 观测词汇（`QUOTA_VIEW_STATUSES`）恰为 `AVAILABLE / PRESSURE / EXHAUSTED / UNKNOWN` 四态；UNKNOWN 绝不当作可用。配额恢复不改变路由（额度决定"何时"，不决定"谁做"）。
@@ -390,8 +390,9 @@ runtime CLI 子命令（退出码 0 成功 / 2 校验拒绝 / 1 运行期拒绝�
 | --- | --- |
 | `v24-compile <dag-json> [--task-ref] [--out]` | 静态 DAG → TS Workflow 源（只产码，绝不执行） |
 | `writer-acquire / writer-release [--force] / writer-show` | 仓库写者守卫操作面（§7） |
-| `v24-record-run <task_ref> <run-id>` | 任务 ↔ Workflow run 关联单据（§5） |
-| `workflow-model-select <models-json> [--model <exact-id>] [--task-ref <task_id>]` | worker 模型选型硬闸（INV-MODEL-01；恰一 Flash 自动 / 零候选拒 / 多候选歧义拒；`--task-ref` 消费任务 pin：`--model` 显式值 > 任务 pin > 自动选型，pin 失效即拒；输出 `{subagent_model, model_policy}` 提交契约） |
+| `task-record-workflow-run <repo_root> <task_id> <run-id>` | 任务 ↔ Workflow run 关联单据规范注册（§5；v2.6.0 WP-R4：AF-04 写者守卫前置、任意 CWD 落 repo_root 账本、失败零假事件） |
+| `[legacy 低层薄壳] v24-record-run <task_ref> <run-id>` | 同单据的 legacy 入口（缺省以 CWD 定 repo_root；规范面见上行） |
+| `workflow-model-select <models-json> [--model <exact-id>] [--task-ref <task_id>]` | worker 模型选型硬闸（INV-MODEL-01；用户授权显式选型：任务 pin > `--model`（必须与 pin 一致）> Flash 软推荐自动选型（仅裸调用）；无 pin 无 `--model` 拒转问答 / 零候选拒 / 多候选歧义拒 / pin 失效即拒；输出 `{subagent_model, model_policy}` 提交契约） |
 | `worker-model-pin <repo> <task_id> <exact-id>` | 任务级 worker 模型 pin 写入（§14；形状预检不查宿主面，非终态才可写，同值幂等 / 异值覆盖带 prev/new，无 journal 事件） |
 | `quota-automation-bind / quota-automation-clear / quota-continuity-preflight` | auto 连续性武装操作面（§14；preflight ready=false → 退出码 2 = launch/resume 阻断） |
 | `review-record <repo> <task> <reviewer> <verdict> [note]` | 任务级评审记录（先验证后评审） |

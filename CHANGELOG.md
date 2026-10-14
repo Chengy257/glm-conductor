@@ -1,5 +1,42 @@
 # Changelog
 
+## 2.6.0
+
+Reliability fixes and model-selection rebaseline — a minor release landing, in one pass, every finding of the post-v2.5.2 independent audit plus two contract rebaselines: per-task state transactions (P1-1), the degraded-reporting contract (P1-2), single reset_at with unconditional visibility and preventive arming (P1-3), a bounded Stop-guard budget (P2-1), canonical run registration (P2-2), seven P3 hygiene items, and the worker model-selection rebaseline (WP-M1 user-authorized explicit selection: host-wide candidates + Flash demoted to soft recommendation + pin cannot be bypassed + default-max reasoning-tier notice). Companion plan: `docs/roadmap/V2_6_0_IMPLEMENTATION_PLAN.md`. **Breaking: none** — state schema unchanged; existing v2.4/v2.5 tasks load with zero migration.
+
+### Phase A — Per-task state transactions (WP-R1, audit P1-1)
+
+- `runtime/state.py` gains the `update_task_state` transaction primitive: take the exclusive lock on the target `state.json` → strictly re-read current bytes inside the lock (corrupt / mismatched / schema-incomplete state is rejected and never overwritten; missing is allowed only where explicitly permitted) → task-identity and terminal/transition checks → apply the mutation to fresh state → atomic replace. Zero git I/O inside the lock.
+- All 14 state-mutating entry points in `runtime/task.py` migrate to the same transaction discipline: git observation outside the lock, structural gates re-checked inside, idempotent fast paths preserved, journal events appended only after a successful state commit — concurrent writers updating independent fields all survive, and a corrupt ledger is never silently overwritten.
+
+### Phase B — Single reset_at, unconditional visibility + preventive-arming contracts (WP-R2, audit P1-3)
+
+- Exactly one outward reset_at: the quota observation view is single-source and single-batch, carrying the earliest valid future observed reset among recognized windows (explicit UTC-instant comparison, independent of quota status); `quota-resume-decision` unconditionally attaches `reset_at` for every action (existing keys and side effects untouched); a cache-source observation with no future reset is force-refreshed exactly once, after which a floor-only degraded state is disclosed honestly — never fabricated.
+- Skill and command surfaces (continuity / orchestration / quota command) switch wholesale to the single-observation caliber: three-part success statement (authorization / bound floor / precision sleep actually launched), floor-only as a visible degraded condition rather than "armed", parking turns never establish the first sleep, the wake protocol's first action is `--force-refresh`, null or past targets never spin; authorization immediately arms both channels (recurring floor + precision sleep) before any work starts. `parser.plan_resume` keeps its conservative EXHAUSTED caliber.
+
+### Phase C — Stop-guard bounded deadline + canonical run registration (WP-R3+R4, audit P1-2 / P2-1 / P2-2)
+
+- stop_gate's two degradation reports carry the unified `ENFORCEMENT DEGRADED` prefix (honoring the existing enforcement / troubleshooting contract); the guard runs under a shared monotonic deadline bounded by the hooks.json timeoutMs (margin included), `GLM_CONDUCTOR_GUARD_BUDGET_MS` can only tighten it, and each git timeout is min(env, remaining budget) — a larger env value can never break the hook budget, and a hanging git produces a visible degradation warning before the host's hard kill; same-root status observation is reused (subprocess count 2→1).
+- New canonical `task-record-workflow-run` CLI: AF-04 writer-guard precondition, ledger-root receipts from any CWD, zero false events on failure; adapter record/load accept an explicit repo_root (default keeps legacy behavior); `v24-record-run` is demoted to a documented legacy thin shell; same-terminal replay adjudication moves inside the transaction as a no-change mutate.
+
+### Phase D — User-authorized explicit model selection (WP-M1)
+
+- Submission shape validation is role-neutral: the Flash suffix is no longer a validation item, every host-configured model is a candidate (any provider; ListModels levels shown as reasoning tiers), and even a single candidate requires explicit user confirmation; the Flash tier becomes a soft recommendation (version-agnostic `-Flash` suffix classifier); `model_policy: user-authorized-explicit-selection`. A bare call without `--task-ref` still auto-selects the single Flash candidate (soft-recommendation convenience); with `--task-ref`, a task without a pin and without `--model` always returns to the launch interview — even a single candidate is rejected.
+- Pin consumption is checked against the live host list: `--model` mismatching a pinned task exits 2; a stale pin is rejected with never a silent fallback or auto-switch; the interview display always notes that subagent (workflow) models run at the default max reasoning tier (tier is not part of the pin); the main model inherits the host main session (the GLM-5.3 hard gate is removed); visual roles keep their static binding and gain a binding-maintenance note (fully-qualified frontmatter / changes take effect in new sessions / new agents as extension points).
+
+### Phase E — Seven P3 hygiene items + release surface (WP-C)
+
+- ① Explicit CLI error classification: structural ledger rejections (corrupt JSON parse / schema-incomplete / task-identity mismatch / save_state validation gate) converge to validation rejection (exit 2) while task-lifecycle rejections (terminal freeze / out-of-matrix sources) stay exit 1 — docstring / USAGE / actual mapping are consistent and tested; ② the exit-waiting doc aligns with the `TASK_TRANSITIONS` matrix (all legal → active sources — waiting_quota / waiting_user / blocked — documented verbatim, semantics unchanged); ③ node ids and actor labels are folded through `_comment_text` before entering generated comments (comment-injection surface closed, determinism preserved); ④ dead `window_math.py` removed; ⑤ the quota HTTP catch tuple includes `http.client.HTTPException` (response-layer exceptions classified as network, never leaking bare); ⑥ hooks.json description loses its self-versioning; ⑦ the quota User-Agent moves to a stable version-agnostic label.
+
+### Tests & Validation
+
+- Per-phase gates: targeted new cases + local full regression + validator 16/16 + ruff clean + an independent review (glm-reviewer) ship before the next phase; per-phase records: Phase A 841 OK / Phase B 881 OK / Phase C 911 OK / Phase D 940 OK (see the respective commits); the Phase E final gate (full suite + validator + smoke + final review) runs at release close-out.
+- New targeted tests remain on-disk untracked per the owner's tests-localization decision: `tests/test_state_transactions.py` / `tests/test_preventive_reset.py` / `tests/test_guard_budget.py` / `tests/test_workflow_run_registration.py`, among others.
+
+### Compatibility
+- Breaking: none. State schema unchanged (existing v2.4/v2.5 tasks load with zero migration); `TASK_JOURNAL_EVENTS` names unchanged; exit codes stay 0 / 2 / 1 — the structural-vs-lifecycle split makes the documented mapping explicit instead of reversing it; `quota-resume-decision` output only gains an unconditional `reset_at` key (backward-compatible additive key); the quota adapter's explicit repo_root parameter defaults to legacy behavior.
+- Per-phase validation change_ids and independent-review verdicts live in the respective commits; tagging / Release are handled by the main session at close-out (owner ruling: historical tags are not restored).
+
 ## 2.5.2
 
 Precise wake re-architected on live-verified host facts + model-adaptation hardening — patch release closing the two audited defects of v2.5.1: (a) cross-quota precise wake that could never fire under the default topology (same-session automation ownership + post-fire mutation degradation + model-unresponsive-when-exhausted); (b) contract-surface contradictions that forced the model to hunt for commands and do its own time arithmetic. Companion plan: `docs/roadmap/V2_5_2_PRECISE_WAKE_AND_MODEL_ADAPTATION_PLAN.md` (v4.1); host-fact evidence: `docs/reviews/WAKE_TOPOLOGY_PROBE_RESULTS.md` (P-C / three-state emission law / P-B1/P-B2 background-sleep channel / P-R1 end-to-end rehearsal: zero-drift wake + new-window anchoring to the second). **Breaking: none** — state schema, task lifecycle API, and guard semantics unchanged.

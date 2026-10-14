@@ -7,7 +7,9 @@
     额度只读解析（quota-resolve）、v2.4 audit-fix AF-03 额度等待/恢复
     生命周期操作面（quota-wait / quota-resume-authorize /
     quota-resume-decision / quota-resume-confirm）、v2.4 新路径
-    操作面（v24-compile / writer-* / v24-record-run）、v2.4.1
+    操作面（v24-compile / writer-* / v24-record-run——record-run 自
+    v2.6.0 WP-R4 起标注 legacy 低层薄壳，规范 run 注册入口为
+    task-record-workflow-run）、v2.4.1
     continuity hotfix 操作面（workflow-model-select /
     quota-automation-bind / quota-automation-clear /
     quota-continuity-preflight），以及 v2.5 任务级 worker 模型 pin
@@ -58,9 +60,12 @@ v2.4 Phase 3（P3-D/E）收口面：
         含 snapshot），组装归一化诊断 view {status, source,
         observed_at, reset_at}——observed_at 取 detail.fetched_at
         （provider 层即 evaluated_at；none 层 None 绝不虚构）、
-        reset_at 取 EXHAUSTED 阻塞窗 reset_at 的字典序最大值
-        （v2.5.2 阻塞窗口径，经 parser.evaluate 求逐窗态后过滤；
-        无阻塞窗 → None；纯诊断字段，不参与任何判定）——再以
+        reset_at 为已识别窗口中最早的有效未来观测 reset_at
+        （v2.6.0 单一观测口径，规格 §2.2：snapshot 经 parser.evaluate
+        求逐窗态后由 parser.earliest_future_reset_at 以 UTC instant
+        显式比较选出，与窗口状态无关；已过期 / 无效 / 陈旧观测
+        force refresh 恰一次，仍不可得 → None 如实披露 floor-only
+        降级，绝不虚构；纯诊断字段，不参与任何判定）——再以
         quota_view 进入 waiting_quota（幂等语义
         不变；workflow_run_id 不动）。语义：任务已遭遇额度相关执行
         停止后的显式停靠命令，不是自动额度失败探测器。任务层拒绝 →
@@ -77,13 +82,14 @@ v2.4 Phase 3（P3-D/E）收口面：
         同 quota-wait 方式取观测 view，输出单行 JSON {task_id,
         decision, quota_observation}（decision 为任务层原样决策
         dict——action / reason，resume-authorized 时另含
-        workflow_run_id / resume_count_after 暂存计数）。v2.5 精确
-        唤醒输出扩展（I4/W3，向后兼容附加键）：decision 为
-        remain-waiting 且观测为 EXHAUSTED 时，decision 只读透传本次
-        观测的 reset_at（quota_view.reset_at，ISO 字符串或 null，
-        v2.5.2 起为阻塞窗口径）——纯诊断透传，供主会话按睡眠模板
-        换算精度层睡眠目标，不参与任何判定；UNKNOWN / no-op 分支
-        保持既有输出形状，绝不透传。
+        workflow_run_id / resume_count_after 暂存计数）。v2.6.0 单
+        reset_at 无条件透传（规格 §2.3，向后兼容附加键）：对所有
+        action（no-op / remain-waiting / waiting-user /
+        resume-authorized），decision 恒只读透传本次观测的 reset_at
+        （quota_view.reset_at，ISO 字符串或 null，单一观测口径——
+        已识别窗口最早有效未来 reset，与额度状态无关）——纯诊断
+        透传，供主会话按睡眠模板换算精度层睡眠目标，不参与任何
+        判定；既有键一律不动。
         绝不调用宿主 ResumeWorkflowRun（宿主动作归主会话）。
     quota-resume-confirm <repo_root> <task_id>
         恢复落账确认（task.confirm_resume_started 薄壳；仅在宿主
@@ -135,42 +141,52 @@ v2.4 Phase 3（P3-D/E）收口面：
         workflow_run_id / created_at + 可选 artifact_path）；结构非法
         （空 id 等，WorkflowRunError）→ 退出码 2。零状态镜像：绝不落
         任何子代理运行时状态（F6 冻结结果）。
+        v2.6.0 WP-R4 起降级为 **legacy 低层薄壳**（保留、行为不变——
+        只落 adapter 关联单据，不写 state、不落事件、不动守卫）；
+        规范任务生命周期入口是 task-record-workflow-run，编排 runbook
+        一律走规范命令，本命令仅供明确只要关联单据的低层调用方使用。
     workflow-model-select <models-json> [--model <exact-id>]
             [--task-ref <task_id>] [--repo-root <path>]
-        v2.4.1 Workflow 提交 worker 模型选型（H1，INV-MODEL-01；
-        runtime.workflow.submission.select_worker_model /
-        build_submission_contract 薄壳；绝不写宿主 API 客户端——模型
-        发现面归宿主，id 集合由调用方供给）。models-json 参数：能按
-        JSON 解析为数组则直接采用（支持内联 '["..."]' 形态），否则按
-        JSON 文件路径读取数组（UTF-8；推荐路径：ListModels 输出写
-        临时 JSON 文件后传文件路径）。从已配置 id 集合选定唯一
-        provider 限定 Flash worker 模型：显式 --model <exact-id> 校验
-        之并要求精确成员（优先于自动选择）；否则恰一 Flash 候选自动
-        选定、零候选 / 多候选歧义拒绝（绝不静默取第一个）。v2.5 起
-        增可选 --task-ref <task_id>（I1 任务级 worker 模型 pin 消费）：
-        选型优先级固定 --model 显式值 > 任务 pin > 自动选型——--model
-        给出时为完全显式覆盖（任务 pin 不参与也不对账）；否则读任务
-        顶层 worker_model pin（账本根按 --repo-root <path> 解析，
-        v2.5.2 W3 起提供；缺省当前工作目录保持兼容，v24-record-run
-        同款约定）注入
-        explicit_model_id：pin 形状非法 / pin 不在本次 configured
-        集合 → 专门拒绝（「任务 pin 已失效，请重新问答授权」语义，
-        绝不回退自动选型、绝不静默换模型）；无 pin 走既有自动选型
-        路径（行为与不带 --task-ref 逐字一致）。任务层拒绝（任务
-        缺失 / v2.3 遗留）→ 退出码 1。成功输出单行 JSON 提交契约
+        v2.4.1 Workflow 提交 worker 模型选型（H1；runtime.workflow.
+        submission.select_worker_model / build_submission_contract 薄壳；
+        绝不写宿主 API 客户端——模型发现面归宿主，id 集合由调用方供给
+        ）。models-json 参数：能按 JSON 解析为数组则直接采用（支持内联
+        '["..."]' 形态），否则按 JSON 文件路径读取数组（UTF-8；推荐路
+        径：ListModels 输出写临时 JSON 文件后传文件路径）。从已配置 id
+        集合选定用户显式授权的 provider 限定精确 worker 模型（v2.6.0
+        WP-M1 重基线：任意已配置精确 id 合法，不限 Flash 后缀；Flash
+        档降为软推荐）：--model <exact-id> 校验之并要求精确成员；不带
+        显式值时恰一 Flash 档软推荐候选自动选定（便捷路径，非静默指
+        派）、零候选 / 多候选歧义拒绝交回启动问答（绝不静默取第一个）。
+        v2.5 起增可选 --task-ref <task_id>（I1 任务级 worker 模型 pin
+        消费；账本根按 --repo-root <path> 解析，v2.5.2 W3 起提供；缺
+        省当前工作目录保持兼容，v24-record-run 同款约定）。v2.6.0 起
+        --task-ref 给出即读任务顶层 worker_model pin 且 pin 必检：pin
+        形状非法 / pin 不在本次 configured 集合 → 专门拒绝（「任务
+        pin 已失效，请重新问答授权」语义，绝不回退自动选型、绝不静默
+        换模型）；任务有 pin 时 --model 显式值必须与 pin 一致，不一致
+        即拒绝（规格 §5.3 第 4 条：普通 --model 不再能绕过任务 pin；
+        更换授权必经交互问答重新授权并以 worker-model-pin 更新任务
+        pin）；--task-ref 且无 pin 且无 --model → 退出码 2 转启动问答
+        （绝不隐式授权单候选，恰一 Flash 候选也拒）；无 --task-ref 的
+        裸调用无显式值才走软推荐自动选型。任务层拒绝（任务缺失 /
+        v2.3 遗留）→ 退出码 1。成功输出单行 JSON 提交契约
         {subagent_model, model_policy}（model_policy 恒为
-        "explicit-flash-required"）——CreateWorkflow 的
-        subagent_model 必须取此值。校验 / 配置拒绝（清单不可读 /
-        非法 JSON / 顶层非数组 / WorkflowSubmissionError / pin 失效
-        或形状非法）→ 退出码 2。
+        "user-authorized-explicit-selection"，v2.6.0 WP-M1 起语义为
+        用户授权显式选型）——CreateWorkflow 的 subagent_model 必须取
+        此值。校验 / 配置拒绝（清单不可读 / 非法 JSON / 顶层非数组 /
+        WorkflowSubmissionError / pin 失效或形状非法 / --model 与
+        pin 不一致）→ 退出码 2。
     worker-model-pin <repo_root> <task_id> <exact-id>
         任务级 worker 模型 pin 写入（v2.5 I1，task.pin_worker_model
-        薄壳）：把经形态预检的 exact id 写入任务顶层 worker_model 键
+        薄壳）：把经形状预检的 exact id 写入任务顶层 worker_model 键
         （授权问答答后落盘动作；任务全生命周期默认使用）。形状预检
-        采用 submission 形态约定（account: 前缀 / Flash 后缀）但绝不
-        查宿主模型面——写入不查宿主面，对账留给消费点。非终态任务
-        才可写；同值幂等成功（零写盘）；异值显式覆盖（返回值带 prev
-        与 new）。id 形状非法 → 参数值非法，退出码 2；任务层拒绝
+        采用 submission 形态约定（v2.6.0 WP-M1 起角色中性：account:
+        前缀 / 两段非空 / 无空白——任意已配置精确 id 合法，不再要求
+        Flash 后缀；裸别名 / 空值仍拒）但绝不查宿主模型面——写入不查
+        宿主面，对账留给消费点。非终态任务才可写；同值幂等成功（零写
+        盘）；异值显式覆盖（返回值带 prev 与 new——更换授权的规范落
+        盘动作）。id 形状非法 → 参数值非法，退出码 2；任务层拒绝
         （任务缺失 / v2.3 遗留 / 终态冻结）→ 退出码 1。绝不新增
         journal 事件（审计由本输出与 state 落盘承载）。输出单行 JSON
         {task_id, prev, new}。
@@ -221,11 +237,26 @@ v2.4 Phase 3（P3-D/E）收口面：
         不上 CLI——生命周期迁移一律走具名命令。
     exit-waiting <repo_root> <task_id>
         手动恢复出等待（v2.5.2 W2，task.exit_waiting_quota 薄壳）：
-        waiting_quota → active 并落 waiting_quota 事件（direction:
-        exit）；原状态 active 幂等。自动恢复路径的落账走既有
-        quota-resume-confirm（本命令是 manual 恢复与运维对账通道）。
-        runtime.task 拒绝（迁移矩阵外来源如 waiting_user）→ 退出码
+        迁回 active 并落 waiting_quota 事件（direction: exit）——
+        TASK_TRANSITIONS 中「→ active」合法的全部来源均放行：
+        waiting_quota / waiting_user / blocked（waiting_user 亦合法
+        ——矩阵事实：手动恢复通道对自动决策已转 waiting_user 的任务
+        同样适用）；原状态 active 幂等（零事件）。自动恢复路径的
+        落账走既有 quota-resume-confirm（本命令是 manual 恢复与运维
+        对账通道）。runtime.task 拒绝（→ active 的矩阵外来源——
+        终态 completed / cancelled / failed 无转换表项）→ 退出码
         1。输出 {task_id, status}。
+    task-record-workflow-run <repo_root> <task_id> <run-id>
+        委派 run 注册规范入口（v2.6.0 WP-R4，task.record_workflow_run
+        薄壳）：一条调用完成 state.workflow_run_id 落盘 + 账本根
+        .glm-conductor/workflow-runs/ 关联单据 + journal
+        workflow_started 事件 + 写者守卫 run id 幂等补挂（全经任务层
+        既有事务原语；单据与进程 CWD 无关——任意 CWD 调用皆落
+        repo_root 账本）。AF-04 前置：delegate/full 注册必须先持有
+        本仓库写预约——预约缺失 / 属其它任务 → 拒绝且绝不落假
+        workflow_started。run-id 结构非法（空串）→ 退出码 2；任务层
+        拒绝（任务缺失 / v2.3 遗留 / 终态冻结 / 守卫前置失配）→
+        退出码 1。输出单行 JSON {task_id, workflow_run_id, status}。
 
 输出与退出码契约：
     stdout 恒为单行 JSON（json.dumps(..., ensure_ascii=True)，中文以
@@ -234,10 +265,16 @@ v2.4 Phase 3（P3-D/E）收口面：
     生成源含中文））；stderr 不承载结构化输出。
     退出码：
       0 = 成功；
-      2 = 校验拒绝（用法错误 / 参数值非法 / save_state 校验闸或状态
-          转换门拒绝——含盘上 state.json 损坏的解析拒绝；v2.5 起
+      2 = 校验拒绝（用法错误 / 参数值非法 / 盘上 state.json 结构性
+          拒绝——JSON 损坏解析 / schema 残缺 / 任务标识错位 /
+          save_state 校验闸：损坏盘面绝不静默覆盖，也绝不作为任务
+          生命周期拒绝报出（v2.6.0 WP-C 显式分类：任务层 ValueError
+          经各薄壳以 _is_structural_state_rejection 分类收口，本类
+          不经 Rejected 包装直接归本档）；v2.5 起
           含 worker-model-pin 的 id 形状非法与 workflow-model-select
-          --task-ref 的任务 pin 失效 / 形状非法）；另含
+          --task-ref 的任务 pin 失效 / 形状非法；v2.6.0 起另含
+          workflow-model-select 的 --model 显式值与任务 pin 不一致）；
+          另含
           quota-continuity-preflight 判定 ready=false（非校验错误的
           运行期阻塞信号：主会话机械视作 launch/resume 阻断）；
       1 = 异常（任务不存在 / 审查记录被拒 / 额度等待与恢复生命周期
@@ -246,7 +283,11 @@ v2.4 Phase 3（P3-D/E）收口面：
           pin 消费面被任务层拒绝（任务缺失 / v2.3 遗留 / 终态冻结）
           / v2.5.2 起任务生命周期操作面（task-create /
           record-validation / task-complete / task-fail /
-          task-cancel / exit-waiting）被 runtime.task 拒绝
+          task-cancel / exit-waiting）与 v2.6.0 规范 run 注册
+          task-record-workflow-run（含 AF-04 守卫前置失配）被
+          runtime.task 拒绝——任务生命周期拒绝（含状态迁移矩阵外
+          来源 / 终态冻结）恒归本档，与退出码 2 的盘面结构性拒绝
+          互斥
           / 意外错误；错误 JSON 只含异常类型名与消息，供操作者排查）。
 
 依赖方向：
@@ -284,7 +325,8 @@ USAGE = (
     "writer-acquire <repo_root> <task_id> [--run-id <id>] | "
     "writer-release <repo_root> <task_id> [--run-id <id>] [--force] | "
     "writer-show <repo_root> | "
-    "v24-record-run <task_ref> <run-id> [--artifact <path>] | "
+    "[legacy 低层薄壳] v24-record-run <task_ref> <run-id> "
+    "[--artifact <path>] | "
     "workflow-model-select <models-json> [--model <exact-id>] "
     "[--task-ref <task_id>] [--repo-root <path>] | "
     "worker-model-pin <repo_root> <task_id> <exact-id> | "
@@ -298,7 +340,8 @@ USAGE = (
     "task-complete <repo_root> <task_id> | "
     "task-fail <repo_root> <task_id> | "
     "task-cancel <repo_root> <task_id> | "
-    "exit-waiting <repo_root> <task_id>")
+    "exit-waiting <repo_root> <task_id> | "
+    "task-record-workflow-run <repo_root> <task_id> <run-id>")
 
 
 class _UsageError(ValueError):
@@ -312,13 +355,17 @@ class _TaskMissing(Exception):
 class _ReviewRejected(Exception):
     """review-record 被 runtime.task 拒绝（任务缺失 / v2.3 遗留任务 /
     终态冻结 / 先验证后评审顺序闸；ValueError 口径）——运行期拒绝，
-    退出码 1。"""
+    退出码 1（与 _QuotaRejected 同口径：盘上 state 结构性拒绝不经本
+    类，经 _is_structural_state_rejection 分类后按 ValueError 原样
+    透传为校验拒绝，退出码 2）。"""
 
 
 class _QuotaRejected(Exception):
     """额度等待 / 恢复生命周期操作被 runtime.task 拒绝（任务缺失 /
     非 waiting 状态 / 预算不变量 / 观测词汇外等 ValueError 口径）
-    ——运行期拒绝，退出码 1。"""
+    ——运行期拒绝，退出码 1（盘上 state 结构性拒绝除外：那不经本
+    类，经 _is_structural_state_rejection 分类后按 ValueError 原样
+    透传为校验拒绝，退出码 2）。"""
 
 
 class _AutomationRejected(Exception):
@@ -347,11 +394,37 @@ class _PinTaskRejected(Exception):
 
 class _TaskRejected(Exception):
     """任务生命周期操作面（task-create / record-validation /
-    task-complete / task-fail / task-cancel / exit-waiting）被
-    runtime.task 拒绝（任务已存在 / 任务缺失 / v2.3 遗留任务 /
-    终态冻结 / 状态迁移矩阵外来源等 ValueError 口径）——运行期
-    拒绝，退出码 1（与 _QuotaRejected / _AutomationRejected 同口径；
-    参数值非法在 CLI 侧先闸走退出码 2，见各子命令实现）。"""
+    task-complete / task-fail / task-cancel / exit-waiting /
+    task-record-workflow-run）被 runtime.task 拒绝（任务已存在 /
+    任务缺失 / v2.3 遗留任务 / 终态冻结 / 状态迁移矩阵外来源 /
+    AF-04 写者守卫前置失配等 ValueError 口径）——运行期拒绝，退出码
+    1（与 _QuotaRejected / _AutomationRejected 同口径；参数值非法在
+    CLI 侧先闸走退出码 2，见各子命令实现；盘上 state 结构性拒绝
+    亦不经本类——经 _is_structural_state_rejection 分类后按
+    ValueError 原样透传为校验拒绝，退出码 2）。"""
+
+
+# 盘上 state 结构性 ValueError 的稳定消息前缀（分类锚点——state 层
+# 消息即契约文案，改动须同步本表；锚定 state.load_state 的损坏解析
+# 拒绝与 _transaction_state / _transaction_commit 的严格读写闸）。
+# 任务缺失（"state 事务：任务 … 不存在"）与生命周期拒绝（遗留 /
+# 终态冻结 / 迁移矩阵外）不在此列——那仍归退出码 1。
+_STRUCTURAL_STATE_ERROR_PREFIXES = (
+    "state.json 损坏，无法解析",
+    "state 事务：盘上 state.json 归一任务标识",
+    "state 事务：盘上 state.json schema 非法",
+    "state 非法，无法保存",
+    "state 事务：新 state.task_id",
+)
+
+
+def _is_structural_state_rejection(exc) -> bool:
+    """任务层 ValueError 是否为盘上 state 结构性拒绝（JSON 损坏解析
+    / schema 残缺 / 任务标识错位 / save_state 校验闸）——已发布契约
+    （模块头退出码 2 条目）把这一类归入校验拒绝，与任务生命周期拒绝
+    （退出码 1）互斥；识别锚定 _STRUCTURAL_STATE_ERROR_PREFIXES。"""
+    return isinstance(exc, ValueError) and str(exc).startswith(
+        _STRUCTURAL_STATE_ERROR_PREFIXES)
 
 
 def _emit(payload):
@@ -400,6 +473,8 @@ def _review_record(repo_root, task_id, reviewer, verdict,
         st = task.record_review(
             repo_root, task_id, reviewer, verdict, findings=raw_note)
     except ValueError as exc:
+        if _is_structural_state_rejection(exc):
+            raise  # 盘上 state 结构性拒绝 → 校验拒绝（退出码 2）
         raise _ReviewRejected(str(exc)) from exc
     _emit({"task_id": task_id, "review": st.get("review")})
     return 0
@@ -425,7 +500,29 @@ def _quota_resolve(repo_root, force_refresh=False) -> int:
 # subscription 概念，不做额度失败自动探测器（quota-wait 是任务已
 # 遭遇额度相关执行停止后的显式停靠命令）。校验与转态语义全在
 # runtime.task 内，这里只做 argv 解析、观测组装、JSON 输出与退出
-# 码映射（任务层 ValueError 拒绝 → _QuotaRejected，退出码 1）。
+# 码映射（任务层 ValueError 拒绝 → _QuotaRejected，退出码 1；
+# 盘上 state 结构性拒绝除外——经 _is_structural_state_rejection
+# 分类后按 ValueError 原样透传为校验拒绝，退出码 2）。
+
+def _observation_view_of(detail) -> dict:
+    """单份 resolve_quota_detail 的 detail → 归一化诊断 view（恰四键，
+    v2.6.0 单一观测口径；语义见 _quota_observation_view）。
+
+    view 恒与这一份 detail 同源同批（status / source / observed_at /
+    reset_at 永不跨观测拼装）；reset_at 语义为已识别窗口中最早的
+    有效未来观测 reset_at（规格 §2.2），无候选 → None（floor-only
+    降级如实披露，绝不虚构）。"""
+    from runtime.quota import parser as quota_parser  # 函数内 import
+    snapshot = detail.get("snapshot")
+    evaluation = (quota_parser.evaluate(snapshot)
+                  if isinstance(snapshot, dict) else None)
+    return {
+        "status": detail.get("status"),
+        "source": detail.get("source"),
+        "observed_at": detail.get("fetched_at"),
+        "reset_at": quota_parser.earliest_future_reset_at(evaluation),
+    }
+
 
 def _quota_observation_view(repo_root, force_refresh=False) -> dict:
     """经 resolver.resolve_quota_detail 取观测并组装归一化诊断 view。
@@ -435,40 +532,35 @@ def _quota_observation_view(repo_root, force_refresh=False) -> dict:
         的 detail 恒含此两键 + snapshot + fetched_at）；
       - observed_at：detail.fetched_at（底层数据抓取时刻——provider
         层即 evaluated_at；none 层为 None，绝不虚构）；
-      - reset_at（v2.5.2 阻塞窗口径）：snapshot 先经 quota.parser.
-        evaluate 求逐窗四态（snapshot 的 §27 原始窗口不带逐窗
-        status），再取 EXHAUSTED 阻塞窗 reset_at（ISO 字符串）的
-        字典序最大值（ISO 串字典序即时间序；与 parser.plan_resume
-        的 _blocked_resets 同口径——未耗尽窗口的 reset 绝不参与，
-        避免未耗尽周窗把等待目标推迟数天）；无阻塞窗 / 无窗口 /
-        阻塞窗全 None → None。
-    纯诊断字段：view 不参与任务层任何授权 / 预算判定（runtime.task
-    的 _validate_quota_view 只闸 status 词汇）。
+      - reset_at（v2.6.0 单一观测口径，规格 §2.2）：snapshot 先经
+        quota.parser.evaluate 求逐窗四态（snapshot 的 §27 原始窗口
+        不带逐窗 status），再由 quota.parser.earliest_future_reset_at
+        取已识别窗口中最早的有效未来观测 reset_at（UTC instant 显式
+        解析比较，与窗口 AVAILABLE/PRESSURE/EXHAUSTED/UNKNOWN 状态
+        无关——下一个观测到的窗口边界即安全的唤醒 / 检查点；观测
+        字符串原样透传）；无有效未来 reset → None。
+    观测刷新纪律（规格 §2.2）：首次观测未强制刷新、来源为缓存
+    （cache_fresh / cache_stale——观测数据可能已过期 / 陈旧）且窗口
+    无有效未来 reset 时，force refresh 恰一次再组 view；仍不可得 →
+    reset_at=None（floor-only 降级如实披露，绝不虚构）。provider /
+    none 来源不二次刷新（provider 是刚取到的当前事实；none 层
+    provider 已在本轮尝试过——resolver 纪律绝不重试网络；调用方
+    已显式 --force-refresh 时同样恰一次、不叠加）。view 恒与最终
+    一次观测的 detail 同源。纯诊断字段：view 不参与任务层任何
+    授权 / 预算判定（runtime.task 的 _validate_quota_view 只闸
+    status 词汇）。
     """
-    from runtime.quota import parser as quota_parser  # 函数内 import
     from runtime.quota import resolver  # 函数内 import：monkeypatch 友好
     detail = resolver.resolve_quota_detail(repo_root,
                                            force_refresh=force_refresh)
-    snapshot = detail.get("snapshot")
-    evaluation = (quota_parser.evaluate(snapshot)
-                  if isinstance(snapshot, dict) else None)
-    windows = (evaluation.get("windows")
-               if isinstance(evaluation, dict) else None)
-    reset_values = []
-    if isinstance(windows, list):
-        for window in windows:
-            if not isinstance(window, dict) \
-                    or window.get("status") != "EXHAUSTED":
-                continue  # v2.5.2：只有阻塞窗（EXHAUSTED）的 reset 参与
-            value = window.get("reset_at")
-            if isinstance(value, str) and value != "":
-                reset_values.append(value)
-    return {
-        "status": detail.get("status"),
-        "source": detail.get("source"),
-        "observed_at": detail.get("fetched_at"),
-        "reset_at": max(reset_values) if reset_values else None,
-    }
+    view = _observation_view_of(detail)
+    if view["reset_at"] is None and not force_refresh \
+            and view["source"] in ("cache_fresh", "cache_stale"):
+        # v2.6.0 规格 §2.2：已过期 / 无效 / 陈旧观测 force refresh
+        # 恰一次；仍不可得 → reset_at=None 如实披露 floor-only 降级
+        view = _observation_view_of(
+            resolver.resolve_quota_detail(repo_root, force_refresh=True))
+    return view
 
 
 def _quota_wait(repo_root, task_id, force_refresh=False) -> int:
@@ -487,6 +579,8 @@ def _quota_wait(repo_root, task_id, force_refresh=False) -> int:
     try:
         st = task.enter_waiting_quota(repo_root, task_id, quota_view=view)
     except ValueError as exc:
+        if _is_structural_state_rejection(exc):
+            raise  # 盘上 state 结构性拒绝 → 校验拒绝（退出码 2）
         raise _QuotaRejected(str(exc)) from exc
     _emit({"task_id": task_id, "status": st.get("status"),
            "quota_observation": view})
@@ -517,6 +611,8 @@ def _quota_resume_authorize(repo_root, task_id, raw_max_resumes) -> int:
     try:
         st = task.authorize_quota_resume(repo_root, task_id, max_resumes)
     except ValueError as exc:
+        if _is_structural_state_rejection(exc):
+            raise  # 盘上 state 结构性拒绝 → 校验拒绝（退出码 2）
         raise _QuotaRejected(str(exc)) from exc
     _emit({"task_id": task_id, "quota_resume": st.get("quota_resume")})
     return 0
@@ -529,32 +625,33 @@ def _quota_resume_decision(repo_root, task_id, force_refresh=False) -> int:
     同 quota-wait 方式取观测 view 传入决策原语；输出单行 JSON
     {task_id, decision, quota_observation}——decision 为任务层原样
     决策 dict（action / reason，resume-authorized 时另含
-    workflow_run_id / resume_count_after 暂存计数）。v2.5.2 双通道
-    唤醒输出扩展（I4/W3，向后兼容附加键）：action=remain-waiting 且
-    观测为 EXHAUSTED 时，decision 只读透传本次观测的 reset_at
-    （quota_view.reset_at，ISO 字符串或 null，阻塞窗口径）——纯诊断
-    透传，供主会话按精度层睡眠模板换算后台睡眠目标（reset_at +
-    grace），不参与任何判定；UNKNOWN / no-op
-    分支保持既有输出形状，绝不透传；既有键（action / reason /
-    workflow_run_id / resume_count_after）一律不动。绝不调用宿主
-    ResumeWorkflowRun（宿主动作归主会话；恢复执行与随后的
-    quota-resume-confirm 落账由唤醒轮次按连续性技能契约推进）。
-    任务层 ValueError（任务缺失 / v2.3 遗留 / 观测词汇外 / 无关联
-    run 等结构性拒绝）→ _QuotaRejected（退出码 1）。"""
+    workflow_run_id / resume_count_after 暂存计数）。v2.6.0 单
+    reset_at 无条件透传（规格 §2.3，向后兼容附加键）：对所有
+    action（no-op / remain-waiting / waiting-user /
+    resume-authorized），decision 浅拷贝后恒附加本次观测的
+    reset_at（view.get("reset_at")，ISO 字符串或 null，单一观测
+    口径）——纯诊断透传，供主会话按精度层睡眠模板换算后台睡眠
+    目标（reset_at + grace），不参与任何判定；额度状态只管可否
+    继续 / 恢复，不管可否透传时间；既有键（action / reason /
+    workflow_run_id / resume_count_after）与任务层副作用一律不动。
+    绝不调用宿主 ResumeWorkflowRun（宿主动作归主会话；恢复执行与
+    随后的 quota-resume-confirm 落账由唤醒轮次按连续性技能契约
+    推进）。任务层 ValueError（任务缺失 / v2.3 遗留 / 观测词汇外 /
+    无关联 run 等任务层拒绝）→ _QuotaRejected（退出码 1）。"""
     from runtime import task  # 函数内 import：monkeypatch 友好
     view = _quota_observation_view(repo_root, force_refresh=force_refresh)
     try:
         decision = task.scheduled_activation_decision(repo_root, task_id,
                                                       view)
     except ValueError as exc:
+        if _is_structural_state_rejection(exc):
+            raise  # 盘上 state 结构性拒绝 → 校验拒绝（退出码 2）
         raise _QuotaRejected(str(exc)) from exc
-    if decision.get("action") == "remain-waiting" \
-            and view.get("status") == "EXHAUSTED":
-        # v2.5 精确唤醒（I4/W3）：EXHAUSTED remain-waiting 只读透传
-        # 本次观测 reset_at（ISO 串或 null）——纯诊断字段，绝不参与
-        # 判定；浅拷贝追加附加键，任务层既有键逐字不动
-        decision = dict(decision)
-        decision["reset_at"] = view.get("reset_at")
+    # v2.6.0 单 reset_at 无条件透传（规格 §2.3）：对所有 action 浅拷
+    # 贝追加附加键——纯诊断字段，绝不参与判定；任务层既有键与副作
+    # 用逐字不动
+    decision = dict(decision)
+    decision["reset_at"] = view.get("reset_at")
     _emit({"task_id": task_id, "decision": decision,
            "quota_observation": view})
     return 0
@@ -574,6 +671,8 @@ def _quota_resume_confirm(repo_root, task_id) -> int:
     try:
         st = task.confirm_resume_started(repo_root, task_id)
     except ValueError as exc:
+        if _is_structural_state_rejection(exc):
+            raise  # 盘上 state 结构性拒绝 → 校验拒绝（退出码 2）
         raise _QuotaRejected(str(exc)) from exc
     _emit({"task_id": task_id, "status": st.get("status"),
            "phase": st.get("phase"),
@@ -799,8 +898,9 @@ def _load_task_worker_model_pin(ledger_root, task_id):
       - 任务缺失（无 state.json）→ _PinTaskRejected（退出码 1）；
       - v2.3 遗留任务 → _PinTaskRejected（退出码 1）——消费对象
         必须是存在的 v2.4 任务，绝不静默当作「无 pin」回退自动选型；
-      - 无有效 pin（键缺失 / null / 非 str）→ None（无 pin，走
-        既有自动选型路径）；
+      - 键缺失 / null 占位 → None（无 pin：--task-ref 消费面由
+        严口径拒绝转问答）；非 str / 空串盘面漂移 → 专门失效拒绝
+        （与形状非法同口径，绝不静默当作无 pin）；
       - 其余原样返回 pin 字符串（形状与 configured 对账由调用方
         _workflow_model_select 做）。
 
@@ -818,8 +918,15 @@ def _load_task_worker_model_pin(ledger_root, task_id):
             "workflow-model-select：任务 %s 是 v2.3 遗留任务，无法"
             "消费任务 pin：%s" % (task_id, state.LEGACY_STATE_GUIDANCE))
     pin = st.get("worker_model")
+    if pin is None:
+        return None  # 键缺失 / null 占位：无 pin（严口径拒由调用方处理）
     if not isinstance(pin, str) or pin == "":
-        return None
+        # 盘面漂移（外部直写非 str / 空串）与 str 形状非法同口径：
+        # 失效即拒，绝不静默当作「无 pin」放行（消费面对账统一 fail-closed）
+        raise ValueError(
+            "workflow-model-select：任务 %s 的 worker_model pin 形状非法"
+            "（盘面漂移：%r）——任务 pin 已失效，请重新问答授权"
+            % (task_id, pin))
     return pin
 
 
@@ -827,38 +934,47 @@ def _workflow_model_select(models_json, model=None, task_ref=None,
                            ledger_root=None) -> int:
     """workflow-model-select：worker 模型选型 + 提交契约输出
     （submission.select_worker_model / build_submission_contract 薄壳；
-    INV-MODEL-01：worker 必须显式选定 provider 限定 Flash 模型，绝不
-    继承主会话文本模型，绝不接受裸别名）。
+    v2.6.0 WP-M1 重基线：worker 是用户显式授权的 provider 全限定精确
+    id——绝不继承主会话文本模型，绝不接受裸别名；Flash 档为软推荐而
+    非准入硬门）。
 
     models-json 解析见 _load_configured_model_ids（内联数组与文件两
-    形态等价）。选型优先级固定（v2.5 I1）：--model 显式值 > 任务 pin
-    > 自动选型——
-      - 显式 --model <exact-id>：完全显式覆盖，校验之并要求
-        configured 精确成员（任务 pin 不参与也不对账；不带
-        --task-ref 时行为与 v2.4.1 逐字一致）；
-      - --task-ref <task_id> 且无 --model：读任务 worker_model pin
-        （账本按 ledger_root 解析，缺省当前工作目录——调用方须在
-        目标仓库根运行本命令，v24-record-run 同款约定），pin 经
-        submission.validate_worker_model 形状预检 + configured 精确
-        成员对账后注入 explicit_model_id（消费必查宿主面——pin 形状
-        非法 / 不在本次 configured 集合即专门拒绝：「任务 pin 已失
-        效，请重新问答授权」，绝不回退自动选型、绝不静默换模型）；
-        无 pin 走既有自动选型路径；
-      - 否则恰一 Flash 候选自动选定、零候选 / 多候选歧义拒绝（绝不
-        静默取第一个）。
+    形态等价）。选型语义（v2.6.0 规格 §5.3 第 4 条：有 pin 任务
+    普通 --model 不得绕过）：
+      - --task-ref <task_id> 给出即读任务 worker_model pin（账本按
+        ledger_root 解析，缺省当前工作目录——调用方须在目标仓库根
+        运行本命令，v24-record-run 同款约定）；pin 存在时消费必查
+        （语义不变）：submission.validate_worker_model 形状预检
+        （角色中性）+ configured 精确成员对账——pin 形状非法 / 不在
+        本次 configured 集合即专门拒绝：「任务 pin 已失效，请重新问
+        答授权」，绝不回退自动选型、绝不静默换模型；
+      - 任务有 pin 时 --model 显式值必须与 pin 一致，不一致即拒绝
+        （校验拒绝口径）：普通 --model 不再能绕过任务 pin；更换授权
+        必经交互问答重新授权并以 worker-model-pin 更新任务 pin；
+      - 无 pin 时 --model 任意 configured 精确成员合法（不限 Flash
+        后缀，submission 形状预检 + 精确成员对账）；不带 --task-ref
+        的 --model 行为同此（完全显式授权路径）；
+      - 无显式值分两径：**不带 --task-ref 的裸调用**走恰一 Flash 档
+        软推荐候选自动选定（软推荐便捷路径，非静默指派）、零候选 /
+        多候选歧义拒绝交回启动问答（绝不静默取第一个）；**--task-ref
+        且任务无 pin** 则无显式值即拒（转 §6.0 问答——绝不隐式授权
+        单候选，规格 §5.3 resume 严口径）。
     成功输出单行 JSON 提交契约 {subagent_model, model_policy}；校验
-    / 配置拒绝（WorkflowSubmissionError 是 ValueError 子类、pin
-    失效 / 形状非法）→ 退出码 2；任务层拒绝（任务缺失 / v2.3 遗留
-    ，_PinTaskRejected）→ 退出码 1；意外 → 退出码 1。"""
+    / 配置拒绝（WorkflowSubmissionError 是 ValueError 子类、pin 失效
+    / 形状非法、--model 与 pin 不一致）→ 退出码 2；任务层拒绝（任务
+    缺失 / v2.3 遗留，_PinTaskRejected）→ 退出码 1；意外 → 退出码 1。"""
     from runtime.workflow import submission  # 函数内 import：monkeypatch 友好
     configured = _load_configured_model_ids(models_json)
-    if model is None and task_ref is not None:
+    pin = None
+    if task_ref is not None:
         root = (ledger_root if ledger_root is not None
                 else pathlib.Path.cwd())
         pin = _load_task_worker_model_pin(root, task_ref)
         if pin is not None:
-            # 消费必查：形状预检（写入点已预检，此处防盘面漂移）+
-            # 当次 configured 精确成员对账；失效即专门拒绝，绝不回退
+            # 消费必查（语义不变）：形状预检（写入点已预检，此处防盘面
+            # 漂移）+ 当次 configured 精确成员对账；失效即专门拒绝，
+            # 绝不回退——--model 给出时同样先过本闸（pin 不因显式值
+            # 而免检）
             try:
                 submission.validate_worker_model(pin)
             except submission.WorkflowSubmissionError as exc:
@@ -873,7 +989,26 @@ def _workflow_model_select(models_json, model=None, task_ref=None,
                     "——任务 pin 已失效，请重新问答授权；绝不回退自动"
                     "选型、绝不静默换模型"
                     % (task_ref, pin, len(configured)))
-            model = pin  # 注入显式选择：任务 pin 优先于自动选型
+    if model is not None and pin is not None and model != pin:
+        # 规格 §5.3 第 4 条：有 pin 任务普通 --model 不得绕过——显式
+        # 值必须与 pin 一致；更换授权必经交互问答 + worker-model-pin
+        raise ValueError(
+            "workflow-model-select：--model %r 与任务 %s 的 worker_model "
+            "pin %r 不一致——有 pin 任务的 --model 显式值必须与 pin 一致"
+            "（普通 --model 不得绕过任务 pin）；如需更换授权，请走交互"
+            "问答重新授权并以 worker-model-pin 更新任务 pin"
+            % (model, task_ref, pin))
+    if model is None and pin is None and task_ref is not None:
+        # 规格 §5.3：resume 遇无 pin 任务绝不隐式授权单候选（§5.2
+        # 单一候选也须用户显式确认）——经问答的任务必有 pin（§6.0
+        # 第二题落盘），可达本分支的 --task-ref 调用即未授权选型
+        raise ValueError(
+            "workflow-model-select：任务 %s 无 worker_model pin 且未给 "
+            "--model 显式值——任务级 worker 选型必须经启动问答显式授权"
+            "（orchestration §6.0 第二题）并以 worker-model-pin 落盘，"
+            "绝不自动选型、绝不隐式授权单候选" % task_ref)
+    if model is None:
+        model = pin  # 无显式值：任务 pin 注入显式选择（优先于自动选型）
     selected = submission.select_worker_model(configured,
                                               explicit_model_id=model)
     _emit(submission.build_submission_contract(selected))
@@ -884,14 +1019,17 @@ def _worker_model_pin(repo_root, task_id, model_id) -> int:
     """worker-model-pin：任务级 worker 模型 pin 写入
     （task.pin_worker_model 薄壳，v2.5 I1）。
 
-    把经形态预检的 exact id 写入任务顶层 worker_model 键（授权问答
+    把经形状预检的 exact id 写入任务顶层 worker_model 键（授权问答
     答后落盘动作；非终态才可写、同值幂等、异值显式覆盖带 prev/new；
     绝不查宿主模型面——对账留给消费点；绝不新增 journal 事件）。
     id 形状非法在 CLI 侧先经 submission.validate_worker_model 预检
-    （参数值非法口径 → 退出码 2，与 review-record 的 verdict 词汇
-    先闸同款）；任务层拒绝（任务缺失 / v2.3 遗留 / 终态冻结）→
-    _PinRejected（退出码 1）。输出单行 JSON {task_id, prev, new}
-    （与 task.pin_worker_model 返回值同源同字段）。"""
+    （v2.6.0 WP-M1 起角色中性形状校验：account: 前缀 / 两段非空 /
+    无空白——任意已配置精确 id 合法，不再要求 Flash 后缀；裸别名 /
+    空值仍拒；宿主配置对账留给消费点）（参数值非法口径 → 退出码 2，
+    与 review-record 的 verdict 词汇先闸同款）；任务层拒绝（任务缺失
+    / v2.3 遗留 / 终态冻结）→ _PinRejected（退出码 1）。输出单行
+    JSON {task_id, prev, new}（与 task.pin_worker_model 返回值同源
+    同字段）。"""
     from runtime import task  # 函数内 import：monkeypatch 友好
     from runtime.workflow import submission  # 函数内 import：monkeypatch 友好
     try:
@@ -905,6 +1043,8 @@ def _worker_model_pin(repo_root, task_id, model_id) -> int:
     try:
         outcome = task.pin_worker_model(repo_root, task_id, model_id)
     except ValueError as exc:
+        if _is_structural_state_rejection(exc):
+            raise  # 盘上 state 结构性拒绝 → 校验拒绝（退出码 2）
         raise _PinRejected(str(exc)) from exc
     _emit(outcome)
     return 0
@@ -922,6 +1062,8 @@ def _quota_automation_bind(repo_root, task_id, automation_id) -> int:
     try:
         st = task.bind_quota_automation(repo_root, task_id, automation_id)
     except ValueError as exc:
+        if _is_structural_state_rejection(exc):
+            raise  # 盘上 state 结构性拒绝 → 校验拒绝（退出码 2）
         raise _AutomationRejected(str(exc)) from exc
     _emit({"task_id": task_id, "quota_resume": st.get("quota_resume")})
     return 0
@@ -940,6 +1082,8 @@ def _quota_automation_clear(repo_root, task_id, automation_id=None) -> int:
         st = task.clear_quota_automation(repo_root, task_id,
                                          automation_id=automation_id)
     except ValueError as exc:
+        if _is_structural_state_rejection(exc):
+            raise  # 盘上 state 结构性拒绝 → 校验拒绝（退出码 2）
         raise _AutomationRejected(str(exc)) from exc
     _emit({"task_id": task_id, "quota_resume": st.get("quota_resume")})
     return 0
@@ -960,6 +1104,8 @@ def _quota_continuity_preflight(repo_root, task_id) -> int:
     try:
         report = task.quota_continuity_preflight(repo_root, task_id)
     except ValueError as exc:
+        if _is_structural_state_rejection(exc):
+            raise  # 盘上 state 结构性拒绝 → 校验拒绝（退出码 2）
         raise _AutomationRejected(str(exc)) from exc
     _emit({"task_id": task_id, "preflight": report})
     return 0 if report.get("ready") is True else 2
@@ -971,8 +1117,10 @@ def _quota_continuity_preflight(repo_root, task_id) -> int:
 # 模型不需要自己找、不允许冲突命令）：CLI 侧只做词汇 / 参数值 /
 # --dag 文件形状的先闸（参数值非法 → 退出码 2，与 review-record 的
 # verdict 先闸同口径），runtime.task 的 ValueError 拒绝 → _TaskRejected
-# （退出码 1）。set_status / set_phase 保持内部原语不上面——生命周期
-# 迁移一律走具名命令（task-complete / task-fail / task-cancel /
+# （退出码 1；盘上 state 结构性拒绝除外——经
+# _is_structural_state_rejection 分类后按 ValueError 原样透传为校验
+# 拒绝，退出码 2）。set_status / set_phase 保持内部原语不上面——生命
+# 周期迁移一律走具名命令（task-complete / task-fail / task-cancel /
 # exit-waiting）。
 
 def _load_dag_nodes(dag_path):
@@ -1043,6 +1191,8 @@ def _task_create(repo_root, task_id, goal, mode, assurance,
             repo_root, task_id, goal,
             {"mode": mode, "assurance": assurance}, dag_nodes=dag_nodes)
     except ValueError as exc:
+        if _is_structural_state_rejection(exc):
+            raise  # 盘上 state 结构性拒绝 → 校验拒绝（退出码 2）
         raise _TaskRejected(str(exc)) from exc
     _emit({"task_id": task_id, "status": st.get("status"),
            "route": st.get("route")})
@@ -1079,6 +1229,8 @@ def _record_validation(repo_root, task_id, raw_status, summary=None,
         st = task.record_validation(repo_root, task_id, raw_status,
                                     summary=summary, commands=commands)
     except ValueError as exc:
+        if _is_structural_state_rejection(exc):
+            raise  # 盘上 state 结构性拒绝 → 校验拒绝（退出码 2）
         raise _TaskRejected(str(exc)) from exc
     _emit({"task_id": task_id, "validation": st.get("validation")})
     return 0
@@ -1093,24 +1245,68 @@ def _task_terminal(repo_root, task_id, finish_func, func_name) -> int:
     try:
         st = finish_func(repo_root, task_id)
     except ValueError as exc:
+        if _is_structural_state_rejection(exc):
+            raise  # 盘上 state 结构性拒绝 → 校验拒绝（退出码 2）
         raise _TaskRejected("%s：%s" % (func_name, exc)) from exc
     _emit({"task_id": task_id, "status": st.get("status")})
     return 0
 
 
 def _exit_waiting(repo_root, task_id) -> int:
-    """exit-waiting：从 waiting_quota 手动恢复回 active
-    （task.exit_waiting_quota 薄壳；自动恢复路径落账走既有
-    quota-resume-confirm）。原状态已 active 幂等；runtime.task 拒绝
-    （任务缺失 / v2.3 遗留 / 迁移矩阵外来源如 waiting_user）→
-    _TaskRejected（退出码 1）。成功输出单行 JSON {task_id, status}
-    并在真实迁移时落 waiting_quota 事件（direction: exit）。"""
+    """exit-waiting：手动恢复回 active（task.exit_waiting_quota 薄壳；
+    自动恢复路径落账走既有 quota-resume-confirm）。TASK_TRANSITIONS
+    中「→ active」合法的全部来源均放行（waiting_quota / waiting_user
+    / blocked）；原状态已 active 幂等（零事件）；runtime.task 拒绝
+    （任务缺失 / v2.3 遗留 / → active 的矩阵外来源——终态无转换表
+    项）→ _TaskRejected（退出码 1）。成功输出单行 JSON {task_id,
+    status} 并在真实迁移时落 waiting_quota 事件（direction: exit）。"""
     from runtime import task  # 函数内 import：monkeypatch 友好
     try:
         st = task.exit_waiting_quota(repo_root, task_id)
     except ValueError as exc:
+        if _is_structural_state_rejection(exc):
+            raise  # 盘上 state 结构性拒绝 → 校验拒绝（退出码 2）
         raise _TaskRejected(str(exc)) from exc
     _emit({"task_id": task_id, "status": st.get("status")})
+    return 0
+
+
+# —— v2.6.0 WP-R4：委派 run 注册规范 CLI 面 ——
+#
+# task-record-workflow-run 是 task.record_workflow_run 的薄壳（规范
+# 任务生命周期入口）：state.workflow_run_id + 账本根关联单据 + journal
+# workflow_started 事件 + 写者守卫 run id 幂等补挂一条调用完成，全部
+# 经任务层既有事务原语；AF-04 守卫前置失败 → 拒绝且绝不落假
+# workflow_started。CLI 只做 run-id 结构先闸（参数值非法口径，退出码
+# 2，与 writer-acquire / v24-record-run 的 id 结构闸同款）与
+# _TaskRejected 映射（退出码 1）。v24-record-run 保留为 legacy 低层
+# 薄壳（仅 adapter 关联单据、CWD-only），编排 runbook 一律走本命令。
+
+def _task_record_workflow_run(repo_root, task_id, run_id) -> int:
+    """task-record-workflow-run：委派 run 注册规范入口
+    （task.record_workflow_run 薄壳，v2.6.0 WP-R4）。
+
+    一条调用完成 state.workflow_run_id 落盘 + 账本根 repo_root 的
+    .glm-conductor/workflow-runs/ 关联单据 + journal workflow_started
+    事件 + 写者守卫 run id 幂等补挂（任意 CWD 调用皆落 repo_root
+    账本）。AF-04 前置：delegate/full 注册必须先持有本仓库写预约——
+    预约缺失 / 属其它任务 → 任务层 ValueError → _TaskRejected
+    （退出码 1），绝不落假 workflow_started。run-id 结构非法（空串）
+    在 CLI 侧先闸（参数值非法口径 → 退出码 2）。成功输出单行 JSON
+    {task_id, workflow_run_id, status}。"""
+    from runtime import task  # 函数内 import：monkeypatch 友好
+    if not isinstance(run_id, str) or run_id == "":
+        raise ValueError(
+            "task-record-workflow-run：run-id 必须是非空字符串，得到 %r"
+            % (run_id,))
+    try:
+        st = task.record_workflow_run(repo_root, task_id, run_id)
+    except ValueError as exc:
+        if _is_structural_state_rejection(exc):
+            raise  # 盘上 state 结构性拒绝 → 校验拒绝（退出码 2）
+        raise _TaskRejected(str(exc)) from exc
+    _emit({"task_id": task_id, "workflow_run_id": run_id,
+           "status": st.get("status")})
     return 0
 
 
@@ -1395,6 +1591,12 @@ def _dispatch(args) -> int:
                 "exit-waiting 需要 <repo_root> <task_id> 两个参数。"
                 + USAGE)
         return _exit_waiting(rest[0], rest[1])
+    if cmd == "task-record-workflow-run":
+        if len(rest) != 3:
+            raise _UsageError(
+                "task-record-workflow-run 需要 <repo_root> <task_id> "
+                "<run-id> 三个参数。" + USAGE)
+        return _task_record_workflow_run(rest[0], rest[1], rest[2])
     raise _UsageError("未知子命令 %r。" % cmd + USAGE)
 
 
@@ -1403,16 +1605,25 @@ def main(argv=None) -> int:
 
     argv 缺省取 sys.argv[1:]；测试可直接传列表调用。异常映射：
     ValueError（用法 / 参数值 / save_state 校验栈 / 任务 pin 失效或
-    形状非法）→ 2；
+    形状非法 / --model 与任务 pin 不一致）→ 2；
     _TaskMissing（任务不存在）/ _ReviewRejected（审查记录被
     runtime.task 顺序与状态闸拒绝）/ _QuotaRejected（额度等待与
     恢复生命周期操作被 runtime.task 拒绝）/ _AutomationRejected
     （auto 连续性武装操作面被 runtime.task 拒绝）/ _PinRejected
     （worker-model-pin 写入被 runtime.task 拒绝）/ _PinTaskRejected
     （workflow-model-select --task-ref 消费面被任务层拒绝）/
-    _TaskRejected（v2.5.2 任务生命周期操作面被 runtime.task 拒绝）
+    _TaskRejected（v2.5.2 起任务生命周期操作面与 v2.6.0 规范 run
+    注册 task-record-workflow-run 被 runtime.task 拒绝）
     → 1；
     其余意外异常 → 1（错误 JSON 含异常类型名，stdout 契约不破）。
+    盘上 state 结构性拒绝（JSON 损坏解析 / schema 残缺 / 任务标识
+    错位 / save_state 校验闸）经 _is_structural_state_rejection 在
+    _TaskRejected / _QuotaRejected / _AutomationRejected /
+    _PinRejected / _ReviewRejected 各薄壳分类收口：不经 Rejected
+    包装、按 ValueError 原样透传落本函数 ValueError 分支 → 2（已
+    发布契约：损坏盘面绝不静默覆盖，也绝不作为任务生命周期拒绝
+    报出）；生命周期拒绝（任务缺失 / 遗留 / 终态冻结 / 迁移矩阵外）
+    恒归 Rejected 类 → 1，两档互斥。
     preflight 的 ready=false 阻断是函数内显式返回 2，不经异常路径。
     """
     args = list(sys.argv[1:]) if argv is None else list(argv)

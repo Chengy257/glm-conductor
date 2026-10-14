@@ -2,11 +2,11 @@
 
 **English** | [简体中文](./README.zh-CN.md)
 
-![Version](https://img.shields.io/badge/version-2.5.2-blue.svg)
+![Version](https://img.shields.io/badge/version-2.6.0-blue.svg)
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
 ![ZCode Plugin](https://img.shields.io/badge/ZCode-plugin-green.svg)
 ![Python](https://img.shields.io/badge/python-3.8%2B-blue.svg)
-![Models](https://img.shields.io/badge/models-GLM--5.3%20%2F%20GLM--5.3--Flash-orange.svg)
+![Models](https://img.shields.io/badge/models-GLM%20series-orange.svg)
 
 **Selective routing, Native Workflow execution, minimal deterministic assurance, and optional bounded quota resume for GLM coding agents in ZCode.**
 
@@ -18,10 +18,10 @@ GLM Conductor keeps the strong model focused on planning, architecture, and fina
 
 ## Key Highlights
 
-- **Maximize Strong-Model Leverage:** Spend GLM-5.3 reasoning on ambiguity resolution, architecture, routing, validation, and final acceptance; offload bounded implementation to cost-effective workflow workers.
+- **Maximize Strong-Model Leverage:** Spend the main-session model's reasoning on ambiguity resolution, architecture, routing, validation, and final acceptance (the launch interview softly recommends a strong model for these, without blocking other configured choices); offload bounded implementation to cost-effective workflow workers.
 - **Explicit Delegation Contracts:** Delegated work is compiled from a canonical DAG defining node objectives, dependencies, owned files, interfaces, and constraints before implementation begins.
 - **Deterministic Native Workflow Execution:** Compiles static DAGs directly into deterministic TypeScript workflows executed natively by ZCode with zero runtime state duplication.
-- **Model Selection Hard Gate:** Guarantees worker models use provider-qualified Flash-tier bindings (version-agnostic `-Flash` tier marker, `workflow-model-select`); prevents silent inheritance of the main-session model.
+- **User-Authorized Model Selection:** Workers are user-authorized, provider-qualified exact model IDs (all configured host candidates are shown; Flash tier is a soft recommendation, `workflow-model-select`, `model_policy: user-authorized-explicit-selection`); `subagent_model` is never omitted, preventing silent inheritance of the main-session model.
 - **Minimal Deterministic Assurance:**
   - **`change_id` Freshness:** Cryptographically ties validation and reviews to exact file modifications (`git rev-parse HEAD` + normalized file content hash); any subsequent edit invalidates previous approvals.
   - **Coarse Repository Writer Guard:** Guarantees at most one active write workflow per repository without arbitrary TTL expirations.
@@ -34,7 +34,7 @@ GLM Conductor keeps the strong model focused on planning, architecture, and fina
 ## Architecture & How It Works
 
 ```text
-                     Main Session — GLM-5.3
+                Main Session (host model)
                 (Plan · Route · Validate · Accept)
                          /              \
                         /                \
@@ -42,7 +42,7 @@ GLM Conductor keeps the strong model focused on planning, architecture, and fina
                     ↓                            ↓
             Main-Session Code            v24-compile (Canonical DAG)
                                                  ↓
-                                         workflow-model-select (Flash Gate)
+                                         workflow-model-select (Model Select Gate)
                                                  ↓
                                          writer-acquire (Repo Lock)
                                                  ↓
@@ -77,9 +77,9 @@ Before delegating any work, the main session assesses two orthogonal dimensions:
 
 | Delegability | Assurance | Route | Implementation Substrate | Independent Review |
 |:---:|:---:|:---:|:---:|:---:|
-| **Low** | Standard | `solo` | GLM-5.3 Main Session | None |
+| **Low** | Standard | `solo` | Main Session (host model) | None |
 | **High** | Standard | `delegate` | ZCode Native Workflow | None |
-| **Low** | High | `audit` | GLM-5.3 Main Session | Read-Only Reviewer (`glm-reviewer` / `visual-reviewer`) |
+| **Low** | High | `audit` | Main Session (host model) | Read-Only Reviewer (`glm-reviewer` / `visual-reviewer`) |
 | **High** | High | `full` | ZCode Native Workflow | Read-Only Reviewer (`glm-reviewer` / `visual-reviewer`) |
 
 Routes are declared upfront via a standardized `SELECTIVE ROUTE` block. When new evidence emerges during implementation, routes can be reassessed in either direction via `ROUTE REASSESSMENT`.
@@ -90,17 +90,17 @@ Routes are declared upfront via a standardized `SELECTIVE ROUTE` block. When new
 
 | Role | Default Model Binding | Primary Responsibility |
 | --- | --- | --- |
-| **Main Session** | **GLM-5.3** | Architecture, routing, DAG authoring, validation, final acceptance |
-| **Workflow Workers** | **GLM-5.3-Flash (explicit)** | Bounded text implementation inside compiled Native Workflows |
-| **Visual Implementer** | **GLM-5.3-Flash (multimodal)** | Bounded visual implementation (Custom Subagent capability exception) |
+| **Main Session** | **Host/Session model (inherited, not programmatically switchable)** | Architecture, routing, DAG authoring, validation, final acceptance |
+| **Workflow Workers** | **User-authorized exact ID (Flash soft-recommended)** | Bounded text implementation inside compiled Native Workflows |
+| **Visual Implementer** | **GLM-5.3-Flash (multimodal, static frontmatter binding)** | Bounded visual implementation (Custom Subagent capability exception) |
 | **Text Reviewer** | **Host / Session Model** | Fresh-context, read-only final review (`glm-reviewer`) |
-| **Visual Reviewer** | **GLM-5.3-Flash (multimodal)** | Fresh-context visual review (`visual-reviewer`; fails closed if unavailable) |
+| **Visual Reviewer** | **GLM-5.3-Flash (multimodal, static frontmatter binding)** | Fresh-context visual review (`visual-reviewer`; fails closed if unavailable) |
 
-### Worker Model Pinning & Hard Gate
-Workflow workers never inherit the session model. Submission requires explicit resolution via `workflow-model-select`:
-1. Exactly one configured provider-qualified Flash model (`account:.../<model>-Flash`) is auto-selected.
-2. If ambiguous, the user chooses during the task launch interview, recorded once as the task's `worker_model` pin (`worker-model-pin`).
-3. Later submissions consume the pin via `--task-ref`. If the pinned model is no longer configured on the host, submission is rejected outright (exit code 2) rather than silently falling back to the main model.
+### Worker Model Pinning & User-Authorized Selection
+Workflow workers never silently inherit the session model — `subagent_model` is always an explicit, provider-qualified exact ID. All configured host models are candidates (not limited to one provider or to Flash); the launch interview lists them all and requires explicit user confirmation **even for a single candidate**. The selected model runs at the **max reasoning tier by default (host default); the tier is not stored in the pin** — the pin holds only the model ID. Flash tier (version-agnostic `-Flash` suffix) is a **soft recommendation** for cost/speed-friendly bounded implementation:
+1. With `--task-ref` on a task that has no pin and no `--model`, selection rejects and returns to the launch interview (never implicitly authorizing even a single candidate); without `--task-ref`, exactly one configured Flash candidate is auto-selected as the soft-recommendation convenience path, and zero or multiple candidates reject back to the interview.
+2. The user's choice is recorded once as the task's `worker_model` pin (`worker-model-pin`). Any configured exact ID — including non-Flash — is valid once user-authorized (`model_policy: user-authorized-explicit-selection`).
+3. Later submissions consume the pin via `--task-ref`. A normal `--model` cannot bypass a recorded pin (mismatch → exit code 2): changing authorization requires an interactive re-authorization plus pin update, and an unattended wake never auto-repins. If the pinned model is no longer configured on the host, submission is rejected outright rather than silently falling back to the main model.
 
 ---
 
@@ -137,7 +137,7 @@ Tasks encountering provider quota exhaustion can safely pause in `waiting_quota`
 ### Requirements
 
 - **[ZCode](https://zcode.z.ai) 3.14+** (Native Workflow & Scheduled Task capabilities verified)
-- A GLM Coding Plan or Z.ai account with GLM-5.3 and GLM-5.3-Flash models enabled
+- A GLM Coding Plan or Z.ai account with configured models available (a strong main-session model is recommended for planning/architecture/verification; Flash-tier models are soft-recommended for cost-effective workflow workers — any configured model is selectable with user authorization)
 - **Python 3.8+** for runtime hooks and CLI utilities
   - *Windows Notice:* Ensure `python3.exe` is available in PATH. If only `python.exe` is present, see the [Windows Setup Guide](./docs/troubleshooting.md#8-windows-环境下-python3-钩子命令排查).
 
@@ -185,7 +185,7 @@ reason: Implementation is bounded by explicit interface contracts and covered by
 
 For tasks creating state, the main session performs a single-round launch interview to confirm:
 - Auto-wake continuity enablement & bounded budget (`max_resumes`).
-- Worker model selection if multiple candidates exist.
+- Worker model selection: all configured candidates are listed; explicit confirmation is required even for a single candidate.
 
 ### 3. Compile & Execute
 
@@ -228,12 +228,13 @@ All runtime operations execute through `python <plugin-root>/runtime/cli.py <sub
 | Command | Description |
 | --- | --- |
 | `v24-compile <dag-json> [--task-ref <id>] [--out <path>]` | Compiles a canonical DAG into deterministic TypeScript Native Workflow source. |
-| `workflow-model-select <models-json> [--model <id>] [--task-ref <id>] [--repo-root <path>]` | Model selection preflight gate; resolves Flash worker model or consumes task pin. |
+| `workflow-model-select <models-json> [--model <id>] [--task-ref <id>] [--repo-root <path>]` | Model selection preflight gate; resolves the user-authorized worker model (Flash soft-recommendation) or consumes the task pin (a recorded pin cannot be bypassed by `--model`). |
 | `worker-model-pin <repo> <task_id> <exact-id>` | Persists user-authorized task-level worker model pin. |
 | `writer-acquire <repo> <task_id> [--run-id <id>]` | Acquires coarse repository-level write reservation. |
 | `writer-release <repo> <task_id> [--force]` | Releases write reservation (`--force` for operator cleanup). |
 | `writer-show <repo>` | Inspects current repository write reservation holder. |
-| `v24-record-run <task_ref> <run-id>` | Records task ↔ Native Workflow run-id association. |
+| `task-record-workflow-run <repo_root> <task_id> <run-id>` | Canonical delegated-run registration: state + writer-guard precondition + `workflow_started` event + ledger-root receipt, from any CWD. |
+| `v24-record-run <task_ref> <run-id>` | Legacy low-level adapter receipt for task ↔ run-id association (kept for compatibility). |
 | `review-record <repo> <task_id> <reviewer> <verdict>` | Records fresh task review verdict (`ship` / `fix-first` / `rethink`). |
 | `quota-resolve <repo> [--force-refresh]` | Four-state provider quota resolution (read-only). |
 | `quota-wait <repo> <task_id>` | Enters `waiting_quota` state with normalized observation snapshot. |
@@ -282,7 +283,7 @@ glm-conductor/
 ## Documentation Hub
 
 - [Core Concepts](./docs/core-concepts.md) — Comprehensive overview of routing, execution, assurance, and recovery.
-- [Architecture Specification](./docs/architecture.md) — Authoritative technical reference for the v2.5 runtime design.
+- [Architecture Specification](./docs/architecture.md) — Authoritative technical reference for the v2.6 runtime design.
 - [Troubleshooting & Diagnostics](./docs/troubleshooting.md) — Quota diagnostics, Windows setup, Monorepo Git tuning, and writer-guard recovery.
 - [Global Quota Clock Extraction Inventory](./docs/roadmap/GLOBAL_QUOTA_CLOCK_EXTRACTION_INVENTORY.md) — Boundary definition for the companion project.
 - [Changelog](./CHANGELOG.md) — Detailed version history and migration guides.
@@ -294,7 +295,7 @@ glm-conductor/
 Contributions are welcome! Before opening a pull request, verify all automated quality gates:
 
 ```bash
-# 1. Run full unit test suite (790+ tests)
+# 1. Run full unit test suite (940+ tests)
 python -m unittest discover -s tests -p "test_*.py"
 
 # 2. Run static contract validator (16/16 checks)

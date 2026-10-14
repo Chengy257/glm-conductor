@@ -2,11 +2,11 @@
 
 [English](./README.md) | **简体中文**
 
-![Version](https://img.shields.io/badge/version-2.5.2-blue.svg)
+![Version](https://img.shields.io/badge/version-2.6.0-blue.svg)
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
 ![ZCode Plugin](https://img.shields.io/badge/ZCode-plugin-green.svg)
 ![Python](https://img.shields.io/badge/python-3.8%2B-blue.svg)
-![Models](https://img.shields.io/badge/models-GLM--5.3%20%2F%20GLM--5.3--Flash-orange.svg)
+![Models](https://img.shields.io/badge/models-GLM%20series-orange.svg)
 
 **面向 ZCode 中 GLM 编码智能体的选择性路由、原生 Workflow 执行、最小确定性保障与可选有界额度恢复。**
 
@@ -18,10 +18,10 @@ GLM Conductor 让强模型专注于架构规划、全局判断与最终验收，
 
 ## 核心特性亮点
 
-- **最大化强模型杠杆率：** 将昂贵的 GLM-5.3 推理算力聚焦于需求澄清、架构设计、路由仲裁、集成验证与最终验收；将边界明确的代码实现委托给经济快速的 Workflow 工作者。
+- **最大化强模型杠杆率：** 将主会话模型的推理算力聚焦于需求澄清、架构设计、路由仲裁、集成验证与最终验收（启动问答对这些环节软性建议强档模型，不阻塞其他已配置选择）；将边界明确的代码实现委托给经济快速的 Workflow 工作者。
 - **基于显式契约的委派：** 委派实施前先编译规范 DAG，在开工前明确定义节点目标、上下游依赖、文件所有权边界、接口规范与环境约束。
 - **确定性 Native Workflow 执行：** 静态 DAG 纯代码编译为确定性 TypeScript 原生工作流，由 ZCode 原生调度运行，零多余的在途运行状态镜像。
-- **工作者模型选型硬闸：** 强制要求工作者必须解析并绑定 provider 限定的 Flash 档模型（版本无关 `-Flash` 档位判据，`workflow-model-select`），从协议层根除意外继承高成本主会话模型的隐患。
+- **用户授权显式选型：** 工作者必须是用户显式授权的 provider 全限定精确 id（展示宿主全部已配置候选；Flash 档为软推荐位，`workflow-model-select`，`model_policy: user-authorized-explicit-selection`）；`subagent_model` 绝不省略，从协议层根除静默继承主会话模型的隐患。
 - **最小确定性质量保障：**
   - **`change_id` 唯一新鲜度原语：** 基于 `git rev-parse HEAD` 与任务所有权范围内的实际改动文件生成 SHA-256 摘要（换行符 CRLF 规范化）；后续任何文件改动必使前置验证或审查自动失效。
   - **粗粒度仓库写者守卫：** 保证一个 Git 仓库同一时刻至多一个活跃 Conductor 写工作流，无脆弱的按时间自动过期（无 TTL），仅在收尾或人工运维时释放。
@@ -34,7 +34,7 @@ GLM Conductor 让强模型专注于架构规划、全局判断与最终验收，
 ## 架构与工作流程
 
 ```text
-                     主会话 — GLM-5.3
+                主会话（宿主模型）
                 (规划 · 路由 · 验证 · 验收)
                          /              \
                         /                \
@@ -42,7 +42,7 @@ GLM Conductor 让强模型专注于架构规划、全局判断与最终验收，
                     ↓                            ↓
             主会话代码编写               v24-compile (规范 DAG 编译)
                                                  ↓
-                                         workflow-model-select (Flash 选型硬闸)
+                                         workflow-model-select (选型硬闸)
                                                  ↓
                                          writer-acquire (仓库写预约)
                                                  ↓
@@ -77,9 +77,9 @@ GLM Conductor 让强模型专注于架构规划、全局判断与最终验收，
 
 | 可委派性 | 保障等级 | 路由模式 | 实施主体 | 独立审查 |
 |:---:|:---:|:---:|:---:|:---:|
-| **Low** | Standard | `solo` | GLM-5.3 主会话 | 无 |
+| **Low** | Standard | `solo` | 主会话（宿主模型） | 无 |
 | **High** | Standard | `delegate` | ZCode 原生 Workflow | 无 |
-| **Low** | High | `audit` | GLM-5.3 主会话 | 只读审查者（`glm-reviewer` / `visual-reviewer`） |
+| **Low** | High | `audit` | 主会话（宿主模型） | 只读审查者（`glm-reviewer` / `visual-reviewer`） |
 | **High** | High | `full` | ZCode 原生 Workflow | 只读审查者（`glm-reviewer` / `visual-reviewer`） |
 
 主会话在动作前输出规范的 `SELECTIVE ROUTE` 声明块；实施过程中若出现新证据改变了任务边界，可双向进行 `ROUTE REASSESSMENT` 重估。
@@ -90,17 +90,17 @@ GLM Conductor 让强模型专注于架构规划、全局判断与最终验收，
 
 | 角色 | 默认模型绑定 | 核心职责 |
 | --- | --- | --- |
-| **主会话** | **GLM-5.3** | 架构决策、路由选择、DAG 编制、代码验证、最终验收 |
-| **Workflow 工作者** | **GLM-5.3-Flash（显式指定）** | 原生 Workflow 内的有界文本代码实施 |
-| **视觉实施者** | **GLM-5.3-Flash（多模态）** | 有界前端/UI 代码实施（Custom Subagent 能力例外通道） |
+| **主会话** | **宿主/会话模型（继承，不可编程切换）** | 架构决策、路由选择、DAG 编制、代码验证、最终验收 |
+| **Workflow 工作者** | **用户授权精确 id（Flash 软推荐）** | 原生 Workflow 内的有界文本代码实施 |
+| **视觉实施者** | **GLM-5.3-Flash（多模态，frontmatter 静态绑定）** | 有界前端/UI 代码实施（Custom Subagent 能力例外通道） |
 | **文本审查者** | **宿主/当前会话模型** | 全新上下文、只读终审（`glm-reviewer`） |
-| **视觉审查者** | **GLM-5.3-Flash（多模态）** | 全新上下文视觉读图终审（`visual-reviewer`，不可用即 fail closed） |
+| **视觉审查者** | **GLM-5.3-Flash（多模态，frontmatter 静态绑定）** | 全新上下文视觉读图终审（`visual-reviewer`，不可用即 fail closed） |
 
-### 工作者模型 Pin 与提交硬闸
-Workflow 工作者绝不继承会话模型。提交必须经 `workflow-model-select` 选型硬闸：
-1. 宿主配置中恰有一个 provider 限定的 Flash 模型（`account:.../<模型段>-Flash`）时自动选定；
-2. 存在多候选歧义时，在启动问答中由用户一次性选定，并作为任务级 `worker_model` pin 记录；
-3. 后续提交携带 `--task-ref` 自动消费该 pin；若 pin 的模型在当前宿主列表已失效，消费点直接拒绝（退出码 2），绝不静默回退或自动切模。
+### 工作者模型 Pin 与用户授权显式选型
+Workflow 工作者绝不静默继承会话模型——`subagent_model` 始终是显式的 provider 全限定精确 id。宿主全部已配置模型入候选（不限 provider、不限 Flash）；启动问答列全清单，**单一候选也须用户显式确认**。选定模型**默认以 max 推理档运行（宿主默认思考档位）；档位不随 pin 存储**——pin 只存模型 id。Flash 档（版本无关 `-Flash` 后缀）是**软推荐位**（有界实施的成本/速度友好档）：
+1. `--task-ref` 指向无 pin 任务且未给 `--model` 时直接拒绝并交回启动问答（恰一候选也绝不隐式授权）；不带 `--task-ref` 的裸调用恰一 Flash 档候选自动选定（软推荐便捷路径），零候选/多候选歧义一律拒绝交回问答。
+2. 用户的选择经 `worker-model-pin` 一次性落为任务级 `worker_model` pin；任意已配置精确 id（含非 Flash）经用户授权均合法（`model_policy: user-authorized-explicit-selection`）。
+3. 后续提交携带 `--task-ref` 自动消费该 pin；有 pin 任务的普通 `--model` 不得绕过（不一致即退出码 2）——更换授权必经交互问答重授权并更新 pin，无人值守唤醒轮绝不自动重 pin。若 pin 的模型在当前宿主列表已失效，消费点直接拒绝，绝不静默回退或自动切模。
 
 ---
 
@@ -137,7 +137,7 @@ Workflow 工作者绝不继承会话模型。提交必须经 `workflow-model-sel
 ### 环境要求
 
 - **[ZCode](https://zcode.z.ai) 3.14+**（已在 Native Workflow 与 Scheduled Task 上深度实测）
-- GLM Coding Plan 或 Z.ai 账号，可访问 GLM-5.3 与 GLM-5.3-Flash
+- GLM Coding Plan 或 Z.ai 账号，且已配置可用模型（主会话建议强档模型承担规划/架构/验证；Flash 档模型软推荐用作经济的工作流工作者——任何已配置模型经用户授权均可选）
 - **Python 3.8+**，用于运行时钩子与 CLI 工具
   - *Windows 提示：* 请确保 PATH 中可直接执行 `python3.exe`。若环境仅有 `python.exe`，请参见 [Windows 排障指引](./docs/troubleshooting.md#8-windows-环境下-python3-钩子命令排查)。
 
@@ -185,7 +185,7 @@ reason: 需求边界清晰，具有明确接口与单元测试覆盖。
 
 对于持久化任务，主会话在开工前自动进行单轮合并问答：
 - 确认是否开启跨额度自动唤醒及 `max_resumes` 预算；
-- 在模型候选项歧义时指定工作者模型。
+- 指定工作者模型：列出宿主全部已配置候选，单一候选也须显式确认。
 
 ### 3. 编译并提交工作流
 
@@ -227,12 +227,13 @@ python plugins/glm-conductor/runtime/cli.py writer-acquire . <task_id>
 | 子命令 | 功能说明 |
 | --- | --- |
 | `v24-compile <dag-json> [--task-ref <id>] [--out <path>]` | 将规范静态 DAG 编译为确定性 TypeScript 原生工作流代码。 |
-| `workflow-model-select <models-json> [--model <id>] [--task-ref <id>] [--repo-root <path>]` | 工作者模型选型硬闸，自动筛选 Flash 模型或消费任务 pin。 |
+| `workflow-model-select <models-json> [--model <id>] [--task-ref <id>] [--repo-root <path>]` | 工作者模型选型硬闸：解析用户授权的 worker 模型（Flash 软推荐）或消费任务 pin（有 pin 时 `--model` 必须与 pin 一致）。 |
 | `worker-model-pin <repo> <task_id> <exact-id>` | 写入用户授权的任务级 worker 模型 pin。 |
 | `writer-acquire <repo> <task_id> [--run-id <id>]` | 获取仓库级写预约（独占写入保护）。 |
 | `writer-release <repo> <task_id> [--force]` | 释放仓库写预约（`--force` 供运维强制清理残留）。 |
 | `writer-show <repo>` | 查询当前仓库写预约持有者信息。 |
-| `v24-record-run <task_ref> <run-id>` | 记录任务与 Native Workflow run-id 的关联单据。 |
+| `task-record-workflow-run <repo_root> <task_id> <run-id>` | 规范委派 run 注册：state + 写者守卫前置 + `workflow_started` 事件 + 账本根单据，任意 CWD 可用。 |
+| `v24-record-run <task_ref> <run-id>` | legacy 低层 adapter 单据（兼容保留）。 |
 | `review-record <repo> <task_id> <reviewer> <verdict>` | 记录任务级审查裁决（`ship` / `fix-first` / `rethink`）。 |
 | `quota-resolve <repo> [--force-refresh]` | 额度四态只读解析（缓存 → provider → 陈旧缓存 → UNKNOWN）。 |
 | `quota-wait <repo> <task_id>` | 停泊至 `waiting_quota` 并记录归一化观测快照。 |
@@ -281,7 +282,7 @@ glm-conductor/
 ## 文档索引
 
 - [核心概念](./docs/core-concepts.md) —— 深入了解选择性路由、工作流执行、保障机制与额度恢复。
-- [权威架构规格](./docs/architecture.md) —— v2.5 运行时设计的唯一架构真相源。
+- [权威架构规格](./docs/architecture.md) —— v2.6 运行时设计的唯一架构真相源。
 - [故障排查手册](./docs/troubleshooting.md) —— 额度诊断、Windows 环境配置、超大仓 Git 超时调优与写者守卫运维。
 - [Global Quota Clock 拆离清单](./docs/roadmap/GLOBAL_QUOTA_CLOCK_EXTRACTION_INVENTORY.md) —— 独立伴随项目的边界定义。
 - [更新日志](./CHANGELOG.md) —— 详尽的版本演进历史与发版说明。
@@ -293,7 +294,7 @@ glm-conductor/
 欢迎提交 Issue 与 Pull Request！在提交代码前，请确保通过全套质量门禁：
 
 ```bash
-# 1. 运行全部单元测试 (790+ 测试)
+# 1. 运行全部单元测试 (940+ 测试)
 python -m unittest discover -s tests -p "test_*.py"
 
 # 2. 运行静态契约校验 (16/16 检查)

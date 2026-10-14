@@ -53,6 +53,7 @@ import hashlib
 import os
 import pathlib
 import subprocess
+import time
 
 
 class ChangeIdError(Exception):
@@ -75,6 +76,48 @@ def get_git_timeout() -> float:
         except (ValueError, TypeError):
             pass
     return DEFAULT_GIT_TIMEOUT_SECONDS
+
+
+# —— 共享单调截止期（Stop 完成守卫 opt-in 注册，v2.6.0 Phase C WP-R3） ——
+#
+# Stop 完成守卫（hooks/stop_gate.py）在本进程内注册共享单调截止期后，
+# 单次 git 子进程超时 = min(env 配置值, 距截止期剩余总预算)——env 调大
+# 也绝不击穿钩子 timeoutMs=5000 总预算。未注册（CLI / 直接调用）时
+# effective_git_timeout() 恒等于 get_git_timeout()，行为与历史完全一致。
+
+_DEADLINE = None  # time.monotonic 绝对值或 None（未注册）
+
+
+def set_git_deadline(deadline) -> None:
+    """注册共享单调截止期（time.monotonic 绝对值；None 注销）。
+
+    仅 Stop 完成守卫进程调用：注册后 resolve_base 的单次 git 超时被
+    effective_git_timeout() 钳制在剩余总预算内；预算耗尽时不发起
+    子进程、直接抛 ChangeIdError（结构性错误，走调用方降级路径）。
+    """
+    global _DEADLINE
+    _DEADLINE = deadline
+
+
+def clear_git_deadline() -> None:
+    """注销共享单调截止期（等价 set_git_deadline(None)；幂等）。"""
+    set_git_deadline(None)
+
+
+def effective_git_timeout() -> float:
+    """单次 git 子进程超时（秒）= min(env 配置值, 距共享截止期剩余预算)。
+
+    未注册截止期时恒等于 get_git_timeout()；已注册且剩余预算更小时
+    取剩余预算——绝不因 env 调大而击穿守卫总预算（无界重试 / 超预算
+    串行叠加都不存在）。返回值可能 ≤0（预算已尽），调用方必须先于
+    spawn 拒绝。
+    """
+    timeout = get_git_timeout()
+    if _DEADLINE is not None:
+        remaining = _DEADLINE - time.monotonic()
+        if remaining < timeout:
+            timeout = remaining
+    return timeout
 
 
 # Conductor 运行时记账目录名（仓库根相对）：其下一切文件不参与变更标识
@@ -175,11 +218,20 @@ def resolve_base(repo_root) -> str:
     - 两者都失败 → 非 git 仓库，抛 ChangeIdError（消息含 returncode
       与 stderr 摘要前 200 字符，格式对齐 ownership.git_touched_files）；
     - git 可执行不存在 / 超时 → ChangeIdError。
-    subprocess 固定 timeout=3 秒（与 ownership.git_touched_files 一致：
-    必须小于 Stop 钩子的 timeoutMs=5000，git 挂起时让结构性错误先于
-    整进程击杀触发，降级才可见）。
+    单次子进程超时 = min(GLM_CONDUCTOR_GIT_TIMEOUT 配置值（默认 3.0
+    秒，范围 1.0~30.0）, 距 Stop 完成守卫共享单调截止期的剩余总预算)
+    （本模块 set_git_deadline 注册）：守卫回合内 env 调大也绝不击穿
+    钩子 timeoutMs=5000 总预算，git 挂起时结构性错误先于宿主整进程
+    击杀触发、ENFORCEMENT DEGRADED 降级才可见；未注册（CLI / 直接
+    调用）即为 env 配置值。预算已耗尽则不发起子进程、直接抛
+    ChangeIdError（无界重试不存在）。--git-dir 探针在 HEAD 之后独立
+    重算剩余预算。
     """
-    timeout = get_git_timeout()
+    timeout = effective_git_timeout()
+    if timeout <= 0:
+        raise ChangeIdError(
+            "git 观察总预算已耗尽（Stop 完成守卫共享截止期已过），"
+            "跳过 rev-parse HEAD（repo=%s）" % (repo_root,))
     try:
         proc = subprocess.run(
             ["git", "rev-parse", "HEAD"], cwd=str(repo_root),
@@ -194,10 +246,16 @@ def resolve_base(repo_root) -> str:
             % (timeout, repo_root)) from exc
     if proc.returncode == 0:
         return proc.stdout.decode("utf-8", errors="replace").strip()
+    probe_timeout = effective_git_timeout()
+    if probe_timeout <= 0:
+        raise ChangeIdError(
+            "git 观察总预算已耗尽（Stop 完成守卫共享截止期已过），"
+            "跳过 rev-parse --git-dir 探针（repo=%s）" % (repo_root,))
     try:
         probe = subprocess.run(
             ["git", "rev-parse", "--git-dir"], cwd=str(repo_root),
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout)
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            timeout=probe_timeout)
     except FileNotFoundError as exc:
         raise ChangeIdError(
             "git 调用失败：找不到 git 可执行文件（%s）" % exc) from exc
@@ -205,7 +263,7 @@ def resolve_base(repo_root) -> str:
         raise ChangeIdError(
             "git 调用失败：rev-parse --git-dir 超时（>%.1f 秒，repo=%s；"
             "如处于超大仓库或工作区脏文件过多，可配置环境变量 GLM_CONDUCTOR_GIT_TIMEOUT 调整阈值）"
-            % (timeout, repo_root)) from exc
+            % (probe_timeout, repo_root)) from exc
     if probe.returncode == 0:
         return "-"
     stderr_summary = probe.stderr.decode("utf-8", errors="replace").strip()

@@ -1,13 +1,13 @@
 ---
 name: orchestration
-description: GLM 双轴选择性路由 + 原生 Workflow 编排。主会话任架构师，按 Delegability × Assurance 两个独立维度在首次任务委派前声明 SELECTIVE ROUTE（solo/delegate/audit/full）；任何实施任务启动必经一次强制任务启动问答（单轮三问、零模型判断：跨额度自动唤醒启用与否 + 有界 max_resumes 预算；worker 模型仅选型歧义时列全部候选；地板载体间隔默认 1h 可调）——答「启用」落 quota-resume-authorize 与双通道武装序列（地板 CronCreate + 首个精度睡眠，先于 CreateWorkflow），答出模型落 worker-model-pin 任务级 pin；delegate/full 经 v24-compile 把静态节点 DAG 确定性编译为宿主原生 Workflow 源码，由主会话以显式 Flash 档 subagent_model 提交执行——提交前必经宿主模型列表 → workflow-model-select 选型硬闸（Flash 档判据版本无关，--task-ref 自动取任务级 pin，pin 失效专门拒绝即停），选型失败绝不 CreateWorkflow、绝不省略 subagent_model、绝不继承主会话 GLM-5.3（writer-acquire 取仓库写预约 → 记录 run 关联 → 等待结构化结果）；实施完成后主会话亲自验证并经 record-validation 记录，assurance:high 时引入全新上下文的只读审查者并经 review-record 申报裁决；视觉任务走子代理例外通道。适用于构建并验证功能、多步骤交付、前端/视觉任务、需要委派实施或独立代码审查的任务。
+description: GLM 双轴选择性路由 + 原生 Workflow 编排。主会话任架构师，按 Delegability × Assurance 两个独立维度在首次任务委派前声明 SELECTIVE ROUTE（solo/delegate/audit/full）；任何实施任务启动必经一次强制任务启动问答（单轮三问、零模型判断：跨额度自动唤醒启用与否 + 有界 max_resumes 预算；worker 模型列宿主全部已配置候选、用户显式选定——不限 Flash，Flash 为软推荐位，单一候选也须确认；地板载体间隔默认 1h 可调）——答「启用」落 quota-resume-authorize 与双通道武装序列（地板 CronCreate + 首个精度睡眠，先于 CreateWorkflow），答出模型落 worker-model-pin 任务级 pin；delegate/full 经 v24-compile 把静态节点 DAG 确定性编译为宿主原生 Workflow 源码，由主会话以用户授权的显式 subagent_model 提交执行——提交前必经宿主模型列表 → workflow-model-select 选型硬闸（用户授权显式选型 user-authorized-explicit-selection，Flash 档软推荐，--task-ref 自动取任务级 pin，pin 失效专门拒绝即停，有 pin 任务 --model 必须与 pin 一致），选型失败绝不 CreateWorkflow、绝不省略 subagent_model、绝不继承主会话模型（writer-acquire 取仓库写预约 → 记录 run 关联 → 等待结构化结果）；实施完成后主会话亲自验证并经 record-validation 记录，assurance:high 时引入全新上下文的只读审查者并经 review-record 申报裁决；视觉任务走子代理例外通道。适用于构建并验证功能、多步骤交付、前端/视觉任务、需要委派实施或独立代码审查的任务。
 ---
 
 # GLM 编排：双轴选择性路由 + 原生 Workflow
 
 ## 1. 角色与前置
 
-本技能要求主会话为 GLM-5.3，担任架构师。以下职责保留在主会话，不外派：
+主会话担任架构师。主模型继承宿主主会话、不可编程切换——Conductor 绝不要求、也绝不检查主会话的具体模型名，模型能力强弱与模态能力绝不仅凭名字或版本号断言。以下职责保留在主会话，不外派：
 
 - 需求与歧义解决
 - 架构与路由判断
@@ -17,7 +17,7 @@ description: GLM 双轴选择性路由 + 原生 Workflow 编排。主会话任�
 - 路由重估决策
 - 最终验收与完成申报
 
-子智能体只能实施或审查，不得成为新的编排者。若当前主会话模型不是 GLM-5.3，告知用户切换后再继续。
+子智能体只能实施或审查，不得成为新的编排者。§6.0 启动问答对架构/规划/验证软性建议强档模型——仅是建议：用户选择其他已配置模型时不阻塞、不拒绝、不检查主会话模型名。
 
 分工边界（v2.4 冻结）：GLM Conductor 拥有语义编排与验收（路由、DAG、验证、审查、完成守卫）；ZCode 拥有执行编排（Workflow 运行、子代理生命周期、调度）。Conductor 不镜像宿主执行状态。
 
@@ -132,33 +132,33 @@ delegate/full 的唯一实施基底是 ZCode 原生 Workflow。主会话按以�
 **单轮三问（AskUserQuestion 单轮三问合并，绝不拆成多轮）**：
 
 1. **跨额度自动唤醒**：启用 / 不启用。启用时同轮选定**有界 max_resumes 预算选项**（预算必须显式有界，绝不无界授权）；不启用即 manual 连续性（额度耗尽即停，等用户回来）。
-2. **worker 模型**：**仅当选型歧义**（宿主模型列表上有多个 provider 限定 Flash 档候选，跨版本代际同算歧义）时出现——列出全部候选精确 id 与各自的计划语义提示（该模型对应的套餐 / 窗口语义），由用户选定；恰一候选时自动选定、此题不出现。
+2. **worker 模型**（凡有实施委派的任务必问；solo 无委派不问无关的 worker 选择）：问询前已活体调宿主模型列表（ListModels），**全部已配置候选入清单**——不限 provider（不限 bigmodel）、不限 Flash；ListModels 的 `levels` 是思考档位（disabled / low / high / max——disabled=关闭推理选项，不影响该模型可用性），仅真正的行级禁用标注才排除并当场与用户确认。展示与收敛（单轮完成、绝不拆多轮）：候选 ≤4 个时直接作 AskUserQuestion 选项；**候选 >4 个时在题干文本列全清单**（每个候选给出完整精确的 provider 全限定 id + 一句域说明——已知的套餐/成本/能力备注如实写，无据可查标 unknown 绝不虚构），选项收敛为「软推荐项 + Other 自由输入精确 id」。**Flash 档是软推荐位**（有界实施的成本/速度友好档），不是准入条件；**选定模型默认以 max 推理档运行（宿主默认思考档位），档位不随 pin 存储**——pin 只存模型 id。**单一候选也须用户显式确认**，绝不静默自动指派；零合适候选时解释原因并阻塞该角色，绝不静默继承主会话模型、绝不挑别家 provider。主会话模型同题软性建议：架构/规划/验证建议强档模型，仅建议、不阻塞其他已配置选择。
 3. **地板载体间隔**：跨额度唤醒启用时确认地板 recurring 载体的间隔——默认 **1h**（推荐；兜底迟到均值 ~30 分钟），可调（如重要任务 1h、经济任务 4h；**不得等于窗口长度 5h 整**，会与 reset 秒级竞速）。第一题答「不启用」时此题不出现。
 
 **答后落盘（三题各自独立落）**：
 
-- 第一题答「启用」→ `quota-resume-authorize <repo_root> <task_id> <max_resumes>`，随后立即走双通道武装序列（§6.2 auto 分支 + continuity「双通道唤醒」节；地板载体与首个精度睡眠同批建立、先于 CreateWorkflow，INV-CONT-01）
-- 第二题选定模型 → `worker-model-pin <repo_root> <task_id> <exact-id>`——写入任务级 worker 模型 pin（state 顶层键 `worker_model`）。**pin 是用户授权的任务级偏好，不是任务身份**（与 §6.1 第 8 条的区分见该节），任务全生命周期默认使用（含唤醒恢复后的新 run 提交）；写入只做形状校验、不查宿主面，消费必查宿主面（§6.1）
+- 第一题答「启用」→ `quota-resume-authorize <repo_root> <task_id> <max_resumes>`，随后立即走双通道武装序列（§6.2 auto 分支 + continuity「双通道唤醒」节；授权成立后立即 `quota-resume-decision --force-refresh` 取观测 reset_at——任何额度状态都可观测，单一观测口径：最早的有效未来观测 reset，与额度状态无关；地板载体同批建立，存在有效未来 reset 时首个精度睡眠同批发出，全部先于 CreateWorkflow，INV-CONT-01）
+- 第二题选定模型 → `worker-model-pin <repo_root> <task_id> <exact-id>`——写入任务级 worker 模型 pin（state 顶层键 `worker_model`）。**pin 是用户授权的任务级偏好，不是任务身份**（与 §6.1 第 8 条的区分见该节），任务全生命周期默认使用（含唤醒恢复后的新 run 提交）；**pin 只存模型 id、不含思考档位**（选定模型默认以 max 推理档运行）；写入只做形状校验（角色中性——非 Flash 已配置精确 id 同样合法）、不查宿主面，消费必查宿主面（§6.1）
 - 第三题确认值 → 地板 CronCreate 的 `interval` 参数（小时整数；默认 1）——问答确认值即载体终身间隔，创建后不再变更
 
 **交互回合边界**：问答只发生在交互回合；**唤醒轮 / 恢复轮绝不弹问**——无人值守回合遇到本应问答才能解除的阻塞（如 pin 失效）一律 fail closed：阻断提交、转等待用户，绝不以弹问制造死锁。
 
-**与 §6.1 的衔接**：第二题只在选型歧义时出现；歧义分支的完整接续（问答 → pin → `workflow-model-select --task-ref` 自动取 pin）见 §6.1。
+**与 §6.1 的衔接**：第二题凡有实施委派必问（单一候选也须用户显式确认）；完整接续（问答 → pin → `workflow-model-select --task-ref` 自动取 pin）见 §6.1。
 
-### 6.1 worker 模型选型硬闸（INV-MODEL-01）
+### 6.1 worker 模型选型硬闸（INV-MODEL-01，用户授权显式选型）
 
-每次 CreateWorkflow 提交前必须完成显式 worker 模型选型。这是强制序列而非可选建议——前一步失败即停，绝不带病进入下一步：
+每次 CreateWorkflow 提交前必须完成用户显式授权的 worker 模型选型。这是强制序列而非可选建议——前一步失败即停，绝不带病进入下一步。Flash 档是**软推荐**而非准入硬门：已配置的非 Flash 精确 id 经用户授权（问答确认、任务 pin 或 `--model` 显式值）同样合法：
 
 1. **调用宿主模型列表**：ListModels 等宿主模型发现面，取已配置模型全集（模型发现归宿主，runtime 绝不自建模型清单）；**推荐路径：把列表写成临时 JSON 文件再传文件路径**（内联数组仅短列表便捷形态）
 2. **提取配置精确 id**：只保留 provider 全限定 `account:<账户>/<模型>` 形态的精确 id（裸别名不可选）
-3. **跑 workflow-model-select**：`cli.py workflow-model-select <models-json> [--model <exact-id>] [--task-ref <task-id>] [--repo-root <path>]`（models-json 传文件路径或内联数组；--repo-root 显式解析任务账本根，缺省当前工作目录）——恰一 provider 限定 Flash 档候选时自动选定（**Flash 档判据版本无关**：模型段以 `-Flash` 结尾，GLM-6-Flash 等未来代际同档模型开箱命中）；零候选拒绝；多候选（选型歧义，跨版本代际同算）时按固定优先级取值：`--model` 显式值 > 任务 pin > 自动选型。任务 pin 由 `--task-ref` 从 §6.0 问答落盘的 `worker_model` 读取，命中即自动作选定 id；无显式值亦无任务 pin 时歧义即拒（绝不静默取第一个），交互回合转 §6.0 问答第二题接续：**问答 → `worker-model-pin` 落盘 → 后续提交带 `--task-ref` 自动取 pin**
+3. **跑 workflow-model-select**：`cli.py workflow-model-select <models-json> [--model <exact-id>] [--task-ref <task-id>] [--repo-root <path>]`（models-json 传文件路径或内联数组；--repo-root 显式解析任务账本根，缺省当前工作目录）。取值优先级（v2.6.0）：**任务 pin > `--model` 显式值（必须与 pin 一致）> Flash 软推荐自动选型（仅限不带 --task-ref 的裸调用）**——任务 pin 由 `--task-ref` 从 §6.0 问答落盘的 `worker_model` 读取，命中即注入显式选定；**有 pin 任务的 `--model` 显式值必须与 pin 一致**，不一致即拒绝（普通 `--model` 不得绕过任务 pin，变更走交互重授权）。**--task-ref 且任务无 pin 且无 --model → 拒绝转 §6.0 问答**（经问答的任务必有 pin；可达此态即未授权选型——resume legacy 无 pin 绝不隐式授权单候选）。无 --task-ref 的裸调用无显式值走 Flash 软推荐便捷路径：恰一 Flash 档候选自动选定（**Flash 档判据版本无关**：模型段以 `-Flash` 结尾，GLM-6-Flash 等未来代际同档模型开箱命中——便捷路径而非准入硬门）；零候选拒绝（拒绝静默回退）；多候选歧义拒绝并列出全部候选（绝不静默取第一个），交互回合转 §6.0 问答第二题接续：**问答（单一候选也确认）→ `worker-model-pin` 落盘 → 后续提交带 `--task-ref` 自动取 pin**。**非 Flash 已配置精确 id 合法**：经 `--model` 显式授权或任务 pin 注入即选定（角色中性形状校验，不限档位）；裸别名、未配置 id 仍一律拒绝
 4. **选型失败绝不 CreateWorkflow**：校验拒绝（退出码 2）是硬闸——报告原因并停止本次委派；绝不猜测回退、绝不静默改用其他模型
-5. **以返回的精确 subagent_model 提交**：CreateWorkflow 的 `subagent_model` 逐字取选型返回值（provider 全限定、模型段以 `-Flash` 结尾的 Flash 档模型）
+5. **以返回的精确 subagent_model 提交**：CreateWorkflow 的 `subagent_model` 逐字取选型返回值（provider 全限定精确 id——用户授权显式选型，不限档位）
 6. **绝不省略 subagent_model**——省略即继承主会话模型，是 v2.4.0 缺陷 A 的直接复现
-7. **绝不替换主会话 GLM-5.3**——非 Flash 档模型（含 `GLM-5.3` 等主会话文本模型）绝不可用作 worker；绝不虚构模型 id
-8. **诊断可报、身份不落**：诊断输出可报告实际选定的模型 id（选型成功返回 `{subagent_model, model_policy: "explicit-flash-required"}` 提交契约），但模型选型不是任务身份——绝不把选定模型写入 state.json / journal 当作任务标识
+7. **绝不经未授权路径选定模型**——已配置的任意精确 id（含非 Flash 文本模型）只经用户显式授权（§6.0 问答确认、任务 pin、`--model` 显式值）合法选定；裸别名、未配置 id 一律拒绝；绝不虚构模型 id；worker 选择绝不仅凭模型名字或版本号作判据
+8. **诊断可报、身份不落**：诊断输出可报告实际选定的模型 id（选型成功返回 `{subagent_model, model_policy: "user-authorized-explicit-selection"}` 提交契约），但模型选型不是任务身份——绝不把选定模型写入 state.json / journal 当作任务标识
 
-**pin 的消费语义（失效即拒）**：任务 pin 的写入不查宿主面，消费必查宿主面——每次 `workflow-model-select --task-ref` 对账当次宿主模型列表，pin 不在列表即**专门拒绝**（退出码 2：「pin 已失效，请重新问答授权」），绝不回退自动选型、绝不静默换模型。候选漂移由此天然安全：新候选不自动采用，旧 pin 过期不自动替换。pin 失效属选型失败，同受第 4 条硬闸约束；交互回合可重新问答授权，唤醒轮 / 恢复轮绝不弹问——阻断提交、转等待用户。
+**pin 的消费语义（失效即拒）**：任务 pin 的写入不查宿主面，消费必查宿主面——每次 `workflow-model-select --task-ref` 对账当次宿主模型列表，pin 不在列表即**专门拒绝**（退出码 2：「pin 已失效，请重新问答授权」），绝不回退自动选型、绝不静默换模型。**有 pin 任务的 `--model` 显式值必须与 pin 一致**（不一致退出码 2）——普通 `--model` 不得绕过任务 pin；更换授权必经交互问答重新授权并以 `worker-model-pin` 更新任务 pin（返回 prev/new 双值可见）。候选漂移由此天然安全：新候选不自动采用，旧 pin 过期不自动替换。pin 失效属选型失败，同受第 4 条硬闸约束；交互回合可重新问答授权，唤醒轮 / 恢复轮绝不弹问——阻断提交、转等待用户；**无人值守唤醒轮绝不自动重 pin、绝不静默换模型**。pin 是 Conductor 交互契约下的问答决策证据，不是密码学层面的用户同意证明（不过度声明）。
 
 **第 8 条与任务 pin 的区分**：第 8 条禁止的是把模型选型结果当作**任务身份**（写入 state/journal 当任务标识）；`worker_model` pin 不是任务身份——它是用户在 §6.0 问答中显式授权的**任务级模型偏好**（任务全生命周期的 worker 模型默认值），任务的身份始终是 task_id。两者并行不悖：pin 恰是把选型决策从每次提交的临时动作升格为「一次授权、任务内默认」，第 8 条「诊断可报、身份不落」原样成立。
 
@@ -178,7 +178,7 @@ delegate/full 的唯一实施基底是 ZCode 原生 Workflow。主会话按以�
 -> workflow-model-select <models文件> [--task-ref <task_id>] [--repo-root <repo_root>]
 -> writer-acquire <repo_root> <task_id>
 -> CreateWorkflow（subagent_model=选型返回值）
--> v24-record-run <task_ref> <run-id>
+-> task-record-workflow-run <repo_root> <task_id> <run-id>
 ```
 
 **auto 连续性（入口 = §6.0 问答确认启用后）**：第一题答「启用」即先落授权，预算在问答中一并选定；用户陈述只是授权意图，不是无界授权。**先武装后开工（arm-before-work，INV-CONT-01）+ 建立动作优先**：地板载体与首个精度睡眠在 CreateWorkflow 之前同批建立——完整唤醒契约（统一唤醒协议、停靠轮、续臂、终态清理）见 `skills/continuity`「双通道唤醒」节，本节是其编排侧入口：
@@ -187,20 +187,30 @@ delegate/full 的唯一实施基底是 ZCode 原生 Workflow。主会话按以�
 问答（§6.0 单轮三问：第一题「启用」+预算；第三题确认地板间隔，默认 1h）
 -> task-create <repo_root> <task_id> <goal> <mode> <assurance> [--dag <path>]
 -> quota-resume-authorize <repo_root> <task_id> <max_resumes>
+-> 立即 quota-resume-decision <repo_root> <task_id> --force-refresh 取观测
+   reset_at（任何额度状态都可观测——单一观测口径：最早的有效未来观测 reset，
+   与额度状态无关；active/no-op 分支同样透传，不要求任务在 waiting_quota）
 -> 宿主 CronCreate 地板载体：intervalUnit=hourly, interval=<问答确认值，默认 1>,
    recurring=true, prompt=统一唤醒协议（动作优先，绝不枚举工具清单；
    模板见 continuity/references/long-horizon.md）
 -> quota-automation-bind <repo_root> <task_id> <真实返回的 automation id>
 -> quota-continuity-preflight <repo_root> <task_id> 必须 PASS（ready=false 即阻断启动）
--> 发首个精度睡眠：后台 sleep 到（当前观测阻塞窗 reset_at + 300s）——命令模板
-   逐字抄写自 long-horizon.md「精度层睡眠模板」（bash 动态计算秒数，模型零算术）
+-> 发首个精度睡眠：后台 sleep 到（观测 reset_at + 300s）——仅当本次观测含有效
+   未来 reset 时发出；reset_at 为 null 时**不发**、如实陈述 floor-only 降级
+   （只有地板在臂），绝不谎称精度层已武装——命令模板逐字抄写自
+   long-horizon.md「精度层睡眠模板」（bash 动态计算秒数，模型零算术；
+   宿主接受后台进程即记录在案）
+-> worker-model-pin <repo_root> <task_id> <精确 id>（问答第二题选定过时；
+   消费语义「失效即拒」见 §6.1）
 -> v24-compile <dag-json> [--task-ref <id>] [--out <path>]
 -> ListModels -> 写临时 JSON 文件
 -> workflow-model-select <models文件> --task-ref <task_id> [--repo-root <repo_root>]
 -> writer-acquire <repo_root> <task_id>
 -> CreateWorkflow（subagent_model=选型返回值）
--> v24-record-run <task_ref> <run-id>
+-> task-record-workflow-run <repo_root> <task_id> <run-id>
 ```
+
+**成功陈述三分（v2.6.0）**：auto 启动成功的汇报必须区分三个独立事实——(a) **auto 授权已落**（mode=auto + 有界预算）；(b) **地板载体已绑定**（真实 automation id 入 state + preflight PASS）；(c) **精度睡眠已实际发出**（宿主接受后台进程）。三者缺一如实陈述缺项：缺 (c) 即 **floor-only 可见降级**（只有地板兜底在臂），绝不是「精度层已武装」；缺 (b) 即 auto 阻断（不开工、按降级报告）。
 
 地板载体创建失败时三禁：**绝不谎称 auto 连续性已启用**；**绝不绑假 id**；**绝不按 auto/until_done 承诺继续**——按调用上下文报告降级（本轮仅手动连续性可用）或交运营者处理。武装、唤醒与终态清理契约见 `skills/continuity`。
 
@@ -212,7 +222,7 @@ delegate/full 的唯一实施基底是 ZCode 原生 Workflow。主会话按以�
 
 ### 6.4 提交后程序
 
-1. **记录 run 关联**：拿到 run id 后立即 `runtime.task.record_workflow_run(repo_root, task_id, workflow_run_id)`（一条调用完成 state.workflow_run_id + `.glm-conductor/workflow-runs/` 关联单据 + journal `workflow_started` 事件）；只落关联单据可用 `cli.py v24-record-run <task_ref> <run-id>`
+1. **记录 run 关联（规范命令，v2.6.0 WP-R4）**：拿到 run id 后立即 `cli.py task-record-workflow-run <repo_root> <task_id> <run-id>`——一条调用完成 state.workflow_run_id 落盘 + 账本根 `.glm-conductor/workflow-runs/` 关联单据（与进程 CWD 无关，任意 CWD 调用皆落 repo_root 账本）+ journal `workflow_started` 事件 + 写者守卫 run id 幂等补挂（全经任务层既有事务原语）；AF-04 写者守卫前置（delegate/full 必须先经 `writer-acquire` 持有本仓库写预约）失败即拒绝（退出码 1）且**绝不落假 `workflow_started`**。`cli.py v24-record-run <task_ref> <run-id>` 自 v2.6.0 起降级为 **legacy 低层薄壳**（保留、行为不变：只落 adapter 关联单据、目录相对当前工作目录，不写 state、不落事件、不动守卫）——不是任务生命周期入口，编排 runbook 一律走规范命令
 2. **等待结构化结果**：完成通知经宿主送达（GetWorkflowRun 可查进度）。每个节点返回一份 NodeResult：`node_id / status（complete | partial | blocked）/ changes / local_checks / reassessment / gaps`——全部结果按节点 id 聚合返回
 3. **收尾**：验收通过后 `cli.py task-complete <repo_root> <task_id>`（终态迁移 + `task_completed` 事件 + 自动释放写者守卫）；失败/取消走 `cli.py task-fail` / `cli.py task-cancel <repo_root> <task_id>`（同样释放守卫）
 
@@ -244,7 +254,7 @@ delegate/full 的唯一实施基底是 ZCode 原生 Workflow。主会话按以�
 视觉/交互任务（前端界面、布局、dashboard、表单交互、视觉回归）不走原生 Workflow 文本通道，直接派发 `visual-implementer` 子智能体实施：
 
 - 主会话用其专属 Browser/Computer Use 能力采集截图落盘（子代理无采集权）；实施者以 `VISUAL_CAPTURE_REQUEST` 结束调用索取证据，主会话发起携带完整状态的新调用续作（VISUAL_ROUND 1-3，最多 3 轮）
-- 视觉判定由多模态角色完成（visual-implementer / visual-reviewer 亲自 Read 截图）；GLM-5.3 主会话是纯文本模型，只能驱动采集，不得声称自己做了视觉判定
+- 视觉判定由多模态角色完成（visual-implementer / visual-reviewer 亲自 Read 截图）；主会话只承担驱动与采集（Conductor 绝不仅凭主会话模型的名字断言其模态能力），不得声称自己做了视觉判定
 - 视觉任务 assurance: high 时用 `visual-reviewer` 独立终审（裁决与 review-record 流程同 §8）
 
 判据、模板与协议细节见 references/role-contracts.md 与 references/operations.md。

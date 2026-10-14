@@ -6,12 +6,13 @@
     薄宿主关联层：把「任务 ↔ 原生 Workflow run」的对应关系持久化为
     .glm-conductor/workflow-runs/ 下单一 JSON 记录，供主会话在宿主
     Workflow 完成通知与 Conductor 任务之间做 id 关联。公共面只有两个
-    函数：
+    函数（v2.6.0 WP-R4 起均接受显式 repo_root，缺省 None 保持 v2.4
+    legacy CWD-only 行为——记录 schema 与查找行为原样保留）：
       - record_run(task_ref, workflow_run_id, artifact_path=None,
-        node_map=None) -> dict：写 / 更新关联记录（同 task_ref 重复
-        调用整条替换——关联口径是「一任务一活跃 run」），返回落盘的
-        记录 dict；
-      - load_run(task_ref) -> dict | None：读关联记录。
+        node_map=None, repo_root=None) -> dict：写 / 更新关联记录
+        （同 task_ref 重复调用整条替换——关联口径是「一任务一活跃
+        run」），返回落盘的记录 dict；
+      - load_run(task_ref, repo_root=None) -> dict | None：读关联记录。
 
 记录形状（白名单字段，除此之外一律不落盘）：
       - task_ref（必填，非空字符串）；
@@ -31,13 +32,20 @@
     文件，父目录缺失自动创建）；读走 atomic_read_json（缺失 / 损坏
     fail-open 返回 None，绝不抛）。
 
-存储位置与文件名：
-    RUNS_DIR 为模块级常量，默认 ".glm-conductor/workflow-runs"（相对
-    当前工作目录 = 仓库根）；测试可整替换该常量注入临时目录（本单元
-    测试即如此，绝不触碰真实账本）。记录文件名形如
-    run-<task_ref 的百分号编码>.json：编码单射，特殊字符 task_ref 既
-    不逃逸记录目录、也不互相碰撞；"run-" 前缀避开 Windows 保留设备名，
-    超长名截断 + 摘要后缀保唯一。
+存储位置与文件名（v2.6.0 WP-R4 起双模式）：
+    record_run / load_run / record_path 均接受显式 repo_root 参数
+    （任务侧规范路径 task.record_workflow_run 传账本根）：
+      - repo_root 给出 → 记录目录 = <repo_root>/.glm-conductor/
+        workflow-runs（单据落账本仓库根，与进程 CWD 无关——任意
+        CWD 调用都落同一账本）；
+      - repo_root 缺省 None → 记录目录 = 模块级常量 RUNS_DIR
+        （legacy 口径：默认 ".glm-conductor/workflow-runs" 相对当前
+        工作目录 = 仓库根；测试可整替换该常量注入临时目录——本单元
+        测试即如此，绝不触碰真实账本）。legacy CWD-only 行为与记录
+        schema 原样保留（v2.4 兼容）。
+    记录文件名形如 run-<task_ref 的百分号编码>.json：编码单射，特殊
+    字符 task_ref 既不逃逸记录目录、也不互相碰撞；"run-" 前缀避开
+    Windows 保留设备名，超长名截断 + 摘要后缀保唯一。
 
 依赖：
     仅 Python 3 标准库 + runtime.durable_io；不导入任何 v2.3 执行面
@@ -101,17 +109,36 @@ def run_filename(task_ref) -> str:
     return FILENAME_PREFIX + quoted + ".json"
 
 
-def record_path(task_ref) -> str:
-    """task_ref 的关联记录完整路径：<RUNS_DIR>/run-<编码>.json。"""
-    return os.path.join(RUNS_DIR, run_filename(task_ref))
+def _runs_dir(repo_root=None) -> str:
+    """解析记录目录（record_path 的唯一目录口径）：
+
+    - repo_root 显式给出 → <repo_root>/.glm-conductor/workflow-runs
+      （账本根锚定，与进程 CWD 无关——WP-R4 规范路径）；
+    - repo_root 为 None → 模块级常量 RUNS_DIR（legacy CWD-only 口径
+      与测试注入点，行为与 v2.4 逐字一致）。
+    """
+    if repo_root is None:
+        return RUNS_DIR
+    return os.path.join(repo_root, STATE_DIR_NAME, RUNS_DIR_NAME)
+
+
+def record_path(task_ref, repo_root=None) -> str:
+    """task_ref 的关联记录完整路径：<记录目录>/run-<编码>.json。
+
+    记录目录由 _runs_dir(repo_root) 决定（显式 repo_root 账本根锚定；
+    None 保持 legacy RUNS_DIR / CWD 口径）。"""
+    return os.path.join(_runs_dir(repo_root), run_filename(task_ref))
 
 
 def record_run(task_ref, workflow_run_id, artifact_path=None,
-               node_map=None) -> dict:
+               node_map=None, repo_root=None) -> dict:
     """写 / 更新 task_ref 的 run 关联记录，返回落盘的记录 dict。
 
     - 记录固定含 task_ref / workflow_run_id / created_at 三键；
       artifact_path / node_map 仅在非 None 时落盘（可选字段语义）；
+    - repo_root 显式给出时单据落 <repo_root>/.glm-conductor/
+      workflow-runs/（账本根锚定）；None 保持 legacy CWD-only 口径
+      （模块常量 RUNS_DIR，v2.4 兼容）；
     - 同 task_ref 重复调用 = 关联更新，整条替换（created_at 取本次
       写入时刻）；
     - 结构非法输入（空 / 非 string 的 task_ref、workflow_run_id，
@@ -143,20 +170,22 @@ def record_run(task_ref, workflow_run_id, artifact_path=None,
         record["artifact_path"] = artifact_path
     if node_map is not None:
         record["node_map"] = dict(node_map)
-    durable_io.atomic_write_json(record_path(task_ref), record)
+    durable_io.atomic_write_json(record_path(task_ref, repo_root), record)
     return dict(record)
 
 
-def load_run(task_ref):
+def load_run(task_ref, repo_root=None):
     """读 task_ref 的 run 关联记录 → 记录 dict | None。
 
-    None = 无记录（缺失 / 损坏不可解析 / 内容非 dict——durable_io 读侧
-    fail-open 惯例）或记录内 task_ref 与请求不符（防手挪文件错配）。
-    只读：不加锁、零写入；返回值是本次 JSON 解析的新 dict，调用方改动
-    不影响落盘内容。
+    repo_root 语义同 record_run（显式账本根锚定；None 保持 legacy
+    RUNS_DIR / CWD 口径）。None = 无记录（缺失 / 损坏不可解析 / 内容
+    非 dict——durable_io 读侧 fail-open 惯例）或记录内 task_ref 与
+    请求不符（防手挪文件错配）。只读：不加锁、零写入；返回值是本次
+    JSON 解析的新 dict，调用方改动不影响落盘内容。
     """
     _validate_identity("task_ref", task_ref)
-    record = durable_io.atomic_read_json(record_path(task_ref), default=None)
+    record = durable_io.atomic_read_json(record_path(task_ref, repo_root),
+                                         default=None)
     if not isinstance(record, dict):
         return None
     if record.get("task_ref") != task_ref:

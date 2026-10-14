@@ -126,11 +126,18 @@ def _validate_inputs(nodes, task_context) -> None:
 
 def _emit_stage(stage_number, node_ids, by_id, task_context) -> "list[str]":
     """生成一个阶段的代码：phase 标记 + await Promise.all（组内每节点
-    恰一个 agent + ask 调用）。组内节点按 id 升序展开（确定性）。"""
+    恰一个 agent + ask 调用）。组内节点按 id 升序展开（确定性）。
+
+    节点 id / actor 标签进入本函数生成的 // 注释前一律经
+    _comment_text 折叠空白（validate_node 只要求 id 非空字符串——
+    换行 / 制表等控制输入不得破坏注释边界；无空白 id 逐字不变，
+    确定性保持）；代码位（actor 名 / 结果映射键）仍经 _ts_string
+    转义保留原文。"""
     ordered = sorted(node_ids)
     lines = []
     lines.append("// —— 阶段 %d：%s ——"
-                 % (stage_number, "、".join(ordered)))
+                 % (stage_number,
+                    "、".join(_comment_text(nid) for nid in ordered)))
     lines.append("phase(%s);"
                  % _ts_string("阶段 %d: %s"
                               % (stage_number, ", ".join(ordered))))
@@ -139,7 +146,8 @@ def _emit_stage(stage_number, node_ids, by_id, task_context) -> "list[str]":
         actor = "node-%s" % node_id
         instruction = build_ask(by_id[node_id], task_context)
         lines.append("  // 节点 %s（actor 标签 %s；"
-                     "结果映射键为节点 id 原文）" % (node_id, actor))
+                     "结果映射键为节点 id 原文）"
+                     % (_comment_text(node_id), _comment_text(actor)))
         lines.append("  agent(%s, persona).ask<NodeResult>(%s)"
                      % (_ts_string(actor), _ts_string(instruction)))
         lines.append("    .then((result: NodeResult): void => "
@@ -172,7 +180,7 @@ def compile_workflow(nodes, task_context) -> str:
 
     lines = []
     lines.append("// " + "=" * 60)
-    lines.append("// GLM Conductor v2.4 原生 Workflow 编译产物"
+    lines.append("// GLM Conductor 原生 Workflow 编译产物"
                  "（runtime/workflow，P1-D）")
     lines.append("// task_ref：%s" % _comment_text(task_context["task_ref"]))
     lines.append("// goal：%s" % _comment_text(task_context["goal"]))
