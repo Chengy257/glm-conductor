@@ -178,7 +178,7 @@ delegate/full 的唯一实施基底是 ZCode 原生 Workflow。主会话按以�
 -> workflow-model-select <models文件> [--task-ref <task_id>] [--repo-root <repo_root>]
 -> writer-acquire <repo_root> <task_id>
 -> CreateWorkflow（subagent_model=选型返回值）
--> v24-record-run <task_ref> <run-id>
+-> task-record-workflow-run <repo_root> <task_id> <run-id>
 ```
 
 **auto 连续性（入口 = §6.0 问答确认启用后）**：第一题答「启用」即先落授权，预算在问答中一并选定；用户陈述只是授权意图，不是无界授权。**先武装后开工（arm-before-work，INV-CONT-01）+ 建立动作优先**：地板载体与首个精度睡眠在 CreateWorkflow 之前同批建立——完整唤醒契约（统一唤醒协议、停靠轮、续臂、终态清理）见 `skills/continuity`「双通道唤醒」节，本节是其编排侧入口：
@@ -207,7 +207,7 @@ delegate/full 的唯一实施基底是 ZCode 原生 Workflow。主会话按以�
 -> workflow-model-select <models文件> --task-ref <task_id> [--repo-root <repo_root>]
 -> writer-acquire <repo_root> <task_id>
 -> CreateWorkflow（subagent_model=选型返回值）
--> v24-record-run <task_ref> <run-id>
+-> task-record-workflow-run <repo_root> <task_id> <run-id>
 ```
 
 **成功陈述三分（v2.6.0）**：auto 启动成功的汇报必须区分三个独立事实——(a) **auto 授权已落**（mode=auto + 有界预算）；(b) **地板载体已绑定**（真实 automation id 入 state + preflight PASS）；(c) **精度睡眠已实际发出**（宿主接受后台进程）。三者缺一如实陈述缺项：缺 (c) 即 **floor-only 可见降级**（只有地板兜底在臂），绝不是「精度层已武装」；缺 (b) 即 auto 阻断（不开工、按降级报告）。
@@ -222,7 +222,7 @@ delegate/full 的唯一实施基底是 ZCode 原生 Workflow。主会话按以�
 
 ### 6.4 提交后程序
 
-1. **记录 run 关联**：拿到 run id 后立即 `runtime.task.record_workflow_run(repo_root, task_id, workflow_run_id)`（一条调用完成 state.workflow_run_id + `.glm-conductor/workflow-runs/` 关联单据 + journal `workflow_started` 事件）；只落关联单据可用 `cli.py v24-record-run <task_ref> <run-id>`
+1. **记录 run 关联（规范命令，v2.6.0 WP-R4）**：拿到 run id 后立即 `cli.py task-record-workflow-run <repo_root> <task_id> <run-id>`——一条调用完成 state.workflow_run_id 落盘 + 账本根 `.glm-conductor/workflow-runs/` 关联单据（与进程 CWD 无关，任意 CWD 调用皆落 repo_root 账本）+ journal `workflow_started` 事件 + 写者守卫 run id 幂等补挂（全经任务层既有事务原语）；AF-04 写者守卫前置（delegate/full 必须先经 `writer-acquire` 持有本仓库写预约）失败即拒绝（退出码 1）且**绝不落假 `workflow_started`**。`cli.py v24-record-run <task_ref> <run-id>` 自 v2.6.0 起降级为 **legacy 低层薄壳**（保留、行为不变：只落 adapter 关联单据、目录相对当前工作目录，不写 state、不落事件、不动守卫）——不是任务生命周期入口，编排 runbook 一律走规范命令
 2. **等待结构化结果**：完成通知经宿主送达（GetWorkflowRun 可查进度）。每个节点返回一份 NodeResult：`node_id / status（complete | partial | blocked）/ changes / local_checks / reassessment / gaps`——全部结果按节点 id 聚合返回
 3. **收尾**：验收通过后 `cli.py task-complete <repo_root> <task_id>`（终态迁移 + `task_completed` 事件 + 自动释放写者守卫）；失败/取消走 `cli.py task-fail` / `cli.py task-cancel <repo_root> <task_id>`（同样释放守卫）
 

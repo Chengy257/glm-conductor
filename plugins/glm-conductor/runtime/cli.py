@@ -7,7 +7,9 @@
     额度只读解析（quota-resolve）、v2.4 audit-fix AF-03 额度等待/恢复
     生命周期操作面（quota-wait / quota-resume-authorize /
     quota-resume-decision / quota-resume-confirm）、v2.4 新路径
-    操作面（v24-compile / writer-* / v24-record-run）、v2.4.1
+    操作面（v24-compile / writer-* / v24-record-run——record-run 自
+    v2.6.0 WP-R4 起标注 legacy 低层薄壳，规范 run 注册入口为
+    task-record-workflow-run）、v2.4.1
     continuity hotfix 操作面（workflow-model-select /
     quota-automation-bind / quota-automation-clear /
     quota-continuity-preflight），以及 v2.5 任务级 worker 模型 pin
@@ -139,6 +141,10 @@ v2.4 Phase 3（P3-D/E）收口面：
         workflow_run_id / created_at + 可选 artifact_path）；结构非法
         （空 id 等，WorkflowRunError）→ 退出码 2。零状态镜像：绝不落
         任何子代理运行时状态（F6 冻结结果）。
+        v2.6.0 WP-R4 起降级为 **legacy 低层薄壳**（保留、行为不变——
+        只落 adapter 关联单据，不写 state、不落事件、不动守卫）；
+        规范任务生命周期入口是 task-record-workflow-run，编排 runbook
+        一律走规范命令，本命令仅供明确只要关联单据的低层调用方使用。
     workflow-model-select <models-json> [--model <exact-id>]
             [--task-ref <task_id>] [--repo-root <path>]
         v2.4.1 Workflow 提交 worker 模型选型（H1，INV-MODEL-01；
@@ -230,6 +236,17 @@ v2.4 Phase 3（P3-D/E）收口面：
         quota-resume-confirm（本命令是 manual 恢复与运维对账通道）。
         runtime.task 拒绝（迁移矩阵外来源如 waiting_user）→ 退出码
         1。输出 {task_id, status}。
+    task-record-workflow-run <repo_root> <task_id> <run-id>
+        委派 run 注册规范入口（v2.6.0 WP-R4，task.record_workflow_run
+        薄壳）：一条调用完成 state.workflow_run_id 落盘 + 账本根
+        .glm-conductor/workflow-runs/ 关联单据 + journal
+        workflow_started 事件 + 写者守卫 run id 幂等补挂（全经任务层
+        既有事务原语；单据与进程 CWD 无关——任意 CWD 调用皆落
+        repo_root 账本）。AF-04 前置：delegate/full 注册必须先持有
+        本仓库写预约——预约缺失 / 属其它任务 → 拒绝且绝不落假
+        workflow_started。run-id 结构非法（空串）→ 退出码 2；任务层
+        拒绝（任务缺失 / v2.3 遗留 / 终态冻结 / 守卫前置失配）→
+        退出码 1。输出单行 JSON {task_id, workflow_run_id, status}。
 
 输出与退出码契约：
     stdout 恒为单行 JSON（json.dumps(..., ensure_ascii=True)，中文以
@@ -250,7 +267,9 @@ v2.4 Phase 3（P3-D/E）收口面：
           pin 消费面被任务层拒绝（任务缺失 / v2.3 遗留 / 终态冻结）
           / v2.5.2 起任务生命周期操作面（task-create /
           record-validation / task-complete / task-fail /
-          task-cancel / exit-waiting）被 runtime.task 拒绝
+          task-cancel / exit-waiting）与 v2.6.0 规范 run 注册
+          task-record-workflow-run（含 AF-04 守卫前置失配）被
+          runtime.task 拒绝
           / 意外错误；错误 JSON 只含异常类型名与消息，供操作者排查）。
 
 依赖方向：
@@ -288,7 +307,8 @@ USAGE = (
     "writer-acquire <repo_root> <task_id> [--run-id <id>] | "
     "writer-release <repo_root> <task_id> [--run-id <id>] [--force] | "
     "writer-show <repo_root> | "
-    "v24-record-run <task_ref> <run-id> [--artifact <path>] | "
+    "[legacy 低层薄壳] v24-record-run <task_ref> <run-id> "
+    "[--artifact <path>] | "
     "workflow-model-select <models-json> [--model <exact-id>] "
     "[--task-ref <task_id>] [--repo-root <path>] | "
     "worker-model-pin <repo_root> <task_id> <exact-id> | "
@@ -302,7 +322,8 @@ USAGE = (
     "task-complete <repo_root> <task_id> | "
     "task-fail <repo_root> <task_id> | "
     "task-cancel <repo_root> <task_id> | "
-    "exit-waiting <repo_root> <task_id>")
+    "exit-waiting <repo_root> <task_id> | "
+    "task-record-workflow-run <repo_root> <task_id> <run-id>")
 
 
 class _UsageError(ValueError):
@@ -351,11 +372,12 @@ class _PinTaskRejected(Exception):
 
 class _TaskRejected(Exception):
     """任务生命周期操作面（task-create / record-validation /
-    task-complete / task-fail / task-cancel / exit-waiting）被
-    runtime.task 拒绝（任务已存在 / 任务缺失 / v2.3 遗留任务 /
-    终态冻结 / 状态迁移矩阵外来源等 ValueError 口径）——运行期
-    拒绝，退出码 1（与 _QuotaRejected / _AutomationRejected 同口径；
-    参数值非法在 CLI 侧先闸走退出码 2，见各子命令实现）。"""
+    task-complete / task-fail / task-cancel / exit-waiting /
+    task-record-workflow-run）被 runtime.task 拒绝（任务已存在 /
+    任务缺失 / v2.3 遗留任务 / 终态冻结 / 状态迁移矩阵外来源 /
+    AF-04 写者守卫前置失配等 ValueError 口径）——运行期拒绝，退出码
+    1（与 _QuotaRejected / _AutomationRejected 同口径；参数值非法在
+    CLI 侧先闸走退出码 2，见各子命令实现）。"""
 
 
 def _emit(payload):
@@ -1132,6 +1154,43 @@ def _exit_waiting(repo_root, task_id) -> int:
     return 0
 
 
+# —— v2.6.0 WP-R4：委派 run 注册规范 CLI 面 ——
+#
+# task-record-workflow-run 是 task.record_workflow_run 的薄壳（规范
+# 任务生命周期入口）：state.workflow_run_id + 账本根关联单据 + journal
+# workflow_started 事件 + 写者守卫 run id 幂等补挂一条调用完成，全部
+# 经任务层既有事务原语；AF-04 守卫前置失败 → 拒绝且绝不落假
+# workflow_started。CLI 只做 run-id 结构先闸（参数值非法口径，退出码
+# 2，与 writer-acquire / v24-record-run 的 id 结构闸同款）与
+# _TaskRejected 映射（退出码 1）。v24-record-run 保留为 legacy 低层
+# 薄壳（仅 adapter 关联单据、CWD-only），编排 runbook 一律走本命令。
+
+def _task_record_workflow_run(repo_root, task_id, run_id) -> int:
+    """task-record-workflow-run：委派 run 注册规范入口
+    （task.record_workflow_run 薄壳，v2.6.0 WP-R4）。
+
+    一条调用完成 state.workflow_run_id 落盘 + 账本根 repo_root 的
+    .glm-conductor/workflow-runs/ 关联单据 + journal workflow_started
+    事件 + 写者守卫 run id 幂等补挂（任意 CWD 调用皆落 repo_root
+    账本）。AF-04 前置：delegate/full 注册必须先持有本仓库写预约——
+    预约缺失 / 属其它任务 → 任务层 ValueError → _TaskRejected
+    （退出码 1），绝不落假 workflow_started。run-id 结构非法（空串）
+    在 CLI 侧先闸（参数值非法口径 → 退出码 2）。成功输出单行 JSON
+    {task_id, workflow_run_id, status}。"""
+    from runtime import task  # 函数内 import：monkeypatch 友好
+    if not isinstance(run_id, str) or run_id == "":
+        raise ValueError(
+            "task-record-workflow-run：run-id 必须是非空字符串，得到 %r"
+            % (run_id,))
+    try:
+        st = task.record_workflow_run(repo_root, task_id, run_id)
+    except ValueError as exc:
+        raise _TaskRejected(str(exc)) from exc
+    _emit({"task_id": task_id, "workflow_run_id": run_id,
+           "status": st.get("status")})
+    return 0
+
+
 def _dispatch(args) -> int:
     """argv 分发；子命令 / 参数个数错误抛 _UsageError（退出码 2）。"""
     if not args:
@@ -1413,6 +1472,12 @@ def _dispatch(args) -> int:
                 "exit-waiting 需要 <repo_root> <task_id> 两个参数。"
                 + USAGE)
         return _exit_waiting(rest[0], rest[1])
+    if cmd == "task-record-workflow-run":
+        if len(rest) != 3:
+            raise _UsageError(
+                "task-record-workflow-run 需要 <repo_root> <task_id> "
+                "<run-id> 三个参数。" + USAGE)
+        return _task_record_workflow_run(rest[0], rest[1], rest[2])
     raise _UsageError("未知子命令 %r。" % cmd + USAGE)
 
 
@@ -1428,7 +1493,8 @@ def main(argv=None) -> int:
     （auto 连续性武装操作面被 runtime.task 拒绝）/ _PinRejected
     （worker-model-pin 写入被 runtime.task 拒绝）/ _PinTaskRejected
     （workflow-model-select --task-ref 消费面被任务层拒绝）/
-    _TaskRejected（v2.5.2 任务生命周期操作面被 runtime.task 拒绝）
+    _TaskRejected（v2.5.2 起任务生命周期操作面与 v2.6.0 规范 run
+    注册 task-record-workflow-run 被 runtime.task 拒绝）
     → 1；
     其余意外异常 → 1（错误 JSON 含异常类型名，stdout 契约不破）。
     preflight 的 ready=false 阻断是函数内显式返回 2，不经异常路径。

@@ -28,9 +28,10 @@
         记录委派 run 关联：delegate/full 模式前置要求当前任务持有本
         仓库写者守卫（预约缺失 / 属其它任务即 ValueError——委派注册
         必须先持有本仓库写预约，AF-04）；既有落盘（state.workflow_run_id
-        + 镜像 runtime.workflow.adapter.record_run 的 run-id 关联单据 +
-        workflow_started 事件）成功后把 run id 幂等补挂进守卫记录
-        （同任务 acquire 重入更新语义；补挂冲突宁可拒绝注册）。
+        + 镜像 runtime.workflow.adapter.record_run 的 run-id 关联单据
+        ——落账本根 repo_root 的 .glm-conductor/workflow-runs/，与进程
+        CWD 无关 + workflow_started 事件）成功后把 run id 幂等补挂进
+        守卫记录（同任务 acquire 重入更新语义；补挂冲突宁可拒绝注册）。
         solo/audit 不持有写 Workflow，无此前置。
     record_validation(repo_root, task_id, status, summary=None, commands=None)
         任务级验证记录（status ∈ passed/failed）；change_id 经
@@ -143,9 +144,11 @@ journal 词汇（TASK_JOURNAL_EVENTS，恰十名，绝不多不少）：
     守卫 inspect / acquire / release）在锁外执行，操作专属变更在锁内
     对新鲜 state 应用并复核既有前置（终态冻结 / 迁移门 / 顺序闸 /
     预算不变量）——过时整态 dict 绝不覆盖盘上无关新字段。同值幂等
-    入口（bind 同 id / clear 未武装 / pin 同值 / 终态同态重放）在
-    取锁前零写盘原样返回。journal 事件仅在事务提交成功后追加
-    （事件名见下节词汇表）。
+    入口（bind 同 id / clear 未武装 / pin 同值）在取锁前零写盘原样
+    返回；终态同态重放（complete / fail / cancel）自 v2.6.0 WP-R4
+    起把重放判定收进事务内零变更 mutate（锁内对新鲜盘面判定，不再
+    依赖锁外 pre-load），事件与守卫释放在确认盘上仍为同终态后进行。
+    journal 事件仅在事务提交成功后追加（事件名见下节词汇表）。
 
 变更标识的相关改动文件集（W4 完成守卫共用的同一派生）：
     ownership_scopes(task_state) = dag 全节点 ownership scope 并集
@@ -448,7 +451,9 @@ def record_workflow_run(repo_root, task_id, workflow_run_id) -> dict:
       1. state.workflow_run_id 经 state.update_task_state 状态事务落盘
          （非空 str 强制；终态任务冻结——锁内对新鲜 state 复核）；
       2. 镜像到 runtime.workflow.adapter.record_run（run-id 关联单据，
-         同任务重复调用整条替换——「一任务一活跃 run」口径）；
+         落账本根 repo_root 的 .glm-conductor/workflow-runs/——显式
+         repo_root 锚定，与进程 CWD 无关；同任务重复调用整条替换——
+         「一任务一活跃 run」口径）；
       3. 落 workflow_started 事件（含 workflow_run_id）；
       4. 幂等补挂（仅 delegate / full）：writer_guard.acquire 以本
          run id 更新本任务既有预约（同任务重入更新语义，writer-show /
@@ -491,7 +496,10 @@ def record_workflow_run(repo_root, task_id, workflow_run_id) -> dict:
         return current
 
     new_state = state.update_task_state(repo_root, task_id, _mutate)
-    workflow_adapter.record_run(task_id, workflow_run_id)
+    # run-id 关联单据落账本根 repo_root 的 .glm-conductor/workflow-runs/
+    # （显式 repo_root 锚定，与进程 CWD 无关——v2.6.0 WP-R4 任意 CWD
+    # 调用同账本；legacy 直调 adapter 不传 repo_root 的口径不变）
+    workflow_adapter.record_run(task_id, workflow_run_id, repo_root=repo_root)
     journal.append_event(
         repo_root, task_id,
         {"event": "workflow_started", "workflow_run_id": workflow_run_id})
@@ -1264,12 +1272,18 @@ def _finish(repo_root, task_id, terminal_status, event_name) -> dict:
     """终态收尾公共通道：终态迁移 + 任务级 journal 事件 + 写者守卫释放。
 
     - 迁移门同 set_status（旧 == 目标终态 → 同终态重放放行：不重复
-      落盘，但事件与守卫释放幂等重做——hook 重入安全；跨终态迁移
-      一律拒绝）；实际迁移经 state.update_task_state 状态事务落盘
-      （锁内对新鲜 state 复核迁移门再施加，其转换门二次把关）；
+      施加终态，但事件与守卫释放幂等重做——hook 重入安全；跨终态
+      迁移一律拒绝）；实际迁移与重放判定一并经 state.update_task_state
+      状态事务落盘——重放判定收在锁内零变更 mutate 上（v2.6.0 WP-R4
+      加固：锁内对新鲜盘面判定，绝不依赖锁外 pre-load 的陈旧读数，
+      消除「锁外判重放、盘上已变脸」的竞态窗口；同终态重放走事务的
+      零变更 mutate 幂等放行，update_task_state 的转换门对同态放行）；
     - 事件名限于 TASK_JOURNAL_EVENTS（task_completed / task_failed /
-      task_cancelled），含 from 字段记录收尾前状态（提交路径取锁内
-      新鲜盘面的收尾前状态；事件仅在状态事务提交成功后追加）；
+      task_cancelled），含 from 字段记录收尾前状态（恒取锁内新鲜盘面
+      的收尾前状态；事件仅在状态事务提交成功后追加）；
+    - 事件与守卫释放在确认盘上仍为同终态后进行：state.update_task_state
+      返回锁内提交的新鲜 state，status 非目标终态即拒绝（防御闸——
+      mutate 只会施加终态或零变更放行同终态，正常不可达）；
     - 双根分工（FR-01）：state.json / journal 留在账本根 repo_root；
       写者守卫在生效仓库根上释放（state.resolve_repository_root：
       repository.root 绑定优先、账本根回退）——账本根与绑定仓库根
@@ -1280,22 +1294,30 @@ def _finish(repo_root, task_id, terminal_status, event_name) -> dict:
       归属对账由持有者侧或 U6 CLI --force 负责）。
     """
     st = _load_v24_state(repo_root, task_id)
-    old_status = st.get("status")
-    event_from = {"value": old_status}
-    if old_status != terminal_status:
-        _ensure_transition_allowed(st, terminal_status, event_name)
+    # 预检快速失败（结构性拒绝在锁外给出；锁内 mutate 权威复核；
+    # 旧 == 目标终态在此自然放行——重放与否以锁内判定为准）
+    _ensure_transition_allowed(st, terminal_status, event_name)
+    event_from = {"value": None}
 
-        def _mutate(current):
-            # 锁内新鲜盘面复核迁移门（update_task_state 的转换门二次
-            # 把关），终态施加在新鲜 state 上
-            event_from["value"] = current.get("status")
-            _ensure_transition_allowed(current, terminal_status, event_name)
-            current["status"] = terminal_status
+    def _mutate(current):
+        # 锁内新鲜盘面权威判定重放（v2.6.0 WP-R4：不再依赖锁外
+        # pre-load）：同终态 → 零变更放行；否则迁移门复核后施加终态
+        #（update_task_state 的转换门二次把关）
+        event_from["value"] = current.get("status")
+        if current.get("status") == terminal_status:
             return current
+        _ensure_transition_allowed(current, terminal_status, event_name)
+        current["status"] = terminal_status
+        return current
 
-        st = state.update_task_state(repo_root, task_id, _mutate)
-    # 同终态重放不重复落盘（事件与守卫释放幂等重做）；journal 仅在
-    # 状态提交成功后追加
+    st = state.update_task_state(repo_root, task_id, _mutate)
+    # 确认盘上仍为同终态后才落事件 / 释放守卫（事务返回锁内提交的
+    # 新鲜 state；重放判定以事务结果为准）
+    if st.get("status") != terminal_status:
+        raise ValueError(
+            "%s：状态事务提交后任务 %s 处于 %r，非目标终态 %r，拒绝"
+            "追加事件与释放守卫"
+            % (event_name, task_id, st.get("status"), terminal_status))
     journal.append_event(
         repo_root, task_id,
         {"event": event_name, "from": event_from["value"],

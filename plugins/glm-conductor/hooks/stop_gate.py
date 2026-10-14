@@ -46,11 +46,32 @@ v2.3 外壳保留面（进程 I/O）：
     读 Stop 事件 JSON（read_stop_event，容错）、stdout 单行决策 JSON
     （emit_block_json，block 之外零输出）、stderr 提示（warn_stderr，
     UTF-8 字节写）、账本根定位（ledger_root）、钩子自身崩溃的
-    fail-open 兜底（__main__ 包装：任何异常 stderr 报告后 exit 0，
-    绝不阻断会话）。求值期结构性错误（非 git 仓库 / git 故障的
+    fail-open 兜底（__main__ 包装：任何异常 stderr 报
+    "ENFORCEMENT DEGRADED: stop_gate failed: ..." 后 exit 0，绝不
+    阻断会话）。求值期结构性错误（非 git 仓库 / git 故障的
     ChangeIdError、非法 scope 模式的 OwnershipError 等）按任务隔离
-    降级：stderr 一行报告后放行该任务（基础设施故障不是完成证据，
-    沿用 v2.3 外壳的 fail-open 契约）。
+    降级：stderr 一行 "ENFORCEMENT DEGRADED: ..." 报告后放行该任务
+    （基础设施故障不是完成证据，沿用 v2.3 外壳的 fail-open 契约；
+    前缀与 session_start 一致，兑现 enforcement 技能与
+    troubleshooting 的既有降级报文契约）。
+
+守卫总预算（v2.6.0 Phase C，规格 §3 WP-R3 有界截止期）：
+    git 观察整体受共享单调截止期约束：main() 启动即取 time.monotonic
+    截止期 = 启动时刻 + 总预算 − 安全余量。总预算默认 =
+    HOOK_STOP_TIMEOUT_MS（hooks.json Stop timeoutMs=5000 的进程内
+    镜像，不读文件），GUARD_BUDGET_ENV_VAR 只能收紧——上限钳制在
+    钩子预算内、非法值回退默认；安全余量（GUARD_SAFETY_MARGIN_
+    SECONDS）承担进程启动 / stdin 读取 / stderr 报错 / 宿主杀停延迟，
+    总额（含余量）≤ 5000。截止期经 change_id.set_git_deadline /
+    ownership.set_git_deadline 注册进 runtime：单次 git 子进程超时 =
+    min(GLM_CONDUCTOR_GIT_TIMEOUT 配置值, 剩余总预算)，env 调大绝不
+    击穿宿主 5 秒硬杀；同回合内 ownership.begin_status_sharing 让
+    同仓库根复用同一次 status 输出（3s+3s+3s 串行叠加禁止）。git
+    挂起时单次超时先于宿主硬杀触发 → 结构性错误 → 按任务降级路径
+    stderr 可见 ENFORCEMENT DEGRADED 报文后 exit 0（fail-open 保守、
+    无界重试禁止）。evaluate_completion 被直接导入调用（主会话
+    自检 / 生命周期 API 侧）时不注册截止期，git 超时行为与 CLI 侧
+    一致（仅 env 配置值生效）。
 
 v2.3 完成门拆除面（v2.4 无对应物，见
 docs/roadmap/V2_4_PHASE_2_STATE_ASSURANCE_RETIREMENT_SPEC.md §5）：
@@ -93,6 +114,7 @@ evaluate_completion(repo_root, task_id) 契约：
 import json
 import os
 import sys
+import time
 from pathlib import Path
 
 # 接线插件根以复用 runtime（钩子脚本与 runtime/ 同插件；v2.3 外壳保留）
@@ -101,6 +123,34 @@ sys.path.insert(0, str(PLUGIN_ROOT))
 
 # 四查词汇（按严重序排列；evaluate_completion 结果的 check 字段取值）
 COMPLETION_CHECKS = ("writer_guard", "ownership", "validation", "review")
+
+# —— 守卫总预算（hooks.json Stop timeoutMs=5000 的进程内镜像；不改 hooks.json） ——
+HOOK_STOP_TIMEOUT_MS = 5000.0
+# 总预算覆盖环境变量：只能收紧（上限钳制在钩子预算内），非法值回退默认
+GUARD_BUDGET_ENV_VAR = "GLM_CONDUCTOR_GUARD_BUDGET_MS"
+# 进程启动 / stdin 读取 / stderr 报错 / 宿主杀停延迟的安全余量（秒）
+GUARD_SAFETY_MARGIN_SECONDS = 0.6
+
+
+def _git_observation_budget_seconds() -> float:
+    """git 观察窗口（秒）= 守卫总预算 − 安全余量（下限 0）。
+
+    总预算默认 = HOOK_STOP_TIMEOUT_MS；GUARD_BUDGET_ENV_VAR 可收紧
+    （正数才生效、上限钳制在钩子预算内，非法值回退默认）。窗口自
+    main() 启动时刻起算（time.monotonic 共享截止期），保证总额（含
+    进程启动 / 读取 / 报错余量）不击穿 hooks.json Stop timeoutMs=5000。
+    """
+    budget_ms = HOOK_STOP_TIMEOUT_MS
+    raw = os.environ.get(GUARD_BUDGET_ENV_VAR)
+    if raw is not None and raw.strip() != "":
+        try:
+            value = float(raw)
+        except ValueError:
+            value = None
+        if value is not None and value > 0:
+            budget_ms = min(value, HOOK_STOP_TIMEOUT_MS)
+    seconds = budget_ms / 1000.0 - GUARD_SAFETY_MARGIN_SECONDS
+    return seconds if seconds > 0 else 0.0
 
 
 # —— 进程 I/O 外壳（v2.3 保留面，逐字沿用） ——
@@ -421,21 +471,42 @@ def evaluate_completion(repo_root, task_id) -> dict:
 # —— Stop 钩子主流程（外壳薄包装） ——
 
 def main():
-    """v2.4 完成守卫主流程。
+    """v2.4 完成守卫主流程（进程入口；四查本体见 _run_guard）。
 
     返回值恒为 0（block 是 stdout JSON 决策，不用退出码 2）；除 block
     的单行 JSON 外不向 stdout 写任何内容，一切提示只走 stderr。
+    守卫启动（main 进入）即建共享单调截止期（模块 docstring「守卫总
+    预算」）并注册进 runtime——change_id / ownership 的单次 git 子
+    进程超时被钳制在剩余总预算内（env 调大不击穿钩子预算），同回合
+    开启 status 观测共享；finally 恒注销，进程内不残留全局状态。
+    """
+    deadline = time.monotonic() + _git_observation_budget_seconds()
+    # runtime 模块在函数内 import：其上的 sys.path 接线已就绪，
+    # import 失败会被外层 fail-open 捕获
+    from runtime import change_id, ownership
+    change_id.set_git_deadline(deadline)
+    ownership.set_git_deadline(deadline)
+    ownership.begin_status_sharing()
+    try:
+        return _run_guard()
+    finally:
+        change_id.clear_git_deadline()
+        ownership.clear_git_deadline()
+        ownership.end_status_sharing()
+
+
+def _run_guard():
+    """四查守卫本体（main 已注册截止期与 status 共享）。
+
     stop_hook_active=true（续行循环中的 Stop）照常校验（载荷不参与
     分支决策，保留解析以备扩展）。触发域见模块 docstring：仅对
     status == "active" 的 v2.4 任务四查；第一个 block 即输出并返回
     （恰好一条理由），全绿任务已随 evaluate_completion 就地完成。
     """
+    from runtime import state
+
     # 1) 读 stdin（容错；v2.3 外壳保留面）
     read_stop_event()
-
-    # runtime 模块在函数内 import：其上的 sys.path 接线已就绪，
-    # import 失败会被外层 fail-open 捕获
-    from runtime import state
 
     # 2) 账本根与任务发现（v2.3 外壳保留面：discover_tasks 四分类）
     ledger = ledger_root()
@@ -481,14 +552,16 @@ def main():
 
     # 5) 四查逐任务求值：首个 block 即 stdout 决策 JSON（恰好一条
     #    中文理由）；求值结构性错误（非 git 仓库等）按任务隔离降级
-    #    放行（stderr 一行报告，沿用 v2.3 外壳 fail-open 契约）
+    #    放行（stderr 一行 ENFORCEMENT DEGRADED 报告，沿用 v2.3 外壳
+    #    fail-open 契约；git 挂起时该报文由 min(env, 剩余总预算) 的
+    #    单次超时先于宿主硬杀触发，降级可见）
     for name in gated:
         try:
             result = evaluate_completion(ledger, name)
         except Exception as exc:
             warn_stderr(
-                "GLM CONDUCTOR: 完成门无法评估任务 %s（%s），本轮放行"
-                "该任务" % (name, exc))
+                "ENFORCEMENT DEGRADED: 完成门无法评估任务 %s（%s），"
+                "本轮放行该任务" % (name, exc))
             continue
         if result["decision"] == "block":
             emit_block_json(result["reason"])
@@ -502,5 +575,5 @@ if __name__ == "__main__":
     except SystemExit:
         raise
     except Exception as exc:  # fail-open：钩子自身崩溃绝不阻断会话
-        warn_stderr("GLM CONDUCTOR: stop_gate failed: %r" % (exc,))
+        warn_stderr("ENFORCEMENT DEGRADED: stop_gate failed: %r" % (exc,))
         sys.exit(0)
