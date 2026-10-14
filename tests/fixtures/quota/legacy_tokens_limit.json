@@ -1,0 +1,35 @@
+{
+  "success": true,
+  "code": 200,
+  "msg": "成功",
+  "data": {
+    "level": "pro",
+    "limits": [
+      {
+        "type": "TOKENS_LIMIT",
+        "unit": 3,
+        "number": 5,
+        "percentage": 82.5,
+        "currentValue": 8250000,
+        "usage": 8250000,
+        "remaining": 1750000,
+        "usageDetails": [
+          {"modelName": "glm-5.3", "usage": 6800000},
+          {"modelName": "glm-4.7", "usage": 1450000}
+        ],
+        "nextResetTime": 1787899502000
+      },
+      {
+        "type": "TOKENS_LIMIT",
+        "unit": 6,
+        "number": 1,
+        "percentage": 45,
+        "currentValue": 45250000,
+        "usage": 45250000,
+        "remaining": 54750000,
+        "usageDetails": [],
+        "nextResetTime": 1788265200000
+      }
+    ]
+  }
+}

@@ -22,8 +22,8 @@
    创建失败绝不谎称已启用）
    |
    v
-[执行] delegate/full → 原生 Workflow 运行（显式 Flash 档模型选型 ->
-   CreateWorkflow(subagent_model=选型返回值) -> v24-record-run 绑 run id）
+[执行] delegate/full → 原生 Workflow 运行（用户授权显式模型选型（orchestration §6.1 硬闸，Flash 为软推荐） ->
+   CreateWorkflow(subagent_model=<选型返回值>) -> task-record-workflow-run 登记 run id）
    |
    v（实质性里程碑 -> 写 CONTINUITY CHECKPOINT）
    |

@@ -140,7 +140,7 @@ active task（delegate/full、audit，以及任何需要完成守卫保护的长
 -> 应用问答第二题的 worker 模型 pin：worker-model-pin <repo_root> <task_id> <精确 id>
    （第二题出现过时；消费语义「失效即拒」见 orchestration §6.1）
 -> v24-compile -> 显式 worker 模型选型（orchestration §6.1 硬闸） -> writer-acquire
--> CreateWorkflow（subagent_model=选型返回值） -> v24-record-run <task_ref> <run-id>
+-> CreateWorkflow（subagent_model=选型返回值） -> task-record-workflow-run <repo_root> <task_id> <run-id>
 ```
 
 **成功陈述三分（v2.6.0）**：auto 启动成功的汇报必须区分三个独立事实——(a) **auto 授权已落**（mode=auto + 有界预算）；(b) **地板载体已绑定**（真实 automation id 入 state + preflight PASS）；(c) **精度睡眠已实际发出**（宿主接受后台进程）。三者缺一如实陈述缺项：缺 (c) 即 **floor-only 可见降级**（只有地板兜底在臂），绝不是「精度层已武装」；缺 (b) 即 auto 阻断（preflight ready=false 不开工）。

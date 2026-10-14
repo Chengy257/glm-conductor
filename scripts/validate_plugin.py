@@ -519,7 +519,8 @@ SINGLE_OBSERVATION_MARKERS = (
     (ORCHESTRATION_SKILL,
      ("最早的有效未来观测", "与额度状态无关", "floor-only")),
     (QUOTA_COMMAND,
-     ("最早的有效未来观测", "与额度状态无关", "无条件透传", "floor-only")),
+     ("earliest valid future observed reset_at", "regardless of quota status",
+      "unconditionally", "floor-only")),
 )
 # 16k 负向：v2.5.2 阻塞窗（EXHAUSTED-only）reset 提取口径措辞在文档面
 # 退役（claim 形零容忍，出现即 FAIL——旧口径与 v2.6.0 单一观测口径互斥；

@@ -1,0 +1,31 @@
+{
+  "success": true,
+  "code": 200,
+  "msg": "成功",
+  "data": {
+    "level": "lite",
+    "limits": [
+      {
+        "type": "TOKENS_LIMIT",
+        "unit": 3,
+        "number": 5,
+        "percentage": 8,
+        "currentValue": 80000,
+        "usage": 80000,
+        "remaining": 920000,
+        "usageDetails": []
+      },
+      {
+        "type": "TIME_LIMIT",
+        "unit": 4,
+        "number": 1,
+        "percentage": 3,
+        "currentValue": 9,
+        "usage": 9,
+        "remaining": 291,
+        "usageDetails": [],
+        "nextResetTime": 1787919600000
+      }
+    ]
+  }
+}
