@@ -2,11 +2,11 @@
 
 [English](./README.md) | **简体中文**
 
-![Version](https://img.shields.io/badge/version-2.5.2-blue.svg)
+![Version](https://img.shields.io/badge/version-2.6.0-blue.svg)
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
 ![ZCode Plugin](https://img.shields.io/badge/ZCode-plugin-green.svg)
 ![Python](https://img.shields.io/badge/python-3.8%2B-blue.svg)
-![Models](https://img.shields.io/badge/models-GLM--5.3%20%2F%20GLM--5.3--Flash-orange.svg)
+![Models](https://img.shields.io/badge/models-GLM%20series-orange.svg)
 
 **面向 ZCode 中 GLM 编码智能体的选择性路由、原生 Workflow 执行、最小确定性保障与可选有界额度恢复。**
 
@@ -232,7 +232,8 @@ python plugins/glm-conductor/runtime/cli.py writer-acquire . <task_id>
 | `writer-acquire <repo> <task_id> [--run-id <id>]` | 获取仓库级写预约（独占写入保护）。 |
 | `writer-release <repo> <task_id> [--force]` | 释放仓库写预约（`--force` 供运维强制清理残留）。 |
 | `writer-show <repo>` | 查询当前仓库写预约持有者信息。 |
-| `v24-record-run <task_ref> <run-id>` | 记录任务与 Native Workflow run-id 的关联单据。 |
+| `task-record-workflow-run <repo_root> <task_id> <run-id>` | 规范委派 run 注册：state + 写者守卫前置 + `workflow_started` 事件 + 账本根单据，任意 CWD 可用。 |
+| `v24-record-run <task_ref> <run-id>` | legacy 低层 adapter 单据（兼容保留）。 |
 | `review-record <repo> <task_id> <reviewer> <verdict>` | 记录任务级审查裁决（`ship` / `fix-first` / `rethink`）。 |
 | `quota-resolve <repo> [--force-refresh]` | 额度四态只读解析（缓存 → provider → 陈旧缓存 → UNKNOWN）。 |
 | `quota-wait <repo> <task_id>` | 停泊至 `waiting_quota` 并记录归一化观测快照。 |
@@ -281,7 +282,7 @@ glm-conductor/
 ## 文档索引
 
 - [核心概念](./docs/core-concepts.md) —— 深入了解选择性路由、工作流执行、保障机制与额度恢复。
-- [权威架构规格](./docs/architecture.md) —— v2.5 运行时设计的唯一架构真相源。
+- [权威架构规格](./docs/architecture.md) —— v2.6 运行时设计的唯一架构真相源。
 - [故障排查手册](./docs/troubleshooting.md) —— 额度诊断、Windows 环境配置、超大仓 Git 超时调优与写者守卫运维。
 - [Global Quota Clock 拆离清单](./docs/roadmap/GLOBAL_QUOTA_CLOCK_EXTRACTION_INVENTORY.md) —— 独立伴随项目的边界定义。
 - [更新日志](./CHANGELOG.md) —— 详尽的版本演进历史与发版说明。
@@ -293,7 +294,7 @@ glm-conductor/
 欢迎提交 Issue 与 Pull Request！在提交代码前，请确保通过全套质量门禁：
 
 ```bash
-# 1. 运行全部单元测试 (790+ 测试)
+# 1. 运行全部单元测试 (940+ 测试)
 python -m unittest discover -s tests -p "test_*.py"
 
 # 2. 运行静态契约校验 (16/16 检查)

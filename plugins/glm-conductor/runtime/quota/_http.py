@@ -47,9 +47,10 @@ fetch 流程（§38）：
     缓存检查（§34：force=False 且距上次成功 < ttl_seconds → 返回
     缓存 snapshot 深拷贝；失败永不写缓存）→ 传输层 → 状态分类
     （401/403 → auth；3xx → network（重定向被禁）；其余非 2xx →
-    unavailable；URLError / timeout / OSError → network）→ 限长
-    检查（malformed）→ JSON 解析（malformed）→ parse_quota_body
-    （§27 标准化）→ 写缓存 → 返回深拷贝。
+    unavailable；URLError / timeout / OSError /
+    http.client.HTTPException → network）→ 限长检查（malformed）→
+    JSON 解析（malformed）→ parse_quota_body（§27 标准化）→ 写缓存
+    → 返回深拷贝。
 
 传输层注入点（测试锚定；全部测试走注入，零真实网络）：
     transport(url, headers, timeout) -> (status_code:int, body:bytes)
@@ -57,14 +58,15 @@ fetch 流程（§38）：
     禁重定向 opener + 限长读取）。
 
 依赖：
-    仅 Python 3.7 标准库（urllib.request / urllib.error / json /
-    socket / datetime），零第三方依赖，`python3 -S` 可运行。
+    仅 Python 3.7 标准库（http.client / urllib.request / urllib.error /
+    json / socket / datetime），零第三方依赖，`python3 -S` 可运行。
 
 来源：
     v2.0 设计（已蒸馏入 docs/architecture.md）+ v2 升级计划工作块 B5.2。
 """
 
 import copy
+import http.client
 import json
 import socket
 import urllib.error
@@ -82,7 +84,8 @@ DEFAULT_TTL_SECONDS = 120
 
 # —— 请求常量 ——
 # 鉴权头格式为实测结论：Authorization: <API Key>，无 Bearer 前缀（§37 条款 8）
-_USER_AGENT = "glm-conductor/2.0"
+# User-Agent 为稳定版本无关标签（WP-C：不随发布版本漂移，网络行为形状不变）
+_USER_AGENT = "glm-conductor"
 _QUOTA_PATH = "/api/monitor/usage/quota/limit"
 
 # —— provider 名 → 监控 host 注册表（§25：host 字符串仅在此出现，
@@ -262,7 +265,11 @@ class HttpQuotaProvider(QuotaProvider):
             # 非 2xx / 被禁重定向（默认传输路径）；401/403 → auth，
             # 3xx → network（重定向被禁），其余 → unavailable
             raise self._status_error(exc.code) from exc
-        except (urllib.error.URLError, socket.timeout, OSError) as exc:
+        except (urllib.error.URLError, socket.timeout, OSError,
+                http.client.HTTPException) as exc:
+            # HTTPException（IncompleteRead / BadStatusLine 等响应层
+            # 异常）与 URLError 家族同归 network——传输层任何分类内
+            # 异常都不得裸泄漏出 fetch（§38：不返回 None、不抛裸异常）
             raise self._network_error(type(exc).__name__) from exc
 
         if not 200 <= status < 300:
@@ -306,7 +313,8 @@ class HttpQuotaProvider(QuotaProvider):
             % (code, self.host, _QUOTA_PATH), kind)
 
     def _network_error(self, error_type):
-        """传输层异常（URLError / timeout / OSError）→ network。"""
+        """传输层异常（URLError / timeout / OSError /
+        http.client.HTTPException）→ network。"""
         return QuotaProviderError(
             "quota 请求网络失败（host=%s，path=%s，error_type=%s）"
             % (self.host, _QUOTA_PATH, error_type), "network")

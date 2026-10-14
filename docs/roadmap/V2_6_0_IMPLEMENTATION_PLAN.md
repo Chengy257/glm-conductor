@@ -1,6 +1,6 @@
 # v2.6.0 实施计划（Reliability Fix & Model Selection Rebaseline）
 
-- **状态**：WRITTEN — 等待 owner 授权开工（本文档为计划，非实施证据）
+- **状态**：IMPLEMENTED — Phase A-E 已全部实施（Phase A `c299425` / Phase B `6751a7a` / Phase C `5925488` / Phase D `ee5d841` / Phase E 为 v2.6.0 发布提交（本分支最后一个 feat 提交））；统一 push + tag + Release 由主会话收尾（owner 裁决：不补历史 tags）
 - **日期**：2026-10-14
 - **基线**：main @ 7c95ba0（v2.5.2 + 规格文档）
 - **规格权威**：docs/roadmap/POST_V2_5_2_RELIABILITY_AND_MODEL_SELECTION_IMPLEMENTATION_SPEC.md（owner 对齐设计）；本计划为其执行细化，含 owner 讨论裁决（2026-10-13/14）与本机宿主实测事实

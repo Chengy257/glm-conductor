@@ -1,6 +1,6 @@
-# GLM Conductor 架构（权威文档，v2.4）
+# GLM Conductor 架构（权威文档，v2.6.0）
 
-> 本文档是 GLM Conductor 的**唯一架构真相源**，描述插件**当前**（v2.4.0）的实际运行时行为——每一节回答"系统现在是什么"，不叙述开发历程；已删除的模块不写成"deprecated 运行路径"——它们不存在了（退役对照见 §21）。
+> 本文档是 GLM Conductor 的**唯一架构真相源**，描述插件**当前**（v2.6.0）的实际运行时行为——每一节回答"系统现在是什么"，不叙述开发历程；已删除的模块不写成"deprecated 运行路径"——它们不存在了（退役对照见 §21）。
 > 一句话定位：**GLM Conductor owns semantic orchestration and acceptance; ZCode owns execution orchestration.**
 > 契约细节以插件目录为准（`plugins/glm-conductor/` 下的 agents 与 skills）；本文档与其保持一致，冲突时以修复到一致为准。概念入门见 [core-concepts.md](core-concepts.md)，排障指引见 [troubleshooting.md](troubleshooting.md)。
 

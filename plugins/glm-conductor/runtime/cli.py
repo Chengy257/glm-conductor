@@ -237,10 +237,14 @@ v2.4 Phase 3（P3-D/E）收口面：
         不上 CLI——生命周期迁移一律走具名命令。
     exit-waiting <repo_root> <task_id>
         手动恢复出等待（v2.5.2 W2，task.exit_waiting_quota 薄壳）：
-        waiting_quota → active 并落 waiting_quota 事件（direction:
-        exit）；原状态 active 幂等。自动恢复路径的落账走既有
-        quota-resume-confirm（本命令是 manual 恢复与运维对账通道）。
-        runtime.task 拒绝（迁移矩阵外来源如 waiting_user）→ 退出码
+        迁回 active 并落 waiting_quota 事件（direction: exit）——
+        TASK_TRANSITIONS 中「→ active」合法的全部来源均放行：
+        waiting_quota / waiting_user / blocked（waiting_user 亦合法
+        ——矩阵事实：手动恢复通道对自动决策已转 waiting_user 的任务
+        同样适用）；原状态 active 幂等（零事件）。自动恢复路径的
+        落账走既有 quota-resume-confirm（本命令是 manual 恢复与运维
+        对账通道）。runtime.task 拒绝（→ active 的矩阵外来源——
+        终态 completed / cancelled / failed 无转换表项）→ 退出码
         1。输出 {task_id, status}。
     task-record-workflow-run <repo_root> <task_id> <run-id>
         委派 run 注册规范入口（v2.6.0 WP-R4，task.record_workflow_run
@@ -261,8 +265,12 @@ v2.4 Phase 3（P3-D/E）收口面：
     生成源含中文））；stderr 不承载结构化输出。
     退出码：
       0 = 成功；
-      2 = 校验拒绝（用法错误 / 参数值非法 / save_state 校验闸或状态
-          转换门拒绝——含盘上 state.json 损坏的解析拒绝；v2.5 起
+      2 = 校验拒绝（用法错误 / 参数值非法 / 盘上 state.json 结构性
+          拒绝——JSON 损坏解析 / schema 残缺 / 任务标识错位 /
+          save_state 校验闸：损坏盘面绝不静默覆盖，也绝不作为任务
+          生命周期拒绝报出（v2.6.0 WP-C 显式分类：任务层 ValueError
+          经各薄壳以 _is_structural_state_rejection 分类收口，本类
+          不经 Rejected 包装直接归本档）；v2.5 起
           含 worker-model-pin 的 id 形状非法与 workflow-model-select
           --task-ref 的任务 pin 失效 / 形状非法；v2.6.0 起另含
           workflow-model-select 的 --model 显式值与任务 pin 不一致）；
@@ -277,7 +285,9 @@ v2.4 Phase 3（P3-D/E）收口面：
           record-validation / task-complete / task-fail /
           task-cancel / exit-waiting）与 v2.6.0 规范 run 注册
           task-record-workflow-run（含 AF-04 守卫前置失配）被
-          runtime.task 拒绝
+          runtime.task 拒绝——任务生命周期拒绝（含状态迁移矩阵外
+          来源 / 终态冻结）恒归本档，与退出码 2 的盘面结构性拒绝
+          互斥
           / 意外错误；错误 JSON 只含异常类型名与消息，供操作者排查）。
 
 依赖方向：
@@ -345,13 +355,17 @@ class _TaskMissing(Exception):
 class _ReviewRejected(Exception):
     """review-record 被 runtime.task 拒绝（任务缺失 / v2.3 遗留任务 /
     终态冻结 / 先验证后评审顺序闸；ValueError 口径）——运行期拒绝，
-    退出码 1。"""
+    退出码 1（与 _QuotaRejected 同口径：盘上 state 结构性拒绝不经本
+    类，经 _is_structural_state_rejection 分类后按 ValueError 原样
+    透传为校验拒绝，退出码 2）。"""
 
 
 class _QuotaRejected(Exception):
     """额度等待 / 恢复生命周期操作被 runtime.task 拒绝（任务缺失 /
     非 waiting 状态 / 预算不变量 / 观测词汇外等 ValueError 口径）
-    ——运行期拒绝，退出码 1。"""
+    ——运行期拒绝，退出码 1（盘上 state 结构性拒绝除外：那不经本
+    类，经 _is_structural_state_rejection 分类后按 ValueError 原样
+    透传为校验拒绝，退出码 2）。"""
 
 
 class _AutomationRejected(Exception):
@@ -385,7 +399,32 @@ class _TaskRejected(Exception):
     任务缺失 / v2.3 遗留任务 / 终态冻结 / 状态迁移矩阵外来源 /
     AF-04 写者守卫前置失配等 ValueError 口径）——运行期拒绝，退出码
     1（与 _QuotaRejected / _AutomationRejected 同口径；参数值非法在
-    CLI 侧先闸走退出码 2，见各子命令实现）。"""
+    CLI 侧先闸走退出码 2，见各子命令实现；盘上 state 结构性拒绝
+    亦不经本类——经 _is_structural_state_rejection 分类后按
+    ValueError 原样透传为校验拒绝，退出码 2）。"""
+
+
+# 盘上 state 结构性 ValueError 的稳定消息前缀（分类锚点——state 层
+# 消息即契约文案，改动须同步本表；锚定 state.load_state 的损坏解析
+# 拒绝与 _transaction_state / _transaction_commit 的严格读写闸）。
+# 任务缺失（"state 事务：任务 … 不存在"）与生命周期拒绝（遗留 /
+# 终态冻结 / 迁移矩阵外）不在此列——那仍归退出码 1。
+_STRUCTURAL_STATE_ERROR_PREFIXES = (
+    "state.json 损坏，无法解析",
+    "state 事务：盘上 state.json 归一任务标识",
+    "state 事务：盘上 state.json schema 非法",
+    "state 非法，无法保存",
+    "state 事务：新 state.task_id",
+)
+
+
+def _is_structural_state_rejection(exc) -> bool:
+    """任务层 ValueError 是否为盘上 state 结构性拒绝（JSON 损坏解析
+    / schema 残缺 / 任务标识错位 / save_state 校验闸）——已发布契约
+    （模块头退出码 2 条目）把这一类归入校验拒绝，与任务生命周期拒绝
+    （退出码 1）互斥；识别锚定 _STRUCTURAL_STATE_ERROR_PREFIXES。"""
+    return isinstance(exc, ValueError) and str(exc).startswith(
+        _STRUCTURAL_STATE_ERROR_PREFIXES)
 
 
 def _emit(payload):
@@ -434,6 +473,8 @@ def _review_record(repo_root, task_id, reviewer, verdict,
         st = task.record_review(
             repo_root, task_id, reviewer, verdict, findings=raw_note)
     except ValueError as exc:
+        if _is_structural_state_rejection(exc):
+            raise  # 盘上 state 结构性拒绝 → 校验拒绝（退出码 2）
         raise _ReviewRejected(str(exc)) from exc
     _emit({"task_id": task_id, "review": st.get("review")})
     return 0
@@ -459,7 +500,9 @@ def _quota_resolve(repo_root, force_refresh=False) -> int:
 # subscription 概念，不做额度失败自动探测器（quota-wait 是任务已
 # 遭遇额度相关执行停止后的显式停靠命令）。校验与转态语义全在
 # runtime.task 内，这里只做 argv 解析、观测组装、JSON 输出与退出
-# 码映射（任务层 ValueError 拒绝 → _QuotaRejected，退出码 1）。
+# 码映射（任务层 ValueError 拒绝 → _QuotaRejected，退出码 1；
+# 盘上 state 结构性拒绝除外——经 _is_structural_state_rejection
+# 分类后按 ValueError 原样透传为校验拒绝，退出码 2）。
 
 def _observation_view_of(detail) -> dict:
     """单份 resolve_quota_detail 的 detail → 归一化诊断 view（恰四键，
@@ -536,6 +579,8 @@ def _quota_wait(repo_root, task_id, force_refresh=False) -> int:
     try:
         st = task.enter_waiting_quota(repo_root, task_id, quota_view=view)
     except ValueError as exc:
+        if _is_structural_state_rejection(exc):
+            raise  # 盘上 state 结构性拒绝 → 校验拒绝（退出码 2）
         raise _QuotaRejected(str(exc)) from exc
     _emit({"task_id": task_id, "status": st.get("status"),
            "quota_observation": view})
@@ -566,6 +611,8 @@ def _quota_resume_authorize(repo_root, task_id, raw_max_resumes) -> int:
     try:
         st = task.authorize_quota_resume(repo_root, task_id, max_resumes)
     except ValueError as exc:
+        if _is_structural_state_rejection(exc):
+            raise  # 盘上 state 结构性拒绝 → 校验拒绝（退出码 2）
         raise _QuotaRejected(str(exc)) from exc
     _emit({"task_id": task_id, "quota_resume": st.get("quota_resume")})
     return 0
@@ -590,13 +637,15 @@ def _quota_resume_decision(repo_root, task_id, force_refresh=False) -> int:
     绝不调用宿主 ResumeWorkflowRun（宿主动作归主会话；恢复执行与
     随后的 quota-resume-confirm 落账由唤醒轮次按连续性技能契约
     推进）。任务层 ValueError（任务缺失 / v2.3 遗留 / 观测词汇外 /
-    无关联 run 等结构性拒绝）→ _QuotaRejected（退出码 1）。"""
+    无关联 run 等任务层拒绝）→ _QuotaRejected（退出码 1）。"""
     from runtime import task  # 函数内 import：monkeypatch 友好
     view = _quota_observation_view(repo_root, force_refresh=force_refresh)
     try:
         decision = task.scheduled_activation_decision(repo_root, task_id,
                                                       view)
     except ValueError as exc:
+        if _is_structural_state_rejection(exc):
+            raise  # 盘上 state 结构性拒绝 → 校验拒绝（退出码 2）
         raise _QuotaRejected(str(exc)) from exc
     # v2.6.0 单 reset_at 无条件透传（规格 §2.3）：对所有 action 浅拷
     # 贝追加附加键——纯诊断字段，绝不参与判定；任务层既有键与副作
@@ -622,6 +671,8 @@ def _quota_resume_confirm(repo_root, task_id) -> int:
     try:
         st = task.confirm_resume_started(repo_root, task_id)
     except ValueError as exc:
+        if _is_structural_state_rejection(exc):
+            raise  # 盘上 state 结构性拒绝 → 校验拒绝（退出码 2）
         raise _QuotaRejected(str(exc)) from exc
     _emit({"task_id": task_id, "status": st.get("status"),
            "phase": st.get("phase"),
@@ -992,6 +1043,8 @@ def _worker_model_pin(repo_root, task_id, model_id) -> int:
     try:
         outcome = task.pin_worker_model(repo_root, task_id, model_id)
     except ValueError as exc:
+        if _is_structural_state_rejection(exc):
+            raise  # 盘上 state 结构性拒绝 → 校验拒绝（退出码 2）
         raise _PinRejected(str(exc)) from exc
     _emit(outcome)
     return 0
@@ -1009,6 +1062,8 @@ def _quota_automation_bind(repo_root, task_id, automation_id) -> int:
     try:
         st = task.bind_quota_automation(repo_root, task_id, automation_id)
     except ValueError as exc:
+        if _is_structural_state_rejection(exc):
+            raise  # 盘上 state 结构性拒绝 → 校验拒绝（退出码 2）
         raise _AutomationRejected(str(exc)) from exc
     _emit({"task_id": task_id, "quota_resume": st.get("quota_resume")})
     return 0
@@ -1027,6 +1082,8 @@ def _quota_automation_clear(repo_root, task_id, automation_id=None) -> int:
         st = task.clear_quota_automation(repo_root, task_id,
                                          automation_id=automation_id)
     except ValueError as exc:
+        if _is_structural_state_rejection(exc):
+            raise  # 盘上 state 结构性拒绝 → 校验拒绝（退出码 2）
         raise _AutomationRejected(str(exc)) from exc
     _emit({"task_id": task_id, "quota_resume": st.get("quota_resume")})
     return 0
@@ -1047,6 +1104,8 @@ def _quota_continuity_preflight(repo_root, task_id) -> int:
     try:
         report = task.quota_continuity_preflight(repo_root, task_id)
     except ValueError as exc:
+        if _is_structural_state_rejection(exc):
+            raise  # 盘上 state 结构性拒绝 → 校验拒绝（退出码 2）
         raise _AutomationRejected(str(exc)) from exc
     _emit({"task_id": task_id, "preflight": report})
     return 0 if report.get("ready") is True else 2
@@ -1058,8 +1117,10 @@ def _quota_continuity_preflight(repo_root, task_id) -> int:
 # 模型不需要自己找、不允许冲突命令）：CLI 侧只做词汇 / 参数值 /
 # --dag 文件形状的先闸（参数值非法 → 退出码 2，与 review-record 的
 # verdict 先闸同口径），runtime.task 的 ValueError 拒绝 → _TaskRejected
-# （退出码 1）。set_status / set_phase 保持内部原语不上面——生命周期
-# 迁移一律走具名命令（task-complete / task-fail / task-cancel /
+# （退出码 1；盘上 state 结构性拒绝除外——经
+# _is_structural_state_rejection 分类后按 ValueError 原样透传为校验
+# 拒绝，退出码 2）。set_status / set_phase 保持内部原语不上面——生命
+# 周期迁移一律走具名命令（task-complete / task-fail / task-cancel /
 # exit-waiting）。
 
 def _load_dag_nodes(dag_path):
@@ -1130,6 +1191,8 @@ def _task_create(repo_root, task_id, goal, mode, assurance,
             repo_root, task_id, goal,
             {"mode": mode, "assurance": assurance}, dag_nodes=dag_nodes)
     except ValueError as exc:
+        if _is_structural_state_rejection(exc):
+            raise  # 盘上 state 结构性拒绝 → 校验拒绝（退出码 2）
         raise _TaskRejected(str(exc)) from exc
     _emit({"task_id": task_id, "status": st.get("status"),
            "route": st.get("route")})
@@ -1166,6 +1229,8 @@ def _record_validation(repo_root, task_id, raw_status, summary=None,
         st = task.record_validation(repo_root, task_id, raw_status,
                                     summary=summary, commands=commands)
     except ValueError as exc:
+        if _is_structural_state_rejection(exc):
+            raise  # 盘上 state 结构性拒绝 → 校验拒绝（退出码 2）
         raise _TaskRejected(str(exc)) from exc
     _emit({"task_id": task_id, "validation": st.get("validation")})
     return 0
@@ -1180,22 +1245,27 @@ def _task_terminal(repo_root, task_id, finish_func, func_name) -> int:
     try:
         st = finish_func(repo_root, task_id)
     except ValueError as exc:
+        if _is_structural_state_rejection(exc):
+            raise  # 盘上 state 结构性拒绝 → 校验拒绝（退出码 2）
         raise _TaskRejected("%s：%s" % (func_name, exc)) from exc
     _emit({"task_id": task_id, "status": st.get("status")})
     return 0
 
 
 def _exit_waiting(repo_root, task_id) -> int:
-    """exit-waiting：从 waiting_quota 手动恢复回 active
-    （task.exit_waiting_quota 薄壳；自动恢复路径落账走既有
-    quota-resume-confirm）。原状态已 active 幂等；runtime.task 拒绝
-    （任务缺失 / v2.3 遗留 / 迁移矩阵外来源如 waiting_user）→
-    _TaskRejected（退出码 1）。成功输出单行 JSON {task_id, status}
-    并在真实迁移时落 waiting_quota 事件（direction: exit）。"""
+    """exit-waiting：手动恢复回 active（task.exit_waiting_quota 薄壳；
+    自动恢复路径落账走既有 quota-resume-confirm）。TASK_TRANSITIONS
+    中「→ active」合法的全部来源均放行（waiting_quota / waiting_user
+    / blocked）；原状态已 active 幂等（零事件）；runtime.task 拒绝
+    （任务缺失 / v2.3 遗留 / → active 的矩阵外来源——终态无转换表
+    项）→ _TaskRejected（退出码 1）。成功输出单行 JSON {task_id,
+    status} 并在真实迁移时落 waiting_quota 事件（direction: exit）。"""
     from runtime import task  # 函数内 import：monkeypatch 友好
     try:
         st = task.exit_waiting_quota(repo_root, task_id)
     except ValueError as exc:
+        if _is_structural_state_rejection(exc):
+            raise  # 盘上 state 结构性拒绝 → 校验拒绝（退出码 2）
         raise _TaskRejected(str(exc)) from exc
     _emit({"task_id": task_id, "status": st.get("status")})
     return 0
@@ -1232,6 +1302,8 @@ def _task_record_workflow_run(repo_root, task_id, run_id) -> int:
     try:
         st = task.record_workflow_run(repo_root, task_id, run_id)
     except ValueError as exc:
+        if _is_structural_state_rejection(exc):
+            raise  # 盘上 state 结构性拒绝 → 校验拒绝（退出码 2）
         raise _TaskRejected(str(exc)) from exc
     _emit({"task_id": task_id, "workflow_run_id": run_id,
            "status": st.get("status")})
@@ -1544,6 +1616,14 @@ def main(argv=None) -> int:
     注册 task-record-workflow-run 被 runtime.task 拒绝）
     → 1；
     其余意外异常 → 1（错误 JSON 含异常类型名，stdout 契约不破）。
+    盘上 state 结构性拒绝（JSON 损坏解析 / schema 残缺 / 任务标识
+    错位 / save_state 校验闸）经 _is_structural_state_rejection 在
+    _TaskRejected / _QuotaRejected / _AutomationRejected /
+    _PinRejected / _ReviewRejected 各薄壳分类收口：不经 Rejected
+    包装、按 ValueError 原样透传落本函数 ValueError 分支 → 2（已
+    发布契约：损坏盘面绝不静默覆盖，也绝不作为任务生命周期拒绝
+    报出）；生命周期拒绝（任务缺失 / 遗留 / 终态冻结 / 迁移矩阵外）
+    恒归 Rejected 类 → 1，两档互斥。
     preflight 的 ready=false 阻断是函数内显式返回 2，不经异常路径。
     """
     args = list(sys.argv[1:]) if argv is None else list(argv)

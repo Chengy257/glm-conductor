@@ -2,11 +2,11 @@
 
 **English** | [简体中文](./README.zh-CN.md)
 
-![Version](https://img.shields.io/badge/version-2.5.2-blue.svg)
+![Version](https://img.shields.io/badge/version-2.6.0-blue.svg)
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
 ![ZCode Plugin](https://img.shields.io/badge/ZCode-plugin-green.svg)
 ![Python](https://img.shields.io/badge/python-3.8%2B-blue.svg)
-![Models](https://img.shields.io/badge/models-GLM--5.3%20%2F%20GLM--5.3--Flash-orange.svg)
+![Models](https://img.shields.io/badge/models-GLM%20series-orange.svg)
 
 **Selective routing, Native Workflow execution, minimal deterministic assurance, and optional bounded quota resume for GLM coding agents in ZCode.**
 
@@ -233,7 +233,8 @@ All runtime operations execute through `python <plugin-root>/runtime/cli.py <sub
 | `writer-acquire <repo> <task_id> [--run-id <id>]` | Acquires coarse repository-level write reservation. |
 | `writer-release <repo> <task_id> [--force]` | Releases write reservation (`--force` for operator cleanup). |
 | `writer-show <repo>` | Inspects current repository write reservation holder. |
-| `v24-record-run <task_ref> <run-id>` | Records task ↔ Native Workflow run-id association. |
+| `task-record-workflow-run <repo_root> <task_id> <run-id>` | Canonical delegated-run registration: state + writer-guard precondition + `workflow_started` event + ledger-root receipt, from any CWD. |
+| `v24-record-run <task_ref> <run-id>` | Legacy low-level adapter receipt for task ↔ run-id association (kept for compatibility). |
 | `review-record <repo> <task_id> <reviewer> <verdict>` | Records fresh task review verdict (`ship` / `fix-first` / `rethink`). |
 | `quota-resolve <repo> [--force-refresh]` | Four-state provider quota resolution (read-only). |
 | `quota-wait <repo> <task_id>` | Enters `waiting_quota` state with normalized observation snapshot. |
@@ -282,7 +283,7 @@ glm-conductor/
 ## Documentation Hub
 
 - [Core Concepts](./docs/core-concepts.md) — Comprehensive overview of routing, execution, assurance, and recovery.
-- [Architecture Specification](./docs/architecture.md) — Authoritative technical reference for the v2.5 runtime design.
+- [Architecture Specification](./docs/architecture.md) — Authoritative technical reference for the v2.6 runtime design.
 - [Troubleshooting & Diagnostics](./docs/troubleshooting.md) — Quota diagnostics, Windows setup, Monorepo Git tuning, and writer-guard recovery.
 - [Global Quota Clock Extraction Inventory](./docs/roadmap/GLOBAL_QUOTA_CLOCK_EXTRACTION_INVENTORY.md) — Boundary definition for the companion project.
 - [Changelog](./CHANGELOG.md) — Detailed version history and migration guides.
@@ -294,7 +295,7 @@ glm-conductor/
 Contributions are welcome! Before opening a pull request, verify all automated quality gates:
 
 ```bash
-# 1. Run full unit test suite (790+ tests)
+# 1. Run full unit test suite (940+ tests)
 python -m unittest discover -s tests -p "test_*.py"
 
 # 2. Run static contract validator (16/16 checks)

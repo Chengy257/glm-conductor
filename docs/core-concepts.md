@@ -1,8 +1,8 @@
-# GLM Conductor 核心概念（v2.4）
+# GLM Conductor 核心概念（v2.6.0）
 
 > **GLM Conductor 是面向 ZCode GLM Coding Agent 的轻量语义编排层：GLM Conductor owns semantic orchestration and acceptance; ZCode owns execution orchestration.**
 >
-> 本文是概念词典：逐条定义 v2.4 的核心概念——是什么、长什么样、权威落点在哪。每个词条都可在 [architecture.md](architecture.md)（唯一架构真相源）与 `plugins/glm-conductor/runtime/` 代码中核对；运行面操作契约见插件技能文档。不叙述演化过程，不收录已删除的 v2.3 概念（退役对照见 architecture.md §21）。
+> 本文是概念词典：逐条定义 v2.6.0 的核心概念——是什么、长什么样、权威落点在哪。每个词条都可在 [architecture.md](architecture.md)（唯一架构真相源）与 `plugins/glm-conductor/runtime/` 代码中核对；运行面操作契约见插件技能文档。不叙述演化过程，不收录已删除的 v2.3 概念（退役对照见 architecture.md §21）。
 
 两个真相域是全部概念的坐标系：
 
