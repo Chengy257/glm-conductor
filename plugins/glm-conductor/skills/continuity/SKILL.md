@@ -18,7 +18,7 @@ v2.4 的连续性由四个机制构成，全部围绕任务状态（state.json�
 
 v2.5.2 在四机制之上并入两条扩展：
 
-5. **任务启动问答授权落点**——建状态任务启动前的强制一次问答（单轮三问，契约见 orchestration §6.0）把「是否跨额度自动唤醒 + 有界 max_resumes 预算」「worker 模型（仅选型歧义时）」「地板载体间隔（默认 1h）」落进任务状态与武装参数；问答只发生在交互回合，唤醒轮 / 恢复轮绝不弹问；
+5. **任务启动问答授权落点**——建状态任务启动前的强制一次问答（单轮三问，契约见 orchestration §6.0）把「是否跨额度自动唤醒 + 有界 max_resumes 预算」「worker 模型（凡有实施委派必问：宿主全候选展示+显式确认，单一候选也确认；solo 等无委派任务不问）」「地板载体间隔（默认 1h）」落进任务状态与武装参数；问答只发生在交互回合，唤醒轮 / 恢复轮绝不弹问；
 6. **双通道唤醒（启动即武装 + 滚动续臂）**——地板（recurring 载体，活性兜底，抗应用重启，创建后终身不再触碰）与精度层（后台睡眠到观测 reset_at+300s，秒级精确——reset_at 为最早的有效未来观测复位时刻，与额度状态无关；无有效未来观测时精度层缺席、floor-only 降级如实陈述）同批建立；唤醒机制的建立/续臂动作永远先于工作推进，每次唤醒轮收尾必核查在臂睡眠并续臂滚动到当前观测的下一未来窗口边界（见「双通道唤醒」节）。
 
 ## 任务状态与运行时文件
@@ -122,7 +122,7 @@ active task（delegate/full、audit，以及任何需要完成守卫保护的长
 ### 启动序列（runbook，arm-before-work）
 
 ```
-问答（orchestration §6.0，单轮三问：①跨额度唤醒+预算 ②worker 模型（仅歧义） ③地板间隔，默认 1h）
+问答（orchestration §6.0，单轮三问：①跨额度唤醒+预算 ②worker 模型（全候选+显式确认） ③地板间隔，默认 1h）
 -> task-create <repo_root> <task_id> <goal> <mode> <assurance> [--dag <path>]
 -> quota-resume-authorize <repo_root> <task_id> <max_resumes>（问答第一题确认的预算）
 -> 立即 quota-resume-decision <repo_root> <task_id> --force-refresh 取观测 reset_at

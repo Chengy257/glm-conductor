@@ -147,40 +147,46 @@ v2.4 Phase 3（P3-D/E）收口面：
         一律走规范命令，本命令仅供明确只要关联单据的低层调用方使用。
     workflow-model-select <models-json> [--model <exact-id>]
             [--task-ref <task_id>] [--repo-root <path>]
-        v2.4.1 Workflow 提交 worker 模型选型（H1，INV-MODEL-01；
-        runtime.workflow.submission.select_worker_model /
-        build_submission_contract 薄壳；绝不写宿主 API 客户端——模型
-        发现面归宿主，id 集合由调用方供给）。models-json 参数：能按
-        JSON 解析为数组则直接采用（支持内联 '["..."]' 形态），否则按
-        JSON 文件路径读取数组（UTF-8；推荐路径：ListModels 输出写
-        临时 JSON 文件后传文件路径）。从已配置 id 集合选定唯一
-        provider 限定 Flash worker 模型：显式 --model <exact-id> 校验
-        之并要求精确成员（优先于自动选择）；否则恰一 Flash 候选自动
-        选定、零候选 / 多候选歧义拒绝（绝不静默取第一个）。v2.5 起
-        增可选 --task-ref <task_id>（I1 任务级 worker 模型 pin 消费）：
-        选型优先级固定 --model 显式值 > 任务 pin > 自动选型——--model
-        给出时为完全显式覆盖（任务 pin 不参与也不对账）；否则读任务
-        顶层 worker_model pin（账本根按 --repo-root <path> 解析，
-        v2.5.2 W3 起提供；缺省当前工作目录保持兼容，v24-record-run
-        同款约定）注入
-        explicit_model_id：pin 形状非法 / pin 不在本次 configured
-        集合 → 专门拒绝（「任务 pin 已失效，请重新问答授权」语义，
-        绝不回退自动选型、绝不静默换模型）；无 pin 走既有自动选型
-        路径（行为与不带 --task-ref 逐字一致）。任务层拒绝（任务
-        缺失 / v2.3 遗留）→ 退出码 1。成功输出单行 JSON 提交契约
+        v2.4.1 Workflow 提交 worker 模型选型（H1；runtime.workflow.
+        submission.select_worker_model / build_submission_contract 薄壳；
+        绝不写宿主 API 客户端——模型发现面归宿主，id 集合由调用方供给
+        ）。models-json 参数：能按 JSON 解析为数组则直接采用（支持内联
+        '["..."]' 形态），否则按 JSON 文件路径读取数组（UTF-8；推荐路
+        径：ListModels 输出写临时 JSON 文件后传文件路径）。从已配置 id
+        集合选定用户显式授权的 provider 限定精确 worker 模型（v2.6.0
+        WP-M1 重基线：任意已配置精确 id 合法，不限 Flash 后缀；Flash
+        档降为软推荐）：--model <exact-id> 校验之并要求精确成员；不带
+        显式值时恰一 Flash 档软推荐候选自动选定（便捷路径，非静默指
+        派）、零候选 / 多候选歧义拒绝交回启动问答（绝不静默取第一个）。
+        v2.5 起增可选 --task-ref <task_id>（I1 任务级 worker 模型 pin
+        消费；账本根按 --repo-root <path> 解析，v2.5.2 W3 起提供；缺
+        省当前工作目录保持兼容，v24-record-run 同款约定）。v2.6.0 起
+        --task-ref 给出即读任务顶层 worker_model pin 且 pin 必检：pin
+        形状非法 / pin 不在本次 configured 集合 → 专门拒绝（「任务
+        pin 已失效，请重新问答授权」语义，绝不回退自动选型、绝不静默
+        换模型）；任务有 pin 时 --model 显式值必须与 pin 一致，不一致
+        即拒绝（规格 §5.3 第 4 条：普通 --model 不再能绕过任务 pin；
+        更换授权必经交互问答重新授权并以 worker-model-pin 更新任务
+        pin）；--task-ref 且无 pin 且无 --model → 退出码 2 转启动问答
+        （绝不隐式授权单候选，恰一 Flash 候选也拒）；无 --task-ref 的
+        裸调用无显式值才走软推荐自动选型。任务层拒绝（任务缺失 /
+        v2.3 遗留）→ 退出码 1。成功输出单行 JSON 提交契约
         {subagent_model, model_policy}（model_policy 恒为
-        "explicit-flash-required"）——CreateWorkflow 的
-        subagent_model 必须取此值。校验 / 配置拒绝（清单不可读 /
-        非法 JSON / 顶层非数组 / WorkflowSubmissionError / pin 失效
-        或形状非法）→ 退出码 2。
+        "user-authorized-explicit-selection"，v2.6.0 WP-M1 起语义为
+        用户授权显式选型）——CreateWorkflow 的 subagent_model 必须取
+        此值。校验 / 配置拒绝（清单不可读 / 非法 JSON / 顶层非数组 /
+        WorkflowSubmissionError / pin 失效或形状非法 / --model 与
+        pin 不一致）→ 退出码 2。
     worker-model-pin <repo_root> <task_id> <exact-id>
         任务级 worker 模型 pin 写入（v2.5 I1，task.pin_worker_model
-        薄壳）：把经形态预检的 exact id 写入任务顶层 worker_model 键
+        薄壳）：把经形状预检的 exact id 写入任务顶层 worker_model 键
         （授权问答答后落盘动作；任务全生命周期默认使用）。形状预检
-        采用 submission 形态约定（account: 前缀 / Flash 后缀）但绝不
-        查宿主模型面——写入不查宿主面，对账留给消费点。非终态任务
-        才可写；同值幂等成功（零写盘）；异值显式覆盖（返回值带 prev
-        与 new）。id 形状非法 → 参数值非法，退出码 2；任务层拒绝
+        采用 submission 形态约定（v2.6.0 WP-M1 起角色中性：account:
+        前缀 / 两段非空 / 无空白——任意已配置精确 id 合法，不再要求
+        Flash 后缀；裸别名 / 空值仍拒）但绝不查宿主模型面——写入不查
+        宿主面，对账留给消费点。非终态任务才可写；同值幂等成功（零写
+        盘）；异值显式覆盖（返回值带 prev 与 new——更换授权的规范落
+        盘动作）。id 形状非法 → 参数值非法，退出码 2；任务层拒绝
         （任务缺失 / v2.3 遗留 / 终态冻结）→ 退出码 1。绝不新增
         journal 事件（审计由本输出与 state 落盘承载）。输出单行 JSON
         {task_id, prev, new}。
@@ -258,7 +264,9 @@ v2.4 Phase 3（P3-D/E）收口面：
       2 = 校验拒绝（用法错误 / 参数值非法 / save_state 校验闸或状态
           转换门拒绝——含盘上 state.json 损坏的解析拒绝；v2.5 起
           含 worker-model-pin 的 id 形状非法与 workflow-model-select
-          --task-ref 的任务 pin 失效 / 形状非法）；另含
+          --task-ref 的任务 pin 失效 / 形状非法；v2.6.0 起另含
+          workflow-model-select 的 --model 显式值与任务 pin 不一致）；
+          另含
           quota-continuity-preflight 判定 ready=false（非校验错误的
           运行期阻塞信号：主会话机械视作 launch/resume 阻断）；
       1 = 异常（任务不存在 / 审查记录被拒 / 额度等待与恢复生命周期
@@ -839,8 +847,9 @@ def _load_task_worker_model_pin(ledger_root, task_id):
       - 任务缺失（无 state.json）→ _PinTaskRejected（退出码 1）；
       - v2.3 遗留任务 → _PinTaskRejected（退出码 1）——消费对象
         必须是存在的 v2.4 任务，绝不静默当作「无 pin」回退自动选型；
-      - 无有效 pin（键缺失 / null / 非 str）→ None（无 pin，走
-        既有自动选型路径）；
+      - 键缺失 / null 占位 → None（无 pin：--task-ref 消费面由
+        严口径拒绝转问答）；非 str / 空串盘面漂移 → 专门失效拒绝
+        （与形状非法同口径，绝不静默当作无 pin）；
       - 其余原样返回 pin 字符串（形状与 configured 对账由调用方
         _workflow_model_select 做）。
 
@@ -858,8 +867,15 @@ def _load_task_worker_model_pin(ledger_root, task_id):
             "workflow-model-select：任务 %s 是 v2.3 遗留任务，无法"
             "消费任务 pin：%s" % (task_id, state.LEGACY_STATE_GUIDANCE))
     pin = st.get("worker_model")
+    if pin is None:
+        return None  # 键缺失 / null 占位：无 pin（严口径拒由调用方处理）
     if not isinstance(pin, str) or pin == "":
-        return None
+        # 盘面漂移（外部直写非 str / 空串）与 str 形状非法同口径：
+        # 失效即拒，绝不静默当作「无 pin」放行（消费面对账统一 fail-closed）
+        raise ValueError(
+            "workflow-model-select：任务 %s 的 worker_model pin 形状非法"
+            "（盘面漂移：%r）——任务 pin 已失效，请重新问答授权"
+            % (task_id, pin))
     return pin
 
 
@@ -867,38 +883,47 @@ def _workflow_model_select(models_json, model=None, task_ref=None,
                            ledger_root=None) -> int:
     """workflow-model-select：worker 模型选型 + 提交契约输出
     （submission.select_worker_model / build_submission_contract 薄壳；
-    INV-MODEL-01：worker 必须显式选定 provider 限定 Flash 模型，绝不
-    继承主会话文本模型，绝不接受裸别名）。
+    v2.6.0 WP-M1 重基线：worker 是用户显式授权的 provider 全限定精确
+    id——绝不继承主会话文本模型，绝不接受裸别名；Flash 档为软推荐而
+    非准入硬门）。
 
     models-json 解析见 _load_configured_model_ids（内联数组与文件两
-    形态等价）。选型优先级固定（v2.5 I1）：--model 显式值 > 任务 pin
-    > 自动选型——
-      - 显式 --model <exact-id>：完全显式覆盖，校验之并要求
-        configured 精确成员（任务 pin 不参与也不对账；不带
-        --task-ref 时行为与 v2.4.1 逐字一致）；
-      - --task-ref <task_id> 且无 --model：读任务 worker_model pin
-        （账本按 ledger_root 解析，缺省当前工作目录——调用方须在
-        目标仓库根运行本命令，v24-record-run 同款约定），pin 经
-        submission.validate_worker_model 形状预检 + configured 精确
-        成员对账后注入 explicit_model_id（消费必查宿主面——pin 形状
-        非法 / 不在本次 configured 集合即专门拒绝：「任务 pin 已失
-        效，请重新问答授权」，绝不回退自动选型、绝不静默换模型）；
-        无 pin 走既有自动选型路径；
-      - 否则恰一 Flash 候选自动选定、零候选 / 多候选歧义拒绝（绝不
-        静默取第一个）。
+    形态等价）。选型语义（v2.6.0 规格 §5.3 第 4 条：有 pin 任务
+    普通 --model 不得绕过）：
+      - --task-ref <task_id> 给出即读任务 worker_model pin（账本按
+        ledger_root 解析，缺省当前工作目录——调用方须在目标仓库根
+        运行本命令，v24-record-run 同款约定）；pin 存在时消费必查
+        （语义不变）：submission.validate_worker_model 形状预检
+        （角色中性）+ configured 精确成员对账——pin 形状非法 / 不在
+        本次 configured 集合即专门拒绝：「任务 pin 已失效，请重新问
+        答授权」，绝不回退自动选型、绝不静默换模型；
+      - 任务有 pin 时 --model 显式值必须与 pin 一致，不一致即拒绝
+        （校验拒绝口径）：普通 --model 不再能绕过任务 pin；更换授权
+        必经交互问答重新授权并以 worker-model-pin 更新任务 pin；
+      - 无 pin 时 --model 任意 configured 精确成员合法（不限 Flash
+        后缀，submission 形状预检 + 精确成员对账）；不带 --task-ref
+        的 --model 行为同此（完全显式授权路径）；
+      - 无显式值分两径：**不带 --task-ref 的裸调用**走恰一 Flash 档
+        软推荐候选自动选定（软推荐便捷路径，非静默指派）、零候选 /
+        多候选歧义拒绝交回启动问答（绝不静默取第一个）；**--task-ref
+        且任务无 pin** 则无显式值即拒（转 §6.0 问答——绝不隐式授权
+        单候选，规格 §5.3 resume 严口径）。
     成功输出单行 JSON 提交契约 {subagent_model, model_policy}；校验
-    / 配置拒绝（WorkflowSubmissionError 是 ValueError 子类、pin
-    失效 / 形状非法）→ 退出码 2；任务层拒绝（任务缺失 / v2.3 遗留
-    ，_PinTaskRejected）→ 退出码 1；意外 → 退出码 1。"""
+    / 配置拒绝（WorkflowSubmissionError 是 ValueError 子类、pin 失效
+    / 形状非法、--model 与 pin 不一致）→ 退出码 2；任务层拒绝（任务
+    缺失 / v2.3 遗留，_PinTaskRejected）→ 退出码 1；意外 → 退出码 1。"""
     from runtime.workflow import submission  # 函数内 import：monkeypatch 友好
     configured = _load_configured_model_ids(models_json)
-    if model is None and task_ref is not None:
+    pin = None
+    if task_ref is not None:
         root = (ledger_root if ledger_root is not None
                 else pathlib.Path.cwd())
         pin = _load_task_worker_model_pin(root, task_ref)
         if pin is not None:
-            # 消费必查：形状预检（写入点已预检，此处防盘面漂移）+
-            # 当次 configured 精确成员对账；失效即专门拒绝，绝不回退
+            # 消费必查（语义不变）：形状预检（写入点已预检，此处防盘面
+            # 漂移）+ 当次 configured 精确成员对账；失效即专门拒绝，
+            # 绝不回退——--model 给出时同样先过本闸（pin 不因显式值
+            # 而免检）
             try:
                 submission.validate_worker_model(pin)
             except submission.WorkflowSubmissionError as exc:
@@ -913,7 +938,26 @@ def _workflow_model_select(models_json, model=None, task_ref=None,
                     "——任务 pin 已失效，请重新问答授权；绝不回退自动"
                     "选型、绝不静默换模型"
                     % (task_ref, pin, len(configured)))
-            model = pin  # 注入显式选择：任务 pin 优先于自动选型
+    if model is not None and pin is not None and model != pin:
+        # 规格 §5.3 第 4 条：有 pin 任务普通 --model 不得绕过——显式
+        # 值必须与 pin 一致；更换授权必经交互问答 + worker-model-pin
+        raise ValueError(
+            "workflow-model-select：--model %r 与任务 %s 的 worker_model "
+            "pin %r 不一致——有 pin 任务的 --model 显式值必须与 pin 一致"
+            "（普通 --model 不得绕过任务 pin）；如需更换授权，请走交互"
+            "问答重新授权并以 worker-model-pin 更新任务 pin"
+            % (model, task_ref, pin))
+    if model is None and pin is None and task_ref is not None:
+        # 规格 §5.3：resume 遇无 pin 任务绝不隐式授权单候选（§5.2
+        # 单一候选也须用户显式确认）——经问答的任务必有 pin（§6.0
+        # 第二题落盘），可达本分支的 --task-ref 调用即未授权选型
+        raise ValueError(
+            "workflow-model-select：任务 %s 无 worker_model pin 且未给 "
+            "--model 显式值——任务级 worker 选型必须经启动问答显式授权"
+            "（orchestration §6.0 第二题）并以 worker-model-pin 落盘，"
+            "绝不自动选型、绝不隐式授权单候选" % task_ref)
+    if model is None:
+        model = pin  # 无显式值：任务 pin 注入显式选择（优先于自动选型）
     selected = submission.select_worker_model(configured,
                                               explicit_model_id=model)
     _emit(submission.build_submission_contract(selected))
@@ -924,14 +968,17 @@ def _worker_model_pin(repo_root, task_id, model_id) -> int:
     """worker-model-pin：任务级 worker 模型 pin 写入
     （task.pin_worker_model 薄壳，v2.5 I1）。
 
-    把经形态预检的 exact id 写入任务顶层 worker_model 键（授权问答
+    把经形状预检的 exact id 写入任务顶层 worker_model 键（授权问答
     答后落盘动作；非终态才可写、同值幂等、异值显式覆盖带 prev/new；
     绝不查宿主模型面——对账留给消费点；绝不新增 journal 事件）。
     id 形状非法在 CLI 侧先经 submission.validate_worker_model 预检
-    （参数值非法口径 → 退出码 2，与 review-record 的 verdict 词汇
-    先闸同款）；任务层拒绝（任务缺失 / v2.3 遗留 / 终态冻结）→
-    _PinRejected（退出码 1）。输出单行 JSON {task_id, prev, new}
-    （与 task.pin_worker_model 返回值同源同字段）。"""
+    （v2.6.0 WP-M1 起角色中性形状校验：account: 前缀 / 两段非空 /
+    无空白——任意已配置精确 id 合法，不再要求 Flash 后缀；裸别名 /
+    空值仍拒；宿主配置对账留给消费点）（参数值非法口径 → 退出码 2，
+    与 review-record 的 verdict 词汇先闸同款）；任务层拒绝（任务缺失
+    / v2.3 遗留 / 终态冻结）→ _PinRejected（退出码 1）。输出单行
+    JSON {task_id, prev, new}（与 task.pin_worker_model 返回值同源
+    同字段）。"""
     from runtime import task  # 函数内 import：monkeypatch 友好
     from runtime.workflow import submission  # 函数内 import：monkeypatch 友好
     try:
@@ -1486,7 +1533,7 @@ def main(argv=None) -> int:
 
     argv 缺省取 sys.argv[1:]；测试可直接传列表调用。异常映射：
     ValueError（用法 / 参数值 / save_state 校验栈 / 任务 pin 失效或
-    形状非法）→ 2；
+    形状非法 / --model 与任务 pin 不一致）→ 2；
     _TaskMissing（任务不存在）/ _ReviewRejected（审查记录被
     runtime.task 顺序与状态闸拒绝）/ _QuotaRejected（额度等待与
     恢复生命周期操作被 runtime.task 拒绝）/ _AutomationRejected

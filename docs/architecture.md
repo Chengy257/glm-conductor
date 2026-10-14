@@ -138,7 +138,7 @@ v2.4 有两个真相域：**静态语义真相**（Conductor 任务/DAG state）
   "created_at": "2026-09-21T08:30:00.000Z" }
 ```
 
-主会话的委派启动顺序固化为：**任务启动问答**（v2.5：凡建状态任务在 create_task 之前强制一次单轮两问合并的问答——① 跨额度自动唤醒与有界 `max_resumes` 预算，答「启用」先落 `quota-resume-authorize` 再走下方武装序列；② 选型歧义时的 worker 模型，答出即落 `worker-model-pin`，恰一候选自动选定此题不出现；纯会话内小任务不建 state 不问；问答只发生在交互回合，唤醒轮 / 恢复轮绝不弹问，契约见 orchestration §6.0）→ create task → `v24-compile` 产码 → **worker 模型选型硬闸**（宿主模型列表 → `workflow-model-select` 选定显式 provider 限定 GLM-5.3-Flash；带 `--task-ref <task_id>` 时按固定优先级取值：`--model` 显式值 > 任务 pin > 自动选型，pin 失效专门拒绝，见 §14；mode=auto 任务还须先完成连续性武装：建 Scheduled Task → `quota-automation-bind` → `quota-continuity-preflight` PASS）→ `writer-acquire` 取仓库写预约 → 宿主 CreateWorkflow（显式 `subagent_model`）启动 run → `record_workflow_run`（state.workflow_run_id + adapter 单据 + journal 事件）。run 的中途状态（进行中 / 卡在 ask / 已完成）一律经宿主 ListWorkflowRuns / GetWorkflowRun 观察，不进 Conductor 账本。
+主会话的委派启动顺序固化为：**任务启动问答**（v2.5.2：凡建状态任务在 create_task 之前强制一次单轮三问合并的问答（第三题为 auto 启用时的条件题，manual 分支两问）——① 跨额度自动唤醒与有界 `max_resumes` 预算，答「启用」先落 `quota-resume-authorize` 再走下方武装序列；② worker 模型（凡有实施委派必问：宿主全候选展示+显式确认，单一候选也确认；solo 等无委派任务不问），答出即落 `worker-model-pin`；问答只发生在交互回合，唤醒轮 / 恢复轮绝不弹问，契约见 orchestration §6.0）→ create task → `v24-compile` 产码 → **worker 模型选型硬闸**（宿主模型列表 → `workflow-model-select` 选定用户显式授权的 provider 全限定精确 id（不限档位，Flash 为软推荐）；带 `--task-ref <task_id>` 时按固定优先级取值：任务 pin > `--model` 显式值（必须与 pin 一致）> Flash 软推荐自动选型（仅裸调用），无 pin 无 `--model` 即拒转问答、pin 失效专门拒绝，见 §14；mode=auto 任务还须先完成连续性武装：建 Scheduled Task → `quota-automation-bind` → `quota-continuity-preflight` PASS）→ `writer-acquire` 取仓库写预约 → 宿主 CreateWorkflow（显式 `subagent_model`）启动 run → `record_workflow_run`（state.workflow_run_id + adapter 单据 + journal 事件）。run 的中途状态（进行中 / 卡在 ask / 已完成）一律经宿主 ListWorkflowRuns / GetWorkflowRun 观察，不进 Conductor 账本。
 
 ## 6. ownership 与编译期冲突处理
 
@@ -391,7 +391,7 @@ runtime CLI 子命令（退出码 0 成功 / 2 校验拒绝 / 1 运行期拒绝�
 | `v24-compile <dag-json> [--task-ref] [--out]` | 静态 DAG → TS Workflow 源（只产码，绝不执行） |
 | `writer-acquire / writer-release [--force] / writer-show` | 仓库写者守卫操作面（§7） |
 | `v24-record-run <task_ref> <run-id>` | 任务 ↔ Workflow run 关联单据（§5） |
-| `workflow-model-select <models-json> [--model <exact-id>] [--task-ref <task_id>]` | worker 模型选型硬闸（INV-MODEL-01；恰一 Flash 自动 / 零候选拒 / 多候选歧义拒；`--task-ref` 消费任务 pin：`--model` 显式值 > 任务 pin > 自动选型，pin 失效即拒；输出 `{subagent_model, model_policy}` 提交契约） |
+| `workflow-model-select <models-json> [--model <exact-id>] [--task-ref <task_id>]` | worker 模型选型硬闸（INV-MODEL-01；用户授权显式选型：任务 pin > `--model`（必须与 pin 一致）> Flash 软推荐自动选型（仅裸调用）；无 pin 无 `--model` 拒转问答 / 零候选拒 / 多候选歧义拒 / pin 失效即拒；输出 `{subagent_model, model_policy}` 提交契约） |
 | `worker-model-pin <repo> <task_id> <exact-id>` | 任务级 worker 模型 pin 写入（§14；形状预检不查宿主面，非终态才可写，同值幂等 / 异值覆盖带 prev/new，无 journal 事件） |
 | `quota-automation-bind / quota-automation-clear / quota-continuity-preflight` | auto 连续性武装操作面（§14；preflight ready=false → 退出码 2 = launch/resume 阻断） |
 | `review-record <repo> <task> <reviewer> <verdict> [note]` | 任务级评审记录（先验证后评审） |

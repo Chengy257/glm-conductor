@@ -168,8 +168,8 @@ file <归一路径>\0<sha256:…|missing>   ← 每个相关路径一行（排�
 **是什么**：用户在任务启动问答（orchestration §6.0）中显式授权的**任务级 worker 模型偏好**——授权一次、任务全生命周期默认（含唤醒恢复后的新 run 提交）；是偏好，不是任务身份（任务身份始终是 `task_id`）。
 
 - **形状**：state 顶层可选键 `worker_model`——存在才校验（null 或非空 str），缺省即不写键（未问答授权即无 pin），旧任务加载零迁移（`runtime/state.py`）
-- **写入不查宿主面**：`task.pin_worker_model`（CLI `worker-model-pin`）经 submission 形态约定预检（`account:` 前缀 + Flash 后缀）后落盘——写入时点与提交时点宿主面可能不同，对账留给消费点；非终态才可写，同值幂等（零写盘），异值显式覆盖（输出带 prev/new）；不新增 journal 事件
-- **消费必查宿主面**：`workflow-model-select --task-ref <task_id>` 每次对账当次 configured 集合；选型优先级固定 `--model` 显式值 > 任务 pin > 自动选型；pin 形状非法或不在列表即专门拒绝（退出码 2「任务 pin 已失效，请重新问答授权」）——绝不回退自动选型、绝不静默换模型；候选漂移由此天然安全（新候选不自动采用，旧 pin 不自动替换）
+- **写入不查宿主面**：`task.pin_worker_model`（CLI `worker-model-pin`）经 submission 角色中性形态约定预检（`account:` 前缀、两段非空、无空白——不限 Flash 后缀）后落盘——写入时点与提交时点宿主面可能不同，对账留给消费点；非终态才可写，同值幂等（零写盘），异值显式覆盖（输出带 prev/new）；不新增 journal 事件
+- **消费必查宿主面**：`workflow-model-select --task-ref <task_id>` 每次对账当次 configured 集合；选型优先级固定 任务 pin > `--model` 显式值（必须与 pin 一致）> Flash 软推荐自动选型（仅裸调用）；任务无 pin 且无 `--model` 即拒转启动问答（绝不隐式授权单候选）；pin 形状非法（含盘面漂移）或不在列表即专门拒绝（退出码 2「任务 pin 已失效，请重新问答授权」）——绝不回退自动选型、绝不静默换模型；候选漂移由此天然安全（新候选不自动采用，旧 pin 不自动替换）
 - **交互回合边界**：问答与重新授权只发生在交互回合；唤醒轮 / 恢复轮绝不弹问——无人值守回合遇 pin 失效一律阻断提交、转等待用户（fail closed）
 - **权威落点**：`runtime/state.py`（键校验）；`runtime/task.py`（`pin_worker_model`）；`runtime/cli.py`（`worker-model-pin` 写入 / `workflow-model-select --task-ref` 消费）
 

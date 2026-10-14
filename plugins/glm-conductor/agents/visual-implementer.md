@@ -96,3 +96,10 @@ GAPS:
 ```
 
 记住：无证据的完成声明无效——没有亲自读过的截图，视觉验证即不成立。
+
+## 绑定维护（维护者说明，非运行时指令）
+
+- **当前绑定**：frontmatter `model: "account:bigmodel-individual-coding-plan/GLM-5.3-Flash"`（思考档位 high）——owner 2026-10-14 裁决维持静态绑定：不做动态绑定探针、不做运行时改写 frontmatter；读图能力不可用时本角色 fail closed，绝不降级为文字猜测。
+- **必须 provider 全限定写法**：`model` 字段必须写完整 `account:<账户>/<模型>` 精确 id——裸模型 id（缺 `account:` 前缀）会被宿主**静默回退到主会话模型**（实测坑）：绑定看似存在、实际已换模型，多模态读图契约随之失效。
+- **更新操作**：改本文件 frontmatter 的 `model` 字段即可换绑；但 agent 定义**无热加载**——宿主在会话启动时对插件缓存做快照，改动只对**新会话**生效，已开会话继续使用旧绑定。
+- **扩展点**：新增 `agents/<name>.md` 即被宿主发现为新的可选子智能体（同样新会话生效）；frontmatter 同样必须写 provider 全限定精确 id。
