@@ -61,7 +61,7 @@
 import os
 from datetime import datetime, timezone
 
-from runtime import durable_io
+from runtime import durable_io, messages
 
 
 class WriterGuardError(Exception):
@@ -92,8 +92,7 @@ def _validate_task_id(task_id) -> None:
     """task_id 结构校验：必须是非空字符串（id 由调用方供给，本模块不造）。"""
     if not isinstance(task_id, str) or task_id == "":
         raise WriterGuardError(
-            "writer_guard：task_id 必须是非空字符串（由调用方供给），得到 %r"
-            % (task_id,))
+            messages.WRITER_GUARD_TASK_ID_INVALID % (task_id,))
 
 
 def _validate_workflow_run_id(workflow_run_id) -> None:
@@ -101,8 +100,7 @@ def _validate_workflow_run_id(workflow_run_id) -> None:
     if workflow_run_id is not None and (
             not isinstance(workflow_run_id, str) or workflow_run_id == ""):
         raise WriterGuardError(
-            "writer_guard：workflow_run_id 必须是 None 或非空字符串，得到 %r"
-            % (workflow_run_id,))
+            messages.WRITER_GUARD_RUN_ID_INVALID % (workflow_run_id,))
 
 
 def _holder_record(current):

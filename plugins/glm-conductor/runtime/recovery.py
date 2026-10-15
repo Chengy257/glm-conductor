@@ -84,6 +84,41 @@ MAX_RENDERED_TASKS = 3
 # corrupt 警告行里最多列出的目录名数（超出以 +N more 截断，保持单行）
 MAX_CORRUPT_IDS_SHOWN = 5
 
+# —— resume context 行模板（W3a 集中：值冻结逐字不变，W3b 统一换英文） ——
+
+# v2.4 任务段落行（_render_task；段序冻结见函数 docstring）
+TASK_LINE_TEMPLATE = "Task: %s"
+REPOSITORY_LINE_TEMPLATE = "Repository: %s"
+GOAL_LINE_TEMPLATE = "Goal: %s"
+STATUS_LINE_TEMPLATE = "Status: %s"
+ROUTE_LINE_TEMPLATE = "Route: %s"
+ROUTE_ASSURANCE_SUFFIX_TEMPLATE = " (assurance: %s)"
+WORKFLOW_RUN_LINE_TEMPLATE = "Workflow run: %s"
+QUOTA_WAIT_LINE_TEMPLATE = (
+    "Quota wait: %s (resume mode: %s; resumes used %d/%d)")
+NEXT_ACTION_LINE_TEMPLATE = "Next action: %s"
+
+# 字段缺失 / 形状异常时的占位值（恢复层照实呈现不猜测）
+FALLBACK_NOT_BOUND = "not bound"
+FALLBACK_NO_GOAL = "(no goal)"
+FALLBACK_UNKNOWN = "unknown"
+FALLBACK_RUN_NONE = "none"
+FALLBACK_WAITING_STATUS = "waiting"
+FALLBACK_WAITING_MODE = "manual"
+
+# legacy 一行式（_render_legacy_task；guidance 为
+# state.LEGACY_STATE_GUIDANCE 逐字透传）
+LEGACY_TASK_LINE_TEMPLATE = (
+    "Legacy task %s: v2.3 task detected — %s; next action: %s")
+
+# 截断提示行与 corrupt 警告行（render_resume_context；advisory 文本）
+TASKS_OMITTED_LINE_TEMPLATE = "(%d more task(s) omitted)"
+LEGACY_TASKS_OMITTED_LINE_TEMPLATE = "(%d more legacy task(s) omitted)"
+CORRUPT_MORE_SUFFIX_TEMPLATE = ", +%d more"
+CORRUPT_WARNING_LINE_TEMPLATE = (
+    "WARNING: %d corrupt task state file(s) detected (%s%s); "
+    "inspect .glm-conductor/tasks/ before relying on recovery.")
+
 
 # —— 摘要条目构造（纯本地只读，容错读不抛） ——
 
@@ -313,28 +348,32 @@ def _render_task(entry):
     Next action。Next action 值恒为 NEXT_ACTIONS 词汇逐字（测试
     锚定）；Workflow run 无 run id 时渲染 "none"。
     """
-    lines = ["", "Task: %s" % entry.get("task_id")]
+    lines = ["", TASK_LINE_TEMPLATE % entry.get("task_id")]
     repo = entry.get("repository")
-    lines.append("Repository: %s"
-                 % (repo if isinstance(repo, str) and repo else "not bound"))
+    lines.append(REPOSITORY_LINE_TEMPLATE
+                 % (repo if isinstance(repo, str) and repo
+                    else FALLBACK_NOT_BOUND))
     goal = entry.get("goal")
-    lines.append("Goal: %s"
-                 % (goal if isinstance(goal, str) and goal else "(no goal)"))
+    lines.append(GOAL_LINE_TEMPLATE
+                 % (goal if isinstance(goal, str) and goal
+                    else FALLBACK_NO_GOAL))
     status = entry.get("status")
-    lines.append("Status: %s"
+    lines.append(STATUS_LINE_TEMPLATE
                  % (status if isinstance(status, str) and status
-                    else "unknown"))
+                    else FALLBACK_UNKNOWN))
     route = entry.get("route")
     route = route if isinstance(route, dict) else {}
     mode = route.get("mode")
-    mode_text = mode if isinstance(mode, str) and mode else "unknown"
+    mode_text = mode if isinstance(mode, str) and mode \
+        else FALLBACK_UNKNOWN
     assurance = route.get("assurance")
     if isinstance(assurance, str) and assurance:
-        mode_text += " (assurance: %s)" % assurance
-    lines.append("Route: %s" % mode_text)
+        mode_text += ROUTE_ASSURANCE_SUFFIX_TEMPLATE % assurance
+    lines.append(ROUTE_LINE_TEMPLATE % mode_text)
     run_id = entry.get("workflow_run_id")
-    lines.append("Workflow run: %s"
-                 % (run_id if isinstance(run_id, str) and run_id else "none"))
+    lines.append(WORKFLOW_RUN_LINE_TEMPLATE
+                 % (run_id if isinstance(run_id, str) and run_id
+                    else FALLBACK_RUN_NONE))
 
     # 额度等待态增补（仅 quota_wait 键携带任务）：一行 Quota wait，
     # 值为等待态状态 + quota_resume 占位块容错投影
@@ -342,10 +381,10 @@ def _render_task(entry):
     if isinstance(quota_wait, dict):
         wait_status = quota_wait.get("status")
         wait_status = wait_status if isinstance(wait_status, str) \
-            and wait_status else "waiting"
+            and wait_status else FALLBACK_WAITING_STATUS
         wait_mode = quota_wait.get("mode")
         wait_mode = wait_mode if isinstance(wait_mode, str) \
-            and wait_mode else "manual"
+            and wait_mode else FALLBACK_WAITING_MODE
         resume_count = quota_wait.get("resume_count")
         if isinstance(resume_count, bool) or not isinstance(resume_count, int):
             resume_count = 0
@@ -353,10 +392,10 @@ def _render_task(entry):
         if isinstance(max_resumes, bool) or not isinstance(max_resumes, int):
             max_resumes = 0
         lines.append(
-            "Quota wait: %s (resume mode: %s; resumes used %d/%d)"
+            QUOTA_WAIT_LINE_TEMPLATE
             % (wait_status, wait_mode, resume_count, max_resumes))
 
-    lines.append("Next action: %s" % entry.get("next_action"))
+    lines.append(NEXT_ACTION_LINE_TEMPLATE % entry.get("next_action"))
     return lines
 
 
@@ -368,11 +407,12 @@ def _render_legacy_task(entry):
     展开 Goal / Status 等字段行（test_recovery_v24 锚定单行形态）。
     """
     task_id = entry.get("task_id")
-    task_id = task_id if isinstance(task_id, str) and task_id else "unknown"
+    task_id = task_id if isinstance(task_id, str) and task_id \
+        else FALLBACK_UNKNOWN
     guidance = entry.get("guidance")
     if not isinstance(guidance, str) or guidance == "":
         guidance = state.LEGACY_STATE_GUIDANCE
-    return ["Legacy task %s: v2.3 task detected — %s; next action: %s"
+    return [LEGACY_TASK_LINE_TEMPLATE
             % (task_id, guidance, entry.get("next_action"))]
 
 
@@ -415,23 +455,23 @@ def render_resume_context(summary):
         lines.extend(_render_task(entry))
     omitted = len(tasks) - len(shown_tasks)
     if omitted > 0:
-        lines.append("(%d more task(s) omitted)" % omitted)
+        lines.append(TASKS_OMITTED_LINE_TEMPLATE % omitted)
 
     shown_legacy = legacy[:MAX_RENDERED_TASKS]
     for entry in shown_legacy:
         lines.extend(_render_legacy_task(entry))
     omitted_legacy = len(legacy) - len(shown_legacy)
     if omitted_legacy > 0:
-        lines.append("(%d more legacy task(s) omitted)" % omitted_legacy)
+        lines.append(LEGACY_TASKS_OMITTED_LINE_TEMPLATE % omitted_legacy)
 
     if corrupt:
         shown_ids = corrupt[:MAX_CORRUPT_IDS_SHOWN]
         suffix = ""
         if len(corrupt) > len(shown_ids):
-            suffix = ", +%d more" % (len(corrupt) - len(shown_ids))
+            suffix = CORRUPT_MORE_SUFFIX_TEMPLATE \
+                % (len(corrupt) - len(shown_ids))
         lines.append(
-            "WARNING: %d corrupt task state file(s) detected (%s%s); "
-            "inspect .glm-conductor/tasks/ before relying on recovery."
+            CORRUPT_WARNING_LINE_TEMPLATE
             % (len(corrupt), ", ".join(shown_ids), suffix))
 
     return "\n".join(lines)

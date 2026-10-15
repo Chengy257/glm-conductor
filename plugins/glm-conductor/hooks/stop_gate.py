@@ -131,6 +131,97 @@ GUARD_BUDGET_ENV_VAR = "GLM_CONDUCTOR_GUARD_BUDGET_MS"
 # 进程启动 / stdin 读取 / stderr 报错 / 宿主杀停延迟的安全余量（秒）
 GUARD_SAFETY_MARGIN_SECONDS = 0.6
 
+# —— 模型可见报文模板（W3a 集中：值冻结逐字不变，W3b 统一换英文） ——
+# block 理由 / ValueError 消息 / stderr 提示 / 降级报文正文的唯一出处；
+# 本地定义（runtime/messages.py 不存在）；ENFORCEMENT DEGRADED 前缀
+# 保持英文。
+
+# 可空标识呈现（_display_id 兜底占位）
+UNBOUND_ID_DISPLAY = "（未关联）"
+
+# 查 1 失败理由：writer_guard 被其他任务持有
+GUARD_REASON_TEMPLATE = (
+    "完成被阻断：仓库写者守卫正被其他任务持有（任务 %s）。\n"
+    "- 持有者 task_id：%s\n"
+    "- 持有者 workflow_run_id：%s\n"
+    "请等持有任务收尾（其终态收尾会自动释放守卫），或由操作者核实"
+    "残留后显式释放（runtime.cli writer-release --force），"
+    "再请求完成本任务。")
+
+# 查 1 失败理由：已注册委派 run 的守卫预约缺失（AF-04）
+RESERVATION_MISSING_REASON_TEMPLATE = (
+    "完成被阻断：任务 %s 已注册委派 run，但仓库写者守卫预约缺失"
+    "（missing writer reservation——委派任务完成前必须仍持有本仓库"
+    "写者守卫）。\n"
+    "- 任务 task_id：%s\n"
+    "- 已注册 workflow_run_id：%s\n"
+    "请先经 cli.py writer-show 查看预约状态，核实守卫记录是否被"
+    "误清；为本任务补回写预约（cli.py writer-acquire <repo_root> "
+    "<task_id> --run-id <workflow_run_id>）后再请求完成。")
+
+# 查 2 失败理由：ownership 越界（头行 / 逐路径行 / 未覆盖说明 / 处置脚注）
+OWNERSHIP_REASON_HEADER_TEMPLATE = (
+    "完成被阻断：以下实际改动路径不在 dag ownership 并集内"
+    "（任务 %s）：")
+OWNERSHIP_REASON_PATH_LINE_TEMPLATE = "- %s"
+OWNERSHIP_REASON_UNCOVERED_TEMPLATE = (
+    "上述路径未被任何 dag 节点的 ownership scope 覆盖"
+    "（已参与比对：%s）")
+OWNERSHIP_REASON_NO_SCOPE_NOTE = "dag 无 ownership 声明"
+OWNERSHIP_REASON_FOOTER = (
+    "请把这些路径补进相应节点的 ownership scope（scope 变化会使"
+    "既有验证过期，需重新记录验证），或撤销越界改动后重新验证，"
+    "再请求完成。")
+
+# 查 3 失败理由：验证缺失 / 过期
+VALIDATION_MISSING_REASON_TEMPLATE = (
+    "完成被阻断：任务 %s 尚无通过的验证记录"
+    "（validation.status=%r）。\n"
+    "请完成主验证并经 runtime.task.record_validation 记录 passed "
+    "结果，再请求完成。")
+VALIDATION_STALE_REASON_TEMPLATE = (
+    "完成被阻断：验证记录已过期——验证后任务相关文件又有变化"
+    "（任务 %s）。\n"
+    "- 记录 change_id：%s\n"
+    "- 当前 change_id：%s\n"
+    "请重新验证并经 runtime.task.record_validation 刷新记录，"
+    "再请求完成。")
+
+# 查 4 失败理由：评审缺失 / 过期
+REVIEW_MISSING_REASON_TEMPLATE = (
+    "完成被阻断：high 保障任务必须有 ship 评审"
+    "（任务 %s，review.verdict=%r）。\n"
+    "请完成评审并经 runtime.task.record_review 记录 ship 结论"
+    "（评审前需先有通过的验证记录），再请求完成。")
+REVIEW_STALE_REASON_TEMPLATE = (
+    "完成被阻断：评审记录已过期——评审后任务相关文件又有变化"
+    "（任务 %s）。\n"
+    "请重新评审并经 runtime.task.record_review 刷新 ship 结论，"
+    "再请求完成。")
+
+# evaluate_completion 的 ValueError 消息（任务缺失 / v2.3 遗留）
+TASK_MISSING_MESSAGE_TEMPLATE = (
+    "任务 %s 不存在（无 state.json），完成门无法评估")
+LEGACY_TASK_MESSAGE_TEMPLATE = "任务 %s 是 v2.3 遗留任务：%s"
+
+# _run_guard 的 stderr 提示（orphaned / corrupt / legacy）
+ORPHANED_TASK_WARNING_TEMPLATE = (
+    "GLM CONDUCTOR: 任务目录 %s 无 state.json（orphaned），"
+    "完成门跳过")
+CORRUPT_TASK_WARNING_TEMPLATE = (
+    "GLM CONDUCTOR: 任务 %s 的 state.json 不可读（%s），"
+    "完成门跳过")
+LEGACY_TASK_WARNING_TEMPLATE = (
+    "GLM CONDUCTOR: 任务 %s 是 v2.3 遗留任务，完成门不评估"
+    "：%s")
+
+# 降级报文（求值期按任务隔离降级 / 钩子自身崩溃 fail-open）
+DEGRADED_TASK_SKIP_MESSAGE_TEMPLATE = (
+    "ENFORCEMENT DEGRADED: 完成门无法评估任务 %s（%s），"
+    "本轮放行该任务")
+DEGRADED_CRASH_MESSAGE_TEMPLATE = (
+    "ENFORCEMENT DEGRADED: stop_gate failed: %r")
+
 
 def _git_observation_budget_seconds() -> float:
     """git 观察窗口（秒）= 守卫总预算 − 安全余量（下限 0）。
@@ -235,7 +326,7 @@ def _display_id(value):
     """报文里的可空标识呈现：非空 str 原样；其余 → "（未关联）"。"""
     if isinstance(value, str) and value != "":
         return value
-    return "（未关联）"
+    return UNBOUND_ID_DISPLAY
 
 
 def _dag_node_ids(task_state) -> "list[str]":
@@ -258,15 +349,9 @@ def _dag_node_ids(task_state) -> "list[str]":
 
 def _guard_reason(task_id, holder) -> str:
     """查 1 失败理由：点名持有者 task_id 与 workflow_run_id。"""
-    return (
-        "完成被阻断：仓库写者守卫正被其他任务持有（任务 %s）。\n"
-        "- 持有者 task_id：%s\n"
-        "- 持有者 workflow_run_id：%s\n"
-        "请等持有任务收尾（其终态收尾会自动释放守卫），或由操作者核实"
-        "残留后显式释放（runtime.cli writer-release --force），"
-        "再请求完成本任务。"
-        % (task_id, _display_id(holder.get("task_id")),
-           _display_id(holder.get("workflow_run_id"))))
+    return GUARD_REASON_TEMPLATE % (
+        task_id, _display_id(holder.get("task_id")),
+        _display_id(holder.get("workflow_run_id")))
 
 
 def _reservation_missing_reason(task_id, workflow_run_id) -> str:
@@ -276,74 +361,42 @@ def _reservation_missing_reason(task_id, workflow_run_id) -> str:
     仓库写者守卫（AF-04）；预约缺失说明生命周期不变式已破（记录被
     误清 / 损坏），绝不放行。
     """
-    return (
-        "完成被阻断：任务 %s 已注册委派 run，但仓库写者守卫预约缺失"
-        "（missing writer reservation——委派任务完成前必须仍持有本仓库"
-        "写者守卫）。\n"
-        "- 任务 task_id：%s\n"
-        "- 已注册 workflow_run_id：%s\n"
-        "请先经 cli.py writer-show 查看预约状态，核实守卫记录是否被"
-        "误清；为本任务补回写预约（cli.py writer-acquire <repo_root> "
-        "<task_id> --run-id <workflow_run_id>）后再请求完成。"
-        % (task_id, task_id, workflow_run_id))
+    return RESERVATION_MISSING_REASON_TEMPLATE % (
+        task_id, task_id, workflow_run_id)
 
 
 def _ownership_reason(task_id, out_of_scope, node_ids) -> str:
     """查 2 失败理由：越界路径逐条列出，附参与比对的 dag 节点 id。"""
-    lines = [
-        "完成被阻断：以下实际改动路径不在 dag ownership 并集内"
-        "（任务 %s）：" % task_id,
-    ]
+    lines = [OWNERSHIP_REASON_HEADER_TEMPLATE % task_id]
     for path in out_of_scope:
-        lines.append("- %s" % path)
+        lines.append(OWNERSHIP_REASON_PATH_LINE_TEMPLATE % path)
     lines.append(
-        "上述路径未被任何 dag 节点的 ownership scope 覆盖"
-        "（已参与比对：%s）"
-        % (", ".join(node_ids) if node_ids else "dag 无 ownership 声明"))
-    lines.append(
-        "请把这些路径补进相应节点的 ownership scope（scope 变化会使"
-        "既有验证过期，需重新记录验证），或撤销越界改动后重新验证，"
-        "再请求完成。")
+        OWNERSHIP_REASON_UNCOVERED_TEMPLATE
+        % (", ".join(node_ids) if node_ids
+           else OWNERSHIP_REASON_NO_SCOPE_NOTE))
+    lines.append(OWNERSHIP_REASON_FOOTER)
     return "\n".join(lines)
 
 
 def _validation_missing_reason(task_id, status) -> str:
     """查 3 失败理由（未通过分支）：点名当前 validation.status。"""
-    return (
-        "完成被阻断：任务 %s 尚无通过的验证记录"
-        "（validation.status=%r）。\n"
-        "请完成主验证并经 runtime.task.record_validation 记录 passed "
-        "结果，再请求完成。" % (task_id, status))
+    return VALIDATION_MISSING_REASON_TEMPLATE % (task_id, status)
 
 
 def _validation_stale_reason(task_id, recorded, current) -> str:
     """查 3 失败理由（过期分支）：change_id 不一致，两侧都报。"""
-    return (
-        "完成被阻断：验证记录已过期——验证后任务相关文件又有变化"
-        "（任务 %s）。\n"
-        "- 记录 change_id：%s\n"
-        "- 当前 change_id：%s\n"
-        "请重新验证并经 runtime.task.record_validation 刷新记录，"
-        "再请求完成。" % (task_id, _display_id(recorded), current))
+    return VALIDATION_STALE_REASON_TEMPLATE % (
+        task_id, _display_id(recorded), current)
 
 
 def _review_missing_reason(task_id, verdict) -> str:
     """查 4 失败理由（无 ship 分支）：high 保障必须有 ship 评审。"""
-    return (
-        "完成被阻断：high 保障任务必须有 ship 评审"
-        "（任务 %s，review.verdict=%r）。\n"
-        "请完成评审并经 runtime.task.record_review 记录 ship 结论"
-        "（评审前需先有通过的验证记录），再请求完成。"
-        % (task_id, verdict))
+    return REVIEW_MISSING_REASON_TEMPLATE % (task_id, verdict)
 
 
 def _review_stale_reason(task_id) -> str:
     """查 4 失败理由（过期分支）：评审后相关文件又有变化。"""
-    return (
-        "完成被阻断：评审记录已过期——评审后任务相关文件又有变化"
-        "（任务 %s）。\n"
-        "请重新评审并经 runtime.task.record_review 刷新 ship 结论，"
-        "再请求完成。" % task_id)
+    return REVIEW_STALE_REASON_TEMPLATE % task_id
 
 
 def _block(check, detail, reason) -> dict:
@@ -384,11 +437,10 @@ def evaluate_completion(repo_root, task_id) -> dict:
 
     st = state.load_state(repo_root, task_id)
     if st is None:
-        raise ValueError(
-            "任务 %s 不存在（无 state.json），完成门无法评估" % task_id)
+        raise ValueError(TASK_MISSING_MESSAGE_TEMPLATE % task_id)
     if state.is_legacy_state(st):
         raise ValueError(
-            "任务 %s 是 v2.3 遗留任务：%s"
+            LEGACY_TASK_MESSAGE_TEMPLATE
             % (task_id, state.LEGACY_STATE_GUIDANCE))
 
     effective_root = state.resolve_repository_root(st, repo_root)
@@ -515,13 +567,9 @@ def _run_guard():
     # 3) 非拦截桶仅 stderr 一行提示（corrupt / orphaned 不参与判定；
     #    先于无任务早退——损坏 / 孤儿目录也要可见）
     for name, _reason in discovery["orphaned"]:
-        warn_stderr(
-            "GLM CONDUCTOR: 任务目录 %s 无 state.json（orphaned），"
-            "完成门跳过" % name)
+        warn_stderr(ORPHANED_TASK_WARNING_TEMPLATE % name)
     for name, reason in discovery["corrupt"]:
-        warn_stderr(
-            "GLM CONDUCTOR: 任务 %s 的 state.json 不可读（%s），"
-            "完成门跳过" % (name, reason))
+        warn_stderr(CORRUPT_TASK_WARNING_TEMPLATE % (name, reason))
 
     active = [name for name, _status in discovery["active"]]
     if not active:
@@ -535,16 +583,14 @@ def _run_guard():
         try:
             st = state.load_state(ledger, name)
         except (ValueError, OSError) as exc:
-            warn_stderr(
-                "GLM CONDUCTOR: 任务 %s 的 state.json 不可读（%s），"
-                "完成门跳过" % (name, exc))
+            warn_stderr(CORRUPT_TASK_WARNING_TEMPLATE % (name, exc))
             continue
         if st is None:
             continue
         if state.is_legacy_state(st):
             warn_stderr(
-                "GLM CONDUCTOR: 任务 %s 是 v2.3 遗留任务，完成门不评估"
-                "：%s" % (name, state.LEGACY_STATE_GUIDANCE))
+                LEGACY_TASK_WARNING_TEMPLATE
+                % (name, state.LEGACY_STATE_GUIDANCE))
             continue
         if st.get("status") != "active":
             continue  # 停泊态：有意停止点，放行（收尾不发生在本回合）
@@ -559,9 +605,7 @@ def _run_guard():
         try:
             result = evaluate_completion(ledger, name)
         except Exception as exc:
-            warn_stderr(
-                "ENFORCEMENT DEGRADED: 完成门无法评估任务 %s（%s），"
-                "本轮放行该任务" % (name, exc))
+            warn_stderr(DEGRADED_TASK_SKIP_MESSAGE_TEMPLATE % (name, exc))
             continue
         if result["decision"] == "block":
             emit_block_json(result["reason"])
@@ -575,5 +619,5 @@ if __name__ == "__main__":
     except SystemExit:
         raise
     except Exception as exc:  # fail-open：钩子自身崩溃绝不阻断会话
-        warn_stderr("ENFORCEMENT DEGRADED: stop_gate failed: %r" % (exc,))
+        warn_stderr(DEGRADED_CRASH_MESSAGE_TEMPLATE % (exc,))
         sys.exit(0)

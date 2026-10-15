@@ -105,6 +105,7 @@ import os
 import pathlib
 import re
 
+from runtime import messages
 from runtime.dependency import graph_errors
 from runtime.durable_io import (LOCK_SUFFIX, atomic_write_json,
                                 exclusive_lock)
@@ -182,10 +183,10 @@ _LEGACY_COLLECTION_KEYS = ("work_units", "permits", "leases", "receipts")
 # v2.3 work_units 条目内的运行时字段（permit/lease/receipt 字段）
 _LEGACY_UNIT_FIELD_KEYS = ("permit", "lease", "receipt")
 
-# v2.3 遗留任务的一行处置指引（消费方原样向用户报告）
-LEGACY_STATE_GUIDANCE = (
-    "v2.3 遗留任务：请在 2.3.x 下收尾或显式放弃"
-    "（v2.4 不自动迁移、不伪造 v2.4 完成证据）")
+# v2.3 遗留任务的一行处置指引（消费方原样向用户报告；值单源
+# messages.LEGACY_STATE_GUIDANCE——v2.6.1 W3a 集中，本名再导出保持
+# 既有导入面）
+LEGACY_STATE_GUIDANCE = messages.LEGACY_STATE_GUIDANCE
 
 
 # —— quota_resume 块（P3-B 定稿语义） ——
@@ -246,20 +247,20 @@ def normalize_task_id(raw: dict) -> str:
       - 全部不存在、或取到的值为空 / 非 str → ValueError。
     """
     if not isinstance(raw, dict):
-        raise ValueError("任务标识归一失败：输入必须是 JSON 对象")
+        raise ValueError(messages.STATE_NORMALIZE_NOT_DICT)
     present = [key for key in TASK_ID_KEYS if key in raw]
     if not present:
         raise ValueError(
-            "任务标识归一失败：缺少任务标识键（%s）" % ", ".join(TASK_ID_KEYS))
+            messages.STATE_NORMALIZE_MISSING_KEY % ", ".join(TASK_ID_KEYS))
     first_key = present[0]
     value = raw[first_key]
     for key in present[1:]:
         if raw[key] != value:
             raise ValueError(
-                "任务标识归一失败：多个标识键取值不一致（%s=%r 与 %s=%r）"
+                messages.STATE_NORMALIZE_KEY_MISMATCH
                 % (first_key, value, key, raw[key]))
     if not isinstance(value, str) or value == "":
-        raise ValueError("任务标识归一失败：%s 的值必须是非空字符串" % first_key)
+        raise ValueError(messages.STATE_NORMALIZE_EMPTY_VALUE % first_key)
     return value
 
 
@@ -340,17 +341,17 @@ def detect_legacy_task(repo_root, task_id) -> "dict | None":
 
 def _enum_error(path, value, allowed):
     """构造枚举取值错误的中文消息（含字段路径与合法取值清单）。"""
-    return "%s %r 不在合法取值内（%s）" % (path, value, ", ".join(allowed))
+    return messages.STATE_ENUM_ERROR % (path, value, ", ".join(allowed))
 
 
 def _str_list_errors(path, value):
     """校验「字符串数组」：值必须是 list 且每项为非空 str。"""
     if not isinstance(value, list):
-        return ["%s 必须是数组" % path]
+        return [messages.STATE_STR_LIST_NOT_ARRAY % path]
     errors = []
     for index, item in enumerate(value):
         if not isinstance(item, str) or item == "":
-            errors.append("%s[%d] 必须是非空字符串" % (path, index))
+            errors.append(messages.STATE_STR_LIST_ITEM_EMPTY % (path, index))
     return errors
 
 
@@ -362,7 +363,7 @@ def _validate_route(route):
     识别，本函数不再为其维护矩阵不变量。
     """
     if not isinstance(route, dict):
-        return ["route 必须是 JSON 对象"]
+        return [messages.STATE_ROUTE_NOT_OBJECT]
     errors = []
     mode = route.get("mode")
     if mode not in ROUTE_MODES:
@@ -381,10 +382,10 @@ def _validate_repository(repository):
     未知子键忽略（向前兼容）。
     """
     if not isinstance(repository, dict):
-        return ["repository 必须是 JSON 对象"]
+        return [messages.STATE_REPOSITORY_NOT_OBJECT]
     root = repository.get("root")
     if not isinstance(root, str) or root == "":
-        return ["repository.root 必须是非空字符串"]
+        return [messages.STATE_REPOSITORY_ROOT_EMPTY]
     return []
 
 
@@ -401,7 +402,7 @@ def _validate_dag(dag) -> "list[str]":
     dag 允许为空数组（solo 任务可暂无节点；是否可编译归编译器判定）。
     """
     if not isinstance(dag, list):
-        return ["dag 必须是数组"]
+        return [messages.STATE_DAG_NOT_ARRAY]
     errors = []
     for index, node in enumerate(dag):
         errors.extend(
@@ -425,7 +426,7 @@ def _validate_validation(validation):
         摘要无「必填非空」语义）。
     """
     if not isinstance(validation, dict):
-        return ["validation 必须是 JSON 对象"]
+        return [messages.STATE_VALIDATION_NOT_OBJECT]
     errors = []
     if "status" in validation and validation["status"] is not None \
             and validation["status"] not in VALIDATION_STATUSES:
@@ -436,7 +437,7 @@ def _validate_validation(validation):
             value = validation[key]
             if value is not None and (
                     not isinstance(value, str) or value == ""):
-                errors.append("validation.%s 必须是非空字符串或 null" % key)
+                errors.append(messages.STATE_VALIDATION_FIELD_INVALID % key)
     if "commands" in validation and validation["commands"] is not None:
         errors.extend(
             _str_list_errors("validation.commands", validation["commands"]))
@@ -451,7 +452,7 @@ def _validate_review(review):
       - reviewer / change_id / findings：null 或非空 str。
     """
     if not isinstance(review, dict):
-        return ["review 必须是 JSON 对象"]
+        return [messages.STATE_REVIEW_NOT_OBJECT]
     errors = []
     if "verdict" in review and review["verdict"] is not None \
             and review["verdict"] not in REVIEW_VERDICTS:
@@ -462,7 +463,7 @@ def _validate_review(review):
             value = review[key]
             if value is not None and (
                     not isinstance(value, str) or value == ""):
-                errors.append("review.%s 必须是非空字符串或 null" % key)
+                errors.append(messages.STATE_REVIEW_FIELD_INVALID % key)
     return errors
 
 
@@ -483,7 +484,7 @@ def _validate_quota_resume(block):
         task.clear_quota_automation，本层只收形状）。
     """
     if not isinstance(block, dict):
-        return ["quota_resume 必须是 JSON 对象"]
+        return [messages.STATE_QUOTA_RESUME_NOT_OBJECT]
     errors = []
     if "mode" in block and block["mode"] not in QUOTA_RESUME_MODES:
         errors.append(_enum_error("quota_resume.mode", block["mode"],
@@ -497,21 +498,20 @@ def _validate_quota_resume(block):
         if key in block:
             value = block[key]
             if not _valid_count(value):
-                errors.append("quota_resume.%s 必须是 >= 0 的整数" % key)
+                errors.append(messages.STATE_QUOTA_RESUME_COUNT_INVALID % key)
     resume_count = block.get("resume_count")
     max_resumes = block.get("max_resumes")
     if _valid_count(resume_count) and _valid_count(max_resumes) \
             and resume_count > max_resumes:
         errors.append(
-            "quota_resume.resume_count %d 不得大于 quota_resume."
-            "max_resumes %d（预算不变量：resume_count <= max_resumes）"
+            messages.STATE_QUOTA_RESUME_BUDGET_INVARIANT
             % (resume_count, max_resumes))
     # automation_id（未来定时激活见证）：null 或非空 str，无 epoch/
     # subscription 字段（v2.4.1 明确不引入第二连续性状态机）
     if "automation_id" in block and block["automation_id"] is not None:
         value = block["automation_id"]
         if not isinstance(value, str) or value == "":
-            errors.append("quota_resume.automation_id 必须是非空字符串或 null")
+            errors.append(messages.STATE_QUOTA_RESUME_AUTOMATION_ID_INVALID)
     return errors
 
 
@@ -528,7 +528,7 @@ def _validate_worker_model(model_id) -> "list[str]":
     """
     if model_id is not None and (
             not isinstance(model_id, str) or model_id == ""):
-        return ["worker_model 必须是非空字符串或 null"]
+        return [messages.STATE_WORKER_MODEL_INVALID]
     return []
 
 
@@ -545,29 +545,27 @@ def validate_state(state) -> "list[str]":
     task 识别并按 LEGACY_STATE_GUIDANCE 报告为 v2.3 任务。
     """
     if not isinstance(state, dict):
-        return ["state 必须是 JSON 对象"]
+        return [messages.STATE_NOT_OBJECT]
     errors = []
 
     # 必填顶层键
     for key in _REQUIRED_TOP_KEYS:
         if key not in state:
-            errors.append("缺少必填顶层键 %s" % key)
+            errors.append(messages.STATE_MISSING_REQUIRED_KEY % key)
 
     # task_id 非空 str 且匹配格式
     if "task_id" in state:
         task_id = state["task_id"]
         if not isinstance(task_id, str) or task_id == "":
-            errors.append("task_id 必须是非空字符串")
+            errors.append(messages.STATE_TASK_ID_EMPTY)
         elif not _TASK_ID_RE.match(task_id):
-            errors.append(
-                "task_id %r 不匹配格式 ^[A-Za-z0-9][A-Za-z0-9-]*$"
-                "（字母数字开头，仅含字母数字与连字符）" % task_id)
+            errors.append(messages.STATE_TASK_ID_FORMAT % task_id)
 
     # goal 非空 str
     if "goal" in state:
         goal = state["goal"]
         if not isinstance(goal, str) or goal == "":
-            errors.append("goal 必须是非空字符串")
+            errors.append(messages.STATE_GOAL_EMPTY)
 
     # route（mode 四模式 + 可选 assurance 两级）
     if "route" in state:
@@ -597,7 +595,7 @@ def validate_state(state) -> "list[str]":
         if workflow_run_id is not None and (
                 not isinstance(workflow_run_id, str)
                 or workflow_run_id == ""):
-            errors.append("workflow_run_id 必须是非空字符串或 null")
+            errors.append(messages.STATE_WORKFLOW_RUN_ID_INVALID)
 
     # validation / review（任务级最小记录）
     if "validation" in state:
@@ -649,11 +647,10 @@ def new_task_state(task_id, goal, route, *, repository_root, dag_nodes=(),
     """
     if not isinstance(route, dict):
         raise TypeError(
-            "new_task_state：route 必须是 dict（v2.4 route 含 mode/"
-            "assurance），得到 %s" % type(route).__name__)
+            messages.STATE_NEW_TASK_ROUTE_TYPE % type(route).__name__)
     if not isinstance(dag_nodes, (list, tuple)):
         raise TypeError(
-            "new_task_state：dag_nodes 必须是 list 或 tuple，得到 %s"
+            messages.STATE_NEW_TASK_DAG_NODES_TYPE
             % type(dag_nodes).__name__)
     route_block = {"mode": route.get("mode")}
     if route.get("assurance") is not None:
@@ -715,8 +712,7 @@ def bind_repository_root(st, repo_root) -> dict:
         resolved = pathlib.Path(os.path.abspath(repo_root)).resolve()
     else:
         raise ValueError(
-            "bind_repository_root：repo_root 必须是非空字符串路径，得到 %r"
-            % (repo_root,))
+            messages.STATE_BIND_REPO_ROOT_INVALID % (repo_root,))
     repository = st.get("repository")
     if not isinstance(repository, dict):
         repository = {}
@@ -778,10 +774,9 @@ def _transition_errors(previous, new_status):
     allowed = TASK_TRANSITIONS.get(old_status, ())
     if new_status not in allowed:
         targets = ", ".join(allowed) if allowed \
-            else "无（终态不接受任何转换；显式重开请走 reopen_task）"
+            else messages.STATE_TRANSITION_NO_TARGETS
         raise ValueError(
-            "status 转换被拒绝：%r → %r 不在合法转换内"
-            "（%s 的合法目标：%s；完整转换表见 TASK_TRANSITIONS）"
+            messages.STATE_TRANSITION_DISALLOWED
             % (old_status, new_status, old_status, targets))
 
 
@@ -813,18 +808,15 @@ def _transaction_state(repo_root, task_id, *, allow_missing) -> "dict | None":
     if current is None:
         if allow_missing:
             return None
-        raise ValueError(
-            "state 事务：任务 %s 不存在（无 state.json），拒绝读写" % task_id)
+        raise ValueError(messages.STATE_TX_TASK_MISSING % task_id)
     disk_id = normalize_task_id(current)
     if disk_id != task_id:
         raise ValueError(
-            "state 事务：盘上 state.json 归一任务标识 %r 与目标 %r 不一致"
-            "，拒绝在错位账本上写入" % (disk_id, task_id))
+            messages.STATE_TX_ID_MISMATCH % (disk_id, task_id))
     errors = validate_state(current)
     if errors:
         raise ValueError(
-            "state 事务：盘上 state.json schema 非法，拒绝在其上写入"
-            "（损坏不被覆盖）：%s" % "；".join(errors))
+            messages.STATE_TX_SCHEMA_INVALID % "；".join(errors))
     return current
 
 
@@ -840,11 +832,10 @@ def _transaction_commit(path, task_id, new_state) -> pathlib.Path:
     """
     errors = validate_state(new_state)
     if errors:
-        raise ValueError("state 非法，无法保存：%s" % "；".join(errors))
+        raise ValueError(messages.STATE_SAVE_INVALID % "；".join(errors))
     if new_state.get("task_id") != task_id:
         raise ValueError(
-            "state 事务：新 state.task_id %r 与事务目标 %r 不一致，拒绝"
-            "提交（P1-9：目录与内容的任务标识必须一致）"
+            messages.STATE_TX_NEW_TASK_ID_MISMATCH
             % (new_state.get("task_id"), task_id))
     atomic_write_json(path, new_state, sort_keys=False)
     return path
@@ -883,7 +874,7 @@ def update_task_state(repo_root, task_id, mutate, *,
         new_state = mutate(current)
         if not isinstance(new_state, dict):
             raise ValueError(
-                "update_task_state：mutate 必须返回完整 state dict，得到 %s"
+                messages.STATE_TX_MUTATE_RETURN_INVALID
                 % type(new_state).__name__)
         _transition_errors(current, new_state.get("status"))
         _transaction_commit(path, task_id, new_state)
@@ -922,15 +913,14 @@ def save_state(repo_root, state, *, task_id=None) -> pathlib.Path:
     """
     errors = validate_state(state)
     if errors:
-        raise ValueError("state 非法，无法保存：%s" % "；".join(errors))
+        raise ValueError(messages.STATE_SAVE_INVALID % "；".join(errors))
     tid = task_id if task_id is not None else state["task_id"]
     # P1-9：目录 task_id 与内容 task_id 必须一致——显式 task_id 与
     # state["task_id"] 不一致即拒绝，防止任务目录与 state.json 内容错位
     if task_id is not None and task_id != state.get("task_id"):
         raise ValueError(
-            "save_state：目录 task_id %r 与 state.task_id %r 不一致"
-            "（P1-9：目录与内容的任务标识必须一致；如需迁移请以内容 ID "
-            "为准重建目录）" % (task_id, state.get("task_id")))
+            messages.STATE_SAVE_DIR_ID_MISMATCH
+            % (task_id, state.get("task_id")))
     path = state_path(repo_root, tid)
     # 事务：转换门与落盘在同一把独占锁内完成（锁内严格重读——盘上
     # 损坏 / 错位 / schema 残缺在此抛 ValueError，不会被覆盖）
@@ -959,7 +949,7 @@ def load_state(repo_root, task_id) -> "dict | None":
             raw = json.load(fh)
     except ValueError as exc:
         raise ValueError(
-            "state.json 损坏，无法解析（%s）：%s" % (path, exc)) from exc
+            messages.STATE_LOAD_CORRUPT % (path, exc)) from exc
     tid = normalize_task_id(raw)
     for key in TASK_ID_KEYS[1:]:
         if key in raw and raw[key] == tid:
@@ -1025,8 +1015,8 @@ def reopen_task(repo_root, task_id, *, reason=None) -> dict:
         old_status = current.get("status")
         if old_status not in TERMINAL_STATUSES:
             raise ValueError(
-                "reopen_task：任务 %s 的 status 为 %r，非终态任务无需重开"
-                "（迁移请走 transition_task_status）" % (task_id, old_status))
+                messages.STATE_REOPEN_NOT_TERMINAL
+                % (task_id, old_status))
         new_state = dict(current)
         new_state["status"] = "active"
         _transaction_commit(path, task_id, new_state)
@@ -1083,14 +1073,17 @@ def discover_tasks(repo_root) -> dict:
             loaded = load_state(repo_root, entry.name)
         except ValueError as exc:
             discovery["corrupt"].append(
-                (entry.name, _short_reason("state.json 损坏：%s" % exc)))
+                (entry.name, _short_reason(
+                    messages.STATE_DISCOVER_CORRUPT % exc)))
             continue
         except OSError as exc:
             discovery["corrupt"].append(
-                (entry.name, _short_reason("state.json 不可读：%s" % exc)))
+                (entry.name, _short_reason(
+                    messages.STATE_DISCOVER_UNREADABLE % exc)))
             continue
         if loaded is None:
-            discovery["orphaned"].append((entry.name, "无 state.json"))
+            discovery["orphaned"].append(
+                (entry.name, messages.STATE_DISCOVER_NO_STATE))
             continue
         status = loaded.get("status")
         if status in TERMINAL_STATUSES:

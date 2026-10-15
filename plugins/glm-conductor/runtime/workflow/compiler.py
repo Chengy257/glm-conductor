@@ -75,6 +75,46 @@ STATUS_UNION = '"complete" | "partial" | "blocked"'
 # task_context 必备键（至少含这三个非空字符串）
 TASK_CONTEXT_REQUIRED_KEYS = ("task_ref", "goal", "repository")
 
+# —— 生成源注释模板（W3a 集中盘点：值冻结逐字不变，W3b 统一换英文） ——
+# 生成 TS 源里中文注释与阶段标签的唯一出处。审计结论（2026-10-15）：
+# 生成注释含中文 → 全部收编为下列常量；actor 标签前缀 "node-%s" 与
+# "// " + "=" * 60 横线为 ASCII，按 W3a 口径保持内联不改。
+
+# 头部横幅注释块
+BANNER_TITLE_COMMENT = (
+    "// GLM Conductor 原生 Workflow 编译产物"
+    "（runtime/workflow，P1-D）")
+TASK_REF_COMMENT_TEMPLATE = "// task_ref：%s"
+GOAL_COMMENT_TEMPLATE = "// goal：%s"
+REPOSITORY_COMMENT_TEMPLATE = "// repository：%s"
+STAGE_COUNT_COMMENT_TEMPLATE = (
+    "// 节点数 %d；阶段数 %d（阶段序列来自 ownership 编译期"
+    "规划：组内并行、组间顺序等待）")
+DETERMINISTIC_COMMENT = (
+    "// 本产物为确定性生成：无时间戳、无随机数；"
+    "同一输入两次编译字节全等。")
+NODE_ID_TRANSPARENCY_COMMENT = (
+    "// Conductor 节点 id 原样出现在 actor 标签、"
+    "ask 指令与结果映射中。")
+
+# 返回契约 / persona 来源 / 结果映射说明注释
+ASK_CONTRACT_COMMENT = "// 每节点 ask 的返回契约：结构化实施结果（恰六字段）"
+PERSONA_SOURCE_COMMENT = (
+    "// 文本工人 persona（唯一权威来源："
+    "runtime/workflow/persona.py）")
+RESULTS_MAP_COMMENT = "// 全部节点结果映射（键 = Conductor 节点 id 原文）"
+FINAL_AGGREGATION_COMMENT = "// —— 最终聚合返回：全部节点结果按节点 id 升序 ——"
+
+# 阶段注释头 / 阶段内节点 id 连接符 / 阶段标签（phase 名称实参，
+# stage label 前缀「阶段」为中文，一并收编）
+STAGE_HEADER_COMMENT_TEMPLATE = "// —— 阶段 %d：%s ——"
+STAGE_COMMENT_ID_SEPARATOR = "、"
+STAGE_LABEL_TEMPLATE = "阶段 %d: %s"
+
+# 阶段内逐节点注释（actor 标签说明；node- 前缀 ASCII 保持内联）
+NODE_COMMENT_TEMPLATE = ("  // 节点 %s（actor 标签 %s；"
+                         "结果映射键为节点 id 原文）")
+
 
 # —— 序列化 / 校验小助手 ——
 
@@ -135,18 +175,18 @@ def _emit_stage(stage_number, node_ids, by_id, task_context) -> "list[str]":
     转义保留原文。"""
     ordered = sorted(node_ids)
     lines = []
-    lines.append("// —— 阶段 %d：%s ——"
+    lines.append(STAGE_HEADER_COMMENT_TEMPLATE
                  % (stage_number,
-                    "、".join(_comment_text(nid) for nid in ordered)))
+                    STAGE_COMMENT_ID_SEPARATOR.join(
+                        _comment_text(nid) for nid in ordered)))
     lines.append("phase(%s);"
-                 % _ts_string("阶段 %d: %s"
+                 % _ts_string(STAGE_LABEL_TEMPLATE
                               % (stage_number, ", ".join(ordered))))
     lines.append("await Promise.all([")
     for node_id in ordered:
         actor = "node-%s" % node_id
         instruction = build_ask(by_id[node_id], task_context)
-        lines.append("  // 节点 %s（actor 标签 %s；"
-                     "结果映射键为节点 id 原文）"
+        lines.append(NODE_COMMENT_TEMPLATE
                      % (_comment_text(node_id), _comment_text(actor)))
         lines.append("  agent(%s, persona).ask<NodeResult>(%s)"
                      % (_ts_string(actor), _ts_string(instruction)))
@@ -180,22 +220,20 @@ def compile_workflow(nodes, task_context) -> str:
 
     lines = []
     lines.append("// " + "=" * 60)
-    lines.append("// GLM Conductor 原生 Workflow 编译产物"
-                 "（runtime/workflow，P1-D）")
-    lines.append("// task_ref：%s" % _comment_text(task_context["task_ref"]))
-    lines.append("// goal：%s" % _comment_text(task_context["goal"]))
-    lines.append("// repository：%s"
+    lines.append(BANNER_TITLE_COMMENT)
+    lines.append(TASK_REF_COMMENT_TEMPLATE
+                 % _comment_text(task_context["task_ref"]))
+    lines.append(GOAL_COMMENT_TEMPLATE
+                 % _comment_text(task_context["goal"]))
+    lines.append(REPOSITORY_COMMENT_TEMPLATE
                  % _comment_text(task_context["repository"]))
-    lines.append("// 节点数 %d；阶段数 %d（阶段序列来自 ownership 编译期"
-                 "规划：组内并行、组间顺序等待）"
+    lines.append(STAGE_COUNT_COMMENT_TEMPLATE
                  % (len(all_ids), len(stages)))
-    lines.append("// 本产物为确定性生成：无时间戳、无随机数；"
-                 "同一输入两次编译字节全等。")
-    lines.append("// Conductor 节点 id 原样出现在 actor 标签、"
-                 "ask 指令与结果映射中。")
+    lines.append(DETERMINISTIC_COMMENT)
+    lines.append(NODE_ID_TRANSPARENCY_COMMENT)
     lines.append("// " + "=" * 60)
     lines.append("")
-    lines.append("// 每节点 ask 的返回契约：结构化实施结果（恰六字段）")
+    lines.append(ASK_CONTRACT_COMMENT)
     lines.append("interface NodeResult {")
     lines.append("  node_id: string;")
     lines.append("  status: %s;" % STATUS_UNION)
@@ -205,18 +243,17 @@ def compile_workflow(nodes, task_context) -> str:
     lines.append("  gaps: string[];")
     lines.append("}")
     lines.append("")
-    lines.append("// 文本工人 persona（唯一权威来源："
-                 "runtime/workflow/persona.py）")
+    lines.append(PERSONA_SOURCE_COMMENT)
     lines.append("const persona: string = %s;"
                  % _ts_string(TEXT_WORKER_PERSONA))
     lines.append("")
-    lines.append("// 全部节点结果映射（键 = Conductor 节点 id 原文）")
+    lines.append(RESULTS_MAP_COMMENT)
     lines.append("const allResults: { [nodeId: string]: NodeResult } = {};")
     for stage_number, node_ids in enumerate(stages, start=1):
         lines.append("")
         lines.extend(_emit_stage(stage_number, node_ids, by_id, task_context))
     lines.append("")
-    lines.append("// —— 最终聚合返回：全部节点结果按节点 id 升序 ——")
+    lines.append(FINAL_AGGREGATION_COMMENT)
     if all_ids:
         lines.append("return [")
         for node_id in all_ids:
