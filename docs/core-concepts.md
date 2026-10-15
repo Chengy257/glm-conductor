@@ -1,8 +1,8 @@
-# GLM Conductor Core Concepts (v2.6.0)
+# GLM Conductor Core Concepts (v2.6.1)
 
 > **GLM Conductor is a lightweight semantic orchestration layer for the ZCode GLM Coding Agent: GLM Conductor owns semantic orchestration and acceptance; ZCode owns execution orchestration.**
 >
-> This document is a concept dictionary: it defines the core concepts of v2.6.0 one by one — what each is, what it looks like, and where its authoritative landing point lives. Every entry can be checked against [architecture.md](architecture.md) (the single source of architectural truth) and the code under `plugins/glm-conductor/runtime/`; the operational contracts of the runtime face live in the plugin skill documents. It narrates no evolution history and includes no retired v2.3 concepts (retirement cross-reference: architecture.md §21).
+> This document is a concept dictionary: it defines the core concepts of v2.6.1 one by one — what each is, what it looks like, and where its authoritative landing point lives. Every entry can be checked against [architecture.md](architecture.md) (the single source of architectural truth) and the code under `plugins/glm-conductor/runtime/`; the operational contracts of the runtime face live in the plugin skill documents. It narrates no evolution history and includes no retired v2.3 concepts (retirement cross-reference: architecture.md §21).
 
 Two truth domains are the coordinate system of all concepts:
 

@@ -1,6 +1,6 @@
 ---
 name: visual-reviewer
-description: GLM Conductor read-only visual reviewer (GLM-5.3-Flash multimodal, fresh context). For visual tasks on audit/full routes after main-session verification — personally reads screenshot evidence, judges against VISUAL ACCEPTANCE, checks user-visible regressions; outputs a VISUAL REVIEW verdict (ship/fix-first/rethink); never implements fixes.
+description: Read-only fresh-context GLM-5.3-Flash multimodal visual reviewer for visual audit/full tasks after main-session verification: reads screenshots, judges VISUAL ACCEPTANCE and user-visible regressions; VISUAL REVIEW verdict (ship/fix-first/rethink).
 model: "account:bigmodel-individual-coding-plan/GLM-5.3-Flash"
 thoughtLevel: max
 color: purple

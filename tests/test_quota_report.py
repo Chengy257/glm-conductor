@@ -19,7 +19,10 @@ QuotaProviderError），不发任何真实网络请求、不读真实 ~/.zcode �
   - 探测顺序契约：zai 在前，任一成功即用（后者不再探测），fetch
     恒以 force=True 调用（§34 诊断面强制刷新）；
   - format_duration_delta：未来 "1h 42m"/"3d 4h"/"45m"/"0m"、
-    过去 → "due now"、None/垃圾 → "unknown"。
+    过去 → "due now"、None/垃圾 → "unknown"；
+  - 人读中文 reason 渲染锚（v2.6.1 W5b 解耦后 report.py 渲染端口）：
+    PRESSURE 分段与 checkpoint 行、EXHAUSTED resume_at 行、
+    UNKNOWN 状态 reason 与 fail-open 计划行。
 
 运行：
     cd <repo_root> && python3 -m unittest tests.test_quota_report -v
@@ -171,6 +174,12 @@ class SuccessTextTest(ReportHarness):
         self.assertIn("weekly:", out)
         self.assertIn("status: PRESSURE", out)
         self.assertIn("plan: checkpoint", out)
+        # v2.6.1 W5b 解耦后的人读中文 reason 渲染锚（report.py 渲染端口
+        # 按结构化字段重建，parser 原产 reason 已英文化）：PRESSURE 分段
+        # 与 checkpoint 计划行逐字锚定
+        self.assertIn("five_hour 接近阈值（剩余 8%）", out)
+        self.assertIn("额度接近阈值：当前原子步骤收尾后在安全里程碑落"
+                      " checkpoint，不开新的大实施阶段", out)
         self.assertNotIn("not present", out)
 
     def test_available_plan_continue(self):
@@ -187,6 +196,43 @@ class SuccessTextTest(ReportHarness):
         self.assertEqual(code, 0)
         self.assertIn("status: AVAILABLE", out)
         self.assertIn("plan: continue", out)
+
+    def test_exhausted_resume_at_reason_zh(self):
+        """EXHAUSTED：resume_at 计划行的中文渲染锚（'窗口已耗尽：等到 '
+        前缀 + '唤醒后必须强制刷新额度' 后缀；v2.6.1 W5b 渲染端口）。"""
+        windows = [
+            {"kind": "five_hour", "used_percent": 100.0,
+             "remaining_percent": 0.0,
+             "reset_at": iso_z(NOW + timedelta(hours=1))},
+            {"kind": "weekly", "used_percent": 45.0,
+             "remaining_percent": 55.0,
+             "reset_at": iso_z(NOW + timedelta(days=3, hours=4))},
+        ]
+        providers, _, _ = self.success_providers(windows=windows)
+        code, out, _ = self.run_main(providers=providers)
+        self.assertEqual(code, 0)
+        self.assertIn("status: EXHAUSTED", out)
+        self.assertIn("plan: resume_at", out)
+        self.assertIn("窗口已耗尽：等到 ", out)
+        self.assertIn("唤醒后必须强制刷新额度", out)
+
+    def test_unknown_failopen_reason_zh(self):
+        """UNKNOWN：状态 reason 与 periodic_fallback 计划行的中文渲染锚
+        （'窗口数据不完整' + '额度状态未知（fail-open）…'；used 缺失 →
+        窗口 UNKNOWN，fail-open 不阻塞）。"""
+        windows = [
+            {"kind": "five_hour", "used_percent": None,
+             "remaining_percent": None,
+             "reset_at": iso_z(NOW + timedelta(hours=1))},
+        ]
+        providers, _, _ = self.success_providers(windows=windows)
+        code, out, _ = self.run_main(providers=providers)
+        self.assertEqual(code, 0)
+        self.assertIn("status: UNKNOWN", out)
+        self.assertIn("plan: periodic_fallback", out)
+        self.assertIn("窗口数据不完整（five_hour 已用/剩余数据缺失）", out)
+        self.assertIn("额度状态未知（fail-open）：回退周期存活探针，"
+                      "不阻塞任务", out)
 
     def test_weekly_missing_not_present(self):
         windows = [{"kind": "five_hour", "used_percent": 92.0,

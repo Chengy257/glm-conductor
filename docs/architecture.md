@@ -1,6 +1,6 @@
-# GLM Conductor Architecture (authoritative reference, v2.6.0)
+# GLM Conductor Architecture (authoritative reference, v2.6.1)
 
-> This document is the **single source of architectural truth** for GLM Conductor: it describes the **actual current** (v2.6.0) runtime behavior — every section answers "what the system is now" and does not narrate development history; removed modules are never described as "deprecated run paths" — they no longer exist (see §21 for the retirement map).
+> This document is the **single source of architectural truth** for GLM Conductor: it describes the **actual current** (v2.6.1) runtime behavior — every section answers "what the system is now" and does not narrate development history; removed modules are never described as "deprecated run paths" — they no longer exist (see §21 for the retirement map).
 > One-line positioning: **GLM Conductor owns semantic orchestration and acceptance; ZCode owns execution orchestration.**
 > Contract details defer to the plugin directory (the agents and skills under `plugins/glm-conductor/`); this document stays consistent with it, and on conflict the resolution is to fix back into consistency. For the conceptual introduction see [core-concepts.md](core-concepts.md); for troubleshooting see [troubleshooting.md](troubleshooting.md).
 
@@ -448,7 +448,7 @@ GLM CONDUCTOR RESUME CONTEXT
 - **Authorization never fails open**: quota_resume's auto authorization must be explicitly persisted; the count is committed only after the host accepts the resume; the budget invariant is enforced on save — a false refusal only loses one resume opportunity, a false allow is execution without authorization
 - **Minimal state exposure**: state.json / events.jsonl contain no secret values and no full prompts; events.jsonl is append-only and isolated per task; `.glm-conductor/` is preferably excluded locally via `.git/info/exclude`, never auto-modifying a tracked `.gitignore`
 - **Generated-source safety**: Workflow compilation output contains no timestamps / randomness / credentials; the forbidden-word scan anchors zero occurrences of permit / lease vocabulary
-- **Static validation as the contract gate**: `scripts/validate_plugin.py` runs 15 checks to mechanically prevent contract regression (§22)
+- **Static validation as the contract gate**: `scripts/validate_plugin.py` runs 16 checks to mechanically prevent contract regression (§22)
 
 ## 20. Runtime boundaries (ZCode host facts)
 
@@ -485,9 +485,9 @@ The table below is the explicit retirement record: in v2.4 production code and d
 
 ## 22. Static validation and tests
 
-- `scripts/validate_plugin.py` (pure standard library, 15 checks) + CI (static validation + unit tests) maintain contract consistency: it scans `plugins/`, `README.md`, `marketplace.json`, and this document; always skipping `__pycache__` and `*.pyc` / `*.pyo`
+- `scripts/validate_plugin.py` (pure standard library, 16 checks) + local gates (static validation + unit tests) maintain contract consistency (hosted CI was removed in v2.5.2; validation runs locally): it scans `plugins/`, `README.md`, `marketplace.json`, and this document; always skipping `__pycache__` and `*.pyc` / `*.pyo`
 - Tests (`tests/`, pure standard-library unittest) cover: static nodes and DAG validation, ownership stage planning and overlap judgment, the Workflow compiler (determinism / forbidden words), the writer guard (including concurrency), the seven-state layer and its transition gate, change_id, the task lifecycle, quota_resume authorization and resume decisions, the completion guard's four checks, the resume summary, the quota observation surface; tests for deleted components are deleted with the component and never kept as skips
-- Version policy: the `plugin.json` version and the latest CHANGELOG entry stay consistent (v2.4.0)
+- Version policy: the `plugin.json` version and the latest CHANGELOG entry stay consistent (v2.6.1)
 
 ## 23. Stable boundary and evolution discipline
 

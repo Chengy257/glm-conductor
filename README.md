@@ -2,7 +2,7 @@
 
 **English** | [简体中文](./README.zh-CN.md)
 
-![Version](https://img.shields.io/badge/version-2.6.0-blue.svg)
+![Version](https://img.shields.io/badge/version-2.6.1-blue.svg)
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
 ![ZCode Plugin](https://img.shields.io/badge/ZCode-plugin-green.svg)
 ![Python](https://img.shields.io/badge/python-3.8%2B-blue.svg)
