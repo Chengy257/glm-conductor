@@ -11,19 +11,21 @@
       （node-<id>）与结果映射（allResults["<id>"]）；阶段结构——
       await Promise.all 次数 == ownership.plan_stages 阶段组数、组间
       顺序 await（phase 与汇合点的位置交错）、phase 名称形如
-      「阶段 i: 节点 id 列表」；NodeResult 接口恰六字段 + status 三值；
+      「Stage i: id 列表」；NodeResult 接口恰六字段 + status 三值；
       最终 return 按节点 id 升序聚合；ask 以 actor 方法调用形态生成
       （含 .ask<NodeResult>(，且零自由函数 ask<NodeResult>(agent 前缀）；
       ask 指令内嵌 objective /
-      ownership / interfaces / constraints / local_check / 任务背景 /
-      结果契约；生成源禁词扫描（permit / lease / credential / api_key /
+      ownership / interfaces / constraints / local_check / Task
+      context / Result contract；生成源禁词扫描（permit / lease /
+      credential / api_key /
       secret）零命中；无时间戳 / 无随机面；形状 / 图 / task_context
       校验失败抛 WorkflowCompileError；ownership 歧义模式抛
       OwnershipConflictError（冲突即抛）；scope 明确重叠被确定性串行
       （不是错误）；空 DAG 允许；
     - persona：TEXT_WORKER_PERSONA 迁移语义锚点 + 零 permit / receipt
       词；build_ask 含 objective、ownership、interfaces、constraints、
-      local_check、任务背景与结果契约六字段，可选字段缺省占位；
+      local_check、Task context 与 Result contract 六字段，可选字段
+      缺省占位（v2.6.1 W3b 起 ask 脚手架全英文，编译产物零 CJK）；
     - adapter：record_run / load_run 往返；artifact_path / node_map
       可选字段；原子写行为（durable_io 唯一临时名，写后无
       .durable-tmp. 残留、重复写整条替换、单文件）；缺失 / 损坏 /
@@ -197,7 +199,7 @@ class CompileStructureTest(unittest.TestCase):
 
     def test_ask_embeds_node_context(self):
         # 节点 id 原样出现在 ask 指令（标题点名）与全部声明细节
-        self.assertIn("【节点 impl-auth】", self.source)
+        self.assertIn("[Node impl-auth]", self.source)
         self.assertIn("实现认证模块的签名校验", self.source)
         self.assertIn("src/auth/**", self.source)
         self.assertIn("IAuth", self.source)
@@ -227,6 +229,25 @@ class CompileStructureTest(unittest.TestCase):
         source = compiler.compile_workflow([], TASK_CONTEXT)
         self.assertNotIn("await Promise.all([", source)
         self.assertIn("return [];", source)
+
+    def test_compiled_artifact_zero_cjk(self):
+        # v2.6.1 W3b 红线：ask 脚手架英文化后，编译产物（含内嵌 ask）
+        # 零 CJK 字符（样例 DAG 含中文 objective 等用户内容——脚手架
+        # 之外的节点内容原样保留，故此处用全英文夹具编译）
+        english_nodes = [
+            work_unit.new_node("impl-auth", "implement auth signature",
+                               ownership=("src/auth/**",)),
+            work_unit.new_node("impl-docs", "write auth docs",
+                               ownership=("docs/auth/**",)),
+        ]
+        source = compiler.compile_workflow(english_nodes, {
+            "task_ref": "T-ZERO-CJK",
+            "goal": "deliver auth in English",
+            "repository": "glm-conductor",
+        })
+        for ch in source:
+            self.assertLess(ord(ch), 0x4E00,
+                            "编译产物出现 CJK 字符：%r" % ch)
 
 
 # —— compiler：注释边界卫生（WP-C P3） ——
@@ -317,7 +338,8 @@ class CompileValidationTest(unittest.TestCase):
         bad = {"id": "impl-x", "depends_on": [], "ownership": ["src/x/**"]}
         with self.assertRaises(compiler.WorkflowCompileError) as caught:
             compiler.compile_workflow([bad], TASK_CONTEXT)
-        self.assertIn("node 缺少必填键 objective", str(caught.exception))
+        self.assertIn("node is missing required key objective",
+                      str(caught.exception))
 
     def test_duplicate_ids_rejected(self):
         nodes = [
@@ -326,7 +348,7 @@ class CompileValidationTest(unittest.TestCase):
         ]
         with self.assertRaises(compiler.WorkflowCompileError) as caught:
             compiler.compile_workflow(nodes, TASK_CONTEXT)
-        self.assertIn("重复 id", str(caught.exception))
+        self.assertIn("duplicate id", str(caught.exception))
 
     def test_missing_dependency_rejected(self):
         nodes = [
@@ -335,7 +357,7 @@ class CompileValidationTest(unittest.TestCase):
         ]
         with self.assertRaises(compiler.WorkflowCompileError) as caught:
             compiler.compile_workflow(nodes, TASK_CONTEXT)
-        self.assertIn("引用不存在的 id", str(caught.exception))
+        self.assertIn("references unknown id", str(caught.exception))
 
     def test_cycle_rejected(self):
         nodes = [
@@ -346,12 +368,12 @@ class CompileValidationTest(unittest.TestCase):
         ]
         with self.assertRaises(compiler.WorkflowCompileError) as caught:
             compiler.compile_workflow(nodes, TASK_CONTEXT)
-        self.assertIn("环", str(caught.exception))
+        self.assertIn("cycle", str(caught.exception))
 
     def test_nodes_must_be_list(self):
         with self.assertRaises(compiler.WorkflowCompileError) as caught:
             compiler.compile_workflow(tuple(sample_nodes()), TASK_CONTEXT)
-        self.assertIn("nodes 必须是数组", str(caught.exception))
+        self.assertIn("nodes must be an array", str(caught.exception))
 
     def test_task_context_required_keys(self):
         with self.assertRaises(compiler.WorkflowCompileError) as caught:
@@ -416,10 +438,11 @@ class PersonaTest(unittest.TestCase):
     def test_build_ask_sections_complete(self):
         node = sample_nodes()[0]
         ask = persona.build_ask(node, TASK_CONTEXT)
-        for section in ("【节点 impl-auth】", "objective", "ownership",
+        for section in ("[Node impl-auth]", "objective", "ownership",
                         "interfaces", "constraints", "local_check",
-                        "任务背景", "结果契约", "node_id", "status",
-                        "changes", "local_checks", "reassessment", "gaps",
+                        "Task context", "Result contract", "node_id",
+                        "status", "changes", "local_checks",
+                        "reassessment", "gaps",
                         "complete", "partial", "blocked",
                         "T-U4-001", "glm-conductor"):
             self.assertIn(section, ask, "ask 缺小节 / 字段：%r" % section)
@@ -430,9 +453,9 @@ class PersonaTest(unittest.TestCase):
         bare = work_unit.new_node("impl-bare", "只有必填的目标",
                                   ownership=("src/bare/**",))
         ask = persona.build_ask(bare, TASK_CONTEXT)
-        self.assertIn("（本节点未声明接口面）", ask)
-        self.assertIn("（本节点未声明额外约束）", ask)
-        self.assertIn("（本节点未声明本地检查）", ask)
+        self.assertIn("(this node declares no interfaces)", ask)
+        self.assertIn("(this node declares no additional constraints)", ask)
+        self.assertIn("(this node declares no local checks)", ask)
 
     def test_build_ask_requires_dict_node(self):
         with self.assertRaises(TypeError):

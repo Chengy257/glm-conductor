@@ -7,7 +7,7 @@
     触发域内的 v2.4 任务按序做四查，全部通过时执行 runtime.task.complete
     （置 completed + 释放仓库写者守卫 + journal task_completed 事件）
     并放行；任一失败则以 stdout 单行 block JSON 请求模型续跑，reason
-    为恰好一条最严重、可操作的中文理由（四查顺序即严重序）。本钩子
+    为恰好一条最严重、可操作的英文理由（四查顺序即严重序）。本钩子
     只是最后防线——同一套判定经 evaluate_completion(repo_root, task_id)
     暴露为可导入函数，生命周期 API 侧（主会话）可显式调用。
 
@@ -92,7 +92,7 @@ evaluate_completion(repo_root, task_id) 契约：
       {"decision": "allow" | "block",
        "check":    COMPLETION_CHECKS 之一或 None（allow 时），
        "detail":   结构化字段 dict 或 None，
-       "reason":   中文理由或 None（allow 时）}
+       "reason":   英文理由或 None（allow 时）}
     四查全过时本函数就地执行 runtime.task.complete（判过即收尾）。
     任务缺失 / v2.3 遗留 → ValueError（遗留消息携带处置指引）；
     change_id 求值 / ownership 匹配的结构性错误原样上抛
@@ -293,7 +293,7 @@ def warn_stderr(message):
     """向 stderr 写一行提示。
 
     走 sys.stderr.buffer 显式 UTF-8 字节写：Windows 管道默认 locale 编码
-    对中文报文可能编码失败（UnicodeEncodeError），那会把一次提示整个
+    对非 ASCII 报文可能编码失败（UnicodeEncodeError），那会把一次提示整个
     吞掉。写入本身也容错——提示失败绝不能反过来让钩子崩溃（fail-open）。
     """
     text = message.rstrip("\n") + "\n"
@@ -313,7 +313,7 @@ def emit_block_json(reason):
 
     reason 内的换行由 json.dumps 转义为 \\n，物理上仍是单行。走
     sys.stdout.buffer 显式 UTF-8 编码：避免 Windows 管道默认 locale
-    编码对中文报文编码失败（那会把一次有意 block 变成异常降级）。
+    编码对非 ASCII 报文编码失败（那会把一次有意 block 变成异常降级）。
     """
     line = json.dumps({"decision": "block", "reason": reason},
                       ensure_ascii=False)
@@ -335,7 +335,7 @@ def _section(value):
 
 
 def _display_id(value):
-    """报文里的可空标识呈现：非空 str 原样；其余 → "（未关联）"。"""
+    """报文里的可空标识呈现：非空 str 原样；其余 → "(unbound)"。"""
     if isinstance(value, str) and value != "":
         return value
     return UNBOUND_ID_DISPLAY
@@ -357,7 +357,7 @@ def _dag_node_ids(task_state) -> "list[str]":
     return seen
 
 
-# —— 四查的中文理由构造（恰好一条、可操作） ——
+# —— 四查的英文理由构造（恰好一条、可操作） ——
 
 def _guard_reason(task_id, holder) -> str:
     """查 1 失败理由：点名持有者 task_id 与 workflow_run_id。"""
@@ -609,7 +609,7 @@ def _run_guard():
         gated.append(name)
 
     # 5) 四查逐任务求值：首个 block 即 stdout 决策 JSON（恰好一条
-    #    中文理由）；求值结构性错误（非 git 仓库等）按任务隔离降级
+    #    英文理由）；求值结构性错误（非 git 仓库等）按任务隔离降级
     #    放行（stderr 一行 ENFORCEMENT DEGRADED 报告，沿用 v2.3 外壳
     #    fail-open 契约；git 挂起时该报文由 min(env, 剩余总预算) 的
     #    单次超时先于宿主硬杀触发，降级可见）

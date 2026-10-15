@@ -156,8 +156,8 @@ class MixedHostListTest(M1CliFixture):
         code, stdout, _ = self.run_cli("workflow-model-select", name)
         self.assertEqual(code, 2)
         text = json.loads(stdout)["error"]
-        self.assertIn("歧义", text)
-        self.assertIn("软推荐", text)
+        self.assertIn("ambiguous", text)
+        self.assertIn("soft-recommendation", text)
         self.assertIn(FLASH_OLD, text)
         self.assertIn(FLASH_NEW, text)
 

@@ -131,7 +131,7 @@ def _cycle_members(nodes) -> "list[str]":
 # —— 图校验 ——
 
 def graph_errors(nodes) -> "list[str]":
-    """校验依赖图，返回错误消息列表（中文，含节点 id / 下标路径）。
+    """校验依赖图，返回错误消息列表（英文，含节点 id / 下标路径）。
 
     空列表 = 合法图。检查项（聚合全部，不短路）：
       - nodes 非数组 / 项非 JSON 对象 / id 缺失或非空字符串；
@@ -143,42 +143,46 @@ def graph_errors(nodes) -> "list[str]":
       - 环（消息按 id 排序列出全部环成员）。
     """
     if not isinstance(nodes, list):
-        return ["nodes 必须是数组"]
+        return ["nodes must be an array"]
     errors = []
     first_index = {}  # id -> 首次出现的下标
     for index, node in enumerate(nodes):
         if not isinstance(node, dict):
-            errors.append("nodes[%d] 必须是 JSON 对象" % index)
+            errors.append("nodes[%d] must be a JSON object" % index)
             continue
         node_id = node.get("id")
         if not isinstance(node_id, str) or node_id == "":
-            errors.append("nodes[%d].id 必须是非空字符串" % index)
+            errors.append("nodes[%d].id must be a non-empty string" % index)
             continue
         if node_id in first_index:
-            errors.append("重复 id：%r（nodes[%d] 与 nodes[%d]）"
+            errors.append("duplicate id: %r (nodes[%d] and nodes[%d])"
                           % (node_id, first_index[node_id], index))
             continue
         first_index[node_id] = index
         deps = node.get("depends_on")
         if not isinstance(deps, list):
-            errors.append("nodes[%d].depends_on 必须是数组" % index)
+            errors.append("nodes[%d].depends_on must be an array" % index)
             continue
         for j, dep in enumerate(deps):
             if not isinstance(dep, str) or dep == "":
-                errors.append("nodes[%d].depends_on[%d] 必须是非空字符串"
+                errors.append("nodes[%d].depends_on[%d] must be a "
+                              "non-empty string"
                               % (index, j))
         if node_id in deps:
-            errors.append("nodes[%d]（id=%r）自依赖" % (index, node_id))
+            errors.append("nodes[%d] (id=%r) depends on itself"
+                          % (index, node_id))
     # 缺失依赖：只查每个 id 的首次出现处
     for node_id, index in first_index.items():
         for dep in _dep_list(nodes[index]):
             if dep not in first_index:
                 errors.append(
-                    "nodes[%d]（id=%r）depends_on 引用不存在的 id：%r"
+                    "nodes[%d] (id=%r) depends_on references unknown "
+                    "id: %r"
                     % (index, node_id, dep))
     cycle = _cycle_members(nodes)
     if cycle:
-        errors.append("依赖图存在环（环成员按 id 排序：%s）"
+        errors.append("dependency graph contains a cycle (cycle members "
+                      "sorted by id: %s)"
                       % ", ".join(cycle))
     return errors
 
@@ -199,7 +203,8 @@ def topo_order(nodes) -> "list[str]":
     cycle = _cycle_members(nodes)
     if cycle:
         raise ValueError(
-            "依赖图存在环，无法拓扑排序（环成员按 id 排序：%s）"
+            "dependency graph contains a cycle; cannot topologically "
+            "sort (cycle members sorted by id: %s)"
             % ", ".join(cycle))
     indegree = dict.fromkeys(by_id, 0)
     dependents = {}

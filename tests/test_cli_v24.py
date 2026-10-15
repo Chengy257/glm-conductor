@@ -253,7 +253,7 @@ class V24CompileInvalidTest(CliV24Fixture):
         code, stdout, _stderr = self.run_cli("v24-compile", name)
         self.assertEqual(code, 2)
         text = self.decoded(stdout)
-        self.assertIn("环", text)
+        self.assertIn("cycle", text)
         self.assertIn("impl-a", text)
         self.assertIn("impl-b", text)
 
@@ -279,7 +279,7 @@ class V24CompileInvalidTest(CliV24Fixture):
         self.assertEqual(code, 2)
         text = self.decoded(stdout)
         self.assertIn("objective", text)
-        self.assertIn("自依赖", text)
+        self.assertIn("depends on itself", text)
         self.assertIn("impl-x", text)
 
     def test_incomplete_task_context_exit_2(self):
@@ -987,7 +987,7 @@ class WorkflowModelSelectCliTest(CliV24Fixture):
         code, stdout, _ = self.run_cli("workflow-model-select", name)
         self.assertEqual(code, 2)
         text = self.decoded(stdout)
-        self.assertIn("歧义", text)
+        self.assertIn("ambiguous", text)
         self.assertIn(FLASH_A, text)
         self.assertIn(FLASH_B, text)
 

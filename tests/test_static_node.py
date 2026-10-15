@@ -92,13 +92,13 @@ class ValidateNodeErrors(unittest.TestCase):
     def test_non_dict(self):
         """非 dict 输入返回单条错误，不抛异常。"""
         self.assertEqual(work_unit.validate_node(None),
-                         ["node 必须是 JSON 对象"])
+                         ["node must be a JSON object"])
 
     def test_missing_required_keys_aggregated(self):
         """缺必填键逐键聚合报错，不短路。"""
         errors = work_unit.validate_node({"interfaces": []})
         for key in work_unit.NODE_REQUIRED_KEYS:
-            self.assertIn("node 缺少必填键 %s" % key, errors)
+            self.assertIn("node is missing required key %s" % key, errors)
 
     def test_error_path_prefix(self):
         """错误路径前缀形如 node.<字段名>。"""
@@ -116,17 +116,17 @@ class ValidateNodeErrors(unittest.TestCase):
         node["id"] = ""
         node["objective"] = ""
         errors = work_unit.validate_node(node)
-        self.assertIn("node.id 必须是非空字符串", errors)
-        self.assertIn("node.objective 必须是非空字符串", errors)
+        self.assertIn("node.id must be a non-empty string", errors)
+        self.assertIn("node.objective must be a non-empty string", errors)
 
     def test_depends_on_must_be_string_list(self):
         """depends_on 非数组 / 项非非空字符串报错。"""
         node = valid_node()
         node["depends_on"] = "dep-1"
-        self.assertIn("node.depends_on 必须是数组",
+        self.assertIn("node.depends_on must be an array",
                       work_unit.validate_node(node))
         node["depends_on"] = ["dep-1", ""]
-        self.assertIn("node.depends_on[1] 必须是非空字符串",
+        self.assertIn("node.depends_on[1] must be a non-empty string",
                       work_unit.validate_node(node))
 
     def test_self_dependency(self):
@@ -134,14 +134,16 @@ class ValidateNodeErrors(unittest.TestCase):
         node = valid_node("node-a")
         node["depends_on"] = ["node-a"]
         errors = work_unit.validate_node(node)
-        self.assertTrue(any("node.depends_on 自依赖" in e for e in errors),
+        self.assertTrue(any("node.depends_on self-dependency" in e
+                            for e in errors),
                         "缺自依赖错误：%r" % errors)
 
     def test_empty_ownership_rejected(self):
         """空 ownership 数组报错（无文件范围的节点不可编译）。"""
         node = valid_node()
         node["ownership"] = []
-        self.assertIn("node.ownership 不能为空数组（无文件范围的节点不可编译）",
+        self.assertIn("node.ownership must not be an empty array "
+                      "(a node with no file scope cannot be compiled)",
                       work_unit.validate_node(node))
 
     def test_absolute_ownership_rejected(self):
@@ -149,7 +151,8 @@ class ValidateNodeErrors(unittest.TestCase):
         node = valid_node()
         node["ownership"] = ["/etc/passwd", "src/**"]
         errors = work_unit.validate_node(node)
-        self.assertTrue(any("node.ownership[0] 必须是仓库相对路径" in e
+        self.assertTrue(any("node.ownership[0] must be a repo-relative "
+                            "path" in e
                             for e in errors), errors)
 
     def test_optional_non_string_elements(self):
@@ -157,7 +160,7 @@ class ValidateNodeErrors(unittest.TestCase):
         for key in ("interfaces", "constraints", "local_check"):
             node = valid_node()
             node[key] = ["ok", 7]
-            self.assertIn("node.%s[1] 必须是非空字符串" % key,
+            self.assertIn("node.%s[1] must be a non-empty string" % key,
                           work_unit.validate_node(node))
 
     def test_optional_arrays_may_be_empty(self):
@@ -170,9 +173,12 @@ class ValidateNodeErrors(unittest.TestCase):
         """多处非法聚合全部错误：缺键 + 坏 id + 坏依赖 + 空 ownership。"""
         errors = work_unit.validate_node({"id": "", "depends_on": [1]})
         self.assertGreaterEqual(len(errors), 4)
-        self.assertTrue(any("node 缺少必填键 objective" in e for e in errors))
-        self.assertTrue(any("node 缺少必填键 ownership" in e for e in errors))
-        self.assertTrue(any("node.id 必须是非空字符串" in e for e in errors))
+        self.assertTrue(any("node is missing required key objective" in e
+                            for e in errors))
+        self.assertTrue(any("node is missing required key ownership" in e
+                            for e in errors))
+        self.assertTrue(any("node.id must be a non-empty string" in e
+                            for e in errors))
 
     def test_unknown_keys_ignored(self):
         """未知键忽略（向前兼容）。"""

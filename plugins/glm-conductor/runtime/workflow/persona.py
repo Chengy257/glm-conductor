@@ -57,10 +57,10 @@ def _str_items(value) -> "list[str]":
 def _context_value(task_context, key) -> str:
     """容错读取 task_context 键：缺失 / 非字符串 / 空串 → 占位文本。"""
     if not isinstance(task_context, dict):
-        return "（未提供）"
+        return "(not provided)"
     value = task_context.get(key)
     if not isinstance(value, str) or value == "":
-        return "（未提供）"
+        return "(not provided)"
     return value
 
 
@@ -78,17 +78,18 @@ def _append_section(lines, title, items, empty_note) -> None:
 def build_ask(node, task_context) -> str:
     """构造单节点 ask 指令文本（返回多行字符串，内容确定性）。
 
-    逐节展开（节点可选字段缺省时给「未声明」占位，不省略小节——worker
-    拿到的指令形状恒定）：
+    逐节展开（节点可选字段缺省时给 "(this node declares no ...)" 占位，
+    不省略小节——worker 拿到的指令形状恒定）：
       - 开头点名节点 id 与有界任务口径；
-      - objective（只执行此目标，不重新设计架构）；
-      - ownership（只能改动的仓库相对路径清单）；
-      - interfaces（须保持兼容的接口面）；
-      - constraints（额外约束）；
-      - local_check（可选本地检查：诚实执行，为空不虚构）；
-      - 任务背景（task_ref / goal / repository 回显）；
-      - 结果契约：NodeResult 六字段说明（node_id 用节点 id 原文、status
-        三值、changes、local_checks、reassessment、gaps）。
+      - objective (execute only this objective; do not redesign the
+        architecture)；
+      - ownership (repo-relative paths you may modify)；
+      - interfaces (surface that must stay compatible)；
+      - constraints (additional constraints)；
+      - local_check (optional local checks)；
+      - Task context（task_ref / goal / repository 回显）；
+      - Result contract：NodeResult 六字段说明（node_id 用节点 id 原文、
+        status 三值、changes、local_checks、reassessment、gaps）。
 
     node 必须是静态节点 dict（runtime.work_unit 形状；非 dict 抛
     TypeError）。编译器已先做 validate_node 校验，本函数对其余键只做
@@ -96,53 +97,69 @@ def build_ask(node, task_context) -> str:
     """
     if not isinstance(node, dict):
         raise TypeError(
-            "build_ask：node 必须是静态节点 dict，得到 %s" % type(node).__name__)
+            "build_ask: node must be a static node dict, got %s"
+            % type(node).__name__)
     node_id = node.get("id")
     node_label = (node_id if isinstance(node_id, str) and node_id
                   else "<missing-id>")
     objective = node.get("objective")
     objective_text = (
         objective if isinstance(objective, str) and objective
-        else "（本节点未声明 objective——如交付指令确无目标，"
-             "按 reassessment 返回重估请求，不要自行猜测目标）")
+        else "(this node declares no objective - if the delivery "
+             "instructions truly carry no goal, return a reassessment "
+             "request instead of guessing one)")
     lines = []
-    lines.append("【节点 %s】下面是本次交付的有界实施任务，"
-                 "请按文末结果契约返回结构化实施结果。" % node_label)
+    lines.append("[Node %s] Below is the bounded implementation task for "
+                 "this delivery; return the structured implementation "
+                 "result per the result contract at the end." % node_label)
     lines.append("")
-    lines.append("objective（只执行此目标，不重新设计架构）：")
+    lines.append("objective (execute only this objective; do not redesign "
+                 "the architecture):")
     lines.append(objective_text)
     lines.append("")
     _append_section(
-        lines, "ownership（只能改动这些仓库相对路径）：",
+        lines,
+        "ownership (repo-relative paths you may modify - touch nothing "
+        "else):",
         _str_items(node.get("ownership")),
-        "（本节点未声明 ownership——不要改动任何文件）")
+        "(this node declares no ownership - do not modify any files)")
     _append_section(
-        lines, "interfaces（须保持兼容的接口面）：",
+        lines, "interfaces (surface that must stay compatible):",
         _str_items(node.get("interfaces")),
-        "（本节点未声明接口面）")
+        "(this node declares no interfaces)")
     _append_section(
-        lines, "constraints（额外约束）：",
+        lines, "constraints (additional constraints):",
         _str_items(node.get("constraints")),
-        "（本节点未声明额外约束）")
+        "(this node declares no additional constraints)")
     _append_section(
         lines,
-        "local_check（可选本地检查：诚实逐项执行并如实记录；为空则不虚构检查）：",
+        "local_check (optional local checks: run each item honestly and "
+        "record the results faithfully; fabricate none when empty):",
         _str_items(node.get("local_check")),
-        "（本节点未声明本地检查）")
-    lines.append("任务背景：")
-    lines.append("- task_ref：%s" % _context_value(task_context, "task_ref"))
-    lines.append("- goal：%s" % _context_value(task_context, "goal"))
-    lines.append("- repository：%s" % _context_value(task_context, "repository"))
+        "(this node declares no local checks)")
+    lines.append("Task context:")
+    lines.append("- task_ref: %s" % _context_value(task_context, "task_ref"))
+    lines.append("- goal: %s" % _context_value(task_context, "goal"))
+    lines.append("- repository: %s"
+                 % _context_value(task_context, "repository"))
     lines.append("")
-    lines.append("结果契约（返回必须严格符合 NodeResult 结构）：")
-    lines.append("- node_id：%s（Conductor 节点 id 原文）" % node_label)
-    lines.append('- status："complete"（完成且证据齐全）| "partial"（部分完成）'
-                 '| "blocked"（受阻）三选一')
-    lines.append("- changes：实际改动文件清单（字符串数组，逐条仓库相对路径；"
-                 "无改动则空数组）")
-    lines.append("- local_checks：实际执行的本地检查及结果（字符串数组；"
-                 "未执行则空数组，不得伪造）")
-    lines.append("- reassessment：实质性歧义 / 范围冲突 / 规格缺漏时的重估请求"
-                 "（无则空字符串；不自行决策、不重新设计架构）")
-    lines.append("- gaps：未覆盖项或已知残留（无则空数组）")
+    lines.append("Result contract (the returned value must strictly match "
+                 "the NodeResult structure):")
+    lines.append("- node_id: %s (the Conductor node id verbatim)"
+                 % node_label)
+    lines.append('- status: "complete" (finished with full evidence) | '
+                 '"partial" (partially finished) | "blocked" (blocked) - '
+                 "exactly one")
+    lines.append("- changes: list of actually changed files (array of "
+                 "strings, one repo-relative path per entry; empty array "
+                 "when nothing changed)")
+    lines.append("- local_checks: local checks actually run and their "
+                 "results (array of strings; empty array when none were "
+                 "run - never fabricate)")
+    lines.append("- reassessment: reassessment request on substantive "
+                 "ambiguity / scope conflict / missing specification "
+                 "(empty string when none; do not decide on your own and "
+                 "do not redesign the architecture)")
+    lines.append("- gaps: uncovered items or known residue (empty array "
+                 "when none)")
     return "\n".join(lines)

@@ -8,7 +8,7 @@
         与 v2.3 完全一致，构成 20 个导入者的导入安全边界）；
       - 构造：new_task_state() 构造 v2.4 完整状态 dict（只构造不校验，
         调用方负责 validate_state）；
-      - 校验：validate_state() 返回中文错误列表（空列表 = 合法，不抛
+      - 校验：validate_state() 返回英文错误列表（空列表 = 合法，不抛
         异常）；dag 数组逐节点经 runtime.work_unit.validate_node 校验
         （错误前缀 dag[i].），整图经 runtime.dependency.graph_errors
         校验（nodes[i] 路径统一改写为 dag[i] 路径）；
@@ -72,8 +72,10 @@ v2.3 遗留面处置（本模块 v2.4 重基线明确退役的形态，只识别
     quota_subscription 授权块，全部不再是 v2.4 schema 概念（validate
     按缺键报错，绝不自动迁移、绝不伪造 v2.4 完成证据）。载入带这些
     标记的 state 时 is_legacy_state() 返回 True，消费方按
-    LEGACY_STATE_GUIDANCE 报告「v2.3 任务：请在 2.3.x 下收尾或显式
-    放弃」。（Phase 3 收口后 quota/continuity 等旧模块及其消费面
+    LEGACY_STATE_GUIDANCE 报告（"v2.3 legacy task: wrap up or
+    explicitly abandon it under 2.3.x (v2.4 does not auto-migrate
+    and never fabricates v2.4 completion evidence)"）。
+    （Phase 3 收口后 quota/continuity 等旧模块及其消费面
     ——含曾为本模块保留的 QUOTA_SUBSCRIPTION_MINIMUM_STATES 词汇
     常量——已整体删除，本模块不再为任何已删模块保留词汇。）
 
@@ -343,7 +345,7 @@ def detect_legacy_task(repo_root, task_id) -> "dict | None":
 # —— 校验 ——
 
 def _enum_error(path, value, allowed):
-    """构造枚举取值错误的中文消息（含字段路径与合法取值清单）。"""
+    """构造枚举取值错误的英文消息（含字段路径与合法取值清单）。"""
     return messages.STATE_ENUM_ERROR % (path, value, ", ".join(allowed))
 
 
@@ -397,8 +399,8 @@ def _validate_dag(dag) -> "list[str]":
 
     两层校验（聚合全部，不短路）：
       - 逐节点：runtime.work_unit.validate_node，错误统一加
-        "dag[i]." 节点路径前缀（如 "dag[0].node.objective 必须是
-        非空字符串"）；
+        "dag[i]." 节点路径前缀（如 "dag[0].node.objective must be a
+        non-empty string"）；
       - 整图：runtime.dependency.graph_errors（重复 id / 缺失依赖 /
         自依赖 / 环），消息内 nodes[i] 路径统一改写为 dag[i]；不含
         节点下标的整图消息（如环成员清单）加 "dag." 前缀。
@@ -536,9 +538,10 @@ def _validate_worker_model(model_id) -> "list[str]":
 
 
 def validate_state(state) -> "list[str]":
-    """校验 v2.4 状态 dict，返回错误消息列表（中文，含字段路径）。
+    """校验 v2.4 状态 dict，返回错误消息列表（英文，含字段路径）。
 
-    空列表 = 合法；不抛异常；state 非 dict → ["state 必须是 JSON 对象"]。
+    空列表 = 合法；不抛异常；state 非 dict → ["state must be a JSON
+    object"]。
     必填顶层键（_REQUIRED_TOP_KEYS）：task_id / goal / repository /
     route / dag / status / workflow_run_id / validation / review /
     quota_resume；phase 与 worker_model（v2.5 I1 任务级 worker 模型
@@ -819,7 +822,7 @@ def _transaction_state(repo_root, task_id, *, allow_missing) -> "dict | None":
     errors = validate_state(current)
     if errors:
         raise ValueError(
-            messages.STATE_TX_SCHEMA_INVALID % "；".join(errors))
+            messages.STATE_TX_SCHEMA_INVALID % "; ".join(errors))
     return current
 
 
@@ -835,7 +838,7 @@ def _transaction_commit(path, task_id, new_state) -> pathlib.Path:
     """
     errors = validate_state(new_state)
     if errors:
-        raise ValueError(messages.STATE_SAVE_INVALID % "；".join(errors))
+        raise ValueError(messages.STATE_SAVE_INVALID % "; ".join(errors))
     if new_state.get("task_id") != task_id:
         raise ValueError(
             messages.STATE_TX_NEW_TASK_ID_MISMATCH
@@ -916,7 +919,7 @@ def save_state(repo_root, state, *, task_id=None) -> pathlib.Path:
     """
     errors = validate_state(state)
     if errors:
-        raise ValueError(messages.STATE_SAVE_INVALID % "；".join(errors))
+        raise ValueError(messages.STATE_SAVE_INVALID % "; ".join(errors))
     tid = task_id if task_id is not None else state["task_id"]
     # P1-9：目录 task_id 与内容 task_id 必须一致——显式 task_id 与
     # state["task_id"] 不一致即拒绝，防止任务目录与 state.json 内容错位
@@ -1038,7 +1041,7 @@ _CORRUPT_REASON_LIMIT = 80
 
 
 def _short_reason(text) -> str:
-    """把异常消息简写为不超过 _CORRUPT_REASON_LIMIT 字符的中文原因。"""
+    """把异常消息简写为不超过 _CORRUPT_REASON_LIMIT 字符的英文原因。"""
     text = str(text)
     if len(text) > _CORRUPT_REASON_LIMIT:
         return text[:_CORRUPT_REASON_LIMIT]

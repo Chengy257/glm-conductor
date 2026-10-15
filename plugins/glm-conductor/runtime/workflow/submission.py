@@ -90,18 +90,23 @@ def _reject_reason(model_id):
     拒绝）。裸别名（无 account: 前缀）仍一律拒绝。
     """
     if not isinstance(model_id, str):
-        return "model_id 必须是非空字符串，实际为 %s" % type(model_id).__name__
+        return ("model_id must be a non-empty string, got %s"
+                % type(model_id).__name__)
     if model_id == "":
-        return "model_id 不能是空字符串"
+        return "model_id must not be an empty string"
     if not model_id.startswith(_ACCOUNT_SCHEME_PREFIX):
-        return ("模型 id 必须以 %r 前缀开头（provider 限定，拒绝裸别名）：%r"
+        return ("model id must start with the %r prefix "
+                "(provider-qualified; bare aliases are rejected): %r"
                 % (_ACCOUNT_SCHEME_PREFIX, model_id))
     if any(char.isspace() for char in model_id):
-        return "模型 id 不允许包含空白字符：%r" % (model_id,)
+        return "model id must not contain whitespace characters: %r" \
+            % (model_id,)
     account_seg, sep, model_seg = model_id[len(_ACCOUNT_SCHEME_PREFIX):].partition("/")
     if not sep or account_seg == "" or model_seg == "":
-        return ("模型 id 必须是 account:<账户段>/<模型段> 形态（两段均非空，"
-                "账户段不含 '/'）：%r" % (model_id,))
+        return ("model id must have the form "
+                "account:<account-segment>/<model-segment> (both "
+                "segments non-empty; the account segment contains "
+                "no '/'): %r" % (model_id,))
     return None
 
 
@@ -128,12 +133,14 @@ def _validated_configured(configured_model_ids):
     """
     if not isinstance(configured_model_ids, (list, tuple)):
         raise WorkflowSubmissionError(
-            "configured_model_ids 必须是 list/tuple 的非空字符串集合，实际为 %s"
+            "configured_model_ids must be a list/tuple of non-empty "
+            "strings, got %s"
             % type(configured_model_ids).__name__)
     for index, item in enumerate(configured_model_ids):
         if not isinstance(item, str) or item == "":
             raise WorkflowSubmissionError(
-                "configured_model_ids[%d] 必须是非空字符串，实际为 %r"
+                "configured_model_ids[%d] must be a non-empty string, "
+                "got %r"
                 % (index, item))
     return tuple(configured_model_ids)
 
@@ -155,8 +162,9 @@ def validate_worker_model(model_id, configured_model_ids=None):
         configured = _validated_configured(configured_model_ids)
         if model_id not in configured:
             raise WorkflowSubmissionError(
-                "模型 id 不在 configured 集合中（须精确成员，共 %d 个已配置"
-                "模型）：%r" % (len(configured), model_id))
+                "model id is not in the configured set (exact "
+                "membership required; %d configured model(s)): %r"
+                % (len(configured), model_id))
     return model_id
 
 
@@ -180,14 +188,18 @@ def select_worker_model(configured_model_ids, explicit_model_id=None):
         return flash_candidates[0]
     if not flash_candidates:
         raise WorkflowSubmissionError(
-            "configured 集合（共 %d 个模型）中没有任何模型段以 %s 结尾的 "
-            "provider 限定 Flash 档软推荐候选，拒绝静默回退——如需选用非 "
-            "Flash 已配置模型，请经启动问答复核后显式给出 exact id"
-            % (len(configured), FLASH_TIER_SUFFIX))
+            "no provider-qualified Flash-tier soft-recommendation "
+            "candidate (model segment ending with %s) exists in the "
+            "configured set (%d model(s)); silent fallback is refused "
+            "- to use a configured non-Flash model, confirm it in the "
+            "launch interview and pass the exact id explicitly"
+            % (FLASH_TIER_SUFFIX, len(configured)))
     listing = ", ".join('"%s"' % mid for mid in flash_candidates)
     raise WorkflowSubmissionError(
-        "Flash 档软推荐候选有 %d 个，选择歧义——必须显式给出 exact id，"
-        "绝不静默取第一个（选择交回启动问答由用户选定）；全部候选：%s"
+        "%d Flash-tier soft-recommendation candidates - ambiguous "
+        "choice; the exact id must be given explicitly, never "
+        "silently taking the first (the choice returns to the launch "
+        "interview for the user to decide); all candidates: %s"
         % (len(flash_candidates), listing))
 
 

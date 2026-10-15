@@ -43,7 +43,7 @@ v2.4 Phase 3（P3-D/E）收口面：
         rethink，词汇外 → 退出码 2）；note 缺省 None（透传 findings）。
         先验证后评审：任务尚无 validation 记录（status 与 change_id
         齐备）→ 拒绝；任务缺失 / v2.3 遗留任务 / 终态冻结 → 拒绝
-        （均退出码 1，错误 JSON 含中文原因）。成功输出单行 JSON
+        （均退出码 1，错误 JSON 含英文原因）。成功输出单行 JSON
         {task_id, review}（review 块含 reviewer / verdict / change_id /
         findings，change_id 现算——任何相关文件变化都会使记录过期）
         并落 review_recorded 事件。
@@ -259,10 +259,10 @@ v2.4 Phase 3（P3-D/E）收口面：
         退出码 1。输出单行 JSON {task_id, workflow_run_id, status}。
 
 输出与退出码契约：
-    stdout 恒为单行 JSON（json.dumps(..., ensure_ascii=True)，中文以
-    \\uXXXX 转义——管道 / Windows 控制台零编码依赖；例外：v24-compile
+    stdout 恒为单行 JSON（json.dumps(..., ensure_ascii=True)，非 ASCII
+    以 \\uXXXX 转义——管道 / Windows 控制台零编码依赖；例外：v24-compile
     缺省输出路径时把生成 TS 源以多行纯文本打到 stdout（显式 UTF-8，
-    生成源含中文））；stderr 不承载结构化输出。
+    W3b 起生成源为全英文零 CJK））；stderr 不承载结构化输出。
     退出码：
       0 = 成功；
       2 = 校验拒绝（用法错误 / 参数值非法 / 盘上 state.json 结构性
@@ -389,8 +389,8 @@ class _TaskRejected(Exception):
 # 盘上 state 结构性 ValueError 的稳定消息前缀（分类锚点——state 层
 # 消息即契约文案，改动须同步本表；锚定 state.load_state 的损坏解析
 # 拒绝与 _transaction_state / _transaction_commit 的严格读写闸）。
-# 任务缺失（"state 事务：任务 … 不存在"）与生命周期拒绝（遗留 /
-# 终态冻结 / 迁移矩阵外）不在此列——那仍归退出码 1。
+# 任务缺失（"state transaction: on-disk state.json normalized task id …"）
+# 与生命周期拒绝（遗留 / 终态冻结 / 迁移矩阵外）不在此列——那仍归退出码 1。
 _STRUCTURAL_STATE_ERROR_PREFIXES = messages.STRUCTURAL_STATE_ERROR_PREFIXES
 
 
@@ -677,7 +677,7 @@ def _v24_compile(dag_json_path, task_ref=None, out_path=None) -> int:
       4. compiler.compile_workflow 只生成源码字符串——绝不执行；
       5. 输出：--out 给出时源码落盘（UTF-8 / LF），stdout 单行 JSON
          摘要 {ok, stages, nodes, out}；缺省把 TS 源打到 stdout（多行
-         纯文本，显式 UTF-8——生成源含中文）。
+         纯文本，显式 UTF-8——v2.6.1 W3b 起生成源全英文零 CJK）。
 
     --task-ref 给出时覆盖 DAG JSON 内的 task_context.task_ref
     （task_context 缺失 / 非对象时以覆盖值起底，goal / repository 缺键
@@ -747,7 +747,7 @@ def _v24_compile(dag_json_path, task_ref=None, out_path=None) -> int:
         _emit({"ok": True, "stages": len(stages), "nodes": len(nodes),
                "out": out_path})
     else:
-        _force_utf8_stdout()  # 生成源含中文：显式 UTF-8（quota/report.py 同款）
+        _force_utf8_stdout()  # 生成源显式 UTF-8 输出（W3b 起全英文零 CJK）
         sys.stdout.write(source)
     return 0
 
@@ -1123,7 +1123,7 @@ def _load_dag_nodes(dag_path):
     errors.extend(dependency.graph_errors(nodes))
     if errors:
         raise ValueError(
-            messages.CLI_TASK_CREATE_DAG_ERRORS % "；".join(errors))
+            messages.CLI_TASK_CREATE_DAG_ERRORS % "; ".join(errors))
     return nodes
 
 

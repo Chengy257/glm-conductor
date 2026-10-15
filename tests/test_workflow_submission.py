@@ -93,7 +93,7 @@ class ValidateWorkerModelTest(unittest.TestCase):
     def test_case03_empty_rejected(self):
         with self.assertRaises(WorkflowSubmissionError) as ctx:
             validate_worker_model("")
-        self.assertIn("空", str(ctx.exception))
+        self.assertIn("empty", str(ctx.exception))
         # 补充：纯空白同样拒绝（不满足 account: 前缀形态）
         with self.assertRaises(WorkflowSubmissionError):
             validate_worker_model("   ")
@@ -101,7 +101,7 @@ class ValidateWorkerModelTest(unittest.TestCase):
     def test_case04_bare_flash_rejected(self):
         with self.assertRaises(WorkflowSubmissionError) as ctx:
             validate_worker_model("GLM-5.3-Flash")
-        self.assertIn("裸别名", str(ctx.exception))
+        self.assertIn("bare alias", str(ctx.exception))
         # 补充：id 是不透明精确串（WP-M1 角色中性形状校验）——小写
         # 拼写不再因档位后缀大小写敏感被拒（配置面精确成员对账归
         # configured 集合，精确字符串相等）
@@ -214,7 +214,7 @@ class SelectWorkerModelTest(unittest.TestCase):
         # 消息必须列出全部候选 id（绝不静默取第一个）
         self.assertIn(FLASH_A, message)
         self.assertIn(FLASH_B, message)
-        self.assertIn("显式", message)
+        self.assertIn("explicit", message)
 
     def test_case11b_cross_generation_ambiguous(self):
         # v2.5.2 W5：跨版本代际的两档 Flash 候选同属候选集——歧义
@@ -224,7 +224,7 @@ class SelectWorkerModelTest(unittest.TestCase):
         message = str(ctx.exception)
         self.assertIn(FLASH_A, message)
         self.assertIn(FLASH_NEXT, message)
-        self.assertIn("歧义", message)
+        self.assertIn("ambiguous", message)
 
     def test_case12_multiple_with_explicit_selection(self):
         self.assertEqual(

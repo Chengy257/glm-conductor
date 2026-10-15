@@ -367,7 +367,7 @@ def _compute_change_id(st, repo_root) -> str:
 def create_task(repo_root, task_id, goal, route, dag_nodes=()) -> dict:
     """校验并持久化一个新 v2.4 任务，返回构造出的完整状态 dict。
 
-    - 持久化前显式 validate_state（聚合中文错误，任一错误即拒绝且零
+    - 持久化前显式 validate_state（聚合英文错误，任一错误即拒绝且零
       落盘）；state.update_task_state 状态事务（首存放行）的再校验
       二次把关；锁内复核任务仍不存在——预检与提交之间被并发创建的
       任务绝不以过时整态 dict 覆盖；
@@ -393,7 +393,7 @@ def create_task(repo_root, task_id, goal, route, dag_nodes=()) -> dict:
     errors = state.validate_state(st)
     if errors:
         raise ValueError(
-            messages.TASK_CREATE_STATE_INVALID % "；".join(errors))
+            messages.TASK_CREATE_STATE_INVALID % "; ".join(errors))
 
     def _mutate(current):
         # 锁内新鲜盘面复核：预检与提交之间任务被并发创建即拒绝，
@@ -847,7 +847,7 @@ def scheduled_activation_decision(repo_root, task_id, quota_view) -> dict:
     quota_view：归一化配额观测 dict（status ∈ QUOTA_VIEW_STATUSES +
     reset_at/source/observed_at；由调用方从 resolver/report 获得）。
     返回 dict 恒含 action（SCHEDULED_ACTIVATION_ACTIONS 恰四值）与
-    reason（人读中文），判定顺序固定、每步幂等：
+    reason（人读英文，messages.TASK_DECISION_* 文案），判定顺序固定、每步幂等：
 
       1. 任务不处于 waiting_quota（含终态 / 已在 waiting_user）→
          {"action": "no-op"}——重复唤醒安全，绝不改写任何状态；

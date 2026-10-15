@@ -328,7 +328,7 @@ class TaskCreateCliTest(GitCliFixture):
         code, payload = run_cli("task-create", str(self.repo), TID, "目标",
                                 "solo", "standard", "--dag", str(badnode))
         self.assertEqual(code, 2)
-        self.assertIn("缺少必填键", payload["error"])
+        self.assertIn("missing required key", payload["error"])
 
     def test_vocabulary_and_goal_gates_exit_2(self):
         for args in (("delegate", "ultra"),      # assurance 词汇外

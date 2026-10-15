@@ -266,7 +266,7 @@ class TestDagValidation(unittest.TestCase):
         """整图重复 id：nodes[i] 路径改写为 dag[i]。"""
         st = full_state(dag_nodes=[demo_node("dup"), demo_node("dup")])
         errors = state.validate_state(st)
-        dup = [item for item in errors if "重复 id" in item]
+        dup = [item for item in errors if "duplicate id" in item]
         self.assertTrue(dup, errors)
         self.assertIn("dag[0]", dup[0])
         self.assertIn("dag[1]", dup[0])
@@ -279,7 +279,7 @@ class TestDagValidation(unittest.TestCase):
         text = "\n".join(state.validate_state(st))
         self.assertIn("dag[0]", text)
         self.assertIn("dag[1]", text)
-        self.assertIn("自依赖", text)
+        self.assertIn("depends on itself", text)
         self.assertNotIn("nodes[", text)
 
     def test_cycle_reported_with_dag_prefix(self):
@@ -287,7 +287,7 @@ class TestDagValidation(unittest.TestCase):
         st = full_state(dag_nodes=[demo_node("a", ("b",)),
                                    demo_node("b", ("a",))])
         errors = state.validate_state(st)
-        cycle = [item for item in errors if "环" in item]
+        cycle = [item for item in errors if "cycle" in item]
         self.assertTrue(cycle, errors)
         self.assertTrue(cycle[0].startswith("dag."),
                         "环消息应带 dag. 前缀：%r" % cycle[0])

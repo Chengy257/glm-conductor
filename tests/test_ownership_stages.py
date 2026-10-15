@@ -312,7 +312,7 @@ class PlanStagesValidationTest(unittest.TestCase):
         with self.assertRaises(ValueError) as ctx:
             ownership.plan_stages([
                 node("n1", ("a/**",)), node("n1", ("b/**",))])
-        self.assertIn("重复 id", str(ctx.exception))
+        self.assertIn("duplicate id", str(ctx.exception))
 
     def test_missing_dependency_raises(self):
         with self.assertRaises(ValueError):
@@ -324,7 +324,7 @@ class PlanStagesValidationTest(unittest.TestCase):
                 node("n1", ("a/**",), deps=("n2",)),
                 node("n2", ("b/**",), deps=("n1",)),
             ])
-        self.assertIn("环", str(ctx.exception))
+        self.assertIn("cycle", str(ctx.exception))
 
     def test_non_list_input_raises(self):
         with self.assertRaises(ValueError):

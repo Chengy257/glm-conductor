@@ -49,30 +49,30 @@ class GraphErrorsTest(unittest.TestCase):
     def test_non_list_input(self):
         """非数组输入单条错误。"""
         self.assertEqual(dependency.graph_errors("nope"),
-                         ["nodes 必须是数组"])
+                         ["nodes must be an array"])
 
     def test_missing_dependency(self):
         """缺失依赖：depends_on 引用不存在的 id。"""
         errors = dependency.graph_errors([n("a"), n("b", ("ghost",))])
         self.assertEqual(
             [e for e in errors if "ghost" in e],
-            ["nodes[1]（id='b'）depends_on 引用不存在的 id：'ghost'"])
+            ["nodes[1] (id='b') depends_on references unknown id: 'ghost'"])
 
     def test_duplicate_id(self):
         """重复 id：报告两次出现的下标。"""
         errors = dependency.graph_errors([n("a"), n("b"), n("a")])
-        self.assertIn("重复 id：'a'（nodes[0] 与 nodes[2]）", errors)
+        self.assertIn("duplicate id: 'a' (nodes[0] and nodes[2])", errors)
 
     def test_self_dependency(self):
         """自依赖：id 出现在自身 depends_on 中。"""
         errors = dependency.graph_errors([n("a", ("a",))])
-        self.assertIn("nodes[0]（id='a'）自依赖", errors)
+        self.assertIn("nodes[0] (id='a') depends on itself", errors)
 
     def test_cycle_reports_all_members(self):
         """环检测：A→B→C→A 报全部三个 id（按 id 排序）。"""
         graph = [n("a", ("c",)), n("b", ("a",)), n("c", ("b",))]
         errors = dependency.graph_errors(graph)
-        self.assertTrue(any("依赖图存在环" in e and
+        self.assertTrue(any("dependency graph contains a cycle" in e and
                             "a, b, c" in e for e in errors), errors)
 
     def test_errors_aggregated_no_short_circuit(self):
@@ -81,25 +81,29 @@ class GraphErrorsTest(unittest.TestCase):
         graph = [n("a", ("a", "ghost")), n("a"), n("b", ("a",)),
                  n("c", ("b",)), n("d", ("c",))]
         errors = dependency.graph_errors(graph)
-        self.assertTrue(any("自依赖" in e for e in errors), errors)
+        self.assertTrue(any("depends on itself" in e for e in errors),
+                         errors)
         self.assertTrue(any("ghost" in e for e in errors), errors)
-        self.assertTrue(any("重复 id" in e for e in errors), errors)
+        self.assertTrue(any("duplicate id" in e for e in errors), errors)
         # 环与重复 id 同图聚合
         graph2 = [n("x", ("y",)), n("y", ("x",)), n("x")]
         errors2 = dependency.graph_errors(graph2)
-        self.assertTrue(any("依赖图存在环" in e for e in errors2), errors2)
-        self.assertTrue(any("重复 id" in e for e in errors2), errors2)
+        self.assertTrue(any("dependency graph contains a cycle" in e
+                            for e in errors2), errors2)
+        self.assertTrue(any("duplicate id" in e for e in errors2), errors2)
 
     def test_shape_errors_reported(self):
         """形状级错误（非 dict 项 / 缺 id / depends_on 项非字符串）。"""
         graph = ["not-a-dict", {"depends_on": [1]}, n("ok", (7,))]
         errors = dependency.graph_errors(graph)
-        self.assertIn("nodes[0] 必须是 JSON 对象", errors)
+        self.assertIn("nodes[0] must be a JSON object", errors)
         # id 非法的节点只报 id：节点无法定位，其 depends_on 不再展开
         # （沿用 v2.3 遗留实现同语义）
-        self.assertIn("nodes[1].id 必须是非空字符串", errors)
-        self.assertNotIn("nodes[1].depends_on[0] 必须是非空字符串", errors)
-        self.assertIn("nodes[2].depends_on[0] 必须是非空字符串", errors)
+        self.assertIn("nodes[1].id must be a non-empty string", errors)
+        self.assertNotIn("nodes[1].depends_on[0] must be a non-empty string",
+                         errors)
+        self.assertIn("nodes[2].depends_on[0] must be a non-empty string",
+                      errors)
 
     def test_valid_graph_zero_errors(self):
         """合法图（含例图）零错误。"""

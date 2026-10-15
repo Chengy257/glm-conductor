@@ -588,7 +588,7 @@ class WorkflowModelSelectTaskRefCliTest(WorkerModelPinCliFixture):
         code, stdout, _ = self.run_cli(
             "workflow-model-select", ambiguous)
         self.assertEqual(code, 2)
-        self.assertIn("歧义", json.loads(stdout)["error"])
+        self.assertIn("ambiguous", json.loads(stdout)["error"])
 
     def test_null_pin_treated_as_no_pin(self):
         """worker_model=null（无 pin 占位）→ 视同无 pin：--task-ref 严

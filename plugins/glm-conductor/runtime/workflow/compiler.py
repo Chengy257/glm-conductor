@@ -75,10 +75,10 @@ STATUS_UNION = '"complete" | "partial" | "blocked"'
 # task_context 必备键（至少含这三个非空字符串）
 TASK_CONTEXT_REQUIRED_KEYS = ("task_ref", "goal", "repository")
 
-# —— 生成源注释模板（W3a 集中盘点：值冻结逐字不变，W3b 统一换英文） ——
-# 生成 TS 源里中文注释与阶段标签的唯一出处。审计结论（2026-10-15）：
-# 生成注释含中文 → 全部收编为下列常量；actor 标签前缀 "node-%s" 与
-# "// " + "=" * 60 横线为 ASCII，按 W3a 口径保持内联不改。
+# —— 生成源注释模板（W3a 集中盘点收编为常量；W3b 已统一英文化） ——
+# 生成 TS 源注释与阶段标签的唯一出处（v2.6.1 W3b 起全英文——编译产物
+# 零 CJK）。actor 标签前缀 "node-%s" 与 "// " + "=" * 60 横线为
+# ASCII，按 W3a 口径保持内联不改。
 
 # 头部横幅注释块
 BANNER_TITLE_COMMENT = (
@@ -107,8 +107,8 @@ PERSONA_SOURCE_COMMENT = (
 RESULTS_MAP_COMMENT = "// Results map for all nodes (keys = Conductor node ids verbatim)"
 FINAL_AGGREGATION_COMMENT = "// == Final aggregation: return all node results in ascending node id order =="
 
-# 阶段注释头 / 阶段内节点 id 连接符 / 阶段标签（phase 名称实参，
-# stage label 前缀「阶段」为中文，一并收编）
+# 阶段注释头 / 阶段内节点 id 连接符 / 阶段标签（phase 名称实参；
+# W3b 起标签前缀为英文 "Stage"）
 STAGE_HEADER_COMMENT_TEMPLATE = "// == Stage %d: %s =="
 STAGE_COMMENT_ID_SEPARATOR = ", "
 STAGE_LABEL_TEMPLATE = "Stage %d: %s"
@@ -138,13 +138,13 @@ def _comment_text(value) -> str:
 def _task_context_errors(task_context) -> "list[str]":
     """校验 task_context：必须是 dict 且必备键均为非空字符串。"""
     if not isinstance(task_context, dict):
-        return ["task_context 必须是 JSON 对象，得到 %s"
+        return ["task_context must be a JSON object, got %s"
                 % type(task_context).__name__]
     errors = []
     for key in TASK_CONTEXT_REQUIRED_KEYS:
         value = task_context.get(key)
         if not isinstance(value, str) or value == "":
-            errors.append("task_context.%s 必须是非空字符串" % key)
+            errors.append("task_context.%s must be a non-empty string" % key)
     return errors
 
 
@@ -152,7 +152,8 @@ def _validate_inputs(nodes, task_context) -> None:
     """编译前校验（节点形状 → 全图 → task_context），错误聚合抛出。"""
     errors = []
     if not isinstance(nodes, list):
-        errors.append("nodes 必须是数组，得到 %s" % type(nodes).__name__)
+        errors.append("nodes must be an array, got %s"
+                      % type(nodes).__name__)
     else:
         for node in nodes:
             errors.extend(work_unit.validate_node(node))
@@ -160,8 +161,8 @@ def _validate_inputs(nodes, task_context) -> None:
     errors.extend(_task_context_errors(task_context))
     if errors:
         raise WorkflowCompileError(
-            "compile_workflow：输入校验失败（共 %d 项）：%s"
-            % (len(errors), "；".join(errors)))
+            "compile_workflow: input validation failed (%d error(s)): %s"
+            % (len(errors), "; ".join(errors)))
 
 
 # —— 代码生成 ——
@@ -208,7 +209,7 @@ def compile_workflow(nodes, task_context) -> str:
       的 dict（多余键忽略，向前兼容）；
     - 确定性：同一输入两次调用返回逐字节相同的字符串；
     - 错误：形状 / 图 / task_context 非法 → WorkflowCompileError（聚合
-      中文消息）；ownership 歧义 / 非法 → ownership.OwnershipConflictError
+      英文消息）；ownership 歧义 / 非法 → ownership.OwnershipConflictError
       原样上抛；
     - 空 DAG 允许：生成零阶段脚本，return 聚合为空数组。
     """
