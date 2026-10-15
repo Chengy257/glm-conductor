@@ -299,7 +299,9 @@ v2.4 Phase 3（P3-D/E）收口面：
     直接运行。
 
 依赖：
-    仅 Python 3 标准库（json / pathlib / sys），零第三方依赖。
+    仅 Python 3 标准库（json / pathlib / sys）
+    + runtime.messages（v2.6.1 W3a 单源：USAGE 与全部用户可见消息
+      常量），零第三方依赖。
 """
 
 import json
@@ -315,12 +317,12 @@ from runtime import messages, state  # noqa: E402
 
 # v2.6.1 W3a 单源接线：USAGE 与全部用户可见消息改由 messages 模块单源
 # 供给（本名再导出保持 cli.USAGE 等既有读取面）。发布面静态契约锚随
-# 文案同迁——validator 检查 16 仍锚定 cli.py 文本中的
-# 「任务 pin 已失效，请重新问答授权」与
-# 「有 pin 任务的 --model 显式值必须与 pin 一致」
-# 两锚（scripts/validate_plugin.py 的 PIN_REJECTION_CLI_MARKERS 与模型
-# 选型锚；单源值在 messages.CLI_WORKFLOW_MODEL_SELECT_*，两处必须同步
-# 改动；W3b 英文化时连同 validator 锚一并翻转）。
+# 文案同迁——W3b 英文化后 validator 检查 16 重锚到 messages 单源英文值：
+# "the task pin is void; re-run the launch interview for authorization"
+# 与 "for pinned tasks the explicit --model value must equal the pin"
+# 两英文锚（scripts/validate_plugin.py 的 PIN_REJECTION_CLI_MARKERS 与
+# 模型选型锚；单源值在 messages.CLI_WORKFLOW_MODEL_SELECT_*，validator
+# 与 messages 两处同步改动）。
 USAGE = messages.CLI_USAGE
 
 

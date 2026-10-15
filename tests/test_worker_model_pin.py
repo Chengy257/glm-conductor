@@ -52,7 +52,7 @@ CLI_PATH = (Path(__file__).resolve().parents[1] / "plugins" /
 
 # runtime import（tests/test_cli_v24.py 同款 sys.path 引导）
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "plugins" / "glm-conductor"))
-from runtime import journal, state, task  # noqa: E402
+from runtime import journal, messages, state, task  # noqa: E402
 
 # 测试用模型 id（假账户段，绝不指向任何真实账户；形态约定同
 # tests/test_cli_v24.py 的 FLASH_A / FLASH_B / TEXT_MODEL_ID）
@@ -99,7 +99,7 @@ class WorkerModelStateKeyTest(unittest.TestCase):
             errors = state.validate_state(st)
             self.assertEqual(
                 errors,
-                ["worker_model 必须是非空字符串或 null"],
+                [messages.STATE_WORKER_MODEL_INVALID],
                 "worker_model=%r 应被拒绝" % (value,))
 
     def test_save_state_gate_rejects_invalid_pin(self):
@@ -107,7 +107,7 @@ class WorkerModelStateKeyTest(unittest.TestCase):
         st = full_state(worker_model="")
         with self.assertRaises(ValueError) as ctx:
             state.save_state("C:/glm-conductor-under-test", st)
-        self.assertIn("worker_model 必须是非空字符串或 null",
+        self.assertIn(messages.STATE_WORKER_MODEL_INVALID,
                       str(ctx.exception))
 
     def test_save_load_roundtrip_preserves_pin(self):
@@ -213,7 +213,9 @@ class PinWorkerModelApiTest(unittest.TestCase):
         self.make_terminal_task()
         with self.assertRaises(ValueError) as ctx:
             task.pin_worker_model(self.repo, TID, FLASH_A)
-        self.assertIn("终态", str(ctx.exception))
+        self.assertIn(messages.TASK_TERMINAL_FROZEN
+                      % ("pin_worker_model", TID, "completed"),
+                      str(ctx.exception))
         self.assertNotIn("worker_model",
                          state.load_state(self.repo, TID))
 
@@ -264,7 +266,8 @@ class PinWorkerModelApiTest(unittest.TestCase):
         """任务缺失（无 state.json）→ ValueError 拒绝。"""
         with self.assertRaises(ValueError) as ctx:
             task.pin_worker_model(self.repo, "no-such-task", FLASH_A)
-        self.assertIn("不存在", str(ctx.exception))
+        self.assertIn(messages.TASK_MISSING % "no-such-task",
+                      str(ctx.exception))
 
     def test_legacy_task_rejected(self):
         """v2.3 遗留任务拒绝（绝不静默当作 v2.4 任务写入）。"""
@@ -387,7 +390,9 @@ class WorkerModelPinCliTest(WorkerModelPinCliFixture):
         code, stdout, _ = self.run_cli(
             "worker-model-pin", self.repo, "no-such-task", FLASH_A)
         self.assertEqual(code, 1)
-        self.assertIn("不存在", json.loads(stdout)["error"])
+        self.assertIn(messages.CLI_TASK_MISSING_WORKER_MODEL_PIN
+                      % ("no-such-task", self.repo),
+                      json.loads(stdout)["error"])
 
     def test_terminal_task_exit_1(self):
         """终态冻结 → 任务层拒绝口径，退出码 1（盘面零改动）。"""
@@ -396,7 +401,9 @@ class WorkerModelPinCliTest(WorkerModelPinCliFixture):
         code, stdout, _ = self.run_cli(
             "worker-model-pin", self.repo, TID, FLASH_A)
         self.assertEqual(code, 1)
-        self.assertIn("终态", json.loads(stdout)["error"])
+        self.assertIn(messages.TASK_TERMINAL_FROZEN
+                      % ("pin_worker_model", TID, "completed"),
+                      json.loads(stdout)["error"])
         self.assertNotIn("worker_model", self.load())
 
     def test_usage_errors_exit_2(self):
@@ -426,9 +433,11 @@ class WorkflowModelSelectTaskRefCliTest(WorkerModelPinCliFixture):
             "--model", FLASH_B)
         self.assertEqual(code, 2)
         text = json.loads(stdout)["error"]
-        self.assertIn("不一致", text)
-        self.assertIn("不得绕过", text)
-        self.assertIn("重新授权", text)
+        self.assertIn(messages.CLI_WORKFLOW_MODEL_SELECT_MODEL_PIN_MISMATCH
+                      % (FLASH_B, TID, FLASH_A), text)
+        self.assertIn("must not bypass the task pin", text)
+        self.assertIn("re-authorize through the interactive interview",
+                      text)
         self.assertIn("worker-model-pin", text)
         self.assertIn(FLASH_A, text)
         self.assertIn(FLASH_B, text)
@@ -462,7 +471,9 @@ class WorkflowModelSelectTaskRefCliTest(WorkerModelPinCliFixture):
             "workflow-model-select", name, "--model", FLASH_A,
             "--task-ref", "no-such-task")
         self.assertEqual(code, 1)
-        self.assertIn("不存在", json.loads(stdout)["error"])
+        self.assertIn(messages.CLI_WORKFLOW_MODEL_SELECT_TASK_MISSING
+                      % ("no-such-task", self.repo),
+                      json.loads(stdout)["error"])
 
     def test_pin_adopted_breaks_ambiguity(self):
         """任务 pin > 自动选型：多候选歧义被 pin 打破（pin 恰被采纳）。"""
@@ -501,8 +512,9 @@ class WorkflowModelSelectTaskRefCliTest(WorkerModelPinCliFixture):
             "workflow-model-select", name, "--task-ref", TID)
         self.assertEqual(code, 2)
         text = json.loads(stdout)["error"]
-        self.assertIn("任务 pin 已失效", text)
-        self.assertIn("请重新问答授权", text)
+        self.assertIn(messages.CLI_WORKFLOW_MODEL_SELECT_PIN_NOT_CONFIGURED
+                      % (TID, FLASH_A, 1), text)
+        self.assertIn("never fall back to automatic selection", text)
         self.assertIn(FLASH_A, text)
         # 对照：无 pin 时**裸调用**同 configured 走既有自动选型 → 0
         # （证明上面的拒绝是 pin 失效闸而非选型面回归；--task-ref 无 pin
@@ -523,9 +535,10 @@ class WorkflowModelSelectTaskRefCliTest(WorkerModelPinCliFixture):
             "workflow-model-select", name, "--task-ref", TID)
         self.assertEqual(code, 2)
         text = json.loads(stdout)["error"]
-        self.assertIn("形状非法", text)
-        self.assertIn("任务 pin 已失效", text)
-        self.assertIn("请重新问答授权", text)
+        self.assertIn("has an invalid shape", text)
+        self.assertIn("the task pin is void", text)
+        self.assertIn("re-run the launch interview for authorization",
+                      text)
 
     def test_drifted_pin_shapes_rejected_not_treated_as_no_pin(self):
         """盘面漂移（外部直写非 str / 空串）→ 专门失效拒绝 exit 2，
@@ -538,9 +551,9 @@ class WorkflowModelSelectTaskRefCliTest(WorkerModelPinCliFixture):
                 "workflow-model-select", name, "--task-ref", TID)
             self.assertEqual(code, 2, "漂移 %r 应拒" % (drift,))
             text = json.loads(stdout)["error"]
-            self.assertIn("形状非法", text)
-            self.assertIn("盘面漂移", text)
-            self.assertIn("任务 pin 已失效", text)
+            self.assertIn("has an invalid shape", text)
+            self.assertIn("ledger drift", text)
+            self.assertIn("the task pin is void", text)
 
     def test_no_pin_follows_existing_path_verbatim(self):
         """无 pin 分径契约（规格 §5.3 resume 严口径）：--task-ref 无 pin
@@ -552,8 +565,11 @@ class WorkflowModelSelectTaskRefCliTest(WorkerModelPinCliFixture):
         code_with, stdout_with, _ = self.run_cli(
             "workflow-model-select", single, "--task-ref", TID)
         self.assertEqual(code_with, 2)
-        self.assertIn("无 worker_model pin", json.loads(stdout_with)["error"])
-        self.assertIn("启动问答", json.loads(stdout_with)["error"])
+        self.assertIn(
+            messages.CLI_WORKFLOW_MODEL_SELECT_NO_PIN_NO_MODEL % TID,
+            json.loads(stdout_with)["error"])
+        self.assertIn("launch interview",
+                      json.loads(stdout_with)["error"])
         # 裸调用（无任务上下文）：恰一 Flash 软推荐照旧自动选定
         code_without, stdout_without, _ = self.run_cli(
             "workflow-model-select", single)
@@ -583,8 +599,9 @@ class WorkflowModelSelectTaskRefCliTest(WorkerModelPinCliFixture):
         code, stdout, _ = self.run_cli(
             "workflow-model-select", name, "--task-ref", TID)
         self.assertEqual(code, 2)
-        self.assertIn("无 worker_model pin",
-                      json.loads(stdout)["error"])
+        self.assertIn(
+            messages.CLI_WORKFLOW_MODEL_SELECT_NO_PIN_NO_MODEL % TID,
+            json.loads(stdout)["error"])
         code, stdout, _ = self.run_cli("workflow-model-select", name)
         self.assertEqual(code, 0)
         self.assertEqual(json.loads(stdout)["subagent_model"], FLASH_A)
@@ -595,7 +612,9 @@ class WorkflowModelSelectTaskRefCliTest(WorkerModelPinCliFixture):
         code, stdout, _ = self.run_cli(
             "workflow-model-select", name, "--task-ref", "no-such-task")
         self.assertEqual(code, 1)
-        self.assertIn("不存在", json.loads(stdout)["error"])
+        self.assertIn(messages.CLI_WORKFLOW_MODEL_SELECT_TASK_MISSING
+                      % ("no-such-task", self.repo),
+                      json.loads(stdout)["error"])
 
     def test_usage_errors_exit_2(self):
         """旗标缺取值 / 未知旗标 / 参数个数错误 → 用法口径，退出码 2。"""

@@ -96,7 +96,10 @@ schema 来源：
     + runtime.dependency（图校验 graph_errors，Phase 1 P1-B；同上）
     + runtime.durable_io（共享原子写原语 atomic_write_json + 独占锁
       exclusive_lock 与锁名常量 LOCK_SUFFIX；它不导入 runtime 包内任
-      何模块，无循环导入），
+      何模块，无循环导入）
+    + runtime.messages（v2.6.1 W3a 单源：盘面拒绝消息常量与
+      STRUCTURAL_STATE_ERROR_PREFIXES 结构性分类锚，本模块经它再导出
+      LEGACY_STATE_GUIDANCE），
     零第三方依赖，`python3 -S` 可运行。
 """
 

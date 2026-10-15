@@ -68,7 +68,7 @@ CLI_PATH = PLUGIN_ROOT / "runtime" / "cli.py"
 
 # runtime import（tests/test_cli_v24.py 同款 sys.path 引导）
 sys.path.insert(0, str(PLUGIN_ROOT))
-from runtime import state, task  # noqa: E402
+from runtime import messages, state, task  # noqa: E402
 from runtime.workflow import submission  # noqa: E402
 
 # —— 测试夹具：混合宿主清单（中性账户段，绝不指向真实账户） ——
@@ -316,9 +316,11 @@ class PinIntegrityTest(M1CliFixture):
             "--model", TEXT_MAIN)
         self.assertEqual(code, 2)
         text = json.loads(stdout)["error"]
-        self.assertIn("不一致", text)
-        self.assertIn("不得绕过", text)
-        self.assertIn("重新授权", text)
+        self.assertIn(messages.CLI_WORKFLOW_MODEL_SELECT_MODEL_PIN_MISMATCH
+                      % (TEXT_MAIN, TID, FLASH_OLD), text)
+        self.assertIn("must not bypass the task pin", text)
+        self.assertIn("re-authorize through the interactive interview",
+                      text)
         self.assertIn(FLASH_OLD, text)
         self.assertIn(TEXT_MAIN, text)
 
@@ -352,8 +354,9 @@ class PinIntegrityTest(M1CliFixture):
             "workflow-model-select", name, "--task-ref", TID)
         self.assertEqual(code, 2)
         text = json.loads(stdout)["error"]
-        self.assertIn("任务 pin 已失效", text)
-        self.assertIn("请重新问答授权", text)
+        self.assertIn(messages.CLI_WORKFLOW_MODEL_SELECT_PIN_NOT_CONFIGURED
+                      % (TID, FLASH_OLD, 1), text)
+        self.assertIn("never fall back to automatic selection", text)
         self.assertIn(FLASH_OLD, text)
 
 
@@ -394,16 +397,18 @@ class NoPinExplicitAuthorizationTest(M1CliFixture):
             "workflow-model-select", name, "--task-ref", TID)
         self.assertEqual(code, 2)
         error = json.loads(stdout)["error"]
-        self.assertIn("无 worker_model pin", error)
-        self.assertIn("启动问答", error)
+        self.assertIn(messages.CLI_WORKFLOW_MODEL_SELECT_NO_PIN_NO_MODEL
+                      % TID, error)
+        self.assertIn("launch interview", error)
         # 恰一 Flash 候选：同样拒绝（关键差异点——旧便捷路径已收窄）
         single = self.write_models([FLASH_OLD, TEXT_MAIN],
                                    name="single.json")
         code, stdout, _ = self.run_cli(
             "workflow-model-select", single, "--task-ref", TID)
         self.assertEqual(code, 2)
-        self.assertIn("无 worker_model pin",
-                      json.loads(stdout)["error"])
+        self.assertIn(
+            messages.CLI_WORKFLOW_MODEL_SELECT_NO_PIN_NO_MODEL % TID,
+            json.loads(stdout)["error"])
         # 裸调用对照（无任务上下文）：恰一 Flash 软推荐照旧自动选定
         code, stdout, _ = self.run_cli(
             "workflow-model-select", single)
@@ -440,7 +445,9 @@ class ResumeNeverAutoAuthorizesTest(M1CliFixture):
             "workflow-model-select", name, "--task-ref", legacy_id)
         self.assertEqual(code, 1)
         text = json.loads(stdout)["error"]
-        self.assertIn("遗留", text)
+        self.assertIn(
+            messages.CLI_WORKFLOW_MODEL_SELECT_TASK_LEGACY.split(": %s")[0]
+            % legacy_id, text)
         self.assertIn(state.LEGACY_STATE_GUIDANCE, text)
         self.assertNotIn("subagent_model", json.loads(stdout))
 

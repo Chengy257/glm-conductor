@@ -82,38 +82,40 @@ TASK_CONTEXT_REQUIRED_KEYS = ("task_ref", "goal", "repository")
 
 # 头部横幅注释块
 BANNER_TITLE_COMMENT = (
-    "// GLM Conductor 原生 Workflow 编译产物"
-    "（runtime/workflow，P1-D）")
-TASK_REF_COMMENT_TEMPLATE = "// task_ref：%s"
-GOAL_COMMENT_TEMPLATE = "// goal：%s"
-REPOSITORY_COMMENT_TEMPLATE = "// repository：%s"
+    "// GLM Conductor native Workflow compilation output"
+    " (runtime/workflow, P1-D)")
+TASK_REF_COMMENT_TEMPLATE = "// task_ref: %s"
+GOAL_COMMENT_TEMPLATE = "// goal: %s"
+REPOSITORY_COMMENT_TEMPLATE = "// repository: %s"
 STAGE_COUNT_COMMENT_TEMPLATE = (
-    "// 节点数 %d；阶段数 %d（阶段序列来自 ownership 编译期"
-    "规划：组内并行、组间顺序等待）")
+    "// %d node(s); %d stage(s) (stage order from ownership"
+    " compile-time planning: parallel within a stage, sequential"
+    " barriers between stages)")
 DETERMINISTIC_COMMENT = (
-    "// 本产物为确定性生成：无时间戳、无随机数；"
-    "同一输入两次编译字节全等。")
+    "// This output is deterministically generated: no timestamps,"
+    " no randomness; two compilations of the same input are"
+    " byte-identical.")
 NODE_ID_TRANSPARENCY_COMMENT = (
-    "// Conductor 节点 id 原样出现在 actor 标签、"
-    "ask 指令与结果映射中。")
+    "// Conductor node ids appear verbatim in actor labels, "
+    "ask instructions, and the results map.")
 
 # 返回契约 / persona 来源 / 结果映射说明注释
-ASK_CONTRACT_COMMENT = "// 每节点 ask 的返回契约：结构化实施结果（恰六字段）"
+ASK_CONTRACT_COMMENT = "// Per-node ask return contract: a structured implementation result (exactly six fields)"
 PERSONA_SOURCE_COMMENT = (
-    "// 文本工人 persona（唯一权威来源："
-    "runtime/workflow/persona.py）")
-RESULTS_MAP_COMMENT = "// 全部节点结果映射（键 = Conductor 节点 id 原文）"
-FINAL_AGGREGATION_COMMENT = "// —— 最终聚合返回：全部节点结果按节点 id 升序 ——"
+    "// Text worker persona (single authoritative source: "
+    "runtime/workflow/persona.py)")
+RESULTS_MAP_COMMENT = "// Results map for all nodes (keys = Conductor node ids verbatim)"
+FINAL_AGGREGATION_COMMENT = "// == Final aggregation: return all node results in ascending node id order =="
 
 # 阶段注释头 / 阶段内节点 id 连接符 / 阶段标签（phase 名称实参，
 # stage label 前缀「阶段」为中文，一并收编）
-STAGE_HEADER_COMMENT_TEMPLATE = "// —— 阶段 %d：%s ——"
-STAGE_COMMENT_ID_SEPARATOR = "、"
-STAGE_LABEL_TEMPLATE = "阶段 %d: %s"
+STAGE_HEADER_COMMENT_TEMPLATE = "// == Stage %d: %s =="
+STAGE_COMMENT_ID_SEPARATOR = ", "
+STAGE_LABEL_TEMPLATE = "Stage %d: %s"
 
 # 阶段内逐节点注释（actor 标签说明；node- 前缀 ASCII 保持内联）
-NODE_COMMENT_TEMPLATE = ("  // 节点 %s（actor 标签 %s；"
-                         "结果映射键为节点 id 原文）")
+NODE_COMMENT_TEMPLATE = ("  // Node %s (actor label %s; "
+                         "results map key is the node id verbatim)")
 
 
 # —— 序列化 / 校验小助手 ——

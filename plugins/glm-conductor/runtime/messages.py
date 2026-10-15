@@ -29,19 +29,20 @@
 # v2.3 遗留任务的一行处置指引（消费方原样向用户报告；原 state.py
 # 模块常量，经 state.LEGACY_STATE_GUIDANCE 再导出保持既有导入面）
 LEGACY_STATE_GUIDANCE = (
-    "v2.3 遗留任务：请在 2.3.x 下收尾或显式放弃"
-    "（v2.4 不自动迁移、不伪造 v2.4 完成证据）")
+    "v2.3 legacy task: wrap up or explicitly abandon it under 2.3.x"
+    " (v2.4 does not auto-migrate and never fabricates v2.4"
+    " completion evidence)")
 
 # 盘上 state 结构性 ValueError 的稳定消息前缀（cli.
 # _is_structural_state_rejection 的分类锚——state 层消息即契约文案，
 # 改动须同步本表；锚定 state.load_state 的损坏解析拒绝与
 # _transaction_state / _transaction_commit 的严格读写闸）。
 STRUCTURAL_STATE_ERROR_PREFIXES = (
-    "state.json 损坏，无法解析",
-    "state 事务：盘上 state.json 归一任务标识",
-    "state 事务：盘上 state.json schema 非法",
-    "state 非法，无法保存",
-    "state 事务：新 state.task_id",
+    "state.json is corrupt and cannot be parsed",
+    "state transaction: on-disk state.json normalized task id",
+    "state transaction: on-disk state.json schema is invalid",
+    "state is invalid and cannot be saved",
+    "state transaction: new state.task_id",
 )
 
 # ============================================================
@@ -50,7 +51,7 @@ STRUCTURAL_STATE_ERROR_PREFIXES = (
 
 # USAGE 帮助块（缺子命令 / 未知子命令 / 参数个数错误统一追加）
 CLI_USAGE = (
-    "用法: python3 plugins/glm-conductor/runtime/cli.py "
+    "Usage: python3 plugins/glm-conductor/runtime/cli.py "
     "review-record <repo_root> <task_id> <reviewer> <verdict> [note] | "
     "quota-resolve <repo_root> [--force-refresh] | "
     "quota-wait <repo_root> <task_id> [--force-refresh] | "
@@ -61,7 +62,7 @@ CLI_USAGE = (
     "writer-acquire <repo_root> <task_id> [--run-id <id>] | "
     "writer-release <repo_root> <task_id> [--run-id <id>] [--force] | "
     "writer-show <repo_root> | "
-    "[legacy 低层薄壳] v24-record-run <task_ref> <run-id> "
+    "[legacy low-level shell] v24-record-run <task_ref> <run-id> "
     "[--artifact <path>] | "
     "workflow-model-select <models-json> [--model <exact-id>] "
     "[--task-ref <task_id>] [--repo-root <path>] | "
@@ -81,196 +82,217 @@ CLI_USAGE = (
 
 # —— 用法错误（_dispatch；调用点统一 + CLI_USAGE）——
 
-CLI_USAGE_MISSING_SUBCOMMAND = "缺少子命令。"
+CLI_USAGE_MISSING_SUBCOMMAND = "Missing subcommand."
 CLI_USAGE_REVIEW_RECORD = (
-    "review-record 需要 <repo_root> <task_id> <reviewer> "
-    "<verdict> [note] 四或五个参数。")
+    "review-record requires <repo_root> <task_id> <reviewer> "
+    "<verdict> [note]: four or five arguments.")
 CLI_USAGE_QUOTA_RESOLVE = (
-    "quota-resolve 需要 <repo_root> [--force-refresh] 一或"
-    "两个参数。")
+    "quota-resolve requires <repo_root> [--force-refresh]: "
+    "one or two arguments.")
 CLI_USAGE_QUOTA_RESOLVE_FLAG = (
-    "quota-resolve 的可选参数只接受 --force-refresh。")
+    "quota-resolve accepts only --force-refresh as an optional "
+    "argument.")
 CLI_USAGE_QUOTA_WAIT = (
-    "quota-wait 需要 <repo_root> <task_id> "
-    "[--force-refresh] 两或三个参数。")
+    "quota-wait requires <repo_root> <task_id> "
+    "[--force-refresh]: two or three arguments.")
 CLI_USAGE_QUOTA_WAIT_FLAG = (
-    "quota-wait 的可选参数只接受 --force-refresh。")
+    "quota-wait accepts only --force-refresh as an optional "
+    "argument.")
 CLI_USAGE_QUOTA_RESUME_AUTHORIZE = (
-    "quota-resume-authorize 需要 <repo_root> <task_id> "
-    "<max_resumes> 三个参数。")
+    "quota-resume-authorize requires <repo_root> <task_id> "
+    "<max_resumes>: three arguments.")
 CLI_USAGE_QUOTA_RESUME_DECISION = (
-    "quota-resume-decision 需要 <repo_root> <task_id> "
-    "[--force-refresh] 两或三个参数。")
+    "quota-resume-decision requires <repo_root> <task_id> "
+    "[--force-refresh]: two or three arguments.")
 CLI_USAGE_QUOTA_RESUME_DECISION_FLAG = (
-    "quota-resume-decision 的可选参数只接受 "
-    "--force-refresh。")
+    "quota-resume-decision accepts only "
+    "--force-refresh as an optional argument.")
 CLI_USAGE_QUOTA_RESUME_CONFIRM = (
-    "quota-resume-confirm 需要 <repo_root> <task_id> 两个"
-    "参数。")
+    "quota-resume-confirm requires <repo_root> <task_id>: "
+    "two arguments.")
 CLI_USAGE_V24_COMPILE = (
-    "v24-compile 需要 <dag-json> [--task-ref <id>] "
-    "[--out <path>] 一、三或五个参数。")
-CLI_USAGE_V24_COMPILE_FLAG_VALUE = "v24-compile 的旗标 %r 缺少取值。"
+    "v24-compile requires <dag-json> [--task-ref <id>] "
+    "[--out <path>]: one, three, or five arguments.")
+CLI_USAGE_V24_COMPILE_FLAG_VALUE = "v24-compile: flag %r is missing a value."
 CLI_USAGE_V24_COMPILE_FLAGS = (
-    "v24-compile 的可选参数只接受 --task-ref <id> 与 "
-    "--out <path>（各至多一次）。")
+    "v24-compile accepts only --task-ref <id> and "
+    "--out <path> as optional arguments (each at most once).")
 CLI_USAGE_WRITER_ACQUIRE = (
-    "writer-acquire 需要 <repo_root> <task_id> "
-    "[--run-id <id>] 两或四个参数。")
+    "writer-acquire requires <repo_root> <task_id> "
+    "[--run-id <id>]: two or four arguments.")
 CLI_USAGE_WRITER_ACQUIRE_FLAG = (
-    "writer-acquire 的可选参数只接受 --run-id <id>。")
+    "writer-acquire accepts only --run-id <id> as an optional "
+    "argument.")
 CLI_USAGE_WRITER_RELEASE = (
-    "writer-release 需要 <repo_root> <task_id> "
-    "[--run-id <id>] [--force] 两到五个参数。")
-CLI_USAGE_WRITER_RELEASE_FORCE_ONCE = "writer-release 的 --force 至多出现一次。"
-CLI_USAGE_WRITER_RELEASE_RUN_ID_VALUE = "writer-release 的 --run-id 需要恰一个取值。"
-CLI_USAGE_WRITER_RELEASE_RUN_ID_ONCE = "writer-release 的 --run-id 至多出现一次。"
+    "writer-release requires <repo_root> <task_id> "
+    "[--run-id <id>] [--force]: two to five arguments.")
+CLI_USAGE_WRITER_RELEASE_FORCE_ONCE = "writer-release accepts --force at most once."
+CLI_USAGE_WRITER_RELEASE_RUN_ID_VALUE = "writer-release: --run-id requires exactly one value."
+CLI_USAGE_WRITER_RELEASE_RUN_ID_ONCE = "writer-release accepts --run-id at most once."
 CLI_USAGE_WRITER_RELEASE_FLAGS = (
-    "writer-release 的可选参数只接受 --run-id <id> 与 "
-    "--force。")
-CLI_USAGE_WRITER_SHOW = "writer-show 需要 <repo_root> 一个参数。"
+    "writer-release accepts only --run-id <id> and "
+    "--force as optional arguments.")
+CLI_USAGE_WRITER_SHOW = "writer-show requires exactly one argument: <repo_root>."
 CLI_USAGE_V24_RECORD_RUN = (
-    "v24-record-run 需要 <task_ref> <run-id> "
-    "[--artifact <path>] 两或四个参数。")
+    "v24-record-run requires <task_ref> <run-id> "
+    "[--artifact <path>]: two or four arguments.")
 CLI_USAGE_V24_RECORD_RUN_FLAG = (
-    "v24-record-run 的可选参数只接受 --artifact <path>。")
+    "v24-record-run accepts only --artifact <path> as an "
+    "optional argument.")
 CLI_USAGE_WORKFLOW_MODEL_SELECT = (
-    "workflow-model-select 需要 <models-json> "
+    "workflow-model-select requires <models-json> "
     "[--model <exact-id>] [--task-ref <task_id>] "
-    "[--repo-root <path>] 一、三、五或七个参数。")
+    "[--repo-root <path>]: one, three, five, or seven arguments.")
 CLI_USAGE_WORKFLOW_MODEL_SELECT_FLAG_VALUE = (
-    "workflow-model-select 的旗标 %r 缺少取值。")
+    "workflow-model-select: flag %r is missing a value.")
 CLI_USAGE_WORKFLOW_MODEL_SELECT_FLAGS = (
-    "workflow-model-select 的可选参数只接受 "
-    "--model <exact-id>、--task-ref <task_id> 与 "
-    "--repo-root <path>（各至多一次）。")
+    "workflow-model-select accepts only "
+    "--model <exact-id>, --task-ref <task_id>, and "
+    "--repo-root <path> as optional arguments (each at most "
+    "once).")
 CLI_USAGE_WORKER_MODEL_PIN = (
-    "worker-model-pin 需要 <repo_root> <task_id> "
-    "<exact-id> 三个参数。")
+    "worker-model-pin requires <repo_root> <task_id> "
+    "<exact-id>: three arguments.")
 CLI_USAGE_QUOTA_AUTOMATION_BIND = (
-    "quota-automation-bind 需要 <repo_root> <task_id> "
-    "<automation_id> 三个参数。")
+    "quota-automation-bind requires <repo_root> <task_id> "
+    "<automation_id>: three arguments.")
 CLI_USAGE_QUOTA_AUTOMATION_CLEAR = (
-    "quota-automation-clear 需要 <repo_root> <task_id> "
-    "[automation_id] 两或三个参数。")
+    "quota-automation-clear requires <repo_root> <task_id> "
+    "[automation_id]: two or three arguments.")
 CLI_USAGE_QUOTA_CONTINUITY_PREFLIGHT = (
-    "quota-continuity-preflight 需要 <repo_root> <task_id> "
-    "两个参数。")
+    "quota-continuity-preflight requires <repo_root> <task_id>: "
+    "two arguments.")
 CLI_USAGE_TASK_CREATE = (
-    "task-create 需要 <repo_root> <task_id> <goal> <mode> "
-    "<assurance> [--dag <path>] 五或七个参数。")
-CLI_USAGE_TASK_CREATE_FLAG = "task-create 的可选参数只接受 --dag <path>。"
+    "task-create requires <repo_root> <task_id> <goal> <mode> "
+    "<assurance> [--dag <path>]: five or seven arguments.")
+CLI_USAGE_TASK_CREATE_FLAG = "task-create accepts only --dag <path> as an optional argument."
 CLI_USAGE_RECORD_VALIDATION = (
-    "record-validation 需要 <repo_root> <task_id> "
+    "record-validation requires <repo_root> <task_id> "
     "<passed|failed> [--summary <s>] [--commands <s>] ..."
-    "（旗标成对出现）。")
+    " (flags come in pairs).")
 CLI_USAGE_RECORD_VALIDATION_FLAGS = (
-    "record-validation 的可选参数只接受 --summary <s>"
-    "（至多一次）与 --commands <s>（可重复，每次恰一条"
-    "命令）。")
-CLI_USAGE_TASK_COMPLETE = "task-complete 需要 <repo_root> <task_id> 两个参数。"
-CLI_USAGE_TASK_FAIL = "task-fail 需要 <repo_root> <task_id> 两个参数。"
-CLI_USAGE_TASK_CANCEL = "task-cancel 需要 <repo_root> <task_id> 两个参数。"
-CLI_USAGE_EXIT_WAITING = "exit-waiting 需要 <repo_root> <task_id> 两个参数。"
+    "record-validation accepts only --summary <s>"
+    " (at most once) and --commands <s> (repeatable, exactly one "
+    "command each time) as optional arguments.")
+CLI_USAGE_TASK_COMPLETE = "task-complete requires <repo_root> <task_id>: two arguments."
+CLI_USAGE_TASK_FAIL = "task-fail requires <repo_root> <task_id>: two arguments."
+CLI_USAGE_TASK_CANCEL = "task-cancel requires <repo_root> <task_id>: two arguments."
+CLI_USAGE_EXIT_WAITING = "exit-waiting requires <repo_root> <task_id>: two arguments."
 CLI_USAGE_TASK_RECORD_WORKFLOW_RUN = (
-    "task-record-workflow-run 需要 <repo_root> <task_id> "
-    "<run-id> 三个参数。")
-CLI_USAGE_UNKNOWN_SUBCOMMAND = "未知子命令 %r。"
+    "task-record-workflow-run requires <repo_root> <task_id> "
+    "<run-id>: three arguments.")
+CLI_USAGE_UNKNOWN_SUBCOMMAND = "Unknown subcommand %r."
 
 # —— review-record / quota 生命周期薄壳 ——
 
 CLI_TASK_MISSING_REVIEW = (
-    "任务 %s 不存在（%s 下无 state.json），无法记录审查")
+    "Task %s does not exist (no state.json under %s); "
+    "cannot record the review")
 CLI_VERDICT_NOT_IN_REVIEW_VERDICTS = (
-    "%s：verdict %r 不在 state.REVIEW_VERDICTS 内（%s）")
+    "%s: verdict %r is not in state.REVIEW_VERDICTS (%s)")
 CLI_QUOTA_RESUME_AUTHORIZE_MAX_RESUMES = (
-    "quota-resume-authorize：max_resumes 必须是 >= 0 的整数，"
-    "得到 %r")
+    "quota-resume-authorize: max_resumes must be an integer "
+    ">= 0, got %r")
 
 # —— v24-compile ——
 
-CLI_V24_COMPILE_READ_ERROR = "v24-compile：无法读取 DAG JSON %r：%s"
-CLI_V24_COMPILE_PARSE_ERROR = "v24-compile：DAG JSON 解析失败（%s）：%s"
+CLI_V24_COMPILE_READ_ERROR = "v24-compile: cannot read DAG JSON %r: %s"
+CLI_V24_COMPILE_PARSE_ERROR = "v24-compile: DAG JSON parse failed (%s): %s"
 CLI_V24_COMPILE_TOP_NOT_OBJECT = (
-    "v24-compile：DAG JSON 顶层必须是 JSON 对象，"
-    "得到 %s")
-CLI_V24_COMPILE_NODES_NOT_ARRAY = "v24-compile：nodes 必须是数组，得到 %s"
-CLI_V24_COMPILE_OWNERSHIP_REJECTED = "v24-compile：ownership 阶段规划拒绝：%s"
-CLI_V24_COMPILE_REJECTED = "v24-compile：%s"
+    "v24-compile: DAG JSON top level must be a JSON object, "
+    "got %s")
+CLI_V24_COMPILE_NODES_NOT_ARRAY = "v24-compile: nodes must be an array, got %s"
+CLI_V24_COMPILE_OWNERSHIP_REJECTED = "v24-compile: ownership stage planning rejected: %s"
+CLI_V24_COMPILE_REJECTED = "v24-compile: %s"
 
 # —— writer-* / v24-record-run 包装 ——
 
-CLI_WRITER_ACQUIRE_REJECTED = "writer-acquire：%s"
-CLI_WRITER_RELEASE_REJECTED = "writer-release：%s"
-CLI_V24_RECORD_RUN_REJECTED = "v24-record-run：%s"
+CLI_WRITER_ACQUIRE_REJECTED = "writer-acquire: %s"
+CLI_WRITER_RELEASE_REJECTED = "writer-release: %s"
+CLI_V24_RECORD_RUN_REJECTED = "v24-record-run: %s"
 
 # —— workflow-model-select ——
 
 CLI_WORKFLOW_MODEL_SELECT_PARAM_NOT_JSON = (
-    "workflow-model-select：参数 %r 既不是内联 JSON 数组，也无法"
-    "作为 JSON 文件路径读取：%s")
+    "workflow-model-select: argument %r is neither an inline JSON "
+    "array nor readable as a JSON file path: %s")
 CLI_WORKFLOW_MODEL_SELECT_FILE_NOT_JSON = (
-    "workflow-model-select：模型清单文件 %r 不是合法 JSON：%s")
+    "workflow-model-select: model manifest file %r is not valid "
+    "JSON: %s")
 CLI_WORKFLOW_MODEL_SELECT_NOT_ARRAY = (
-    "workflow-model-select：模型清单必须是 JSON 数组（模型 id "
-    "字符串集合），%r 顶层为 %s")
+    "workflow-model-select: model manifest must be a JSON array "
+    "(a set of model id strings); top level of %r is %s")
 CLI_WORKFLOW_MODEL_SELECT_TASK_MISSING = (
-    "workflow-model-select：任务 %s 不存在（%s 下无 "
-    "state.json），无法消费任务 pin")
+    "workflow-model-select: task %s does not exist (no "
+    "state.json under %s); cannot consume the task pin")
 CLI_WORKFLOW_MODEL_SELECT_TASK_LEGACY = (
-    "workflow-model-select：任务 %s 是 v2.3 遗留任务，无法"
-    "消费任务 pin：%s")
+    "workflow-model-select: task %s is a v2.3 legacy task; "
+    "cannot consume the task pin: %s")
 CLI_WORKFLOW_MODEL_SELECT_PIN_DRIFT = (
-    "workflow-model-select：任务 %s 的 worker_model pin 形状非法"
-    "（盘面漂移：%r）——任务 pin 已失效，请重新问答授权")
+    "workflow-model-select: the worker_model pin of task %s has "
+    "an invalid shape (ledger drift: %r)"
+    " — the task pin is void; re-run the launch interview for "
+    "authorization")
 CLI_WORKFLOW_MODEL_SELECT_PIN_INVALID = (
-    "workflow-model-select：任务 %s 的 worker_model "
-    "pin 形状非法——任务 pin 已失效，请重新问答授权"
-    "（%s）")
+    "workflow-model-select: the worker_model "
+    "pin of task %s has an invalid shape — the task pin is void; "
+    "re-run the launch interview for authorization"
+    " (%s)")
 CLI_WORKFLOW_MODEL_SELECT_PIN_NOT_CONFIGURED = (
-    "workflow-model-select：任务 %s 的 worker_model "
-    "pin %r 不在本次 configured 集合（共 %d 个模型）"
-    "——任务 pin 已失效，请重新问答授权；绝不回退自动"
-    "选型、绝不静默换模型")
+    "workflow-model-select: the worker_model "
+    "pin of task %s, %r, is not in this run's configured set "
+    "(%d models in total)"
+    " — the task pin is void; re-run the launch interview for "
+    "authorization; never fall back to automatic selection, "
+    "never switch models silently")
 CLI_WORKFLOW_MODEL_SELECT_MODEL_PIN_MISMATCH = (
-    "workflow-model-select：--model %r 与任务 %s 的 worker_model "
-    "pin %r 不一致——有 pin 任务的 --model 显式值必须与 pin 一致"
-    "（普通 --model 不得绕过任务 pin）；如需更换授权，请走交互"
-    "问答重新授权并以 worker-model-pin 更新任务 pin")
+    "workflow-model-select: --model %r does not match the "
+    "worker_model pin of task %s, %r"
+    " — for pinned tasks the explicit --model value must equal "
+    "the pin"
+    " (a plain --model must not bypass the task pin); to change "
+    "the authorization, re-authorize through the interactive "
+    "interview and update the task pin with worker-model-pin")
 CLI_WORKFLOW_MODEL_SELECT_NO_PIN_NO_MODEL = (
-    "workflow-model-select：任务 %s 无 worker_model pin 且未给 "
-    "--model 显式值——任务级 worker 选型必须经启动问答显式授权"
-    "（orchestration §6.0 第二题）并以 worker-model-pin 落盘，"
-    "绝不自动选型、绝不隐式授权单候选")
+    "workflow-model-select: task %s has no worker_model pin and "
+    "no explicit --model value was given — task-level worker "
+    "selection must be explicitly authorized through the launch "
+    "interview (orchestration §6.0, question 2) and persisted "
+    "with worker-model-pin; "
+    "never select automatically, never treat a single candidate "
+    "as implicit authorization")
 
 # —— worker-model-pin / task-create / record-validation ——
 
-CLI_WORKER_MODEL_PIN_REJECTED = "worker-model-pin：%s"
+CLI_WORKER_MODEL_PIN_REJECTED = "worker-model-pin: %s"
 CLI_TASK_MISSING_WORKER_MODEL_PIN = (
-    "任务 %s 不存在（%s 下无 state.json），无法写入 worker "
-    "模型 pin")
-CLI_TASK_CREATE_GOAL_EMPTY = "task-create：goal 必须是非空字符串，得到 %r"
-CLI_TASK_CREATE_MODE_INVALID = "task-create：mode %r 不在合法取值内（%s）"
-CLI_TASK_CREATE_ASSURANCE_INVALID = "task-create：assurance %r 不在合法取值内（%s）"
-CLI_TASK_CREATE_DAG_READ_ERROR = "task-create：无法读取 DAG JSON %r：%s"
-CLI_TASK_CREATE_DAG_PARSE_ERROR = "task-create：DAG JSON 解析失败（%s）：%s"
+    "Task %s does not exist (no state.json under %s); cannot "
+    "write the worker model pin")
+CLI_TASK_CREATE_GOAL_EMPTY = "task-create: goal must be a non-empty string, got %r"
+CLI_TASK_CREATE_MODE_INVALID = "task-create: mode %r is not in the allowed values (%s)"
+CLI_TASK_CREATE_ASSURANCE_INVALID = "task-create: assurance %r is not in the allowed values (%s)"
+CLI_TASK_CREATE_DAG_READ_ERROR = "task-create: cannot read DAG JSON %r: %s"
+CLI_TASK_CREATE_DAG_PARSE_ERROR = "task-create: DAG JSON parse failed (%s): %s"
 CLI_TASK_CREATE_DAG_TOP_INVALID = (
-    "task-create：DAG JSON 顶层必须是节点数组或含 nodes 数组的"
-    " JSON 对象，%r 顶层为 %s")
-CLI_TASK_CREATE_DAG_ERRORS = "task-create：%s"
+    "task-create: DAG JSON top level must be a node array or a "
+    "JSON object containing a nodes array; top level of %r is %s")
+CLI_TASK_CREATE_DAG_ERRORS = "task-create: %s"
 CLI_RECORD_VALIDATION_STATUS_INVALID = (
-    "record-validation：status %r 不在合法取值内（%s）")
+    "record-validation: status %r is not in the allowed values (%s)")
 CLI_RECORD_VALIDATION_SUMMARY_EMPTY = (
-    "record-validation：summary 必须是非空字符串（省略即 None）")
+    "record-validation: summary must be a non-empty string "
+    "(omit for None)")
 CLI_RECORD_VALIDATION_COMMANDS_EMPTY = (
-    "record-validation：commands 的各项必须是非空字符串"
-    "（--commands 每次恰一条命令）")
+    "record-validation: every item of commands must be a "
+    "non-empty string"
+    " (--commands takes exactly one command each time)")
 
 # —— 终态薄壳包装与意外兜底 / 规范 run 注册 ——
 
-CLI_TASK_REJECTED_WRAP = "%s：%s"
+CLI_TASK_REJECTED_WRAP = "%s: %s"
 CLI_TASK_RECORD_WORKFLOW_RUN_RUN_ID_EMPTY = (
-    "task-record-workflow-run：run-id 必须是非空字符串，得到 %r")
+    "task-record-workflow-run: run-id must be a non-empty "
+    "string, got %r")
 CLI_UNEXPECTED_ERROR = "%s: %s"
 
 # ============================================================
@@ -279,147 +301,190 @@ CLI_UNEXPECTED_ERROR = "%s: %s"
 
 # —— 公共助手 ——
 
-TASK_MISSING = "任务 %s 不存在（无 state.json），无法执行生命周期操作"
+TASK_MISSING = (
+    "Task %s does not exist (no state.json); cannot perform the "
+    "lifecycle operation")
 TASK_LEGACY_LIFECYCLE = (
-    "任务 %s 是 v2.3 遗留任务，v2.4 生命周期层拒绝操作：%s")
+    "Task %s is a v2.3 legacy task; the v2.4 lifecycle layer "
+    "refuses to operate on it: %s")
 TASK_TERMINAL_FROZEN = (
-    "%s：任务 %s 已是终态 %r，账本冻结（重开请走 state.reopen_task）")
+    "%s: task %s is already in terminal state %r; the ledger is "
+    "frozen (to reopen, go through state.reopen_task)")
 TASK_TRANSITION_NO_TARGETS = (
-    "无（终态不接受任何转换；显式重开请走 state.reopen_task）")
+    "none (terminal states accept no transitions; to reopen "
+    "explicitly, go through state.reopen_task)")
 TASK_TRANSITION_DISALLOWED = (
-    "%s：status 转换 %r → %r 不在合法转换内（%s 的合法目标：%s；"
-    "完整转换表见 state.TASK_TRANSITIONS）")
+    "%s: status transition %r → %r is not allowed (allowed "
+    "targets of %s: %s; "
+    "see state.TASK_TRANSITIONS for the full transition table)")
 
 # —— 创建 / 读取 ——
 
 TASK_CREATE_ALREADY_EXISTS = (
-    "create_task：任务 %s 已存在（盘上已有 state.json），"
-    "拒绝重建（绝不覆盖既有账本）")
-TASK_CREATE_STATE_INVALID = "create_task：任务状态非法，拒绝持久化：%s"
-TASK_LOAD_LEGACY = "任务 %s 是 v2.3 遗留任务：%s"
+    "create_task: task %s already exists (state.json already on "
+    "disk); refusing to recreate (an existing ledger is never "
+    "overwritten)")
+TASK_CREATE_STATE_INVALID = "create_task: task state is invalid; refusing to persist: %s"
+TASK_LOAD_LEGACY = "Task %s is a v2.3 legacy task: %s"
 
 # —— 委派 run 关联 ——
 
 TASK_RECORD_RUN_ID_EMPTY = (
-    "record_workflow_run：workflow_run_id 必须是非空字符串，得到 %r")
+    "record_workflow_run: workflow_run_id must be a non-empty "
+    "string, got %r")
 TASK_RECORD_RUN_NO_RESERVATION = (
-    "record_workflow_run：委派 run 注册必须先持有本仓库写者"
-    "守卫（missing writer reservation）——任务 %s 当前无写"
-    "预约，请先经宿主侧 writer-acquire 取得写预约再注册")
+    "record_workflow_run: registering a delegated run requires "
+    "holding this repository's writer guard first "
+    "(missing writer reservation) — task %s currently holds no "
+    "write reservation; acquire one via host-side writer-acquire "
+    "before registering")
 TASK_RECORD_RUN_GUARD_HELD_BY_OTHER = (
-    "record_workflow_run：本仓库写者守卫正被其他任务持有"
-    "（task_id=%r，workflow_run_id=%r），任务 %s 不得注册"
-    "委派 run")
+    "record_workflow_run: this repository's writer guard is "
+    "currently held by another task "
+    "(task_id=%r, workflow_run_id=%r); task %s must not register "
+    "a delegated run")
 TASK_RECORD_RUN_GUARD_RACE = (
-    "record_workflow_run：补挂 run id 时本仓库写者守卫已被"
-    "其他任务持有（task_id=%r，workflow_run_id=%r），拒绝"
-    "本次注册")
+    "record_workflow_run: while attaching the run id, this "
+    "repository's writer guard became held by another task "
+    "(task_id=%r, workflow_run_id=%r); refusing "
+    "this registration")
 
 # —— 任务级验证 / 审查 ——
 
 TASK_REVIEW_NO_VALIDATION = (
-    "record_review：任务 %s 尚无 validation 记录，拒绝记录 review"
-    "（先验证后评审；请先 record_validation）")
+    "record_review: task %s has no validation record yet; "
+    "refusing to record the review "
+    "(validate before review; run record_validation first)")
 TASK_RECORD_VALIDATION_STATUS_INVALID = (
-    "record_validation：status %r 不在合法取值内（%s）")
+    "record_validation: status %r is not in the allowed values (%s)")
 TASK_RECORD_VALIDATION_SUMMARY_INVALID = (
-    "record_validation：summary 必须是非空字符串或 None，得到 %r")
+    "record_validation: summary must be a non-empty string or "
+    "None, got %r")
 TASK_RECORD_VALIDATION_COMMANDS_TYPE = (
-    "record_validation：commands 必须是字符串数组或 None，"
-    "得到 %s")
+    "record_validation: commands must be an array of strings or "
+    "None, "
+    "got %s")
 TASK_RECORD_VALIDATION_COMMAND_ITEM_EMPTY = (
-    "record_validation：commands 的各项必须是非空字符串")
+    "record_validation: every item of commands must be a "
+    "non-empty string")
 TASK_RECORD_REVIEW_REVIEWER_EMPTY = (
-    "record_review：reviewer 必须是非空字符串，得到 %r")
+    "record_review: reviewer must be a non-empty string, got %r")
 TASK_RECORD_REVIEW_VERDICT_INVALID = (
-    "record_review：verdict %r 不在合法取值内（%s）")
+    "record_review: verdict %r is not in the allowed values (%s)")
 TASK_RECORD_REVIEW_FINDINGS_INVALID = (
-    "record_review：findings 必须是非空字符串或 None，得到 %r")
+    "record_review: findings must be a non-empty string or None, "
+    "got %r")
 
 # —— 状态 / phase 推进 ——
 
-TASK_SET_STATUS_INVALID = "set_status：status %r 不在合法取值内（%s）"
-TASK_SET_PHASE_INVALID = "set_phase：phase %r 不在合法取值内（%s）"
+TASK_SET_STATUS_INVALID = "set_status: status %r is not in the allowed values (%s)"
+TASK_SET_PHASE_INVALID = "set_phase: phase %r is not in the allowed values (%s)"
 
 # —— 额度等待 / 恢复 ——
 
 TASK_QUOTA_VIEW_NOT_DICT = (
-    "quota_view 必须是归一化观测 JSON 对象（含 status/reset_at/"
-    "source/observed_at），得到 %s")
-TASK_QUOTA_VIEW_STATUS_INVALID = "quota_view.status %r 不在合法取值内（%s）"
+    "quota_view must be a normalized observation JSON object "
+    "(with status/reset_at/"
+    "source/observed_at), got %s")
+TASK_QUOTA_VIEW_STATUS_INVALID = "quota_view.status %r is not in the allowed values (%s)"
 TASK_AUTHORIZE_MAX_RESUMES_INVALID = (
-    "authorize_quota_resume：max_resumes 必须是 >= 0 的整数，"
-    "得到 %r")
+    "authorize_quota_resume: max_resumes must be an integer "
+    ">= 0, "
+    "got %r")
 TASK_AUTHORIZE_STATUS_INVALID = (
-    "authorize_quota_resume：任务 %s 处于 %r，授权要求任务"
-    "处于 waiting_quota 或 active")
+    "authorize_quota_resume: task %s is in %r; authorization "
+    "requires the task "
+    "to be waiting_quota or active")
 TASK_AUTHORIZE_BUDGET_BELOW_COUNT = (
-    "authorize_quota_resume：max_resumes %d 不得小于已用 "
-    "resume_count %r（预算不变量：resume_count <= "
-    "max_resumes）")
+    "authorize_quota_resume: max_resumes %d must not be less "
+    "than the used "
+    "resume_count %r (budget invariant: resume_count <= "
+    "max_resumes)")
 
 # —— 定时唤醒决策（decision.reason 文案） ——
 
 TASK_DECISION_NOT_WAITING = (
-    "任务状态为 %r，非 waiting_quota（重复唤醒安全，"
-    "不采取任何动作）")
-TASK_DECISION_EXHAUSTED = "额度观测为 %s，继续等待"
-TASK_DECISION_UNKNOWN = "额度观测为 UNKNOWN，不虚构可用性，继续等待"
+    "Task status is %r, not waiting_quota (a duplicate wake is "
+    "safe; "
+    "no action is taken)")
+TASK_DECISION_EXHAUSTED = "Quota observation is %s; keep waiting"
+TASK_DECISION_UNKNOWN = "Quota observation is UNKNOWN; do not fabricate availability, keep waiting"
 TASK_DECISION_NOT_AUTHORIZED = (
-    "quota_resume.mode=%r（未授权自动恢复），等用户"
-    "显式 authorize_quota_resume")
+    "quota_resume.mode=%r (automatic resume not authorized); "
+    "waiting for the user"
+    " to explicitly authorize_quota_resume")
 TASK_DECISION_BUDGET_EXHAUSTED = (
-    "自动恢复预算已耗尽（resume_count=%d >= "
-    "max_resumes=%d），任务转 waiting_user 等用户处理")
+    "Automatic resume budget is exhausted (resume_count=%d >= "
+    "max_resumes=%d); the task moves to waiting_user for the "
+    "user to handle")
 TASK_DECISION_CONTINUITY_UNARMED = (
-    "continuity-unarmed：auto 连续性未武装"
-    "（quota_resume.automation_id=%r），缺少未来定时"
-    "激活见证，绝不给出 resume-authorized；任务保持 "
-    "waiting_quota、零预算消耗——这是运维活性缺失而非"
-    "授权耗尽，请先经宿主侧创建定时激活并 "
-    "bind_quota_automation 绑定，再经 "
-    "quota_continuity_preflight 确认 ready")
+    "continuity-unarmed: auto continuity is not armed "
+    "(quota_resume.automation_id=%r); the witness of a future "
+    "scheduled "
+    "activation is missing, so resume-authorized is never "
+    "issued; the task stays "
+    "waiting_quota with zero budget consumed — this is an "
+    "operational-liveness gap, not "
+    "authorization exhaustion; first create the scheduled "
+    "activation host-side and "
+    "bind it with bind_quota_automation, then confirm ready "
+    "via quota_continuity_preflight")
 TASK_DECISION_NO_RUN = (
-    "scheduled_activation_decision：任务 %s 无关联 "
-    "workflow_run_id，无 run 可恢复，拒绝给出 resume-authorized")
+    "scheduled_activation_decision: task %s has no associated "
+    "workflow_run_id; there is no run to resume, refusing to "
+    "issue resume-authorized")
 TASK_DECISION_RESUME_AUTHORIZED = (
-    "额度可用（%s）且已授权、预算有余（%d/%d）；计数仅"
-    "暂存，宿主 resume 调用被接受后请调 "
-    "confirm_resume_started 落账")
+    "Quota is available (%s), authorized, with budget remaining "
+    "(%d/%d); the count is only "
+    "staged — after the host resume call is accepted, call "
+    "confirm_resume_started to commit it")
 
 # —— 恢复落账确认 ——
 
 TASK_CONFIRM_NOT_WAITING = (
-    "confirm_resume_started：任务 %s 处于 %r，非 waiting_quota"
-    "——无暂存恢复决策可落账（重复确认安全：确认后任务已转"
-    " active）")
+    "confirm_resume_started: task %s is in %r, not "
+    "waiting_quota"
+    " — no staged resume decision to commit (duplicate "
+    "confirmation is safe: after confirmation the task has "
+    "already moved to active)")
 TASK_CONFIRM_NOT_AUTHORIZED = (
-    "confirm_resume_started：任务 %s 的 quota_resume.mode=%r，"
-    "未授权自动恢复，拒绝落账")
+    "confirm_resume_started: task %s has quota_resume.mode=%r; "
+    "automatic resume is not authorized, refusing to commit")
 TASK_CONFIRM_COUNT_SHAPE = (
-    "confirm_resume_started：任务 %s 的 quota_resume 计数形状"
-    "非法（resume_count=%r / max_resumes=%r），拒绝落账")
+    "confirm_resume_started: the quota_resume counters of task "
+    "%s have an invalid shape "
+    "(resume_count=%r / max_resumes=%r); refusing to commit")
 TASK_CONFIRM_BUDGET_EXHAUSTED = (
-    "confirm_resume_started：任务 %s 预算已耗尽（resume_count="
-    "%d >= max_resumes=%d），无暂存决策可落账")
+    "confirm_resume_started: the budget of task %s is exhausted "
+    "(resume_count="
+    "%d >= max_resumes=%d); no staged decision to commit")
 
 # —— auto 连续性武装 / 清理 ——
 
 TASK_BIND_STATUS_INVALID = (
-    "bind_quota_automation：任务 %s 处于 %r，绑定要求任务处于"
-    " %s（终态不得新增绑定事实；终态清理走 clear_quota_"
-    "automation）")
+    "bind_quota_automation: task %s is in %r; binding requires "
+    "the task to be in "
+    " %s (terminal states never gain new binding facts; terminal "
+    "cleanup goes through clear_quota_"
+    "automation)")
 TASK_BIND_CONFLICT = (
-    "bind_quota_automation：任务 %s 已绑定 automation_id %r，"
-    "拒绝静默替换为 %r（替换必须先经宿主侧生命周期对账，再走"
-    "显式 clear_quota_automation → bind_quota_automation 序列）")
+    "bind_quota_automation: task %s is already bound to "
+    "automation_id %r; "
+    "refusing to silently replace it with %r (a replacement must "
+    "first be reconciled through the host-side lifecycle, then "
+    "follow the "
+    "explicit clear_quota_automation → bind_quota_automation "
+    "sequence)")
 TASK_BIND_ID_EMPTY = (
-    "bind_quota_automation：automation_id 必须是非空字符串，"
-    "得到 %r")
+    "bind_quota_automation: automation_id must be a non-empty "
+    "string, "
+    "got %r")
 TASK_CLEAR_MISMATCH = (
-    "clear_quota_automation：给定 automation_id %r 与任务 %s "
-    "的存量绑定 %r 不一致，拒绝清理（精确对账口径；无预期时"
-    "传 None 表示无条件清除现存绑定）")
+    "clear_quota_automation: the given automation_id %r does not "
+    "match the existing binding of task %s, %r"
+    "; refusing to clear (exact reconciliation; pass None when "
+    "there is no expectation to unconditionally clear the "
+    "existing binding)")
 
 # —— 连续性预检（reason 为规格 §4.1 给出的英文短句） ——
 
@@ -429,10 +494,11 @@ TASK_PREFLIGHT_UNARMED = "auto continuity is not armed"
 
 # —— worker 模型 pin / 终态收尾 ——
 
-TASK_PIN_REJECTED = "pin_worker_model：%s"
+TASK_PIN_REJECTED = "pin_worker_model: %s"
 TASK_FINISH_POST_COMMIT_MISMATCH = (
-    "%s：状态事务提交后任务 %s 处于 %r，非目标终态 %r，拒绝"
-    "追加事件与释放守卫")
+    "%s: after the state transaction committed, task %s is in "
+    "%r, not the target terminal state %r; refusing to "
+    "append events and release the guard")
 
 # ============================================================
 # —— runtime/state.py：盘面拒绝消息 ——
@@ -440,97 +506,120 @@ TASK_FINISH_POST_COMMIT_MISMATCH = (
 
 # —— legacy 标识归一 ——
 
-STATE_NORMALIZE_NOT_DICT = "任务标识归一失败：输入必须是 JSON 对象"
-STATE_NORMALIZE_MISSING_KEY = "任务标识归一失败：缺少任务标识键（%s）"
+STATE_NORMALIZE_NOT_DICT = (
+    "Task identity normalization failed: the input must be a "
+    "JSON object")
+STATE_NORMALIZE_MISSING_KEY = (
+    "Task identity normalization failed: missing task identity "
+    "key (%s)")
 STATE_NORMALIZE_KEY_MISMATCH = (
-    "任务标识归一失败：多个标识键取值不一致（%s=%r 与 %s=%r）")
-STATE_NORMALIZE_EMPTY_VALUE = "任务标识归一失败：%s 的值必须是非空字符串"
+    "Task identity normalization failed: multiple identity keys "
+    "disagree (%s=%r vs %s=%r)")
+STATE_NORMALIZE_EMPTY_VALUE = (
+    "Task identity normalization failed: the value of %s must be "
+    "a non-empty string")
 
 # —— 校验（validate_state 及其子校验器） ——
 
-STATE_ENUM_ERROR = "%s %r 不在合法取值内（%s）"
-STATE_STR_LIST_NOT_ARRAY = "%s 必须是数组"
-STATE_STR_LIST_ITEM_EMPTY = "%s[%d] 必须是非空字符串"
-STATE_ROUTE_NOT_OBJECT = "route 必须是 JSON 对象"
-STATE_REPOSITORY_NOT_OBJECT = "repository 必须是 JSON 对象"
-STATE_REPOSITORY_ROOT_EMPTY = "repository.root 必须是非空字符串"
-STATE_DAG_NOT_ARRAY = "dag 必须是数组"
-STATE_VALIDATION_NOT_OBJECT = "validation 必须是 JSON 对象"
-STATE_VALIDATION_FIELD_INVALID = "validation.%s 必须是非空字符串或 null"
-STATE_REVIEW_NOT_OBJECT = "review 必须是 JSON 对象"
-STATE_REVIEW_FIELD_INVALID = "review.%s 必须是非空字符串或 null"
-STATE_QUOTA_RESUME_NOT_OBJECT = "quota_resume 必须是 JSON 对象"
-STATE_QUOTA_RESUME_COUNT_INVALID = "quota_resume.%s 必须是 >= 0 的整数"
+STATE_ENUM_ERROR = "%s %r is not in the allowed values (%s)"
+STATE_STR_LIST_NOT_ARRAY = "%s must be an array"
+STATE_STR_LIST_ITEM_EMPTY = "%s[%d] must be a non-empty string"
+STATE_ROUTE_NOT_OBJECT = "route must be a JSON object"
+STATE_REPOSITORY_NOT_OBJECT = "repository must be a JSON object"
+STATE_REPOSITORY_ROOT_EMPTY = "repository.root must be a non-empty string"
+STATE_DAG_NOT_ARRAY = "dag must be an array"
+STATE_VALIDATION_NOT_OBJECT = "validation must be a JSON object"
+STATE_VALIDATION_FIELD_INVALID = "validation.%s must be a non-empty string or null"
+STATE_REVIEW_NOT_OBJECT = "review must be a JSON object"
+STATE_REVIEW_FIELD_INVALID = "review.%s must be a non-empty string or null"
+STATE_QUOTA_RESUME_NOT_OBJECT = "quota_resume must be a JSON object"
+STATE_QUOTA_RESUME_COUNT_INVALID = "quota_resume.%s must be an integer >= 0"
 STATE_QUOTA_RESUME_BUDGET_INVARIANT = (
-    "quota_resume.resume_count %d 不得大于 quota_resume."
-    "max_resumes %d（预算不变量：resume_count <= max_resumes）")
+    "quota_resume.resume_count %d must not exceed quota_resume."
+    "max_resumes %d (budget invariant: resume_count <= "
+    "max_resumes)")
 STATE_QUOTA_RESUME_AUTOMATION_ID_INVALID = (
-    "quota_resume.automation_id 必须是非空字符串或 null")
-STATE_WORKER_MODEL_INVALID = "worker_model 必须是非空字符串或 null"
-STATE_NOT_OBJECT = "state 必须是 JSON 对象"
-STATE_MISSING_REQUIRED_KEY = "缺少必填顶层键 %s"
-STATE_TASK_ID_EMPTY = "task_id 必须是非空字符串"
+    "quota_resume.automation_id must be a non-empty string or null")
+STATE_WORKER_MODEL_INVALID = "worker_model must be a non-empty string or null"
+STATE_NOT_OBJECT = "state must be a JSON object"
+STATE_MISSING_REQUIRED_KEY = "Missing required top-level key %s"
+STATE_TASK_ID_EMPTY = "task_id must be a non-empty string"
 STATE_TASK_ID_FORMAT = (
-    "task_id %r 不匹配格式 ^[A-Za-z0-9][A-Za-z0-9-]*$"
-    "（字母数字开头，仅含字母数字与连字符）")
-STATE_GOAL_EMPTY = "goal 必须是非空字符串"
-STATE_WORKFLOW_RUN_ID_INVALID = "workflow_run_id 必须是非空字符串或 null"
+    "task_id %r does not match format ^[A-Za-z0-9][A-Za-z0-9-]*$"
+    " (must start with an alphanumeric and contain only "
+    "alphanumerics and hyphens)")
+STATE_GOAL_EMPTY = "goal must be a non-empty string"
+STATE_WORKFLOW_RUN_ID_INVALID = "workflow_run_id must be a non-empty string or null"
 
 # —— 状态迁移门 ——
 
 STATE_TRANSITION_NO_TARGETS = (
-    "无（终态不接受任何转换；显式重开请走 reopen_task）")
+    "none (terminal states accept no transitions; to reopen "
+    "explicitly, go through reopen_task)")
 STATE_TRANSITION_DISALLOWED = (
-    "status 转换被拒绝：%r → %r 不在合法转换内"
-    "（%s 的合法目标：%s；完整转换表见 TASK_TRANSITIONS）")
+    "status transition refused: %r → %r is not allowed "
+    "(allowed targets of %s: %s; "
+    "see TASK_TRANSITIONS for the full transition table)")
 
 # —— per-task 状态事务（结构性拒绝——分类锚见
 #     STRUCTURAL_STATE_ERROR_PREFIXES，两处必须逐字同步） ——
 
 STATE_TX_TASK_MISSING = (
-    "state 事务：任务 %s 不存在（无 state.json），拒绝读写")
+    "state transaction: task %s does not exist (no state.json); "
+    "refusing to read or write")
 STATE_TX_ID_MISMATCH = (
-    "state 事务：盘上 state.json 归一任务标识 %r 与目标 %r 不一致"
-    "，拒绝在错位账本上写入")
+    "state transaction: on-disk state.json normalized task id "
+    "%r does not match target %r"
+    "; refusing to write to a misaligned ledger")
 STATE_TX_SCHEMA_INVALID = (
-    "state 事务：盘上 state.json schema 非法，拒绝在其上写入"
-    "（损坏不被覆盖）：%s")
-STATE_SAVE_INVALID = "state 非法，无法保存：%s"
+    "state transaction: on-disk state.json schema is invalid; "
+    "refusing to write on top of it "
+    "(corruption is never overwritten): %s")
+STATE_SAVE_INVALID = "state is invalid and cannot be saved: %s"
 STATE_TX_NEW_TASK_ID_MISMATCH = (
-    "state 事务：新 state.task_id %r 与事务目标 %r 不一致，拒绝"
-    "提交（P1-9：目录与内容的任务标识必须一致）")
+    "state transaction: new state.task_id %r does not match the "
+    "transaction target %r; refusing "
+    "to commit (P1-9: directory and content task ids must agree)")
 STATE_TX_MUTATE_RETURN_INVALID = (
-    "update_task_state：mutate 必须返回完整 state dict，得到 %s")
+    "update_task_state: mutate must return the complete state "
+    "dict, got %s")
 STATE_SAVE_DIR_ID_MISMATCH = (
-    "save_state：目录 task_id %r 与 state.task_id %r 不一致"
-    "（P1-9：目录与内容的任务标识必须一致；如需迁移请以内容 ID "
-    "为准重建目录）")
-STATE_LOAD_CORRUPT = "state.json 损坏，无法解析（%s）：%s"
+    "save_state: directory task_id %r does not match "
+    "state.task_id %r "
+    "(P1-9: directory and content task ids must agree; to "
+    "migrate, rebuild the directory under the content ID "
+    ")")
+STATE_LOAD_CORRUPT = "state.json is corrupt and cannot be parsed (%s): %s"
 
 # —— 重开 / 仓库根绑定 / 构造 ——
 
 STATE_REOPEN_NOT_TERMINAL = (
-    "reopen_task：任务 %s 的 status 为 %r，非终态任务无需重开"
-    "（迁移请走 transition_task_status）")
+    "reopen_task: the status of task %s is %r; a non-terminal "
+    "task needs no reopen "
+    "(for migration go through transition_task_status)")
 STATE_BIND_REPO_ROOT_INVALID = (
-    "bind_repository_root：repo_root 必须是非空字符串路径，得到 %r")
+    "bind_repository_root: repo_root must be a non-empty string "
+    "path, got %r")
 STATE_NEW_TASK_ROUTE_TYPE = (
-    "new_task_state：route 必须是 dict（v2.4 route 含 mode/"
-    "assurance），得到 %s")
+    "new_task_state: route must be a dict (the v2.4 route "
+    "carries mode/"
+    "assurance), got %s")
 STATE_NEW_TASK_DAG_NODES_TYPE = (
-    "new_task_state：dag_nodes 必须是 list 或 tuple，得到 %s")
+    "new_task_state: dag_nodes must be a list or tuple, got %s")
 
 # —— 发现（corrupt / orphaned 桶 reason） ——
 
-STATE_DISCOVER_CORRUPT = "state.json 损坏：%s"
-STATE_DISCOVER_UNREADABLE = "state.json 不可读：%s"
-STATE_DISCOVER_NO_STATE = "无 state.json"
+STATE_DISCOVER_CORRUPT = "state.json is corrupt: %s"
+STATE_DISCOVER_UNREADABLE = "state.json is unreadable: %s"
+STATE_DISCOVER_NO_STATE = "no state.json"
 
 # ============================================================
 # —— runtime/writer_guard.py：结构校验消息 ——
 # ============================================================
 
 WRITER_GUARD_TASK_ID_INVALID = (
-    "writer_guard：task_id 必须是非空字符串（由调用方供给），得到 %r")
+    "writer_guard: task_id must be a non-empty string (supplied "
+    "by the caller), got %r")
 WRITER_GUARD_RUN_ID_INVALID = (
-    "writer_guard：workflow_run_id 必须是 None 或非空字符串，得到 %r")
+    "writer_guard: workflow_run_id must be None or a non-empty "
+    "string, got %r")

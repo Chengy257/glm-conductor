@@ -92,7 +92,8 @@ CLI_PATH = (Path(__file__).resolve().parents[1] / "plugins" /
 # quota 生命周期 CLI 用例（进程内调用 + 假 resolver 注入）的模块引导
 # 与 runtime import（tests/test_quota_resume_v24.py 同款 sys.path 引导）
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "plugins" / "glm-conductor"))
-from runtime import cli, journal, state, task  # noqa: E402
+from runtime import cli, journal, messages, state, task  # noqa: E402
+from runtime.workflow import compiler as workflow_compiler  # noqa: E402
 from runtime.quota import resolver as quota_resolver  # noqa: E402
 from runtime.workflow import adapter as workflow_adapter  # noqa: E402
 
@@ -171,8 +172,12 @@ class V24CompileGoldenTest(CliV24Fixture):
         self.assertEqual(stderr, "")
         # 黄金行：phase 名含节点 id（阶段序列来自 ownership 规划）、
         # 组内并行 Promise.all、NodeResult 接口
-        self.assertIn('phase("阶段 1: impl-auth, impl-docs")', stdout)
-        self.assertIn('phase("阶段 2: impl-tests")', stdout)
+        self.assertIn('phase("%s")'
+                      % (workflow_compiler.STAGE_LABEL_TEMPLATE
+                         % (1, "impl-auth, impl-docs")), stdout)
+        self.assertIn('phase("%s")'
+                      % (workflow_compiler.STAGE_LABEL_TEMPLATE
+                         % (2, "impl-tests")), stdout)
         self.assertEqual(stdout.count("await Promise.all(["), 2)
         self.assertIn("interface NodeResult {", stdout)
         # 节点 id 原样出现在 actor 标签与结果映射
@@ -726,7 +731,8 @@ class QuotaLifecycleCliTest(QuotaLifecycleCliFixture):
         decision = payload["decision"]
         # 既有键不动（remain-waiting 恰 action / reason）+ 附加键透传
         self.assertEqual(decision["action"], "remain-waiting")
-        self.assertIn("继续等待", decision["reason"])
+        self.assertIn(messages.TASK_DECISION_EXHAUSTED % "EXHAUSTED",
+                      decision["reason"])
         self.assertEqual(decision["reset_at"], WEEKLY_RESET_AT)
         self.assertEqual(set(decision),
                          {"action", "reason", "reset_at"})
@@ -858,7 +864,8 @@ class QuotaLifecycleCliTest(QuotaLifecycleCliFixture):
                 "quota-resume-decision", self.repo, self.TID)
         self.assertEqual(code, 0)
         self.assertEqual(payload["decision"]["action"], "waiting-user")
-        self.assertIn("预算已耗尽", payload["decision"]["reason"])
+        self.assertIn(messages.TASK_DECISION_BUDGET_EXHAUSTED % (0, 0),
+                      payload["decision"]["reason"])
         self.assertEqual(self.load()["status"], "waiting_user")
         # 幂等：再次唤醒（任务已 waiting_user）→ no-op，恰一次转态
         with self.with_detail(fake_detail("AVAILABLE")):
@@ -885,16 +892,19 @@ class QuotaLifecycleCliTest(QuotaLifecycleCliFixture):
         code, payload = self.run_cli_json(
             "quota-resume-authorize", self.repo, "ghost-task", "2")
         self.assertEqual(code, 1)
-        self.assertIn("不存在", payload["error"])
+        self.assertIn(messages.TASK_MISSING % "ghost-task",
+                      payload["error"])
         with self.with_detail(fake_detail("AVAILABLE")):
             code, payload = self.run_cli_json(
                 "quota-resume-decision", self.repo, "ghost-task")
         self.assertEqual(code, 1)
-        self.assertIn("不存在", payload["error"])
+        self.assertIn(messages.TASK_MISSING % "ghost-task",
+                      payload["error"])
         code, payload = self.run_cli_json(
             "quota-resume-confirm", self.repo, "ghost-task")
         self.assertEqual(code, 1)
-        self.assertIn("不存在", payload["error"])
+        self.assertIn(messages.TASK_MISSING % "ghost-task",
+                      payload["error"])
 
     def test_lifecycle_usage_errors_exit_2(self):
         """参数个数 / 未知旗标 → 用法错退出码 2。"""
@@ -1026,7 +1036,9 @@ class WorkflowModelSelectCliTest(CliV24Fixture):
             json.dumps({"models": [FLASH_A]}).encode("utf-8"))
         code, stdout, _ = self.run_cli("workflow-model-select", "obj.json")
         self.assertEqual(code, 2)
-        self.assertIn("数组", self.decoded(stdout))
+        self.assertIn(
+            messages.CLI_WORKFLOW_MODEL_SELECT_NOT_ARRAY.split("%r")[0],
+            self.decoded(stdout))
         # 内联可解析但非数组 → 落到文件路径读取 → 不存在 → 2
         code, _stdout, _ = self.run_cli("workflow-model-select", '{"a": 1}')
         self.assertEqual(code, 2)
@@ -1191,7 +1203,8 @@ class QuotaAutomationCliTest(QuotaLifecycleCliFixture):
         ):
             code, payload = self.run_cli_json(*argv)
             self.assertEqual(code, 1)
-            self.assertIn("不存在", payload["error"])
+            self.assertIn(messages.TASK_MISSING % "ghost-task",
+                      payload["error"])
 
     def test_automation_usage_errors_exit_2(self):
         """参数个数错误（不足 / 超出）→ 用法错，退出码 2。"""

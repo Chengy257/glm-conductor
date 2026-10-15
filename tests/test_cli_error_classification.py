@@ -55,13 +55,17 @@ from pathlib import Path
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "plugins" / "glm-conductor"))
-from runtime import cli, state, task  # noqa: E402
+from runtime import cli, messages, state, task  # noqa: E402
 
 from runtime.quota import resolver as quota_resolver  # noqa: E402
 
 TID = "errclass-task-1a2b3c"
 
 CORRUPT_BYTES = b"this is not json"
+
+# v2.6.1 W3b 英文化：错误文案断言与 messages.py 单源对齐——结构性
+# 损坏解析消息占位符前的稳定段（原「损坏」子串锚的英文等价）。
+CORRUPT_PARSE_PREFIX = messages.STATE_LOAD_CORRUPT.split("(%s)")[0]
 
 
 def run_cli(*args):
@@ -157,7 +161,7 @@ class CorruptJsonClassificationCliTest(GitCliFixture):
         self.corrupt_task()
         payload = self.assert_structural_exit_2(
             "record-validation", str(self.repo), TID, "passed")
-        self.assertIn("损坏", payload["error"])
+        self.assertIn(CORRUPT_PARSE_PREFIX, payload["error"])
 
     def test_task_terminal_trio_exit_2(self):
         for index, cmd in enumerate(("task-complete", "task-fail",
@@ -167,13 +171,13 @@ class CorruptJsonClassificationCliTest(GitCliFixture):
                 self.corrupt_task(task_id=task_id)
                 payload = self.assert_structural_exit_2(
                     cmd, str(self.repo), task_id, task_id=task_id)
-                self.assertIn("损坏", payload["error"])
+                self.assertIn(CORRUPT_PARSE_PREFIX, payload["error"])
 
     def test_exit_waiting_exit_2(self):
         self.corrupt_task()
         payload = self.assert_structural_exit_2(
             "exit-waiting", str(self.repo), TID)
-        self.assertIn("损坏", payload["error"])
+        self.assertIn(CORRUPT_PARSE_PREFIX, payload["error"])
 
     def test_task_create_existing_corrupt_exit_2(self):
         # 任务已存在 + 盘面损坏：损坏解析先于「已存在」拒绝——
@@ -181,14 +185,14 @@ class CorruptJsonClassificationCliTest(GitCliFixture):
         self.corrupt_task()
         payload = self.assert_structural_exit_2(
             "task-create", str(self.repo), TID, "目标", "solo", "standard")
-        self.assertIn("损坏", payload["error"])
+        self.assertIn(CORRUPT_PARSE_PREFIX, payload["error"])
 
     def test_task_record_workflow_run_exit_2(self):
         # solo 任务无 AF-04 前置，损坏解析在守卫检查之前触发
         self.corrupt_task()
         payload = self.assert_structural_exit_2(
             "task-record-workflow-run", str(self.repo), TID, "run-x")
-        self.assertIn("损坏", payload["error"])
+        self.assertIn(CORRUPT_PARSE_PREFIX, payload["error"])
 
     def test_quota_wait_exit_2(self):
         self.corrupt_task()
@@ -198,7 +202,7 @@ class CorruptJsonClassificationCliTest(GitCliFixture):
                               "snapshot": None, "fetched_at": None}):
             payload = self.assert_structural_exit_2(
                 "quota-wait", str(self.repo), TID)
-        self.assertIn("损坏", payload["error"])
+        self.assertIn(CORRUPT_PARSE_PREFIX, payload["error"])
 
     def test_quota_resume_decision_exit_2(self):
         self.corrupt_task()
@@ -208,19 +212,19 @@ class CorruptJsonClassificationCliTest(GitCliFixture):
                               "snapshot": None, "fetched_at": None}):
             payload = self.assert_structural_exit_2(
                 "quota-resume-decision", str(self.repo), TID)
-        self.assertIn("损坏", payload["error"])
+        self.assertIn(CORRUPT_PARSE_PREFIX, payload["error"])
 
     def test_quota_resume_authorize_exit_2(self):
         self.corrupt_task()
         payload = self.assert_structural_exit_2(
             "quota-resume-authorize", str(self.repo), TID, "2")
-        self.assertIn("损坏", payload["error"])
+        self.assertIn(CORRUPT_PARSE_PREFIX, payload["error"])
 
     def test_quota_resume_confirm_exit_2(self):
         self.corrupt_task()
         payload = self.assert_structural_exit_2(
             "quota-resume-confirm", str(self.repo), TID)
-        self.assertIn("损坏", payload["error"])
+        self.assertIn(CORRUPT_PARSE_PREFIX, payload["error"])
 
 
     def test_automation_trio_corrupt_state_exit_2(self):
@@ -235,7 +239,7 @@ class CorruptJsonClassificationCliTest(GitCliFixture):
         ):
             with self.subTest(cmd=cmd_args[0]):
                 payload = self.assert_structural_exit_2(*cmd_args)
-                self.assertIn("损坏", payload["error"])
+                self.assertIn(CORRUPT_PARSE_PREFIX, payload["error"])
 
 
 class SchemaAndIdentityClassificationCliTest(GitCliFixture):
@@ -248,7 +252,9 @@ class SchemaAndIdentityClassificationCliTest(GitCliFixture):
         code, payload = run_cli("record-validation", str(self.repo), TID,
                                 "passed")
         self.assertEqual(code, 2)
-        self.assertIn("schema 非法", payload["error"])
+        self.assertIn(
+            messages.STATE_TX_SCHEMA_INVALID.split(": %s")[0],
+            payload["error"])
 
     def test_identity_mismatch_exit_2(self):
         # 盘上归一任务标识与目标目录不一致：错位账本拒绝作为事务基底
@@ -260,7 +266,9 @@ class SchemaAndIdentityClassificationCliTest(GitCliFixture):
         self._disk_before = path.read_bytes()
         code, payload = run_cli("task-complete", str(self.repo), TID)
         self.assertEqual(code, 2)
-        self.assertIn("归一任务标识", payload["error"])
+        self.assertIn(
+            messages.STATE_TX_ID_MISMATCH.split("%r")[0],
+            payload["error"])
         self.assertEqual(path.read_bytes(), self._disk_before)
 
 
@@ -271,11 +279,13 @@ class LifecycleContrastCliTest(GitCliFixture):
         code, payload = run_cli("record-validation", str(self.repo),
                                 "errclass-ghost-1", "passed")
         self.assertEqual(code, 1)
-        self.assertIn("不存在", payload["error"])
+        self.assertIn(messages.TASK_MISSING % "errclass-ghost-1",
+                      payload["error"])
         code, payload = run_cli("quota-resume-authorize", str(self.repo),
                                 "errclass-ghost-1", "2")
         self.assertEqual(code, 1)
-        self.assertIn("不存在", payload["error"])
+        self.assertIn(messages.TASK_MISSING % "errclass-ghost-1",
+                      payload["error"])
 
     def test_terminal_freeze_exit_1_not_2(self):
         self.make_v24_task()
@@ -288,46 +298,49 @@ class LifecycleContrastCliTest(GitCliFixture):
         code, payload = run_cli("task-fail", str(self.repo),
                                 "errclass-cross-2")
         self.assertEqual(code, 1)
-        self.assertIn("终态", payload["error"])
+        # 终态冻结的辨识锚：迁移表「无目标」短语（messages 单源）
+        self.assertIn(messages.TASK_TRANSITION_NO_TARGETS,
+                      payload["error"])
 
     def test_same_command_corrupt_2_vs_missing_1(self):
         # 同一命令在两类盘面上的互斥分档
         self.corrupt_task()
         code, payload = run_cli("exit-waiting", str(self.repo), TID)
         self.assertEqual(code, 2)
-        self.assertIn("损坏", payload["error"])
+        self.assertIn(CORRUPT_PARSE_PREFIX, payload["error"])
         code, payload = run_cli("exit-waiting", str(self.repo),
                                 "errclass-ghost-3")
         self.assertEqual(code, 1)
-        self.assertIn("不存在", payload["error"])
+        self.assertIn(messages.TASK_MISSING % "errclass-ghost-3",
+                      payload["error"])
 
 
 class StructuralClassifierPredicateTest(unittest.TestCase):
     """_is_structural_state_rejection 谓词真值表（无盘面依赖）。"""
 
     def test_structural_prefixes_match(self):
+        # v2.6.1 W3b 英文化后真值表直接由 messages 常量格式化而来，
+        # 与 STRUCTURAL_STATE_ERROR_PREFIXES 逐字同源、零复刻
         for message in (
-                "state.json 损坏，无法解析（x）：Expecting value",
-                "state 事务：盘上 state.json 归一任务标识 'a' 与目标 "
-                "'b' 不一致",
-                "state 事务：盘上 state.json schema 非法，拒绝在其上"
-                "写入（损坏不被覆盖）：缺 task_id",
-                "state 非法，无法保存：缺 goal"):
+                messages.STATE_LOAD_CORRUPT % ("x", "Expecting value"),
+                messages.STATE_TX_ID_MISMATCH % ("a", "b"),
+                messages.STATE_TX_SCHEMA_INVALID % "missing task_id",
+                messages.STATE_SAVE_INVALID % "missing goal"):
             with self.subTest(message=message):
                 self.assertTrue(cli._is_structural_state_rejection(
                     ValueError(message)))
 
     def test_lifecycle_and_foreign_values_do_not_match(self):
         for exc in (
-                ValueError("create_task：任务 t 已存在（盘上已有 "
-                           "state.json），拒绝重建"),
-                ValueError("任务 t 不存在（无 state.json），无法执行"
-                           "生命周期操作"),
-                ValueError("task-complete：任务 t 已是终态 'completed'"),
-                ValueError("state 事务：任务 t 不存在（无 state.json），"
-                           "拒绝读写"),
-                RuntimeError("state.json 损坏，无法解析"),  # 非 ValueError
-                KeyError("state.json 损坏，无法解析")):
+                ValueError(messages.TASK_CREATE_ALREADY_EXISTS % "t"),
+                ValueError(messages.TASK_MISSING % "t"),
+                ValueError(messages.TASK_TERMINAL_FROZEN
+                           % ("task-complete", "t", "completed")),
+                ValueError(messages.STATE_TX_TASK_MISSING % "t"),
+                RuntimeError(messages.STATE_LOAD_CORRUPT
+                             % ("x", "Expecting value")),  # 非 ValueError
+                KeyError(messages.STATE_LOAD_CORRUPT
+                         % ("x", "Expecting value"))):
             with self.subTest(exc=type(exc).__name__):
                 self.assertFalse(cli._is_structural_state_rejection(exc))
 
@@ -377,7 +390,7 @@ class UsageDocstringConsistencyTest(unittest.TestCase):
 
     def usage_commands(self):
         """解析 USAGE 的子命令序列（竖线分隔段的首 token）。"""
-        prefix = "用法: python3 plugins/glm-conductor/runtime/cli.py "
+        prefix = "Usage: python3 plugins/glm-conductor/runtime/cli.py "
         self.assertTrue(cli.USAGE.startswith(prefix),
                         "USAGE 前缀漂移：%r" % cli.USAGE[:60])
         body = cli.USAGE[len(prefix):]

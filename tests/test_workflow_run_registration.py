@@ -57,7 +57,11 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "plugins" / "glm-conductor"))
 
-from runtime import cli, journal, state, task, writer_guard  # noqa: E402
+from runtime import cli, journal, messages, state, task, writer_guard  # noqa: E402
+
+# v2.6.1 W3b 英文化：提交后防御闸拒绝的辨识锚（messages 单源派生）。
+TERMINAL_TARGET_MARKER = (
+    messages.TASK_FINISH_POST_COMMIT_MISMATCH.split("%r")[1].strip(", "))
 from runtime.durable_io import (  # noqa: E402
     LOCK_SUFFIX,
     exclusive_lock,
@@ -421,7 +425,7 @@ class TestFinishReplayIdempotent(FinishReplayCase):
                                stale_non_terminal):
             with self.assertRaises(ValueError) as ctx:
                 task.complete(self.repo, self.tid)
-        self.assertIn("非目标终态", str(ctx.exception))
+        self.assertIn(TERMINAL_TARGET_MARKER, str(ctx.exception))
         self.assertNotIn("task_completed", self.names())
         holder = writer_guard.inspect(self.repo)
         self.assertIsNotNone(holder)

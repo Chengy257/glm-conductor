@@ -33,7 +33,7 @@ CLI_PATH = (Path(__file__).resolve().parents[1] / "plugins" /
 
 # runtime import（tests/test_cli_v24.py 同款 sys.path 引导）
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "plugins" / "glm-conductor"))
-from runtime import task  # noqa: E402
+from runtime import messages, task  # noqa: E402
 
 # 测试用模型 id（假账户段，绝不指向任何真实账户；形态约定同
 # tests/test_worker_model_pin.py 的 FLASH_A / FLASH_B）
@@ -96,7 +96,9 @@ class WorkflowModelSelectRepoRootCliTest(unittest.TestCase):
             self.foreign_cwd, "workflow-model-select", models_path,
             "--task-ref", TID)
         self.assertEqual(code, 1)
-        self.assertIn("不存在", json.loads(stdout)["error"])
+        self.assertIn(messages.CLI_WORKFLOW_MODEL_SELECT_TASK_MISSING
+                      % (TID, self.foreign_cwd),
+                      json.loads(stdout)["error"])
 
     def test_absolute_paths_fully_cwd_independent(self):
         """models 绝对路径 + --repo-root 绝对路径：完全 cwd 无关形态。"""

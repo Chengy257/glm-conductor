@@ -50,7 +50,12 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "plugins" / "glm-conductor"))
 
-from runtime import journal, state, task, writer_guard  # noqa: E402
+from runtime import journal, messages, state, task, writer_guard  # noqa: E402
+
+# v2.6.1 W3b 英文化：终态冻结拒绝的辨识锚（messages.TASK_TERMINAL_FROZEN
+# 占位符间的稳定段，单源派生、不在测试内复刻文案）。
+TERMINAL_FROZEN_MARKER = (
+    messages.TASK_TERMINAL_FROZEN.split("%r")[0].split("%s", 2)[-1].strip())
 from runtime.durable_io import (  # noqa: E402
     LOCK_SUFFIX,
     atomic_write_json,
@@ -296,7 +301,7 @@ class TestCompleteVersusValidation(TransactionCase):
         self.assertEqual(len(writer_b_errors), 1,
                          "validation 应恰被拒绝一次：%r" % (writer_b_errors,))
         self.assertIsInstance(writer_b_errors[0], ValueError)
-        self.assertIn("终态", str(writer_b_errors[0]))
+        self.assertIn(TERMINAL_FROZEN_MARKER, str(writer_b_errors[0]))
         # 终态保持，validation 块零写入，state.json 逐字节不被触碰
         final = state.load_state(self.repo, tid)
         self.assertEqual(final["status"], "completed")
@@ -351,7 +356,7 @@ class TestCompleteVersusValidation(TransactionCase):
                 else:
                     # validation 后到：被锁内新鲜盘面终态冻结拒绝
                     self.assertIsInstance(validation_error, ValueError)
-                    self.assertIn("终态", str(validation_error))
+                    self.assertIn(TERMINAL_FROZEN_MARKER, str(validation_error))
                     self.assertIsNone(final["validation"]["status"])
                 self.assertNotIn(
                     "task_reopened", self.journal_names(tid),

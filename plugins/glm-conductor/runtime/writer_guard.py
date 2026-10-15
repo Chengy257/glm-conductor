@@ -51,8 +51,10 @@
     仓库不变式在并发下成立；读侧永不见撕裂文件。
 
 依赖：
-    仅 Python 3 标准库 + runtime.durable_io；3.7 兼容语法（注解引号
-    形式）；无 per-unit 语义、无 scheduler / epoch 概念。
+    仅 Python 3 标准库 + runtime.durable_io
+    + runtime.messages（v2.6.1 W3a 单源：结构校验消息常量）；
+    3.7 兼容语法（注解引号形式）；无 per-unit 语义、无 scheduler /
+    epoch 概念。
 
 来源：
     v2.4 Phase 1 工作包 P1-E（docs/roadmap/V2_4_PHASE_1_*.md，单元 U5）。

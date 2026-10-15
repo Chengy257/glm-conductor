@@ -47,7 +47,7 @@ from pathlib import Path
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "plugins" / "glm-conductor"))
-from runtime import cli, journal, state, task, work_unit
+from runtime import cli, journal, messages, state, task, work_unit
 from runtime.quota import resolver as quota_resolver
 
 TID = "clilife-task-1a2b3c"
@@ -306,13 +306,17 @@ class TaskCreateCliTest(GitCliFixture):
         code, payload = run_cli("task-create", str(self.repo), TID, "目标",
                                 "solo", "standard", "--dag", str(missing))
         self.assertEqual(code, 2)
-        self.assertIn("无法读取", payload["error"])
+        self.assertIn(
+            messages.CLI_TASK_CREATE_DAG_READ_ERROR.split("%r")[0],
+            payload["error"])
         bad = self.repo / "bad.json"
         bad.write_text("{not-json", encoding="utf-8")
         code, payload = run_cli("task-create", str(self.repo), TID, "目标",
                                 "solo", "standard", "--dag", str(bad))
         self.assertEqual(code, 2)
-        self.assertIn("解析失败", payload["error"])
+        self.assertIn(
+            messages.CLI_TASK_CREATE_DAG_PARSE_ERROR.split("(%s)")[0],
+            payload["error"])
         shape = self.repo / "shape.json"
         shape.write_text(json.dumps({"nodes": "x"}), encoding="utf-8")
         code, _payload = run_cli("task-create", str(self.repo), TID, "目标",
@@ -344,7 +348,8 @@ class TaskCreateCliTest(GitCliFixture):
         code, payload = run_cli("task-create", str(self.repo), TID, "目标",
                                 "solo", "standard")
         self.assertEqual(code, 1)
-        self.assertIn("已存在", payload["error"])
+        self.assertIn(messages.TASK_CREATE_ALREADY_EXISTS % TID,
+                      payload["error"])
 
     def test_usage_errors_exit_2(self):
         code, _payload = run_cli("task-create", str(self.repo), TID, "目标",
@@ -406,7 +411,8 @@ class RecordValidationCliTest(GitCliFixture):
         code, payload = run_cli("record-validation", str(self.repo),
                                 "ghost-task", "passed")
         self.assertEqual(code, 1)
-        self.assertIn("不存在", payload["error"])
+        self.assertIn(messages.TASK_MISSING % "ghost-task",
+                      payload["error"])
 
     def test_usage_errors_exit_2(self):
         self.make_v24_task()
@@ -455,7 +461,8 @@ class TaskTerminalCliTest(GitCliFixture):
         run_cli("task-complete", str(self.repo), TID)
         code, payload = run_cli("task-fail", str(self.repo), TID)
         self.assertEqual(code, 1)
-        self.assertIn("终态", payload["error"])
+        self.assertIn(messages.TASK_TRANSITION_NO_TARGETS,
+                      payload["error"])
 
     def test_fail_and_cancel_terminal_statuses(self):
         self.make_v24_task("clilife-fail-1")
@@ -474,7 +481,8 @@ class TaskTerminalCliTest(GitCliFixture):
         for cmd in ("task-complete", "task-fail", "task-cancel"):
             code, payload = run_cli(cmd, str(self.repo), "ghost-task")
             self.assertEqual(code, 1, "cmd=%r 应退出码 1" % cmd)
-            self.assertIn("不存在", payload["error"])
+            self.assertIn(messages.TASK_MISSING % "ghost-task",
+                      payload["error"])
 
     def test_usage_errors_exit_2(self):
         self.make_v24_task()
@@ -528,12 +536,14 @@ class ExitWaitingCliTest(GitCliFixture):
         task.complete(str(self.repo), TID)
         code, payload = run_cli("exit-waiting", str(self.repo), TID)
         self.assertEqual(code, 1)
-        self.assertIn("终态", payload["error"])
+        self.assertIn(messages.TASK_TRANSITION_NO_TARGETS,
+                      payload["error"])
 
     def test_missing_task_exit_1(self):
         code, payload = run_cli("exit-waiting", str(self.repo), "ghost-task")
         self.assertEqual(code, 1)
-        self.assertIn("不存在", payload["error"])
+        self.assertIn(messages.TASK_MISSING % "ghost-task",
+                      payload["error"])
 
     def test_usage_errors_exit_2(self):
         self.make_v24_task()

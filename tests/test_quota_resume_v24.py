@@ -63,7 +63,7 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "plugins" / "glm-conductor"))
 
-from runtime import journal, state, task, writer_guard  # noqa: E402
+from runtime import journal, messages, state, task, writer_guard  # noqa: E402
 from runtime.workflow import adapter as workflow_adapter  # noqa: E402
 
 
@@ -334,7 +334,8 @@ class TestScheduledDecision(QuotaResumeCase):
         task.enter_waiting_quota(self.repo, self.TID)
         decision = self.decide(quota_view("AVAILABLE"))
         self.assertEqual(decision["action"], "waiting-user")
-        self.assertIn("预算已耗尽", decision["reason"])
+        self.assertIn(messages.TASK_DECISION_BUDGET_EXHAUSTED % (1, 1),
+                      decision["reason"])
         self.assertEqual(self.load()["status"], "waiting_user")
         # 幂等：再次唤醒任务已非 waiting_quota → no-op（恰一次转态）
         self.assertEqual(
@@ -554,7 +555,9 @@ class TestAutomationBinding(QuotaResumeCase):
         self.arm()
         with self.assertRaises(ValueError) as ctx:
             task.bind_quota_automation(self.repo, self.TID, "other-sched")
-        self.assertIn("静默替换", str(ctx.exception))
+        self.assertIn(messages.TASK_BIND_CONFLICT
+                      % (self.TID, self.AUTO_ID, "other-sched"),
+                      str(ctx.exception))
         self.assertEqual(
             self.load()["quota_resume"]["automation_id"], self.AUTO_ID)
         self.assertEqual(
@@ -600,7 +603,9 @@ class TestAutomationBinding(QuotaResumeCase):
         with self.assertRaises(ValueError) as ctx:
             task.clear_quota_automation(
                 self.repo, self.TID, "wrong-expected-id")
-        self.assertIn("不一致", str(ctx.exception))
+        self.assertIn(messages.TASK_CLEAR_MISMATCH
+                      % ("wrong-expected-id", self.TID, self.AUTO_ID),
+                      str(ctx.exception))
         self.assertEqual(
             self.load()["quota_resume"]["automation_id"], self.AUTO_ID)
 

@@ -35,7 +35,7 @@ from pathlib import Path
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "plugins" / "glm-conductor"))
-from runtime import cli, journal, state, task
+from runtime import cli, journal, messages, state, task
 from runtime.quota import resolver as quota_resolver
 
 TID = "cliext-task-1a2b3c"
@@ -223,7 +223,9 @@ class ReviewRecordCliTest(GitCliFixture):
         code, payload = run_cli("review-record", str(self.repo),
                                 "ghost-task", "glm-reviewer", "ship")
         self.assertEqual(code, 1)
-        self.assertIn("不存在", payload["error"])
+        self.assertIn(messages.CLI_TASK_MISSING_REVIEW
+                      % ("ghost-task", str(self.repo)),
+                      payload["error"])
 
     def test_review_record_usage_errors_exit_2(self):
         # 3 个参数（缺 verdict）→ 2

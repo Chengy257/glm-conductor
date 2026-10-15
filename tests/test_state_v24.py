@@ -37,7 +37,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "plugins" / "glm-conductor"))
 
-from runtime import journal, state, work_unit  # noqa: E402
+from runtime import journal, messages, state, work_unit  # noqa: E402
 
 
 # —— 测试夹具 ——
@@ -207,7 +207,7 @@ class TestRouteVocabulary(TempRepoTest):
     def test_route_must_be_object(self):
         """route 非 dict 拒绝。"""
         errors = state.validate_state(full_state(route="solo"))
-        self.assertEqual(errors, ["route 必须是 JSON 对象"])
+        self.assertEqual(errors, [messages.STATE_ROUTE_NOT_OBJECT])
 
 
 # —— 4. 必填顶层键与可选 phase ——
@@ -220,7 +220,7 @@ class TestRequiredKeys(unittest.TestCase):
             st = full_state()
             del st[key]
             errors = state.validate_state(st)
-            self.assertIn("缺少必填顶层键 %s" % key, errors,
+            self.assertIn(messages.STATE_MISSING_REQUIRED_KEY % key, errors,
                           "缺 %s 应被点名" % key)
 
     def test_phase_optional_no_null_slot(self):
@@ -296,10 +296,12 @@ class TestDagValidation(unittest.TestCase):
         """dag 非 list 拒绝。"""
         st = full_state()
         st["dag"] = None
-        self.assertIn("dag 必须是数组", state.validate_state(st))
+        self.assertIn(messages.STATE_DAG_NOT_ARRAY,
+                      state.validate_state(st))
         st = full_state()
         st["dag"] = "build"
-        self.assertIn("dag 必须是数组", state.validate_state(st))
+        self.assertIn(messages.STATE_DAG_NOT_ARRAY,
+                      state.validate_state(st))
 
 
 # —— 6. validation / review / quota_resume 记录形状 ——
@@ -392,7 +394,8 @@ class TestLegacyDetection(TempRepoTest):
         report = state.detect_legacy_task(self.repo, "legacy-23-task")
         self.assertTrue(report["legacy"])
         self.assertEqual(report["guidance"], state.LEGACY_STATE_GUIDANCE)
-        self.assertIn("在 2.3.x 下收尾或显式放弃", report["guidance"])
+        self.assertIn("wrap up or explicitly abandon it under 2.3.x",
+                      report["guidance"])
         self.assertIn("key:work_units", report["markers"])
         self.assertIn("status:executing", report["markers"])
         self.assertEqual(report["status"], "executing")
@@ -431,7 +434,8 @@ class TestTerminalReopen(TempRepoTest):
         st["status"] = "active"
         with self.assertRaises(ValueError) as ctx:
             state.save_state(self.repo, st)
-        self.assertIn("转换被拒绝", str(ctx.exception))
+        self.assertIn(messages.STATE_TRANSITION_DISALLOWED.split(": %r")[0],
+                      str(ctx.exception))
         # 盘上仍为 completed
         self.assertEqual(
             state.load_state(self.repo, "w1-demo-task")["status"],

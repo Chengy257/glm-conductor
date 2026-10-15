@@ -40,13 +40,13 @@ When Stop fires, the guard evaluates only tasks **inside the trigger domain**; o
 - **In scope**: among the active tasks discovered from the task-ledger root (`.glm-conductor/tasks/`), the v2.4 tasks with `status == "active"`
 - **Parking states pass**: `waiting_quota` / `waiting_user` / `blocked` are intentional stopping points — no finish happens on this turn, so always pass
 - **Terminal tasks**: completed / cancelled / failed have nothing to evaluate — pass
-- **Legacy v2.3 tasks**: pass with one line of disposition guidance (`LEGACY_STATE_GUIDANCE`: "v2.3 遗留任务：请在 2.3.x 下收尾或显式放弃（v2.4 不自动迁移、不伪造 v2.4 完成证据）") — never pretend completion can be judged
+- **Legacy v2.3 tasks**: pass with one line of disposition guidance (`LEGACY_STATE_GUIDANCE`: "v2.3 legacy task: wrap up or explicitly abandon it under 2.3.x (v2.4 does not auto-migrate and never fabricates v2.4 completion evidence)") — never pretend completion can be judged
 - **Corrupt / orphaned task directories**: do not participate in interception; only a one-line stderr notice
 - **No active tasks**: pass silently; zero intervention in ordinary sessions
 
 ## Four-check completion guard (in order, first failure returns)
 
-The guard runs four checks in a fixed order and commits completion only when all four pass; any failure blocks with a single most-severe, actionable Chinese reason (check order is severity order):
+The guard runs four checks in a fixed order and commits completion only when all four pass; any failure blocks with a single most-severe, actionable reason (check order is severity order):
 
 | # | Check | Pass condition | Failure form |
 | --- | --- | --- | --- |

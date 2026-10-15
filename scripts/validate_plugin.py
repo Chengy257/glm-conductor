@@ -153,18 +153,22 @@
             豁免——journal.py 既有退役注记不属依赖复活）。
          v2.5 扩展锚（任务启动契约，规格 §4 W5）+ v2.5.2 改锚（精确
          唤醒与模型适配计划 §2.4）——任一缺失即 FAIL（v2.6.1 W2 起
-         五文件英文化，文档面锚随译文改英文等价串；cli.py / quota.md
-         等未翻译面保持原锚）：
+         五文件英文化，文档面锚随译文改英文等价串；v2.6.1 W3b 起
+         cli.py 实现面文案单源 messages.py 并英文化，16g/16l 实现面
+         锚随迁 messages.py 英文原文；quota.md 等未翻译面保持原锚）：
          f) 任务启动问答节锚缺失（orchestration/SKILL.md 必含
             '### Task launch interview' 节标题、'The trigger point
             precedes create_task' 触发条件、'there is no exemption'
             强制零判断、'Single round of three questions' 合并题形、
             'Floor carrier interval' 第三问与 'Wake turns / resume
             turns never interview' 无人值守边界措辞）；
-         g) 任务 pin 失效即拒措辞缺失（runtime/cli.py 必含「pin 已失效，
-            请重新问答授权」专门拒绝与「绝不回退自动选型、绝不静默换
-            模型」禁令；orchestration/SKILL.md 必含 'Pin consumption
-            semantics (stale pin rejected)' 消费语义、'the task pin is
+         g) 任务 pin 失效即拒措辞缺失（v2.6.1 W3b 起 runtime 实现面
+            文案单源 messages.py：messages.py 必含 'the task pin is
+            void' / 're-run the launch interview for authorization'
+            专门拒绝与 'never fall back to automatic selection' /
+            'never switch models silently' 禁令；orchestration/SKILL.md
+            必含 'Pin consumption semantics (stale pin rejected)'
+            消费语义、'the task pin is
             stale, re-authorize via the launch interview' 专门拒绝与
             'never falling back to auto-selection' 禁令）；
          h) 双通道唤醒锚缺失（v2.5.2 W1：continuity/SKILL.md 必含
@@ -198,8 +202,14 @@
             candidate also requires explicit user confirmation' /
             'must match the pin' / 'never re-pins automatically' /
             'The main model inherits the host main session' / 提交契约
-            model_policy 新值，cli.py 必含有 pin 任务 --model 不得绕过
-            与交互重授权措辞）。
+            model_policy 新值；v2.6.1 W3b 起实现面锚单源 messages.py——
+            messages.py 必含有 pin 任务 --model 不得绕过（'must not
+            bypass the task pin'）与交互重授权（'re-authorize through
+            the interactive' + 'update the task pin with
+            worker-model-pin'）及无 pin 严口径（'never select
+            automatically, never treat a single candidate' +
+            'as implicit authorization'）措辞，cli.py 保留
+            user-authorized-explicit-selection 提交契约 token 锚）。
 
     扫描范围说明：检查 5/6/7/8（及 8 内的旧名负向检查）的扫描范围是显式
     列表——plugins/ 全部文件 + marketplace.json + README.md +
@@ -389,6 +399,9 @@ TEST_QUOTA_CREDENTIALS = os.path.join(TESTS_DIR, "test_quota_credentials.py")
 TEST_QUOTA_REPORT = os.path.join(TESTS_DIR, "test_quota_report.py")
 ORCHESTRATION_SKILL = os.path.join(SKILLS_DIR, "orchestration", "SKILL.md")
 CLI_PY = os.path.join(RUNTIME_DIR, "cli.py")
+# v2.6.1 W3a/W3b：cli.py 用户可见文案单源 messages.py（16g/16l 实现面
+# 锚的锚定文件——实现面措辞不再以 cli.py 原文出现）
+MESSAGES_PY = os.path.join(RUNTIME_DIR, "messages.py")
 RUNTIME_REQUIRED_FILES = (
     RUNTIME_INIT, STATE_PY, JOURNAL_PY, OWNERSHIP_PY,
     QUOTA_PARSER_PY, QUOTA_PROVIDER_PY, QUOTA_HTTP_PY, QUOTA_ZAI_PY,
@@ -528,12 +541,15 @@ LAUNCH_INTERVIEW_MARKERS = (
     "Floor carrier interval",
     "Wake turns / resume turns never interview",
 )
-# 16g：任务 pin 失效即拒（v2.5 I1——cli.py 专门拒绝措辞 + 绝不回退
-# 自动选型禁令；orchestration 技能文档面同步锚定消费语义。
-# cli.py 仍中文原锚；v2.6.1 W2 orchestration 面改英文锚）
+# 16g：任务 pin 失效即拒（v2.5 I1——专门拒绝措辞 + 绝不回退自动选型
+# 禁令；orchestration 技能文档面同步锚定消费语义。
+# v2.6.1 W3b：实现面文案单源 messages.py 并英文化，锚随迁 messages.py
+# 英文原文——不再锚 cli.py 原文（实现点经 import 接线））
 PIN_REJECTION_CLI_MARKERS = (
-    "任务 pin 已失效，请重新问答授权",
-    "绝不回退自动选型、绝不静默换模型",
+    "the task pin is void",
+    "re-run the launch interview for authorization",
+    "never fall back to automatic selection",
+    "never switch models silently",
 )
 PIN_REJECTION_SKILL_MARKERS = (
     "Pin consumption semantics (stale pin rejected)",
@@ -603,8 +619,9 @@ BLOCKED_WINDOW_RETIRED_FILES = (
 #   提示（档位不随 pin 存储）、单一候选也须用户显式确认、pin 一致性
 #   （--model 必须与 pin 一致）、无人值守绝不自动重 pin、主模型继承宿主
 #   主会话（主模型硬门退役后的正名锚）与提交契约 model_policy 新值；
-#   cli.py 必含有 pin 任务 --model 不得绕过与交互重授权措辞（实现面与
-#   文档面双锚防漂移）。
+#   实现面锚（v2.6.1 W3b 起单源 messages.py）：messages.py 必含有 pin
+#   任务 --model 不得绕过与交互重授权及无 pin 严口径措辞，cli.py 保留
+#   提交契约 token 锚（实现面与文档面双锚防漂移）。
 USER_AUTHORIZED_MODEL_MARKERS = (
     (ORCHESTRATION_SKILL,
      ("soft recommendation",
@@ -616,10 +633,14 @@ USER_AUTHORIZED_MODEL_MARKERS = (
       "The main model inherits the host main session",
       "user-authorized-explicit-selection")),
     (CLI_PY,
-     ("有 pin 任务的 --model 显式值必须与 pin 一致",
-      "问答重新授权并以 worker-model-pin 更新任务 pin",
-      "user-authorized-explicit-selection",
-      "绝不隐式授权单候选")),
+     ("user-authorized-explicit-selection",)),
+    (MESSAGES_PY,
+     ("for pinned tasks the explicit --model value must equal",
+      "must not bypass the task pin",
+      "re-authorize through the interactive",
+      "update the task pin with worker-model-pin",
+      "never select automatically, never treat a single candidate",
+      "as implicit authorization")),
 )
 
 
@@ -1502,7 +1523,9 @@ def check_16_v241_protocol(results):
          orchestration 必含 Flash 软推荐 / 默认 max 推理档提示（档位
          不随 pin 存储）/ 单一候选显式确认 / pin 一致性 / 无人值守
          绝不自动重 pin / 主模型继承宿主主会话 / model_policy 新值；
-         cli.py 必含有 pin 任务 --model 不得绕过与交互重授权措辞。
+         v2.6.1 W3b 起实现面文案单源 messages.py——messages.py 必含
+         有 pin 任务 --model 不得绕过与交互重授权及无 pin 严口径措辞
+         （cli.py 保留 model_policy token 锚）。
     """
     title = ("v2.4.1/v2.5/v2.5.2/v2.6.0 编排/连续性协议静态契约（模型选型硬闸 / "
              "用户授权显式选型 / arm-before-work / 建立动作优先 / 生产 runtime "
@@ -1656,20 +1679,25 @@ def check_16_v241_protocol(results):
                 "触发条件/两问题形/禁弹问措辞回退）" % (orch_shown, marker))
             ok = False
 
-    # —— 16g：任务 pin 失效即拒（v2.5 I1，cli.py + orchestration 双面） ——
+    # —— 16g：任务 pin 失效即拒（v2.5 I1；v2.6.1 W3b 起实现面文案单源
+    # messages.py——锚迁 messages.py 英文原文 + orchestration 双面） ——
     cli_shown = rel_display(CLI_PY)
     cli_text = read_text(CLI_PY)
-    if cli_text is None or not os.path.isfile(CLI_PY):
-        details.append("FAIL: %s 不存在或无法读取，无法执行 16g 检查" % cli_shown)
+    messages_shown = rel_display(MESSAGES_PY)
+    messages_text = read_text(MESSAGES_PY)
+    if messages_text is None or not os.path.isfile(MESSAGES_PY):
+        details.append("FAIL: %s 不存在或无法读取，无法执行 16g 检查"
+                       % messages_shown)
         ok = False
     else:
         for marker in PIN_REJECTION_CLI_MARKERS:
-            if marker in cli_text:
-                details.append("PASS: %s 含 pin 失效即拒锚 `%s`" % (cli_shown, marker))
+            if marker in messages_text:
+                details.append("PASS: %s 含 pin 失效即拒锚 `%s`"
+                               % (messages_shown, marker))
             else:
                 details.append(
                     "FAIL: %s 缺少 pin 失效即拒锚 `%s`（专门拒绝/绝不回退"
-                    "自动选型措辞缺失）" % (cli_shown, marker))
+                    "自动选型措辞缺失）" % (messages_shown, marker))
                 ok = False
     for marker in PIN_REJECTION_SKILL_MARKERS:
         if marker in orch_text:
@@ -1781,8 +1809,9 @@ def check_16_v241_protocol(results):
     # —— 16l：用户授权显式选型锚（v2.6.0 WP-M1，规格 §5.1/§5.2/§5.3） ——
     # Flash 准入硬门降级软推荐后的文档面 + 实现面双锚：orchestration 必含
     # 软推荐/默认 max 提示/单候选确认/pin 一致性/无人值守不重 pin/主模型
-    # 继承宿主/model_policy 新值；cli.py 必含 --model 不绕过 pin 与交互
-    # 重授权措辞。
+    # 继承宿主/model_policy 新值；v2.6.1 W3b 起实现面文案单源 messages.py
+    # （--model 不绕过 pin 与交互重授权及无 pin 严口径措辞锚 messages.py
+    # 英文原文，cli.py 保留 user-authorized-explicit-selection token）。
     for path, markers in USER_AUTHORIZED_MODEL_MARKERS:
         shown = rel_display(path)
         text = read_text(path)

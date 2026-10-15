@@ -54,6 +54,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "plugins" / "glm-co
 from runtime import change_id, journal, ownership, state, task, work_unit  # noqa: E402
 import stop_gate  # noqa: E402
 
+# v2.6.1 W3b 英文化：降级短语与理由文案断言与 stop_gate 模板单源对齐。
+ALLOWING_TASK_PHRASE = (
+    stop_gate.DEGRADED_TASK_SKIP_MESSAGE_TEMPLATE.split("; ")[1])
+
 # 被测钩子脚本：仓库根 plugins/glm-conductor/hooks/stop_gate.py
 STOP_GATE = (Path(__file__).resolve().parents[1]
              / "plugins/glm-conductor/hooks/stop_gate.py")
@@ -304,7 +308,7 @@ class TestSlowGitDegradation(GuardBudgetCase):
         self.assertEqual(len(degraded), 1,
                          "降级报文应恰一条：%r" % (self.stderr_lines,))
         self.assertIn(task_id or self.tid, degraded[0])
-        self.assertIn("本轮放行该任务", degraded[0])
+        self.assertIn(ALLOWING_TASK_PHRASE, degraded[0])
         # 无误 block：stdout 零决策 JSON
         self.assertEqual(self.blocks, [])
         # 无误完成：任务状态不被误改
@@ -478,7 +482,8 @@ class TestNormalBlockPathUnaffected(GuardBudgetCase):
         self.assertEqual(len(lines), 1, "block 决策必须恰单行")
         decision = json.loads(lines[0])
         self.assertEqual(decision["decision"], "block")
-        self.assertIn("验证", decision["reason"])
+        self.assertIn(stop_gate.VALIDATION_MISSING_REASON_TEMPLATE
+                      % (self.tid, None), decision["reason"])
         # reason 内换行已被 json 转义——物理单行不因中文多行理由破坏
         self.assertNotIn("\n", json.dumps(decision, ensure_ascii=False))
         # 正常拦截不是降级：stderr 无 ENFORCEMENT DEGRADED

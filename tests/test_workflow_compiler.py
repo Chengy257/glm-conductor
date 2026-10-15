@@ -111,11 +111,18 @@ class CompileDeterminismTest(unittest.TestCase):
         self.assertEqual(ordered, shuffled)
 
     def test_no_timestamp_or_random_surface(self):
+        # v2.6.1 W3b：头部确定性声明注释（英文）含 "no timestamps" 字样，
+        # 禁词扫描因此只作用于代码面（非注释行）；声明注释本身经编译器
+        # 常量逐字钉住——时间戳 / 随机值仍绝无出现面
         source = compile_sample()
+        self.assertIn(compiler.DETERMINISTIC_COMMENT, source)
+        code_lines = [line for line in source.splitlines()
+                      if not line.lstrip().startswith("//")]
+        code_surface = "\n".join(code_lines)
         for banned in ("new Date", "Date.now", "Date(", "Math.random",
                        "created_at", "timestamp"):
-            self.assertNotIn(banned, source,
-                             "生成源出现时间戳 / 随机面：%r" % banned)
+            self.assertNotIn(banned, code_surface,
+                             "生成源代码面出现时间戳 / 随机面：%r" % banned)
 
 
 # —— compiler：结构 ——
@@ -152,8 +159,9 @@ class CompileStructureTest(unittest.TestCase):
         for node_ids in self.stages:
             stage_number += 1
             phase_at = self.source.index(
-                'phase("阶段 %d: %s")'
-                % (stage_number, ", ".join(sorted(node_ids))))
+                'phase("%s")'
+                % (compiler.STAGE_LABEL_TEMPLATE
+                   % (stage_number, ", ".join(sorted(node_ids)))))
             join_at = self.source.index("await Promise.all([", phase_at)
             positions.append((phase_at, join_at))
         for index in range(len(positions) - 1):
@@ -161,8 +169,12 @@ class CompileStructureTest(unittest.TestCase):
                             "阶段组间未保持顺序 await：%r" % (positions,))
 
     def test_phase_names_list_node_ids(self):
-        self.assertIn('phase("阶段 1: impl-auth, impl-docs")', self.source)
-        self.assertIn('phase("阶段 2: impl-tests")', self.source)
+        self.assertIn('phase("%s")'
+                      % (compiler.STAGE_LABEL_TEMPLATE
+                         % (1, "impl-auth, impl-docs")), self.source)
+        self.assertIn('phase("%s")'
+                      % (compiler.STAGE_LABEL_TEMPLATE
+                         % (2, "impl-tests")), self.source)
 
     def test_node_result_interface_exact_fields(self):
         self.assertIn("interface NodeResult {", self.source)
@@ -175,7 +187,8 @@ class CompileStructureTest(unittest.TestCase):
              "reassessment", "gaps"))
 
     def test_final_return_sorted_by_node_id(self):
-        tail = self.source[self.source.index("最终聚合返回"):]
+        tail = self.source[
+            self.source.index(compiler.FINAL_AGGREGATION_COMMENT):]
         self.assertIn("return [", tail)
         offsets = [tail.index('allResults["%s"]' % node_id)
                    for node_id in sorted(SAMPLE_NODE_IDS)]
@@ -239,10 +252,11 @@ class CompileCommentSanitizationTest(unittest.TestCase):
         self.assertNotIn(self.HOSTILE_ID, source)
         # 注释位：阶段头与节点注释均为折叠单行（完整行内注释子串在
         # 生成源中 contiguous 出现，即注释未被换行截断）
-        self.assertIn("// —— 阶段 1：bad id -with control ——", source)
-        self.assertIn("// 节点 bad id -with control"
-                      "（actor 标签 node-bad id -with control；"
-                      "结果映射键为节点 id 原文）", source)
+        self.assertIn(compiler.STAGE_HEADER_COMMENT_TEMPLATE
+                      % (1, "bad id -with control"), source)
+        self.assertIn(compiler.NODE_COMMENT_TEMPLATE
+                      % ("bad id -with control",
+                         "node-bad id -with control"), source)
         # 代码位：actor 名 / 结果映射键经 _ts_string 转义保留原文
         self.assertIn(json.dumps("node-%s" % self.HOSTILE_ID,
                                  ensure_ascii=False), source)
@@ -257,9 +271,10 @@ class CompileCommentSanitizationTest(unittest.TestCase):
     def test_plain_node_id_comment_output_unchanged(self):
         # 无空白 id：折叠是恒等变换，生成源与历史形态逐字节一致
         source = compile_sample()
-        self.assertIn("// —— 阶段 1：impl-auth、impl-docs ——", source)
-        self.assertIn("  // 节点 impl-auth（actor 标签 node-impl-auth；"
-                      "结果映射键为节点 id 原文）", source)
+        self.assertIn(compiler.STAGE_HEADER_COMMENT_TEMPLATE
+                      % (1, "impl-auth, impl-docs"), source)
+        self.assertIn(compiler.NODE_COMMENT_TEMPLATE
+                      % ("impl-auth", "node-impl-auth"), source)
 
     def test_hostile_id_compile_deterministic(self):
         nodes = [work_unit.new_node("bad\nid", "目标",
@@ -366,8 +381,12 @@ class CompileValidationTest(unittest.TestCase):
         ]
         source = compiler.compile_workflow(nodes, TASK_CONTEXT)
         self.assertEqual(source.count("await Promise.all(["), 2)
-        self.assertIn('phase("阶段 1: impl-one")', source)
-        self.assertIn('phase("阶段 2: impl-two")', source)
+        self.assertIn('phase("%s")'
+                      % (compiler.STAGE_LABEL_TEMPLATE
+                         % (1, "impl-one")), source)
+        self.assertIn('phase("%s")'
+                      % (compiler.STAGE_LABEL_TEMPLATE
+                         % (2, "impl-two")), source)
 
 
 # —— persona ——
@@ -383,8 +402,9 @@ class PersonaTest(unittest.TestCase):
     def test_persona_migrated_semantics(self):
         text = persona.TEXT_WORKER_PERSONA
         for anchor in ("objective", "ownership", "interfaces", "constraints",
-                       "reassessment", "local_check", "重新设计", "重估",
-                       "结构化", "伪造"):
+                       "reassessment", "local_check", "redesign",
+                       "reassessment request", "structured",
+                       "fabricate"):
             self.assertIn(anchor, text, "persona 缺语义锚点：%r" % anchor)
 
     def test_persona_forbidden_tokens_safe_for_embedding(self):

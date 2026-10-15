@@ -48,6 +48,17 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "plugins" / "glm-co
 from runtime import journal, state, task, work_unit, writer_guard  # noqa: E402
 import stop_gate  # noqa: E402
 
+# v2.6.1 W3b 英文化：理由文案断言与 stop_gate 模板单源对齐（派生稳定短语，
+# 不在测试内复刻运行时文案）。
+VALIDATION_STALE_PHRASE = (
+    stop_gate.VALIDATION_STALE_REASON_TEMPLATE.split(" — ")[0]
+    .split("blocked: ", 1)[1])
+REVIEW_STALE_PHRASE = (
+    stop_gate.REVIEW_STALE_REASON_TEMPLATE.split(" — ")[0]
+    .split("blocked: ", 1)[1])
+COMPLETION_GATE_SKIPS_PHRASE = (
+    stop_gate.CORRUPT_TASK_WARNING_TEMPLATE.split("; ")[1])
+
 # 被测钩子脚本：仓库根 plugins/glm-conductor/hooks/stop_gate.py
 STOP_GATE = (Path(__file__).resolve().parents[1]
              / "plugins/glm-conductor/hooks/stop_gate.py")
@@ -262,7 +273,7 @@ class TestOwnershipCheck(CompletionGuardCase):
         self.assertEqual(result["check"], "ownership")
         self.assertEqual(result["detail"]["out_of_scope"], ["stray.txt"])
         # 不是查 3 的新鲜度面：不带过期分支的「验证记录已过期」话术
-        self.assertNotIn("验证记录已过期", result["reason"])
+        self.assertNotIn(VALIDATION_STALE_PHRASE, result["reason"])
 
 
 # —— 3. 查 3：validation ——
@@ -276,7 +287,8 @@ class TestValidationCheck(CompletionGuardCase):
         result = self.evaluate()
         self.assertEqual(result["decision"], "block")
         self.assertEqual(result["check"], "validation")
-        self.assertIn("验证", result["reason"])
+        self.assertIn(stop_gate.VALIDATION_MISSING_REASON_TEMPLATE
+                      % (self.tid, None), result["reason"])
         self.assertIn("record_validation", result["reason"])
 
     def test_validation_failed_blocks(self):
@@ -298,7 +310,7 @@ class TestValidationCheck(CompletionGuardCase):
         result = self.evaluate()
         self.assertEqual(result["decision"], "block")
         self.assertEqual(result["check"], "validation")
-        self.assertIn("过期", result["reason"])
+        self.assertIn(VALIDATION_STALE_PHRASE, result["reason"])
         self.assertIsNotNone(result["detail"]["recorded_change_id"])
         self.assertNotEqual(
             result["detail"]["recorded_change_id"],
@@ -318,7 +330,7 @@ class TestValidationCheck(CompletionGuardCase):
         result = self.evaluate()
         self.assertEqual(result["decision"], "block")
         self.assertEqual(result["check"], "validation")
-        self.assertIn("过期", result["reason"])
+        self.assertIn(VALIDATION_STALE_PHRASE, result["reason"])
         self.assertNotEqual(
             result["detail"]["recorded_change_id"],
             result["detail"]["current_change_id"])
@@ -365,7 +377,8 @@ class TestReviewCheck(CompletionGuardCase):
         self.assertEqual(result["decision"], "block")
         self.assertEqual(result["check"], "review")
         self.assertIn("ship", result["reason"])
-        self.assertIn("评审", result["reason"])
+        self.assertIn(stop_gate.REVIEW_MISSING_REASON_TEMPLATE
+                      % (self.tid, None), result["reason"])
 
     def test_high_with_fix_first_blocks(self):
         """fix-first 永不满足完成（词汇内但非 ship）。"""
@@ -386,7 +399,7 @@ class TestReviewCheck(CompletionGuardCase):
         result = self.evaluate()
         self.assertEqual(result["decision"], "block")
         self.assertEqual(result["check"], "review")
-        self.assertIn("过期", result["reason"])
+        self.assertIn(REVIEW_STALE_PHRASE, result["reason"])
 
     def test_high_review_stale_blocks_after_owned_glob_edit(self):
         """high：owned glob（src/**）内编辑后重验不重审 → review stale 阻断。
@@ -407,7 +420,7 @@ class TestReviewCheck(CompletionGuardCase):
         result = self.evaluate()
         self.assertEqual(result["decision"], "block")
         self.assertEqual(result["check"], "review")
-        self.assertIn("过期", result["reason"])
+        self.assertIn(REVIEW_STALE_PHRASE, result["reason"])
 
     def test_standard_assurance_skips_review(self):
         """standard 保障无独立审查义务：无 review 记录也不拦查 4。"""
@@ -499,7 +512,7 @@ class TestEvaluateRefusals(CompletionGuardCase):
         with self.assertRaises(ValueError) as ctx:
             stop_gate.evaluate_completion(self.repo, "legacy-23-task")
         self.assertIn("2.3", str(ctx.exception))
-        self.assertIn("收尾", str(ctx.exception))
+        self.assertIn(state.LEGACY_STATE_GUIDANCE, str(ctx.exception))
 
 
 # —— 7. hook 外壳（子进程冒烟） ——
@@ -532,7 +545,7 @@ class TestHookShell(CompletionGuardCase):
         self.assertEqual(proc.returncode, 0)
         self.assertEqual(proc.stdout, "")
         self.assertIn("2.3", proc.stderr)
-        self.assertIn("收尾", proc.stderr)
+        self.assertIn(state.LEGACY_STATE_GUIDANCE, proc.stderr)
 
     def test_corrupt_task_stderr_only(self):
         """corrupt state.json → 仅 stderr 提示（完成门跳过），不拦会话。"""
@@ -542,7 +555,7 @@ class TestHookShell(CompletionGuardCase):
         proc = run_gate("{}", self.repo)
         self.assertEqual(proc.returncode, 0)
         self.assertEqual(proc.stdout, "")
-        self.assertIn("完成门跳过", proc.stderr)
+        self.assertIn(COMPLETION_GATE_SKIPS_PHRASE, proc.stderr)
 
     def test_parked_task_allowed_without_validation(self):
         """停泊态（waiting_quota）是有意停止点 → 放行，不要求验证。"""
@@ -555,7 +568,7 @@ class TestHookShell(CompletionGuardCase):
         self.assertEqual(self.load()["status"], "waiting_quota")
 
     def test_failing_task_blocks_single_line_json(self):
-        """失败任务 → stdout 恰单行 block JSON（中文理由），状态不变。"""
+        """失败任务 → stdout 恰单行 block JSON（理由为英文文案），状态不变。"""
         self.gate_ready()
         self.make_task()  # 无验证记录 → 拦在查 3
         proc = run_gate("", self.repo)
@@ -564,7 +577,8 @@ class TestHookShell(CompletionGuardCase):
         self.assertEqual(len(lines), 1)
         decision = json.loads(lines[0])
         self.assertEqual(decision["decision"], "block")
-        self.assertIn("验证", decision["reason"])
+        self.assertIn(stop_gate.VALIDATION_MISSING_REASON_TEMPLATE
+                      % (self.tid, None), decision["reason"])
         self.assertIn("record_validation", decision["reason"])
         self.assertEqual(self.load()["status"], "active")
 

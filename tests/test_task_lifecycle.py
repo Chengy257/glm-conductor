@@ -56,7 +56,7 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "plugins" / "glm-conductor"))
 
-from runtime import change_id, journal, ownership, state, task, work_unit, writer_guard  # noqa: E402
+from runtime import change_id, journal, messages, ownership, state, task, work_unit, writer_guard  # noqa: E402
 from runtime.workflow import adapter as workflow_adapter  # noqa: E402
 
 
@@ -305,7 +305,8 @@ class TestWorkflowRunGuardPrecondition(LifecycleCase):
         with self.assertRaises(ValueError) as ctx:
             task.record_workflow_run(self.repo, "life-cycle-a", "run-1")
         message = str(ctx.exception)
-        self.assertIn("守卫", message)
+        self.assertIn(messages.TASK_RECORD_RUN_NO_RESERVATION
+                      % "life-cycle-a", message)
         self.assertIn("missing writer reservation", message)
         # 零副作用：state / adapter / journal / 守卫四无变化
         self.assertIsNone(self.load()["workflow_run_id"])
@@ -828,7 +829,7 @@ class TestLegacyRefusal(LifecycleCase):
         with self.assertRaises(ValueError) as ctx:
             task.load_task(self.repo, "legacy-23-task")
         self.assertIn("2.3", str(ctx.exception))
-        self.assertIn("收尾", str(ctx.exception))
+        self.assertIn(state.LEGACY_STATE_GUIDANCE, str(ctx.exception))
 
     def test_mutations_refuse_legacy(self):
         """全部变更入口对遗留任务拒绝（先于任何写盘）。"""
