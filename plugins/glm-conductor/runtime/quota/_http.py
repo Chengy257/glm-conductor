@@ -98,7 +98,7 @@ _PROVIDER_HOSTS = {
 for _registered_host in _PROVIDER_HOSTS.values():
     if _registered_host not in ALLOWED_HOSTS:
         raise AssertionError(
-            "quota host 注册表漂移：%s 不在 ALLOWED_HOSTS 内"
+            "quota host registry drift: %s not in ALLOWED_HOSTS"
             % (_registered_host,))
 del _registered_host
 
@@ -190,19 +190,20 @@ class HttpQuotaProvider(QuotaProvider):
                  ttl_seconds=DEFAULT_TTL_SECONDS):
         if not isinstance(api_key, str) or api_key == "":
             # 消息不回显任何值（防御：值本身可能近似凭证，§37）
-            raise ValueError("api_key 必须是非空字符串")
+            raise ValueError("api_key must be a non-empty string")
         if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) \
                 or timeout <= 0:
-            raise ValueError("timeout 必须是正数（秒）")
+            raise ValueError("timeout must be a positive number (seconds)")
         if isinstance(max_bytes, bool) or not isinstance(max_bytes, int) \
                 or max_bytes <= 0:
-            raise ValueError("max_bytes 必须是正整数（字节）")
+            raise ValueError("max_bytes must be a positive integer (bytes)")
         if isinstance(ttl_seconds, bool) \
                 or not isinstance(ttl_seconds, (int, float)) \
                 or ttl_seconds < 0:
-            raise ValueError("ttl_seconds 必须是非负数（秒）")
+            raise ValueError(
+                "ttl_seconds must be a non-negative number (seconds)")
         if transport is not None and not callable(transport):
-            raise ValueError("transport 必须是可调用对象或 None")
+            raise ValueError("transport must be a callable or None")
 
         resolved_host = host if host is not None \
             else _PROVIDER_HOSTS.get(name)
@@ -213,7 +214,8 @@ class HttpQuotaProvider(QuotaProvider):
         # ValueError）
         if resolved_host is not None and resolved_host not in ALLOWED_HOSTS:
             raise QuotaProviderError(
-                "quota host 不在允许清单内（host=%s）" % (resolved_host,),
+                "quota host not in the allowlist (host=%s)"
+                % (resolved_host,),
                 "network")
         super().__init__(name, resolved_host)
 
@@ -222,7 +224,7 @@ class HttpQuotaProvider(QuotaProvider):
         # 防御未来拼接逻辑改动引入非 https 形态（终审 P2 注记）
         if not url.startswith("https://"):
             raise QuotaProviderError(
-                "quota URL 必须是 https（host=%s，path=%s）"
+                "quota URL must be https (host=%s, path=%s)"
                 % (resolved_host, _QUOTA_PATH), "network")
 
         self._api_key = api_key  # 凭证唯一存放处（§37）
@@ -279,16 +281,16 @@ class HttpQuotaProvider(QuotaProvider):
         # §37 条款 4：限长响应——只可能读到 max_bytes+1 字节
         if len(body) > self.max_bytes:
             raise QuotaProviderError(
-                "bounded response exceeded：quota 响应超过 %d 字节上限"
-                "（host=%s，path=%s）" % (self.max_bytes, self.host,
-                                          _QUOTA_PATH),
+                "bounded response exceeded: quota response over the"
+                " %d-byte cap (host=%s, path=%s)"
+                % (self.max_bytes, self.host, _QUOTA_PATH),
                 "malformed")
         try:
             parsed = json.loads(body)
         except ValueError:
             # JSONDecodeError / UnicodeDecodeError 都是 ValueError 子类
             raise QuotaProviderError(
-                "quota 响应不是合法 JSON（host=%s，path=%s）"
+                "quota response is not valid JSON (host=%s, path=%s)"
                 % (self.host, _QUOTA_PATH), "malformed")
 
         snapshot = parse_quota_body(
@@ -309,12 +311,13 @@ class HttpQuotaProvider(QuotaProvider):
         else:
             kind = "unavailable"
         return QuotaProviderError(
-            "quota 端点返回 HTTP %d（host=%s，path=%s）"
+            "quota endpoint returned HTTP %d (host=%s, path=%s)"
             % (code, self.host, _QUOTA_PATH), kind)
 
     def _network_error(self, error_type):
         """传输层异常（URLError / timeout / OSError /
         http.client.HTTPException）→ network。"""
         return QuotaProviderError(
-            "quota 请求网络失败（host=%s，path=%s，error_type=%s）"
+            "quota request network failure (host=%s, path=%s,"
+            " error_type=%s)"
             % (self.host, _QUOTA_PATH, error_type), "network")

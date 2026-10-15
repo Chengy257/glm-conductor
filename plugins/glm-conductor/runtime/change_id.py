@@ -137,7 +137,7 @@ def normalize_content(data: bytes) -> bytes:
     """
     if not isinstance(data, bytes):
         raise ChangeIdError(
-            "变更标识内容必须是 bytes，得到 %s" % type(data).__name__)
+            "change-id content must be bytes, got %s" % type(data).__name__)
     return data.replace(b"\r\n", b"\n")
 
 
@@ -168,29 +168,36 @@ def normalize_relpath(path) -> str:
     """
     if not isinstance(path, str):
         raise ChangeIdError(
-            "路径必须是字符串，得到 %s" % type(path).__name__)
+            "path must be a string, got %s" % type(path).__name__)
     normalized = path.replace("\\", "/")
     while normalized.startswith("./"):
         normalized = normalized[2:]
     if normalized == "":
-        raise ChangeIdError("非法变更标识路径（归一后为空串）：%r" % path)
+        raise ChangeIdError(
+            "invalid change-id path (normalizes to an empty string): %r"
+            % path)
     if normalized.startswith("/"):
-        raise ChangeIdError("非法变更标识路径（绝对路径）：%r" % path)
+        raise ChangeIdError(
+            "invalid change-id path (absolute path): %r" % path)
     segments = normalized.split("/")
     first = segments[0]
     if len(first) == 2 and first[0].isalpha() and first[1] == ":":
         raise ChangeIdError(
-            "非法变更标识路径（Windows 盘符绝对路径）：%r" % path)
+            "invalid change-id path (Windows drive-letter absolute path): %r"
+            % path)
     for seg in segments:
         if seg == "":
             raise ChangeIdError(
-                "非法变更标识路径（含空路径段，如连续 // 或首尾 /）：%r" % path)
+                "invalid change-id path (empty path segment, e.g. "
+                "consecutive // or leading/trailing /): %r" % path)
         if seg == "..":
             raise ChangeIdError(
-                "非法变更标识路径（含 .. 越出仓库根）：%r" % path)
+                "invalid change-id path (contains .. escaping the "
+                "repository root): %r" % path)
         if seg == ".":
             raise ChangeIdError(
-                "非法变更标识路径（含无意义的 . 段）：%r" % path)
+                "invalid change-id path (contains a meaningless . segment):"
+                " %r" % path)
     return normalized
 
 
@@ -230,27 +237,31 @@ def resolve_base(repo_root) -> str:
     timeout = effective_git_timeout()
     if timeout <= 0:
         raise ChangeIdError(
-            "git 观察总预算已耗尽（Stop 完成守卫共享截止期已过），"
-            "跳过 rev-parse HEAD（repo=%s）" % (repo_root,))
+            "git observation budget exhausted (shared Stop completion-gate"
+            " deadline has passed); skipping rev-parse HEAD (repo=%s)"
+            % (repo_root,))
     try:
         proc = subprocess.run(
             ["git", "rev-parse", "HEAD"], cwd=str(repo_root),
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout)
     except FileNotFoundError as exc:
         raise ChangeIdError(
-            "git 调用失败：找不到 git 可执行文件（%s）" % exc) from exc
+            "git call failed: git executable not found (%s)" % exc) from exc
     except subprocess.TimeoutExpired as exc:
         raise ChangeIdError(
-            "git 调用失败：rev-parse HEAD 超时（>%.1f 秒，repo=%s；"
-            "如处于超大仓库或工作区脏文件过多，可配置环境变量 GLM_CONDUCTOR_GIT_TIMEOUT 调整阈值）"
+            "git call failed: rev-parse HEAD timed out (>%.1f s, repo=%s; if"
+            " the repository is very large or has many dirty files, adjust"
+            " the threshold via the GLM_CONDUCTOR_GIT_TIMEOUT environment"
+            " variable)"
             % (timeout, repo_root)) from exc
     if proc.returncode == 0:
         return proc.stdout.decode("utf-8", errors="replace").strip()
     probe_timeout = effective_git_timeout()
     if probe_timeout <= 0:
         raise ChangeIdError(
-            "git 观察总预算已耗尽（Stop 完成守卫共享截止期已过），"
-            "跳过 rev-parse --git-dir 探针（repo=%s）" % (repo_root,))
+            "git observation budget exhausted (shared Stop completion-gate"
+            " deadline has passed); skipping rev-parse --git-dir probe"
+            " (repo=%s)" % (repo_root,))
     try:
         probe = subprocess.run(
             ["git", "rev-parse", "--git-dir"], cwd=str(repo_root),
@@ -258,17 +269,20 @@ def resolve_base(repo_root) -> str:
             timeout=probe_timeout)
     except FileNotFoundError as exc:
         raise ChangeIdError(
-            "git 调用失败：找不到 git 可执行文件（%s）" % exc) from exc
+            "git call failed: git executable not found (%s)" % exc) from exc
     except subprocess.TimeoutExpired as exc:
         raise ChangeIdError(
-            "git 调用失败：rev-parse --git-dir 超时（>%.1f 秒，repo=%s；"
-            "如处于超大仓库或工作区脏文件过多，可配置环境变量 GLM_CONDUCTOR_GIT_TIMEOUT 调整阈值）"
+            "git call failed: rev-parse --git-dir timed out (>%.1f s,"
+            " repo=%s; if the repository is very large or has many dirty"
+            " files, adjust the threshold via the GLM_CONDUCTOR_GIT_TIMEOUT"
+            " environment variable)"
             % (probe_timeout, repo_root)) from exc
     if probe.returncode == 0:
         return "-"
     stderr_summary = probe.stderr.decode("utf-8", errors="replace").strip()
     raise ChangeIdError(
-        "git 调用失败：rev-parse 返回 returncode=%d（repo=%s）；stderr：%s"
+        "git call failed: rev-parse returned returncode=%d (repo=%s);"
+        " stderr: %s"
         % (probe.returncode, repo_root, stderr_summary[:200]))
 
 
@@ -330,7 +344,7 @@ def compute_change_id(repo_root, relevant_files, base=None) -> str:
         base = resolve_base(repo_root)
     elif not isinstance(base, str) or base == "":
         raise ChangeIdError(
-            "显式 base 必须是非空字符串，得到 %r" % (base,))
+            "explicit base must be a non-empty string, got %r" % (base,))
     lines = [_DOMAIN_TAG, "base " + base]
     for rel in ordered:
         target = pathlib.Path(repo_root) / rel
@@ -339,14 +353,15 @@ def compute_change_id(repo_root, relevant_files, base=None) -> str:
         else:
             if target.is_dir():
                 raise ChangeIdError(
-                    "变更标识目标路径是目录而非文件：%r（repo=%s）"
+                    "change-id target path is a directory, not a file:"
+                    " %r (repo=%s)"
                     % (rel, repo_root))
             try:
                 with open(target, "rb") as fh:
                     data = fh.read()
             except OSError as exc:
                 raise ChangeIdError(
-                    "读取变更标识目标文件失败：%r（repo=%s）：%s"
+                    "failed to read change-id target file: %r (repo=%s): %s"
                     % (rel, repo_root, exc)) from exc
             mark = "sha256:" + content_digest(data)
         lines.append("file " + rel + "\0" + mark)

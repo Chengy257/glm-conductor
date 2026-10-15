@@ -181,6 +181,141 @@ def _fmt_percent(value):
     return "%s%%" % value
 
 
+def _fmt_number(value):
+    """数值 → 紧凑文本（300.0 → "300"，12.34 → "12.34"）；中文 reason
+    渲染专用，与 parser._fmt_number 同口径的接缝外副本（保留理由同
+    _is_number：渲染器独立于 parser 的英文 reason 面）。"""
+    value = round(float(value), 2)
+    if value == int(value):
+        return str(int(value))
+    return str(value)
+
+
+# —— 中文 reason 渲染端口（v2.6.1 W5b 解耦） ——
+# parser.evaluate / plan_resume 的 reason 面已英文化（模型执行面 =
+# 简洁英文）；本诊断 CLI 的人读 TEXT 面保持中文（owner ruling 9，
+# tests/test_quota_report.py 与 docs/troubleshooting.md 锚定）。因此
+# status / plan 两行不再直印 evaluation['reason'] / plan['reason']，
+# 改由下方两个渲染器按结构化字段（status / windows / action /
+# resume_at）重建中文 reason——口径与 parser 英文化前的中文文案逐字
+# 一致；渲染器不识别的形状一律原样透出英文 reason（诚实降级，绝不
+# 虚构中文文案）。--json 机器面则继续内嵌 parser 原产 reason（英文）。
+
+def _kind_names_zh(windows):
+    """窗口 kind 的中文顿号清单（如 "five_hour、weekly"；空清单回退
+    "窗口"）——parser._kind_names 英文化前的中文口径。"""
+    names = [str(w.get("kind")) for w in windows
+             if isinstance(w, dict) and w.get("kind")]
+    return "、".join(names) if names else "窗口"
+
+
+def _status_reason_zh(evaluation):
+    """由 evaluation 的结构化字段重建中文 status reason（parser 英文化
+    前 _overall_reason 的中文口径逐字移植；windows 缺失 / 为空 →
+    「无可用窗口数据，状态未知」——对应 evaluate() 的 no-window 形态）。"""
+    windows = evaluation.get("windows") if isinstance(evaluation, dict) \
+        else None
+    if not isinstance(windows, list) or not windows:
+        return "无可用窗口数据，状态未知"
+    status = evaluation.get("status")
+    exhausted = [w for w in windows if w["status"] == "EXHAUSTED"]
+    pressure = [w for w in windows if w["status"] == "PRESSURE"]
+    unknown = [w for w in windows if w["status"] == "UNKNOWN"]
+    parts = []
+    if exhausted:
+        parts.append("%s 窗口已耗尽" % _kind_names_zh(exhausted))
+    if pressure:
+        segments = []
+        for w in pressure:
+            segment = "%s 接近阈值" % (
+                w["kind"] if w.get("kind") else "窗口")
+            if _is_number(w["remaining_percent"]):
+                segment += "（剩余 %s%%）" % _fmt_number(
+                    w["remaining_percent"])
+            segments.append(segment)
+        parts.append("，".join(segments))
+    if status == "EXHAUSTED":
+        return "，".join(parts)
+    if status == "PRESSURE":
+        return parts[0] if parts else "额度接近阈值"
+    if status == "UNKNOWN":
+        if unknown:
+            return "窗口数据不完整（%s 已用/剩余数据缺失）" % _kind_names_zh(
+                unknown)
+        return "窗口数据不完整"
+    return "窗口余量充足"
+
+
+def _plan_reason_zh(evaluation, plan):
+    """由 plan['action'] 重建中文 plan reason（parser 英文化前
+    plan_resume 的中文口径移植；按 action 分派）。
+
+    - 'continue' / 'checkpoint' / UNKNOWN 降级：固定文案；
+    - EXHAUSTED 降级：按 evaluation['windows'] 的 EXHAUSTED 窗重建
+      parser 的分派文案（无阻塞窗 → 总括文案；个别 reset 不可解析 →
+      逐窗文案，kind 缺失回退「阻塞窗口」）；
+    - 'resume_at'：grace 秒数由 resume_at − 最晚阻塞窗 reset 推导
+      （parser 的 resume_at 恰为后者加 grace，故推导可还原）；
+    - 其余 action / 形状（含推导不可行）：原样透出英文
+      plan['reason']——诚实降级，绝不虚构中文文案。"""
+    if not isinstance(plan, dict):
+        return plan
+    action = plan.get("action")
+    if action == "continue":
+        return "额度余量充足，继续当前工作"
+    if action == "checkpoint":
+        return ("额度接近阈值：当前原子步骤收尾后在安全里程碑落"
+                " checkpoint，不开新的大实施阶段")
+    if action == "periodic_fallback":
+        status = evaluation.get("status") if isinstance(evaluation, dict) \
+            else None
+        if status == "UNKNOWN":
+            return "额度状态未知（fail-open）：回退周期存活探针，不阻塞任务"
+        if status == "EXHAUSTED":
+            windows = evaluation.get("windows")
+            blocked = [w for w in windows
+                       if isinstance(w, dict)
+                       and w.get("status") == "EXHAUSTED"] \
+                if isinstance(windows, list) else []
+            if not blocked:
+                return ("窗口已耗尽但无法确定任何阻塞窗口的 reset 时间，"
+                        "不虚构调度：回退周期存活探针")
+            for window in blocked:
+                if _parse_iso_utc(window.get("reset_at")) is None:
+                    kind = window.get("kind")
+                    label = kind if kind else "阻塞窗口"
+                    return ("%s reset 时间未知，不虚构调度：回退周期存活探针"
+                            % label)
+            # 全部 reset 可解析却给出 periodic_fallback：渲染器不识别
+            # 的形状 → 英文 reason 原样透出
+            return plan.get("reason")
+        return plan.get("reason")
+    if action == "resume_at":
+        resume_at = plan.get("resume_at")
+        end = _parse_iso_utc(resume_at)
+        windows = evaluation.get("windows") if isinstance(evaluation, dict) \
+            else None
+        blocked = [w for w in windows
+                   if isinstance(w, dict) and w.get("status") == "EXHAUSTED"] \
+            if isinstance(windows, list) else []
+        moments = []
+        derivable = end is not None and bool(blocked)
+        for window in blocked:
+            moment = _parse_iso_utc(window.get("reset_at"))
+            if moment is None:
+                derivable = False
+                break
+            moments.append(moment)
+        if derivable:
+            grace_seconds = (end - max(moments)).total_seconds()
+            return ("窗口已耗尽：等到 %s 之后再恢复（最晚 reset 加 %s 秒"
+                    "宽限），唤醒后必须强制刷新额度"
+                    % (resume_at, _fmt_number(grace_seconds)))
+        # 推导不可行（resume_at / reset 不可解析等）：英文 reason 透出
+        return plan.get("reason")
+    return plan.get("reason")
+
+
 def _window_lines(window):
     """单窗口 → ["  used: ..", "  remaining: ..", "  reset: .."]。"""
     used = window.get("used_percent")
@@ -248,9 +383,12 @@ def _render_success_text(snapshot, evaluation, plan, source):
         lines.append("%s:" % kind)
         lines.extend(_window_lines(window))
         lines.append("")
+    # 中文 reason 经渲染端口重建（parser 原产 reason 已英文化；
+    # 人读 TEXT 面保持中文，owner ruling 9）——两行格式逐字不变
     lines.append("status: %s — %s" % (evaluation.get("status"),
-                                      evaluation.get("reason")))
-    lines.append("plan: %s（%s）" % (plan.get("action"), plan.get("reason")))
+                                      _status_reason_zh(evaluation)))
+    lines.append("plan: %s（%s）" % (plan.get("action"),
+                                     _plan_reason_zh(evaluation, plan)))
     return "\n".join(lines)
 
 

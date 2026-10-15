@@ -210,7 +210,7 @@ class TestReadEvents(JournalTestCase):
             '{"ts":"2026-08-28T00:00:02.000+00:00","event":"c"}\n')
         with self.assertRaises(journal.JournalError) as cm:
             journal.read_events(self.root, TASK_ID, strict=True)
-        match = re.search(r"第 (\d+) 行", str(cm.exception))
+        match = re.search(r"line (\d+) is not", str(cm.exception))
         self.assertIsNotNone(match, str(cm.exception))
         self.assertEqual(int(match.group(1)), 2)
 
@@ -218,7 +218,7 @@ class TestReadEvents(JournalTestCase):
         self.write_raw("not-json-at-all\n", task_id="task-strict-1")
         with self.assertRaises(journal.JournalError) as cm:
             journal.read_events(self.root, "task-strict-1", strict=True)
-        match = re.search(r"第 (\d+) 行", str(cm.exception))
+        match = re.search(r"line (\d+) is not", str(cm.exception))
         self.assertIsNotNone(match, str(cm.exception))
         self.assertEqual(int(match.group(1)), 1)
 

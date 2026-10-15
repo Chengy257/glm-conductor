@@ -223,9 +223,9 @@ class TestEffectiveTimeoutClamp(GuardBudgetCase):
         """预算耗尽（截止期已过）→ 不发起子进程直接抛结构性错误。
 
         ownership.git_touched_files → OwnershipError（英文消息点明
-        budget exhausted）、change_id.resolve_base → ChangeIdError，
-        消息点名「总预算已耗尽」；假 subprocess
-        记录器零调用（无界重试不存在）。
+        budget exhausted）、change_id.resolve_base → ChangeIdError
+        （v2.6.1 W5b 起同为英文消息，同一 budget exhausted 措辞家族）；
+        假 subprocess 记录器零调用（无界重试不存在）。
         """
         spawned = []
 
@@ -245,7 +245,7 @@ class TestEffectiveTimeoutClamp(GuardBudgetCase):
                 change_id.resolve_base(self.repo)
         self.assertEqual(spawned, [], "预算耗尽后仍发起了 git 子进程")
         self.assertIn("budget exhausted", str(ctx_own.exception))
-        self.assertIn("预算已耗尽", str(ctx_chg.exception))
+        self.assertIn("budget exhausted", str(ctx_chg.exception))
 
 
 # —— 3. 受控假慢 git：守卫回合在预算内可见降级 ——

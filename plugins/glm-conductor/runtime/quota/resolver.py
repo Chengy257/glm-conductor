@@ -135,7 +135,7 @@ def _build_providers(api_key, timeout_seconds=None):
 def _normalize_now(now):
     """归一 now 注入参数：None → 当前 UTC；datetime / ISO 串 → 时刻。
 
-    now 仅供测试注入当前时刻使用；非法输入 → ValueError（中文，
+    now 仅供测试注入当前时刻使用；非法输入 → ValueError（英文，
     对齐 parser.plan_resume 的参数校验口径）。
     """
     if now is None:
@@ -147,8 +147,8 @@ def _normalize_now(now):
     moment = _parse_iso_utc(now)
     if moment is None:
         raise ValueError(
-            "resolve_quota_status：now 必须是 datetime 或 ISO8601 字符串，"
-            "得到 %r" % (now,))
+            "resolve_quota_status: now must be a datetime or ISO8601"
+            " string, got %r" % (now,))
     return moment
 
 
@@ -281,8 +281,9 @@ def _resolve_quota(repo_root, *, now, force_refresh, timeout_seconds) -> dict:
                 "status": cached_status,
                 "source": "cache_fresh",
                 "evaluated_at": evaluated_at,
-                "reason": "命中新鲜额度缓存（抓取于 %s，%d 秒前，%d 秒"
-                          "新鲜期内，未发起网络查询）"
+                "reason": "fresh quota cache hit (fetched %s, %d s ago,"
+                          " within the %d s freshness window; no network"
+                          " query)"
                           % (cache.get("fetched_at"), int(age_seconds),
                              CACHE_TTL_FRESH_SECONDS),
                 "snapshot": cache.get("snapshot"),
@@ -331,8 +332,8 @@ def _resolve_quota(repo_root, *, now, force_refresh, timeout_seconds) -> dict:
                     "status": status,
                     "source": "provider",
                     "evaluated_at": evaluated_at,
-                    "reason": "provider %s 抓取成功，额度已评估并刷新"
-                              "本地缓存" % provider_name,
+                    "reason": "provider %s fetch succeeded; quota evaluated"
+                              " and local cache refreshed" % provider_name,
                     "snapshot": snapshot,
                     "fetched_at": evaluated_at,
                 }
@@ -348,17 +349,20 @@ def _resolve_quota(repo_root, *, now, force_refresh, timeout_seconds) -> dict:
     if cache is not None and same_identity:
         age_seconds = int((moment - cached_at).total_seconds())
         if age_seconds > CACHE_TTL_FRESH_SECONDS:
-            staleness = "数据抓取于 %s，已过期 %d 秒（超过 %d 秒新鲜期）" % (
+            staleness = "data fetched %s, stale by %d s (beyond the %d s" \
+                        " freshness window)" % (
                 cache.get("fetched_at"), age_seconds,
                 CACHE_TTL_FRESH_SECONDS)
         else:
-            staleness = "数据抓取于 %s（force_refresh 跳过新鲜期）" % (
+            staleness = "data fetched %s (force_refresh skipped the" \
+                        " freshness window)" % (
                 cache.get("fetched_at"),)
         return {
             "status": cached_status,
             "source": "cache_stale",
             "evaluated_at": evaluated_at,
-            "reason": "provider 额度查询不可用（%s），回退本地缓存：%s"
+            "reason": "provider quota query unavailable (%s), falling back"
+                      " to the local cache: %s"
                       % (cause, staleness),
             "snapshot": cache.get("snapshot"),
             "fetched_at": cache.get("fetched_at"),
@@ -367,8 +371,9 @@ def _resolve_quota(repo_root, *, now, force_refresh, timeout_seconds) -> dict:
         "status": "UNKNOWN",
         "source": "none",
         "evaluated_at": evaluated_at,
-        "reason": "无额度缓存且 provider 额度查询不可用（%s），"
-                  "按 UNKNOWN fail-open（不阻塞派发，预算按 1 折算）"
+        "reason": "no quota cache and provider quota query unavailable"
+                  " (%s); UNKNOWN fail-open (dispatch not blocked, budget"
+                  " counted as 1)"
                   % cause,
         "snapshot": None,
         "fetched_at": None,
@@ -392,7 +397,7 @@ def resolve_quota_status(repo_root, *, now=None, force_refresh=False,
       {"status": <QUOTA_STATUSES 四态之一>,
        "source": <QUOTA_SOURCES 之一>，
        "evaluated_at": <ISO8601 毫秒精度 Z 形式>,
-       "reason": <中文一句话>}
+       "reason": <英文一句话>}
 
     v2.2 M3（wu-22-03）：本函数与 resolve_quota_detail 共享内部实现
     _resolve_quota（签名 / 语义 / reason 逐字零变化，输出仍恰为四键）。

@@ -14,7 +14,7 @@
       - epoch_ms_to_iso()：nextResetTime（epoch 毫秒）→ UTC
         ISO8601 秒精度字符串（"2026-08-28T06:45:02Z" 形式）；
       - evaluate()：§28 四态评估（snapshot → 逐窗 AVAILABLE /
-        PRESSURE / EXHAUSTED / UNKNOWN + 总体 status + 中文 reason）；
+        PRESSURE / EXHAUSTED / UNKNOWN + 总体 status + 英文 reason）；
       - plan_resume()：§29-§33 恢复规划（评估 → {action, resume_at,
         force_refresh_before_resume, reason}，action ∈ RESUME_ACTIONS）；
       - earliest_future_reset_at()：v2.6.0 观测透传面的单一 reset_at
@@ -221,7 +221,8 @@ def parse_quota_body(body, *, provider, fetched_at):
     """
     if not isinstance(body, dict):
         raise QuotaProviderError(
-            "quota 响应体必须是 JSON 对象，得到 %s" % type(body).__name__,
+            "quota response body must be a JSON object, got %s"
+            % type(body).__name__,
             "malformed")
     data = body.get("data")
     if not isinstance(data, dict):
@@ -230,12 +231,14 @@ def parse_quota_body(body, *, provider, fetched_at):
             data = body
         else:
             raise QuotaProviderError(
-                "quota 响应缺少 data.limits 结构（非成功响应形态）",
+                "quota response lacks the data.limits structure"
+                " (not a successful-response shape)",
                 "malformed")
     limits = data.get("limits")
     if not isinstance(limits, list) or not limits:
         raise QuotaProviderError(
-            "quota 响应 data.limits 必须是非空数组", "malformed")
+            "quota response data.limits must be a non-empty array",
+            "malformed")
 
     windows = []
     seen_kinds = set()
@@ -297,10 +300,11 @@ def _fmt_number(value):
 
 
 def _kind_names(windows):
-    """把窗口列表的 kind 拼为中文顿号清单（如 "five_hour、weekly"）。"""
+    """把窗口列表的 kind 拼为清单（如 "five_hour, weekly"；空清单回退
+    "window"）。"""
     names = [str(w.get("kind")) for w in windows
              if isinstance(w, dict) and w.get("kind")]
-    return "、".join(names) if names else "窗口"
+    return ", ".join(names) if names else "window"
 
 
 # —— §28 四态评估 ——
@@ -347,33 +351,34 @@ def _evaluate_window(item, threshold):
 
 
 def _overall_reason(status, windows):
-    """按总体状态构造中文一句话 reason（§28 风格示例）。"""
+    """按总体状态构造英文一句话 reason（§28 风格示例）。"""
     exhausted = [w for w in windows if w["status"] == "EXHAUSTED"]
     pressure = [w for w in windows if w["status"] == "PRESSURE"]
     unknown = [w for w in windows if w["status"] == "UNKNOWN"]
     parts = []
     if exhausted:
-        parts.append("%s 窗口已耗尽" % _kind_names(exhausted))
+        parts.append("%s exhausted" % _kind_names(exhausted))
     if pressure:
         segments = []
         for w in pressure:
-            segment = "%s 接近阈值" % (
-                w["kind"] if w.get("kind") else "窗口")
+            segment = "%s near threshold" % (
+                w["kind"] if w.get("kind") else "window")
             if _is_number(w["remaining_percent"]):
-                segment += "（剩余 %s%%）" % _fmt_number(
+                # join 空格 + 钉定片段 '(%s%% remaining)'
+                segment += " " + "(%s%% remaining)" % _fmt_number(
                     w["remaining_percent"])
             segments.append(segment)
-        parts.append("，".join(segments))
+        parts.append(", ".join(segments))
     if status == "EXHAUSTED":
-        return "，".join(parts)
+        return ", ".join(parts)
     if status == "PRESSURE":
-        return parts[0] if parts else "额度接近阈值"
+        return parts[0] if parts else "quota near threshold"
     if status == "UNKNOWN":
         if unknown:
-            return "窗口数据不完整（%s 已用/剩余数据缺失）" % _kind_names(
-                unknown)
-        return "窗口数据不完整"
-    return "窗口余量充足"
+            return "window data incomplete (used/remaining missing for %s)" \
+                   % _kind_names(unknown)
+        return "window data incomplete"
+    return "window headroom sufficient"
 
 
 def evaluate(snapshot, *, pressure_threshold_percent=
@@ -392,21 +397,21 @@ def evaluate(snapshot, *, pressure_threshold_percent=
       {"status": <四态之一>,
        "windows": [{"kind", "status", "used_percent",
                     "remaining_percent", "reset_at"}, ...],
-       "reason": <中文一句话>}
+       "reason": <英文一句话>}
     windows 与输入逐窗一一对应（原始字段原样透传，仅新增 status），
     坏窗明细保持可见；总体 = 最严重窗口的状态，但任一窗 UNKNOWN 且
     其余窗无 EXHAUSTED/PRESSURE 时总体 UNKNOWN（§28 fail-open）。
     """
     if not _is_number(pressure_threshold_percent):
         raise ValueError(
-            "evaluate：pressure_threshold_percent 必须是有限数值，得到 %r"
-            % (pressure_threshold_percent,))
+            "evaluate: pressure_threshold_percent must be a finite number,"
+            " got %r" % (pressure_threshold_percent,))
     threshold = float(pressure_threshold_percent)
 
     no_window_result = {
         "status": "UNKNOWN",
         "windows": [],
-        "reason": "无可用窗口数据，状态未知",
+        "reason": "no usable window data, status unknown",
     }
     if not isinstance(snapshot, dict):
         return no_window_result
@@ -470,7 +475,7 @@ def plan_resume(evaluation, snapshot=None, *, now=None,
       - grace_seconds：resume_at 宽限秒数，缺省 300；负数 / 非有限
         数值 → ValueError。
 
-    参数校验（先全量校验再决策，中文 ValueError）：
+    参数校验（先全量校验再决策，英文 ValueError）：
       - evaluation 非 dict、或 status 不在 QUOTA_STATUSES → ValueError。
 
     决策规则：
@@ -487,59 +492,64 @@ def plan_resume(evaluation, snapshot=None, *, now=None,
 
     返回：
       {"action": <RESUME_ACTIONS 之一>, "resume_at": <Z 形式串或 None>,
-       "force_refresh_before_resume": <bool>, "reason": <中文一句话>}
+       "force_refresh_before_resume": <bool>, "reason": <英文一句话>}
     """
     if not isinstance(evaluation, dict):
         raise ValueError(
-            "plan_resume：evaluation 必须是 JSON 对象，得到 %s"
+            "plan_resume: evaluation must be a JSON object, got %s"
             % type(evaluation).__name__)
     status = evaluation.get("status")
     if status not in QUOTA_STATUSES:
         raise ValueError(
-            "plan_resume：evaluation.status %r 不在合法取值内（%s）"
+            "plan_resume: evaluation.status %r not in the legal values (%s)"
             % (status, ", ".join(QUOTA_STATUSES)))
     if not _is_number(grace_seconds) or grace_seconds < 0:
         raise ValueError(
-            "plan_resume：grace_seconds 必须是 >= 0 的有限数值，得到 %r"
-            % (grace_seconds,))
+            "plan_resume: grace_seconds must be a finite number >= 0,"
+            " got %r" % (grace_seconds,))
     grace = timedelta(seconds=float(grace_seconds))
     _normalize_now(now)  # 仅校验注入参数的合法性（见 _normalize_now docstring）
 
     if status == "AVAILABLE":
         return {"action": "continue", "resume_at": None,
                 "force_refresh_before_resume": False,
-                "reason": "额度余量充足，继续当前工作"}
+                "reason": "sufficient quota headroom; continue current work"}
 
     if status == "PRESSURE":
         return {"action": "checkpoint", "resume_at": None,
                 "force_refresh_before_resume": False,
-                "reason": "额度接近阈值：当前原子步骤收尾后在安全里程碑"
-                          "落 checkpoint，不开新的大实施阶段"}
+                "reason": "quota near threshold: finish the current atomic"
+                          " step, checkpoint at a safe milestone, start no"
+                          " new major implementation phase"}
 
     if status == "UNKNOWN":
         return _periodic_fallback(
-            "额度状态未知（fail-open）：回退周期存活探针，不阻塞任务")
+            "quota status unknown (fail-open): fall back to periodic"
+            " liveness probing; do not block the task")
 
     # —— EXHAUSTED（§30/§31/§32） ——
     pairs = _blocked_resets(evaluation, snapshot)
     if not pairs:
         return _periodic_fallback(
-            "窗口已耗尽但无法确定任何阻塞窗口的 reset 时间，"
-            "不虚构调度：回退周期存活探针")
+            "windows exhausted but no blocked window reset time can be"
+            " determined; no fabricated scheduling: fall back to periodic"
+            " liveness probing")
     moments = []
     for kind, reset_at in pairs:
         moment = _parse_iso_utc(reset_at)
         if moment is None:
-            label = kind if kind else "阻塞窗口"
+            label = kind if kind else "blocked window"
             return _periodic_fallback(
-                "%s reset 时间未知，不虚构调度：回退周期存活探针" % label)
+                "%s reset time unknown; no fabricated scheduling: fall"
+                " back to periodic liveness probing" % label)
         moments.append(moment)
     resume_at = _format_iso_z(max(moments) + grace)
     grace_text = _fmt_number(grace_seconds)
     return {"action": "resume_at", "resume_at": resume_at,
             "force_refresh_before_resume": True,
-            "reason": "窗口已耗尽：等到 %s 之后再恢复（最晚 reset 加 %s 秒"
-                      "宽限），唤醒后必须强制刷新额度" % (resume_at, grace_text)}
+            "reason": "windows exhausted: resume after %s (latest reset"
+                      " plus %s s grace); force a quota refresh on wake"
+                      % (resume_at, grace_text)}
 
 
 # —— v2.6.0 Phase B（WP-R2）：单一观测 reset_at 的确定性窗口选择 ——
@@ -562,8 +572,8 @@ def _observation_now(now):
     moment = _parse_iso_utc(now)
     if moment is None:
         raise ValueError(
-            "earliest_future_reset_at：now 必须是 datetime 或 ISO8601 "
-            "字符串，得到 %r" % (now,))
+            "earliest_future_reset_at: now must be a datetime or ISO8601"
+            " string, got %r" % (now,))
     return moment
 
 

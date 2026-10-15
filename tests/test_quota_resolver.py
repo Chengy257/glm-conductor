@@ -231,7 +231,8 @@ class FallbackChainTest(ResolverTestBase):
             result = self.resolve()
         self.assertEqual(result["status"], "PRESSURE")  # 缓存值
         self.assertEqual(result["source"], "cache_stale")
-        self.assertIn("过期", result["reason"])
+        # v2.6.1 W5b：resolver reason 英文化（"stale by %d s ..."）
+        self.assertIn("stale", result["reason"])
         self.assertIn(OLD_ISO, result["reason"])  # 注明数据过期时间
         # 异常细节不透传：只有 kind 分类，无异常文本
         self.assertNotIn("boom", result["reason"])

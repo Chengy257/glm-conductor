@@ -69,7 +69,8 @@ class TestQuotaProviderError(unittest.TestCase):
         text = str(exc)
         self.assertIn("quota 查询失败", text)
         self.assertIn("auth", text)
-        self.assertEqual(text, "quota 查询失败（kind=auth）")
+        # v2.6.1 W5b：__str__ 包装随 QuotaProviderError 英文化改为半角括号
+        self.assertEqual(text, "quota 查询失败 (kind=auth)")
 
     def test_str_never_contains_credentials(self):
         """§37 代码级锚点：str 只含 message+kind，绝不含凭证。
@@ -91,7 +92,8 @@ class TestQuotaProviderError(unittest.TestCase):
         for kind in ERROR_KINDS:
             with self.subTest(kind=kind):
                 exc = QuotaProviderError("端点不可用", kind)
-                self.assertEqual(str(exc), "端点不可用（kind=%s）" % kind)
+                # v2.6.1 W5b：__str__ 包装随 QuotaProviderError 英文化改为半角括号
+                self.assertEqual(str(exc), "端点不可用 (kind=%s)" % kind)
 
 
 class TestQuotaProviderBase(unittest.TestCase):
