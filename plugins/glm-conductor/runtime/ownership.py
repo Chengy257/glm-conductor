@@ -154,7 +154,7 @@ def normalize_path(path) -> str:
     """
     if not isinstance(path, str):
         raise OwnershipError(
-            "路径必须是字符串，得到 %s" % type(path).__name__)
+            "path must be a string, got %s" % type(path).__name__)
     normalized = path.replace("\\", "/")
     # 只剥离开头 "./"（可能重复书写）；"../" 原样保留相对语义
     while normalized.startswith("./"):
@@ -209,13 +209,15 @@ def compile_pattern(pattern) -> "re.Pattern":
     """
     if not isinstance(pattern, str):
         raise OwnershipError(
-            "ownership 模式必须是字符串，得到 %s" % type(pattern).__name__)
+            "ownership pattern must be a string, got %s"
+            % type(pattern).__name__)
     normalized = normalize_path(pattern)
     segments = normalized.split("/")
     for seg in segments:
         if seg == "":
             raise OwnershipError(
-                "非法 ownership 模式（含空路径段，如连续 // 或首尾 /）：%r"
+                "invalid ownership pattern (contains an empty path segment,"
+                " e.g. consecutive // or a leading/trailing /): %r"
                 % pattern)
     # 折叠相邻双星："**/**" 冗余合法，语义等价单个 "**"
     folded = []
@@ -338,24 +340,28 @@ def git_touched_files(repo_root) -> "list[str]":
     timeout = effective_git_timeout()
     if timeout <= 0:
         raise OwnershipError(
-            "git 观察总预算已耗尽（Stop 完成守卫共享截止期已过），"
-            "跳过 status（repo=%s）" % (repo_root,))
+            "git observation budget exhausted (shared Stop completion-gate"
+            " deadline has passed); skipping status (repo=%s)"
+            % (repo_root,))
     try:
         proc = subprocess.run(
             command, cwd=str(repo_root),
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout)
     except FileNotFoundError as exc:
         raise OwnershipError(
-            "git 调用失败：找不到 git 可执行文件（%s）" % exc) from exc
+            "git call failed: git executable not found (%s)" % exc) from exc
     except subprocess.TimeoutExpired as exc:
         raise OwnershipError(
-            "git 调用失败：status 超时（>%.1f 秒，repo=%s；"
-            "如处于超大仓库或工作区脏文件过多，可配置环境变量 GLM_CONDUCTOR_GIT_TIMEOUT 调整阈值）"
+            "git call failed: status timed out (>%.1f s, repo=%s; if the"
+            " repository is very large or has many dirty files, adjust the"
+            " threshold via the GLM_CONDUCTOR_GIT_TIMEOUT environment"
+            " variable)"
             % (timeout, repo_root)) from exc
     if proc.returncode != 0:
         stderr_summary = proc.stderr.decode("utf-8", errors="replace").strip()
         raise OwnershipError(
-            "git 调用失败：status 返回 returncode=%d（repo=%s）；stderr：%s"
+            "git call failed: status returned returncode=%d (repo=%s);"
+            " stderr: %s"
             % (proc.returncode, repo_root, stderr_summary[:200]))
     stdout_text = proc.stdout.decode("utf-8", errors="replace")
     if _STATUS_SHARING:
@@ -512,7 +518,8 @@ def _pattern_segment_nfa(pattern) -> dict:
     compiled = compile_pattern(pattern)
     if compiled.match(""):
         raise OwnershipConflictError(
-            "歧义 ownership 模式（语义上匹配仓库根或一切路径）：%r"
+            "ambiguous ownership pattern (semantically matches the"
+            " repository root or every path): %r"
             % (pattern,))
     normalized = normalize_path(pattern)
     segments = normalized.split("/")
@@ -629,7 +636,7 @@ def plan_stages(nodes) -> "list[list[str]]":
     不相交），组间顺序即执行顺序；同一输入两次调用输出全等。
 
     错误：
-      - 节点形状或依赖图不合法 → ValueError（聚合中文错误消息）；
+      - 节点形状或依赖图不合法 → ValueError（聚合英文错误消息）；
       - 任一 ownership scope 编译失败或歧义（匹配仓库根 / 一切路径）
         → OwnershipConflictError（消息点名节点 id 与 scope 原文；
         预检在任何分组发生之前完成，单节点图同样拦截）。
@@ -639,15 +646,16 @@ def plan_stages(nodes) -> "list[list[str]]":
     from runtime import dependency, work_unit
     if not isinstance(nodes, list):
         raise ValueError(
-            "plan_stages：nodes 必须是数组，得到 %s" % type(nodes).__name__)
+            "plan_stages: nodes must be an array, got %s"
+            % type(nodes).__name__)
     validation = []
     for node in nodes:
         validation.extend(work_unit.validate_node(node))
     validation.extend(dependency.graph_errors(nodes))
     if validation:
         raise ValueError(
-            "plan_stages：节点声明校验失败（共 %d 项）：%s"
-            % (len(validation), "；".join(validation)))
+            "plan_stages: node declaration validation failed (%d items): %s"
+            % (len(validation), "; ".join(validation)))
     by_id = {}
     for node in nodes:
         by_id[node["id"]] = node  # id 唯一性已由 graph_errors 保证
@@ -662,11 +670,11 @@ def plan_stages(nodes) -> "list[list[str]]":
                     _pattern_segment_nfa(pattern)
                 except OwnershipConflictError as exc:
                     raise OwnershipConflictError(
-                        "节点 %r 的 ownership 模式歧义：%s"
+                        "ownership pattern of node %r is ambiguous: %s"
                         % (node_id, exc)) from exc
                 except OwnershipError as exc:
                     raise OwnershipConflictError(
-                        "节点 %r 的 ownership 模式编译失败：%s"
+                        "ownership pattern of node %r failed to compile: %s"
                         % (node_id, exc)) from exc
 
     # 层内贪心装箱：按 id 升序，放入第一个无重叠组，否则新开一组

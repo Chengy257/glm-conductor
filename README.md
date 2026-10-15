@@ -139,7 +139,7 @@ Tasks encountering provider quota exhaustion can safely pause in `waiting_quota`
 - **[ZCode](https://zcode.z.ai) 3.14+** (Native Workflow & Scheduled Task capabilities verified)
 - A GLM Coding Plan or Z.ai account with configured models available (a strong main-session model is recommended for planning/architecture/verification; Flash-tier models are soft-recommended for cost-effective workflow workers — any configured model is selectable with user authorization)
 - **Python 3.8+** for runtime hooks and CLI utilities
-  - *Windows Notice:* Ensure `python3.exe` is available in PATH. If only `python.exe` is present, see the [Windows Setup Guide](./docs/troubleshooting.md#8-windows-环境下-python3-钩子命令排查).
+  - *Windows Notice:* Ensure `python3.exe` is available in PATH. If only `python.exe` is present, see the [Windows Setup Guide](./docs/troubleshooting.md#8-troubleshooting-the-python3-hook-command-on-windows).
 
 ### Installation via ZCode Plugin Marketplace
 

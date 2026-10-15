@@ -25,7 +25,8 @@
     - persona：TEXT_WORKER_PERSONA 迁移语义锚点 + 零 permit / receipt
       词；build_ask 含 objective、ownership、interfaces、constraints、
       local_check、Task context 与 Result contract 六字段，可选字段
-      缺省占位（v2.6.1 W3b 起 ask 脚手架全英文，编译产物零 CJK）；
+      缺省占位（v2.6.1 W3b 起 ask 脚手架全英文，编译产物零 CJK；
+      W5 起收紧为全 ASCII——零非 ASCII 字符）；
     - adapter：record_run / load_run 往返；artifact_path / node_map
       可选字段；原子写行为（durable_io 唯一临时名，写后无
       .durable-tmp. 残留、重复写整条替换、单文件）；缺失 / 损坏 /
@@ -231,9 +232,11 @@ class CompileStructureTest(unittest.TestCase):
         self.assertIn("return [];", source)
 
     def test_compiled_artifact_zero_cjk(self):
-        # v2.6.1 W3b 红线：ask 脚手架英文化后，编译产物（含内嵌 ask）
-        # 零 CJK 字符（样例 DAG 含中文 objective 等用户内容——脚手架
-        # 之外的节点内容原样保留，故此处用全英文夹具编译）
+        # v2.6.1 W3b 红线（W5 收紧）：ask 脚手架英文化后，编译产物
+        # （含内嵌 ask）每个字符都必须是 ASCII——全量非 ASCII 拒绝，
+        # 不只 CJK 区段（CJK 标点等 ord<0x4E00 之外的盲区一并关闭）；
+        # 样例 DAG 含中文 objective 等用户内容——脚手架之外的节点
+        # 内容原样保留，故此处用全英文夹具编译
         english_nodes = [
             work_unit.new_node("impl-auth", "implement auth signature",
                                ownership=("src/auth/**",)),
@@ -246,8 +249,9 @@ class CompileStructureTest(unittest.TestCase):
             "repository": "glm-conductor",
         })
         for ch in source:
-            self.assertLess(ord(ch), 0x4E00,
-                            "编译产物出现 CJK 字符：%r" % ch)
+            self.assertTrue(
+                ch.isascii(),
+                "编译产物出现非 ASCII 字符（要求全 ASCII）：%r" % ch)
 
 
 # —— compiler：注释边界卫生（WP-C P3） ——

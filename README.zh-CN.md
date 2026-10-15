@@ -139,7 +139,7 @@ Workflow 工作者绝不静默继承会话模型——`subagent_model` 始终是
 - **[ZCode](https://zcode.z.ai) 3.14+**（已在 Native Workflow 与 Scheduled Task 上深度实测）
 - GLM Coding Plan 或 Z.ai 账号，且已配置可用模型（主会话建议强档模型承担规划/架构/验证；Flash 档模型软推荐用作经济的工作流工作者——任何已配置模型经用户授权均可选）
 - **Python 3.8+**，用于运行时钩子与 CLI 工具
-  - *Windows 提示：* 请确保 PATH 中可直接执行 `python3.exe`。若环境仅有 `python.exe`，请参见 [Windows 排障指引](./docs/troubleshooting.md#8-windows-环境下-python3-钩子命令排查)。
+  - *Windows 提示：* 请确保 PATH 中可直接执行 `python3.exe`。若环境仅有 `python.exe`，请参见 [Windows 排障指引](./docs/troubleshooting.md#8-troubleshooting-the-python3-hook-command-on-windows)。
 
 ### 从 ZCode 插件市场安装
 

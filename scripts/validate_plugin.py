@@ -51,7 +51,7 @@
          VISUAL_ACCEPT_REQUEST 不得出现在扫描范围内；
       9. 权威架构文档契约：docs/architecture.md 必须存在；必含
          VISUAL_CAPTURE_REQUEST / TASK_ID / .glm-conductor/tasks/ /
-         ROUTE REASSESSMENT / VISUAL REVIEW / 随机十六进制后缀 /
+         ROUTE REASSESSMENT / VISUAL REVIEW / random hex suffix /
          solo / delegate / audit / full / foreground / resumable / idle；
          禁含 风险阶梯 / risk ladder / glm-advisor（均大小写不敏感）；
          `最新 checkpoint` / `latest checkpoint` 只允许出现在含否定词
@@ -60,9 +60,9 @@
          skills/continuity/SKILL.md、
          skills/continuity/references/long-horizon.md 与
          docs/architecture.md；「语义前缀+随机后缀」机械唯一格式的落点
-         标记随文件语言分锚：long-horizon.md 必含 `random hex suffix`
-         （v2.6.1 W2 英文锚），docs/architecture.md 必含
-         `随机十六进制后缀`（仍中文锚）；
+         标记统一英文锚 `random hex suffix`（long-horizon.md 于
+         v2.6.1 W2 改英文锚，docs/architecture.md 于 v2.6.1 W5 随文档
+         英文化收敛译文实际英文等价串）；
      11. 视觉规范拓扑：VISUAL_ROUND 必含于 agents/visual-implementer.md、
          skills/orchestration/references/operations.md、
          skills/orchestration/references/role-contracts.md 与
@@ -319,7 +319,7 @@ ARCH_REQUIRED_MARKERS = (
     ".glm-conductor/tasks/",
     "ROUTE REASSESSMENT",
     "VISUAL REVIEW",
-    "随机十六进制后缀",
+    "random hex suffix",
     "solo / delegate / audit / full",
     "foreground / resumable / idle",
 )
@@ -330,11 +330,12 @@ CHECKPOINT_REF_NEGATIONS = ("不", "禁止", "never", "not")
 
 # —— 检查 10：任务标识 ——
 TASK_ID_FILES = (CONTINUITY_SKILL, LONG_HORIZON, ARCH_DOC)
-# 「语义前缀+随机后缀」机械唯一格式落点标记随文件语言分锚（v2.6.1 W2：
-# long-horizon 英文化后改英文锚，architecture 仍中文锚，两锚并行）
+# 「语义前缀+随机后缀」机械唯一格式落点标记（v2.6.1 W2：long-horizon
+# 英文化后改英文锚；v2.6.1 W5：architecture.md 英文化，中文锚收敛为
+# 译文实际英文等价串 random hex suffix）
 HEX_SUFFIX_PLANS = (
     (LONG_HORIZON, "random hex suffix"),
-    (ARCH_DOC, "随机十六进制后缀"),
+    (ARCH_DOC, "random hex suffix"),
 )
 
 # —— 检查 11：视觉规范拓扑 ——

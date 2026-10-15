@@ -90,7 +90,8 @@ def _validate_identity(kind, value) -> None:
     """id 结构校验：必须是非空字符串（id 由调用方供给，本模块不造）。"""
     if not isinstance(value, str) or value == "":
         raise WorkflowRunError(
-            "adapter：%s 必须是非空字符串（由调用方供给），得到 %r"
+            "adapter: %s must be a non-empty string (supplied by the"
+            " caller), got %r"
             % (kind, value))
 
 
@@ -153,14 +154,15 @@ def record_run(task_ref, workflow_run_id, artifact_path=None,
     if node_map is not None:
         if not isinstance(node_map, dict):
             raise WorkflowRunError(
-                "adapter：node_map 必须是 dict，得到 %s"
+                "adapter: node_map must be a dict, got %s"
                 % type(node_map).__name__)
         for key, value in node_map.items():
             if not isinstance(key, str) or key == "" \
                     or not isinstance(value, str):
                 raise WorkflowRunError(
-                    "adapter：node_map 必须是「非空字符串键 → 字符串值」"
-                    "映射，得到键 %r 值 %r" % (key, value))
+                    "adapter: node_map must be a mapping of non-empty"
+                    " string keys to string values, got key %r value %r"
+                    % (key, value))
     record = {
         "task_ref": task_ref,
         "workflow_run_id": workflow_run_id,

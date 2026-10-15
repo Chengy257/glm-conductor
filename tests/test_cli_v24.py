@@ -267,7 +267,7 @@ class V24CompileInvalidTest(CliV24Fixture):
         self.assertEqual(code, 2)
         text = self.decoded(stdout)
         self.assertIn("impl-wide", text)
-        self.assertIn("歧义", text)
+        self.assertIn("ambiguous", text)
 
     def test_node_shape_errors_aggregated(self):
         # 缺 objective + 自依赖：节点级错误一次聚合报出（不短路）
