@@ -82,13 +82,16 @@ MIXED = [FLASH_OLD, FLASH_NEW, TEXT_MAIN, CROSS_PROVIDER, FUTURE]
 
 TID = "m1-ut-9d41c2"
 
-# ⑧/⑨ 静态扫描用的锚与禁词
+# ⑧/⑨ 静态扫描用的锚与禁词（v2.6.1 W2：orchestration/continuity
+# 英文化后补英文等价硬门措辞；中文原锚保留给仍中文的 enforcement 面）
 RETIRED_POLICY_TOKEN = "explicit-flash-required"
 HARD_GATE_PHRASES = (
     "必须 GLM-5.3",
     "必须为 GLM-5.3",
     "主会话必须是 GLM",
     "主会话必须为 GLM",
+    "main session must be GLM-5.3",
+    "main-session model must be GLM-5.3",
 )
 WORKER_MODEL_WRITE_PATTERN = '["worker_model"] ='
 VISUAL_AGENTS = ("visual-implementer.md", "visual-reviewer.md")

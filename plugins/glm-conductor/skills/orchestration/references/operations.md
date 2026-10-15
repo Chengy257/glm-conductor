@@ -1,82 +1,82 @@
-# 运行细节
+# Run details
 
-本文件是 glm-conductor 编排体系的运行细节文档，SKILL.md 与 role-contracts.md 之外的执行机制在此说明。
+This file is the run-details reference of the glm-conductor orchestration system; execution mechanics beyond SKILL.md and role-contracts.md are documented here.
 
-## 预检与生成
+## Preflight and dispatch
 
-- delegate/full 的文本实施经原生 Workflow 执行：worker persona 由编译器内嵌进生成源，宿主 runtime 不消费插件 agent 定义——该通道**无需子智能体预检**
-- 子智能体通道（视觉例外路径）按声明的角色核对可用类型列表：
-  - 视觉/交互任务实施需要 `glm-conductor:visual-implementer`
-  - assurance:high（文本任务）需要 `glm-conductor:glm-reviewer`
-  - assurance:high（视觉任务）需要 `glm-conductor:visual-reviewer`
-- solo 与 assurance:standard 无需任何子智能体预检
-- 缺失时的 fail-closed 处理：停止该通道，告知用户检查插件安装（Settings → Plugin Management），不得静默替换为其他子智能体类型
-- 调用时不得附加模型/思考档位覆盖：各角色定义已固定（visual-implementer 与 visual-reviewer 均为 GLM-5.3-Flash 多模态显式绑定，档位分别为 high / max；glm-reviewer 继承宿主/会话模型、档位 max），任何运行时覆盖都会破坏本体系的双轴假设
+- delegate/full text implementation runs through the native Workflow: the worker persona is embedded in the generated source by the compiler and the host runtime does not consume plugin agent definitions — this channel **needs no subagent preflight**
+- The subagent channel (the visual exception path) checks the available agent types against the declared roles:
+  - visual/interactive task implementation needs `glm-conductor:visual-implementer`
+  - assurance:high (text tasks) needs `glm-conductor:glm-reviewer`
+  - assurance:high (visual tasks) needs `glm-conductor:visual-reviewer`
+- solo and assurance:standard need no subagent preflight at all
+- Fail closed when a role is missing: stop that channel and tell the user to check the plugin installation (Settings → Plugin Management) — never silently substitute another subagent type
+- Never attach model / thinking-tier overrides at invocation: each role's definition is fixed (visual-implementer and visual-reviewer are both explicit GLM-5.3-Flash multimodal bindings, tiers high / max respectively; glm-reviewer inherits the host/session model, tier max) — any runtime override breaks the system's dual-axis assumptions
 
-## 双轴判断纪律
+## Dual-axis judgment discipline
 
-- 先独立判断 Delegability 与 Assurance，再查路由矩阵；不得从一轴推导另一轴
-- 声明后不得无证据变更路由；变更必须走 ROUTE REASSESSMENT 块并附新观察到的证据
-- 实施结果中的 reassessment 重估请求、审查者给出的 rethink 或多项 fix-first，均构成有效重估证据
+- Judge Delegability and Assurance independently first, then consult the routing matrix; never derive one axis from the other
+- Never change the route after the declaration without evidence; changes must go through a ROUTE REASSESSMENT block with newly observed evidence
+- A reassessment request in an implementation result, or a reviewer's rethink or multiple fix-first findings, all constitute valid reassessment evidence
 
-## 主验证证据
+## Main-session validation evidence
 
-主会话的验证义务（不可由工作者报告替代）：
+The main session's validation duties (never replaceable by a worker's report):
 
-1. 亲自检查完整 diff（git diff 或逐文件读取），核对改动是否越界（⊆ DAG ownership 并集）
-2. 重跑验证声明的全部命令（节点 local_check + 任务级全局验证）
-3. 将每条命令映射到主会话实际观察到的输出，之后才能交给审查者作为 VERIFICATION EVIDENCE
-4. 验证通过后经 `runtime.task.record_validation` 落任务级记录（passed/failed + change_id 现算）——任何相关文件再变化都会使记录过期，修复后重验重录
+1. Personally inspect the full diff (git diff or file-by-file reading) and check that the changed scope ⊆ the union of DAG ownership
+2. Re-run every command in the verification declaration (node local_check + task-level global validation)
+3. Map each command to output the main session actually observed — only then may it be handed to the reviewer as VERIFICATION EVIDENCE
+4. After validation passes, persist the task-level record through `runtime.task.record_validation` (passed/failed + change_id computed at write time) — any later change to relevant files invalidates the record; after a fix, re-validate and re-record
 
-实施方的结果与报告仅是声明，不是证据；证据只存在于主会话亲自观察到的 diff 与命令输出中。
+The implementer's results and reports are claims, not evidence; evidence exists only in the diff and command output the main session personally observed.
 
-视觉任务的补充：主会话可承担驱动与采集（截图落盘），但视觉判定证据来自 Flash 系角色对截图文件的读取结果；主会话不得以文字推测替代视觉判定。
+Visual-task addition: the main session may drive and capture (screenshots to disk), but visual-judgment evidence comes from the Flash-bound multimodal roles reading the screenshot files; the main session never substitutes textual speculation for visual judgment.
 
-## 视觉通道运行细节
+## Visual-channel run details
 
-- **采集分工**：主会话用其专属的 Browser/Computer Use 能力启动应用、执行交互、截图落盘。证据目录按任务隔离：`<工作区>/.glm-conductor/tasks/<task-id>/visual-evidence/`（task-id 由主会话按 continuity 技能的 TASK_ID 规则生成——语义前缀+随机后缀；foreground 一次性任务也分配同格式的临时 ID，TASK_ID 即通用运行时任务标识，保证目录不混用；任务结束由用户决定保留或删除）。主会话只采集不判定（纯文本模型）
-- **判定分工**：visual-implementer 与 visual-reviewer 用 Read 亲自读取截图后判定；采集而不查看不算观察
-- **跨调用握手**：实施者以 `VISUAL_CAPTURE_REQUEST` 结束本次调用来索取证据，主会话采集后发起**新的 visual-implementer 调用**（规范路径）——新调用携带完整状态：五段式规格（含 VISUAL ACCEPTANCE）、当前 diff / 改动状态、上一轮的 VISUAL_CAPTURE_REQUEST、截图路径清单、VISUAL_ROUND 轮次号。仅当 ZCode 运行时已验证稳定的子代理 resume 机制时，才可作为可选优化 resume 原实施者，协议正确性不依赖 resume。不存在子代理在单次调用内等待父会话的通道（协议格式见 agents/visual-implementer.md）
-- **修正轮次**：每个 VISUAL ACCEPTANCE 验收点以 VISUAL_ROUND（1|2|3）跟踪，最多 3 轮实施-采集-判定循环；超出即 blocked 交回主会话做 ROUTE REASSESSMENT
-- **fail-closed**：主会话无法采集（无浏览器/桌面能力或应用无法启动）时，视觉通道停止，不得改为纯文本验证交付
+- **Capture division of labor**: the main session uses its dedicated Browser/Computer Use capability to launch the app, perform interactions, and save screenshots to disk. The evidence directory is isolated per task: `<workspace>/.glm-conductor/tasks/<task-id>/visual-evidence/` (task-id is generated by the main session per the continuity skill's TASK_ID rule — semantic prefix + random suffix; foreground one-shot tasks also get a same-format temporary ID — TASK_ID is the universal runtime task identifier, keeping directories from mixing; at task end the user decides to keep or delete it). The main session only captures, never judges (a pure text model)
+- **Judgment division of labor**: visual-implementer and visual-reviewer personally Read the screenshots before judging; capturing without looking is not observation
+- **Cross-call handshake**: the implementer ends its invocation with a `VISUAL_CAPTURE_REQUEST` to request evidence; after capturing, the main session starts a **new visual-implementer invocation** (canonical path) — the new invocation carries the full state: the five-part spec (incl. VISUAL ACCEPTANCE), the current diff / change status, the previous round's VISUAL_CAPTURE_REQUEST, the screenshot path list, and the VISUAL_ROUND round number. Only when the ZCode runtime has a verified stable subagent resume mechanism may resuming the original implementer be used as an optional optimization; protocol correctness never depends on resume. No channel exists for a subagent to wait for the parent session within a single invocation (protocol format in agents/visual-implementer.md)
+- **Correction rounds**: every VISUAL ACCEPTANCE criterion is tracked with VISUAL_ROUND (1|2|3), at most 3 implement-capture-judge rounds; beyond that, blocked and back to the main session for ROUTE REASSESSMENT
+- **Fail closed**: when the main session cannot capture (no browser/desktop capability, or the app will not start), the visual channel stops — never deliver with text-only verification instead
 
-## 修复与裁决失效流程
+## Fix and verdict-invalidation flow
 
-fix-first 之后必须按以下顺序执行（两种修正路径）：
+After fix-first, execute in this order (two correction paths):
 
-1. **audit 路由**：主会话自行修正
-2. **full 路由**：由修复实施方修正（主会话按 reassessment/gaps 指引续派或接管）
-3. 主会话重跑全部验证命令，确认新证据，并重录 validation（change_id 已变）
-4. 换用全新 reviewer 复审（ZCode 子智能体天然新上下文，直接再次调用对应审查者即可），裁决经 `review-record` 落新记录
-5. 旧裁决作废，不作为新审查的输入
+1. **audit route**: the main session fixes itself
+2. **full route**: the implementing party fixes (the main session continues dispatching or takes over, guided by reassessment/gaps)
+3. The main session re-runs all verification commands, confirms the new evidence, and re-records validation (change_id has changed)
+4. Re-review with a fresh reviewer (ZCode subagents are naturally fresh-context; invoke the corresponding reviewer again directly), and record the verdict via `review-record`
+5. The old verdict is void and never serves as input to the new review
 
-rethink 裁决：修订架构后重新走对应路由（必要时先做 ROUTE REASSESSMENT），不得报告完成。
+rethink verdict: after revising the architecture, re-run the corresponding route (with ROUTE REASSESSMENT first when needed); completion must not be reported.
 
-## 恢复会话的路由恢复
+## Route recovery for recovered sessions
 
-从 checkpoint / Workflow 恢复的任务不得沿用旧声明盲目执行，必须依次：
+A task recovered from a checkpoint / Workflow must never blindly continue on the old declaration; in order:
 
-1. 读取本任务 CONTINUITY CHECKPOINT（按 TASK_ID 定位，若有）与 state.json
-2. 检查当前仓库状态与 diff，确认先前变更是否仍在（repository > checkpoint）
-3. 检查验证状态（validation 记录是否仍在、change_id 是否新鲜）与目标完成度
-4. 重新输出 SELECTIVE ROUTE 声明（沿用或基于新证据重估），再继续执行
+1. Read this task's CONTINUITY CHECKPOINT (located by TASK_ID, if any) and state.json
+2. Check the repository's current state and diff; confirm the previous changes are still present (repository > checkpoint)
+3. Check the validation status (whether the validation record is still there, whether change_id is fresh) and goal completion
+4. Re-output the SELECTIVE ROUTE declaration (same route, or reassessed on new evidence), then continue execution
 
-Workflow 恢复（同 run id resume）、额度等待与有界恢复机制详见 `skills/continuity`。
+Workflow recovery (same run id resume), quota waiting and bounded-resume mechanics: see `skills/continuity`.
 
-## 与 ZCode 机制的适配说明
+## Adaptation notes for ZCode mechanics
 
-- 子智能体内不能再派生子智能体，因此结构天然扁平：主会话是唯一编排者
-- 原生 Workflow 的执行编排（run 生命周期、重试、并行度）归宿主所有——Conductor 只提供编译产物、run id 关联与验收判定，绝不镜像宿主执行状态
-- 子智能体只能看到主会话启动时已连接的 MCP 服务
-- Browser Use 与 Computer Use 为主会话专用：视觉证据的采集由主会话执行，截图落盘后由 Flash 系角色读取判定
-- 修改插件文件后需更新 marketplace 并新建会话才能生效
+- A subagent cannot spawn subagents, so the topology is naturally flat: the main session is the only orchestrator
+- Native Workflow execution orchestration (run lifecycle, retries, parallelism) is owned by the host — Conductor provides only the compiled artifact, the run-id association and the acceptance judgment, and never mirrors host execution state
+- Subagents see only the MCP services connected when the main session started
+- Browser Use and Computer Use are main-session-only: visual evidence is captured by the main session and, once saved to disk, read for judgment by the Flash-bound multimodal roles
+- Plugin file changes require updating the marketplace and a new session to take effect
 
-## 故障处理
+## Failure handling
 
-- **插件角色缺失**：所需子智能体不在可用类型列表时，停止该通道，告知用户检查插件安装，必要时重装后新建会话
-- **审查者缺失**（audit/full）：不得降级为无审查交付；保留当前进度并告知用户
-- **视觉高保障终审绑定不可用**（assurance: high 视觉任务）：`visual-reviewer` 启动即报 account-connection-unavailable 等连接错误时，视觉高保障路线 fail closed——向用户报告绑定不可用，不得退回文本模型（glm-reviewer 或主会话）充当视觉终审
-- **视觉证据不可得**：视觉通道停止（实施者返回 blocked），不得改用文字推测界面正常，也不得把视觉任务静默改为纯文本验证
-- **模型名不符**：可用类型中的定义若显示非预期模型，按 fail-closed 处理并告知用户
-- **审查者尝试越权写操作**：立即终止该通道，丢弃其全部输出，改用全新审查者重新审查
-- **v24-compile 校验拒绝**：按退出码 2 的错误清单修正 DAG JSON（节点形状 / 依赖环 / ownership 冲突 / task_context 缺键）后重新编译；不绕过校验手工改生成源
+- **Plugin role missing**: when a required subagent is not in the available types, stop that channel and tell the user to check the plugin installation; re-install and start a new session if needed
+- **Reviewer missing** (audit/full): never degrade to an unreviewed delivery; keep the current progress and inform the user
+- **Visual high-assurance final review binding unavailable** (assurance: high visual tasks): when `visual-reviewer` fails at startup with a connection error such as account-connection-unavailable, the visual high-assurance route fails closed — report the binding as unavailable to the user; never fall back to a text model (glm-reviewer or the main session) as the visual final review
+- **Visual evidence unobtainable**: the visual channel stops (the implementer returns blocked) — never claim via text that the UI is fine, and never silently turn a visual task into text-only validation
+- **Model name mismatch**: if a definition in the available types shows an unexpected model, fail closed and inform the user
+- **Reviewer attempts an out-of-scope write**: terminate that channel immediately, discard all of its output, and re-review with a fresh reviewer
+- **v24-compile validation rejection**: fix the DAG JSON per the exit-code-2 error list (node shape / dependency cycles / ownership conflicts / missing task_context keys) and recompile; never bypass validation by hand-editing the generated source

@@ -639,17 +639,21 @@ class TestRunbookContract(unittest.TestCase):
         self.quota_command = self.read(QUOTA_COMMAND)
 
     def test_single_observation_anchors_present(self):
-        # 与 validator 16k 同源的四文档语义锚
+        # 与 validator 16k 同源的四文档语义锚（v2.6.1 W2：前三文档
+        # 英文化后改英文锚，与译文逐字同源；quota.md 语义句本就英文）
         for text, markers in (
                 (self.continuity,
-                 ("最早的有效未来观测", "与额度状态无关", "无条件透传",
+                 ("earliest valid future observed reset",
+                  "regardless of quota status", "unconditional pass-through",
                   "floor-only",
                   "quota-resume-decision <repo_root> <task_id> "
                   "--force-refresh")),
                 (self.long_horizon,
-                 ("最早的有效未来观测", "与额度状态无关", "floor-only")),
+                 ("earliest valid future observed reset",
+                  "regardless of quota status", "floor-only")),
                 (self.orchestration,
-                 ("最早的有效未来观测", "与额度状态无关", "floor-only")),
+                 ("earliest valid future observed reset",
+                  "regardless of quota status", "floor-only")),
                 (self.quota_command,
                  ("earliest valid future observed reset_at",
                   "regardless of quota status", "unconditionally",
@@ -661,56 +665,68 @@ class TestRunbookContract(unittest.TestCase):
         # ⑦ arm-before-work：auto 启动序列里地板绑定 / preflight / 首个
         # 精度睡眠全部先于 CreateWorkflow（两处 runbook 同断言；切片锚
         # 定 auto 分支代码块首行——manual 分支无武装直达 CreateWorkflow
-        # 是合法形态，不参与本断言）
+        # 是合法形态，不参与本断言。v2.6.1 W2 英文化后 auto 分支首行
+        # 锚随译文改为英文等价串）
         continuity_runbook = self.continuity[
-            self.continuity.index("### 启动序列（runbook，arm-before-work）"):]
+            self.continuity.index(
+                "Interview (single round of three questions: "
+                "1 enable + bounded budget"):]
         orchestration_runbook = self.orchestration[
             self.orchestration.index(
-                "问答（§6.0 单轮三问：第一题「启用」+预算"):]
+                "auto:    task-create -> quota-resume-authorize"):]
         for runbook in (continuity_runbook, orchestration_runbook):
             workflow_at = runbook.index("CreateWorkflow")
             self.assertLess(runbook.index("quota-automation-bind"),
                             workflow_at)
             self.assertLess(runbook.index("quota-continuity-preflight"),
                             workflow_at)
-            self.assertLess(runbook.index("发首个精度睡眠"), workflow_at)
+            self.assertLess(runbook.index("first precision sleep"),
+                            workflow_at)
 
     def test_silent_exhaustion_covered_by_launch_armed_sleep(self):
         # ⑦ 静默耗尽（额度死在回合之间、无停靠轮）→ 首个睡眠已在臂；
         # 停靠轮绝不承担建立首个睡眠
-        self.assertIn("额度若死在回合之间（无停靠轮发生）", self.continuity)
-        self.assertIn("已武装的待命睡眠恰好覆盖下一个窗口边界",
+        self.assertIn(
+            "if quota dies between turns (no parking round happens)",
+            self.continuity)
+        self.assertIn("exactly covers the next window boundary",
                       self.continuity)
-        self.assertIn("绝不承担建立首个睡眠", self.continuity)
+        self.assertIn("never creates the first sleep", self.continuity)
 
     def test_restart_recovery_via_recurring_floor(self):
         # ⑧ 重启丢睡眠 → 地板自愈重臂（且不把地板触发谎报为精度唤醒）
-        self.assertIn("重启杀掉睡眠后由地板兜底", self.long_horizon)
-        self.assertIn("自愈", self.long_horizon)
+        self.assertIn(
+            "when a restart kills the sleeps, the floor is the fallback",
+            self.long_horizon)
         self.assertIn("self-healing", self.long_horizon)
 
     def test_sleep_template_guards_no_negative_no_fabrication(self):
         # ⑥ 睡眠模板护栏：bash 动态计算 + null/过去不发 + 无负值睡眠
         # 无忙旋 + 绝不虚构 + floor-only 如实披露
-        for marker in ("精度层睡眠模板", "run_in_background", "date -u -d",
-                       "差值 <= 0", "无负值 sleep", "无忙旋", "绝不虚构目标",
+        for marker in ("Precision sleep template", "run_in_background",
+                       "date -u -d", "Delta <= 0", "no negative sleeps",
+                       "no busy spin", "never fabricate a target",
                        "floor-only"):
             self.assertIn(marker, self.long_horizon)
 
     def test_next_window_never_hardcoded_plus_five_hours(self):
         # ⑤ 文档护栏：续臂只依据 provider 观测证据，绝不「加 5 小时」
-        self.assertIn("不以「加 5 小时」推算", self.long_horizon)
+        self.assertIn('never derive the next wake as "plus 5 hours"',
+                      self.long_horizon)
 
     def test_three_part_success_statement(self):
         # 成功陈述三分：授权 / 地板绑定 / 睡眠实际发出——floor-only 是
         # 可见降级而非「已武装」
-        self.assertIn("成功陈述三分", self.continuity)
-        self.assertIn("成功陈述三分", self.orchestration)
+        self.assertIn("Three-part success statement", self.continuity)
+        self.assertIn("three-part success statement", self.orchestration)
 
     def test_blocked_window_semantics_retired_from_docs(self):
         # v2.5.2 EXHAUSTED-only 提取口径措辞退役（零容忍，与 validator
-        # 16k 负向检查同源）——防止旧口径回潮
-        retired = ("阻塞窗口径", "EXHAUSTED 阻塞窗", "字典序最大值")
+        # 16k 负向检查同源）——防止旧口径回潮（v2.6.1 W2：三文档均
+        # 英文化，补英文等价退役措辞，中文原锚保留防中文回潮）
+        retired = ("阻塞窗口径", "EXHAUSTED 阻塞窗", "字典序最大值",
+                   "blocked-window", "EXHAUSTED-only",
+                   "EXHAUSTED blocked window", "lexicographic maximum")
         for name, text in (("continuity/SKILL.md", self.continuity),
                            ("long-horizon.md", self.long_horizon),
                            ("commands/quota.md", self.quota_command)):

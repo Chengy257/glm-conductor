@@ -1,87 +1,87 @@
-# 角色契约
+# Role contracts
 
-本文件是 glm-conductor 编排体系的完整角色契约，SKILL.md 引用本文件获取判据与模板细节。
+This file is the complete role-contract reference of the glm-conductor orchestration system; SKILL.md points here for the criteria and template details.
 
-## 双轴路由契约
+## Dual-axis routing contract
 
-### 轴 A — Delegability（可委派性）
+### Axis A — Delegability
 
-判断问题：剩余的实施工作是否足够有界、规格足够完备，可以委派出去？
+The judgment question: is the remaining implementation work bounded and specification-complete enough to delegate?
 
-**delegability: high** —— 通常满足：
+**delegability: high** — typically all of:
 
-- objective 与 observable outcome 明确
-- 目标文件与 ownership 边界明确
-- interface 明确
-- constraints 明确
-- verification 明确
-- 架构已决定，剩余任务主要是实施
-- 实施过程中不需要频繁重新设计
+- objective and observable outcome are explicit
+- target files and ownership boundaries are explicit
+- interfaces are explicit
+- constraints are explicit
+- verification is explicit
+- the architecture is decided; the remaining task is mostly implementation
+- implementation will not need frequent redesign
 
-典型任务：已确定接口的函数实现、测试/fixture 补充、重复性重构、CLI 接线、配置管道、序列化、已知 root cause 的 bug fix、明确规则的大量代码迁移。
+Typical tasks: function implementation with a settled interface, test/fixture additions, repetitive refactors, CLI wiring, configuration pipelines, serialization, bug fixes with a known root cause, bulk code migrations with explicit rules.
 
-**delegability: low** —— 出现以下情况时优先判断为 low：
+**delegability: low** — judge low first when any of:
 
-- 架构尚未确定
-- root cause 未知
-- 需求存在实质歧义
-- 大量跨模块判断
-- 实施本身就是主要的推理问题
-- 并发/分布式状态等隐藏复杂度
-- 敏感决策尚未解决
-- 实施过程中可能频繁改变设计
+- the architecture is unsettled
+- the root cause is unknown
+- the requirements carry substantive ambiguity
+- heavy cross-module judgment
+- implementation is itself the main reasoning problem
+- hidden complexity such as concurrency / distributed state
+- sensitive decisions unresolved
+- the design may change frequently during implementation
 
-delegability: low 时由主会话实施（主模型继承宿主主会话，不可编程切换）。
+At delegability: low the main session implements (the main model inherits the host main session and is not programmatically switchable).
 
-### 轴 B — Assurance（保障等级）
+### Axis B — Assurance
 
-判断问题：实施完成并通过主会话验证后，一次全新上下文的独立终审是否有实质价值？
+The judgment question: after implementation passes main-session validation, does one independent final review from a fresh context have substantive value?
 
-**assurance: standard** —— 适用于：影响面有限、验证足够明确、回归风险可控的普通实施。
+**assurance: standard** — ordinary implementation with a limited blast radius, sufficiently explicit verification, and controlled regression risk.
 
-**assurance: high** —— 以下情况优先使用：
+**assurance: high** — prefer high when any of:
 
-- 宽影响面（wide blast radius）
-- 高回归风险
-- 认证 / 权限
-- 破坏性行为
-- 数据迁移
-- 跨模块语义变更
-- 验证难以覆盖所有重要失败模式
-- 大规模用户可见变更
-- 用户明确要求严格审查
+- wide blast radius
+- high regression risk
+- authentication / permissions
+- destructive behavior
+- data migration
+- cross-module semantic changes
+- verification cannot cover every important failure mode
+- large-scale user-visible changes
+- the user explicitly asks for strict review
 
-### 路由矩阵
+### Routing matrix
 
-| Delegability | Assurance | Route | 实施 | 独立审查 |
+| Delegability | Assurance | Route | Implementation | Independent review |
 | --- | --- | --- | --- | --- |
-| low | standard | solo | 主会话（宿主模型） | 否 |
-| high | standard | delegate | 原生 Workflow（文本工人） | 否 |
-| low | high | audit | 主会话（宿主模型） | 是 |
-| high | high | full | 原生 Workflow（文本工人） | 是 |
+| low | standard | solo | main session (host model) | no |
+| high | standard | delegate | native Workflow (text worker) | no |
+| low | high | audit | main session (host model) | yes |
+| high | high | full | native Workflow (text worker) | yes |
 
-语义要点：
+Semantic points:
 
-- delegate 不是 solo 的风险升级：solo = 主会话实施（主模型继承宿主主会话），delegate = 原生 Workflow 文本工人实施，delegate 只表达"该实施已足够有界"
-- audit = 主会话实施 + 审查者终审（适合判断密集、敏感、架构重的工作）
-- full = 委派实施 + 审查者终审（适合大规模但有界：机械 API 迁移、清晰规格的 UI 改版、重复性多文件转换）
-- 视觉/交互任务是实施模态的一种能力选择（走 visual-implementer 子智能体通道），不是第五种 route
+- delegate is not a risk escalation of solo: solo = main-session implementation (the main model inherits the host main session), delegate = native-Workflow text-worker implementation; delegate only states "this implementation is bounded enough"
+- audit = main-session implementation + reviewer final review (judgment-dense, sensitive, architecture-heavy work)
+- full = delegated implementation + reviewer final review (large but bounded: mechanical API migrations, UI revamps with clear specs, repetitive multi-file conversions)
+- visual/interactive tasks are a capability choice of implementation modality (the visual-implementer subagent channel), not a fifth route
 
-### SELECTIVE ROUTE 声明
+### SELECTIVE ROUTE declaration
 
-主会话在任何实施委派之前输出一次（进入 state 的只有 mode 与 assurance 两键）：
+Output once by the main session before any implementation delegation (only the two keys mode and assurance enter state):
 
 ```
 SELECTIVE ROUTE
 mode: solo | delegate | audit | full
 delegability: low | high
 assurance: standard | high
-reason: <简明的、基于证据的理由>
+reason: <concise, evidence-based reason>
 ```
 
 ### ROUTE REASSESSMENT
 
-路由变化必须来自新观察到的证据，可双向重估，不得凭直觉或为省事变更：
+A route change must come from newly observed evidence and may be reassessed in both directions — never changed on a hunch or for convenience:
 
 ```
 ROUTE REASSESSMENT
@@ -91,249 +91,250 @@ assurance: <old> -> <new>
 mode: <old> -> <new>
 
 evidence:
-<新观察到的证据>
+<newly observed evidence>
 ```
 
-- 下调示例：delegate 执行中节点结果频繁返回 reassessment、暴露隐藏的跨模块状态耦合、架构歧义或范围超出 ownership → delegability high→low、assurance standard→high、mode delegate→audit，主会话接管实施
-- 上调示例：solo 调查后 root cause、架构、文件与验证均已确定且剩余工作完全机械 → delegability low→high、mode solo→delegate（前提：主会话尚未重复完成同一实施）
-- 实施结果里的 reassessment 重估请求属于有效证据
-- 审查者给出 rethink 或多项 fix-first 属于有效证据
+- Downgrade example: delegate execution keeps returning node results with reassessment requests, exposing hidden cross-module state coupling, architecture ambiguity, or scope beyond ownership -> delegability high→low, assurance standard→high, mode delegate→audit, and the main session takes over implementation
+- Upgrade example: after solo investigation the root cause, architecture, files and verification are all settled and the remaining work is purely mechanical -> delegability low→high, mode solo→delegate (precondition: the main session has not itself repeatedly completed the same implementation)
+- A reassessment request in a result's `reassessment` field is valid evidence
+- A reviewer's rethink, or multiple fix-first findings, is valid evidence
 
-## 五段式实施规格（节点声明的语义框架）
+## Five-part implementation spec (the semantic frame of node declarations)
 
-五段式规格是实施声明的思维框架：静态 DAG 节点的必填/可选字段即它的落点（objective ↔ OBJECTIVE、ownership ↔ FILES AND OWNERSHIP、interfaces ↔ INTERFACES、constraints ↔ CONSTRAINTS、local_check ↔ VERIFICATION）；视觉通道的子智能体交付仍直接使用本模板原文。模板可直接复制：
+The five-part spec is the thinking frame for implementation declarations: the required/optional fields of static DAG nodes are exactly its landing points (objective ↔ OBJECTIVE, ownership ↔ FILES AND OWNERSHIP, interfaces ↔ INTERFACES, constraints ↔ CONSTRAINTS, local_check ↔ VERIFICATION); the visual channel's subagent deliveries still use this template text directly. The template is copy-ready:
 
 ```
 OBJECTIVE:
-<可观察的结果及其意义>
+<the observable outcome and why it matters>
 
 FILES AND OWNERSHIP:
-- <仅列实施者自有文件>
-（注明：代码库可能被并发编辑，不得回退他人改动或越界修改）
+- <only the implementer's own files>
+(note: the codebase may be edited concurrently — never revert others'
+changes, never modify outside scope)
 
 INTERFACES:
-<须保持兼容的签名、类型、模式、命令>
+<signatures, types, patterns, commands that must stay compatible>
 
 CONSTRAINTS:
-<仓库规范、安全边界、排除范围、已定决策>
+<repo conventions, safety boundaries, exclusions, settled decisions>
 
 VERIFICATION:
-<精确命令与期望的具体结果/证据>
+<exact commands and the specific expected results / evidence>
 
 RETURN:
-A completion claim without evidence is invalid / 无证据的完成声明无效
+A completion claim without evidence is invalid
 ```
 
-各节用途：
+Purpose of each section:
 
-- **OBJECTIVE**——可观察的结果及其意义
-- **FILES AND OWNERSHIP**——仅列实施者自有文件；注明代码库可能被并发编辑、不得回退他人改动或越界修改
-- **INTERFACES**——须保持兼容的签名、类型、模式、命令
-- **CONSTRAINTS**——仓库规范、安全边界、排除范围、已定决策
-- **VERIFICATION**——精确命令与期望的具体结果/证据（节点形态下即 local_check）
-- **RETURN**——附在规格末尾的返回要求："A completion claim without evidence is invalid / 无证据的完成声明无效"
+- **OBJECTIVE** — the observable outcome and why it matters
+- **FILES AND OWNERSHIP** — only the implementer's own files; note that the codebase may be edited concurrently and that reverting others' changes or modifying outside scope is forbidden
+- **INTERFACES** — signatures, types, patterns, commands that must stay compatible
+- **CONSTRAINTS** — repo conventions, safety boundaries, exclusions, settled decisions
+- **VERIFICATION** — exact commands and the specific expected results / evidence (in node form this is local_check)
+- **RETURN** — the return requirement appended at the end of the spec: "A completion claim without evidence is invalid"
 
-节点编制纪律（DAG 侧约束见 SKILL.md §5）：每个节点必须仍然小到能接收一个完整的有界 objective——需要再拆说明分解不足。
+Node authoring discipline (DAG-side constraints in the SKILL.md section 'Task state and static DAG authoring'): every node must still stay small enough to receive one complete bounded objective — needing a further split means decomposition was insufficient.
 
-## TASK CONTEXT PACK（实施声明的前置上下文包）
+## TASK CONTEXT PACK (the context pack prepended to the implementation declaration)
 
-复杂或陌生代码域的委派，在实施声明**之前**准备一个上下文包——主会话用昂贵的推理与侦察压缩出的有界上下文，交给实施方做有界执行（这正是异构分工的价值点：强主模型压缩、执行方执行）。做过 ROUTING PREFLIGHT 时，包内条目直接取自 PREFLIGHT REPORT，不重复侦察。
+For delegations into complex or unfamiliar code domains, prepare a context pack **before** the implementation declaration — bounded context the main session compressed with its expensive reasoning and reconnaissance, handed to the implementer for bounded execution (this is exactly the value point of heterogeneous division of labor: the strong main model compresses, the executor executes). When ROUTING PREFLIGHT was done, the pack's entries are taken directly from the PREFLIGHT REPORT — no repeated reconnaissance.
 
-模板（附在实施声明最前，标题行逐字）：
+Template (prepended at the very front of the implementation declaration; title line verbatim):
 
 ```
 TASK CONTEXT PACK
 
 TASK:
-<一句话任务定位>
+<one-sentence task positioning>
 
 ROOT CAUSE:
-<为什么要改——实际观察到的根因，非猜测>
+<why the change is needed — the actually observed root cause, not a guess>
 
 RELEVANT FILES:
-- <文件路径（+ 关键行号/符号）>
+- <file paths (+ key line numbers / symbols)>
 
 KEY SYMBOLS:
-- <函数/类/常量及其职责>
+- <functions / classes / constants and their responsibilities>
 
 CALL / DATA FLOW:
-<改动的数据或调用如何流动，两三句>
+<how the changed data or calls flow, two or three sentences>
 
 INTERFACES:
-<须保持兼容的契约>
+<contracts that must stay compatible>
 
 OWNERSHIP:
-<本包授权的实施范围（与 FILES AND OWNERSHIP 一致）>
+<the implementation scope this pack authorizes (consistent with FILES AND OWNERSHIP)>
 
 TEST ENTRYPOINTS:
-- <验证入口命令>
+- <verification entrypoint commands>
 
 KNOWN RISKS:
-- <已识别的坑（并发编辑点/平台差异/隐式依赖）>
+- <identified pitfalls (concurrent-edit points / platform differences / implicit dependencies)>
 
 EXCLUDED AREAS:
-- <明确不碰的区域>
+- <areas explicitly not touched>
 ```
 
-规则：
+Rules:
 
-- **证据化、紧凑**：条目全部来自主会话实际观察（文件/符号/调用链），不把推测性事实当已定约束写入；不倾倒整个仓库、不整段复制大文件、不重复粘贴完整 diff——引用路径+行号胜过贴代码
-- 有界：通常 15-40 行；超过说明任务分解不足，先拆节点再委派
-- 简单任务（边界清晰、上下文自明）可省略整个包，直接实施声明
+- **Evidence-based and compact**: every entry comes from the main session's actual observation (files / symbols / call chains); never write speculative facts in as settled constraints; never dump the whole repository, never copy whole large files, never re-paste full diffs — a path + line reference beats pasted code
+- Bounded: typically 15-40 lines; exceeding that means decomposition was insufficient — split the nodes before delegating
+- Simple tasks (clear boundaries, self-evident context) may omit the whole pack and go straight to the implementation declaration
 
-## 视觉任务与 VISUAL ACCEPTANCE 扩展
+## Visual tasks and the VISUAL ACCEPTANCE extension
 
-视觉任务在五段式规格之上追加 VISUAL ACCEPTANCE 节（附在 VERIFICATION 之后，其余五节保持不变）。
+Visual tasks append a VISUAL ACCEPTANCE section on top of the five-part spec (placed after VERIFICATION; the other five sections unchanged).
 
-**适用视觉通道的任务**：
+**Tasks suited to the visual channel**:
 
-- React/Vue/Svelte 前端、CSS/布局、响应式设计
-- dashboard、浏览器工作流、表单交互
-- GUI、Canvas/WebGL、游戏 UI
-- 视觉回归、基于截图的验收、用户可见页面改版
+- React/Vue/Svelte frontends, CSS / layout, responsive design
+- dashboards, browser workflows, form interactions
+- GUI, Canvas/WebGL, game UI
+- visual regressions, screenshot-based acceptance, user-visible page revamps
 
-**不适用（走原生 Workflow 文本通道）**：
+**Not suited (the native Workflow text channel)**:
 
-- 普通后端函数、CLI、解析器、纯数据转换、无视觉验收的服务端代码
+- ordinary backend functions, CLI, parsers, pure data transformations, server-side code with no visual acceptance
 
-VISUAL ACCEPTANCE 模板（可直接复制）：
-
-```
-VISUAL ACCEPTANCE:
-- target page / component: <目标页面或组件>
-- viewport: <桌面 1440×900 / 移动 390×844 等>
-- required interaction: <须执行的交互>
-- expected visible state: <期望的可见状态>
-- responsive behavior: <响应式要求>
-- clipping / overflow constraints: <裁切与溢出约束>
-- important user-visible content: <重要用户可见内容>
-```
-
-示例：
+VISUAL ACCEPTANCE template (copy-ready):
 
 ```
 VISUAL ACCEPTANCE:
-- target page / component: 设置页的 API Key 表单
-- viewport: 桌面 1440×900
-- required interaction: 输入非法 Key 并点击保存
-- expected visible state: 输入框下方出现红色错误提示，页面不跳动
-- responsive behavior: 390×844 下表单单列堆叠，按钮保持可点击
-- clipping / overflow constraints: 错误提示完整可见，无横向滚动条
-- important user-visible content: 错误文案说明原因与修复方式
+- target page / component: <target page or component>
+- viewport: <desktop 1440×900 / mobile 390×844 etc.>
+- required interaction: <the interaction to perform>
+- expected visible state: <the expected visible state>
+- responsive behavior: <responsive requirements>
+- clipping / overflow constraints: <clipping and overflow constraints>
+- important user-visible content: <important user-visible content>
 ```
 
-## IMPLEMENTATION REPORT 模板（子智能体通道）
+Example:
 
-视觉通道（visual-implementer）返回时必须遵循；普通实施结果的结构化契约见下节 NodeResult：
+```
+VISUAL ACCEPTANCE:
+- target page / component: the API Key form of the settings page
+- viewport: desktop 1440×900
+- required interaction: enter an invalid key and click save
+- expected visible state: a red error hint appears below the input, with no page jump
+- responsive behavior: at 390×844 the form stacks single-column and the button stays clickable
+- clipping / overflow constraints: the error hint fully visible, no horizontal scrollbar
+- important user-visible content: the error text explains the cause and the fix
+```
+
+## IMPLEMENTATION REPORT template (subagent channel)
+
+Mandatory for the visual channel (visual-implementer) on return; the structured contract for ordinary implementation results is NodeResult in the next section:
 
 ```
 IMPLEMENTATION REPORT
 STATUS: complete | partial | blocked
-OBJECTIVE: <一句话复述目标>
+OBJECTIVE: <one-sentence restatement of the goal>
 CHANGES:
-- <逐文件列出改动>
+- <list changes file by file>
 VERIFIED:
-- <命令>: <实际输出>
+- <command>: <actual output>
 JUDGMENT CALLS:
-- <实施中的判断决策>（无则写"无"）
+- <judgment decisions made during implementation> ("none" when none)
 GAPS:
-- <未覆盖项>（无则写"无"）
+- <uncovered items> ("none" when none)
 ```
 
-- STATUS 取值：complete / partial / blocked
-- VERIFIED 必须是命令与实际输出的配对，不接受空泛描述
-- 报告只是声明（implementation claim）；证据只存在于主会话亲自观察到的 diff 与命令输出中
+- STATUS is one of: complete / partial / blocked
+- VERIFIED must be command-and-actual-output pairs; vague descriptions are not accepted
+- The report is only a claim (an implementation claim); evidence exists only in the diff and command output the main session personally observed
 
-## 文本工人契约（原生 Workflow 实施）
+## Text-worker contract (native Workflow implementation)
 
-delegate/full 的文本实施由原生 Workflow 运行的文本工人（text worker）执行：
+delegate/full text implementation is executed by the text worker of a native Workflow run:
 
-- **worker 模型授权（v2.6.0，规格 §5.2/§5.3）**：worker 模型是用户在 §6.0 启动问答中显式授权的精确选择——宿主全部已配置候选入清单（不限 provider、不限 Flash），Flash 档为软推荐位，**单一候选也须用户显式确认**；**选定模型默认以 max 推理档运行（宿主默认思考档位），档位不随 pin 存储**——任务 pin 只存模型 id；提交经 `workflow-model-select` 产出 `user-authorized-explicit-selection` 提交契约，`subagent_model` 绝不省略——省略即继承主会话模型。有 pin 任务的 `--model` 显式值必须与 pin 一致，变更授权必经交互问答重授权；无人值守唤醒轮绝不自动重 pin
-- **来源**：persona 由 `runtime/workflow/persona.py` 唯一定义，编译器（v24-compile）把它逐字内嵌进生成的 Workflow 源码——宿主 runtime 不消费插件 agent 定义，角色仿真靠脚本内嵌 persona 文本
-- **定位**：有界 objective 的精确执行者——只执行所交付的 objective，不重新设计架构；objective 之外的架构决策、范围扩张与顺手重构一律不做
-- **范围纪律**：只改动节点 ownership 覆盖的仓库相对路径；遵守声明的 interfaces 与 constraints；同一仓库可能有其他代理并行编辑——不回退他人的无关改动
-- **歧义处理**：遇到实质性歧义、范围冲突或规格缺漏时不擅自决策——在结果的 `reassessment` 字段返回明确的重估请求，交回主会话裁决
-- **local_check 诚实执行**：非空时逐项执行并如实记录结果与失败；为空时不虚构任何检查；不得伪造输出，不得省略失败
-- **结果契约（NodeResult，恰六字段）**：`node_id` / `status`（complete | partial | blocked）/ `changes` / `local_checks` / `reassessment` / `gaps`——无证据的完成声明无效；status 与实际证据不符的结果在主会话验证阶段被拒
-- **主会话侧含义**：文本工人没有可调用的子智能体定义，也没有任何派发凭据或标记机制——对它的全部约束都来自节点声明（内嵌进 ask 指令）与完成守卫的事后校验
+- **Worker model authorization**: the worker model is the exact choice the user explicitly authorized in the launch interview ('Task launch interview') — all host-configured candidates go on the list (no provider restriction, not only Flash), the Flash tier is a soft-recommendation slot, and **a single candidate also requires explicit user confirmation**; **the selected model defaults to the max reasoning tier (the host default reasoning tier), and the tier is not stored in the pin** — the task pin stores the model id only. The submission goes through `workflow-model-select`, producing the `user-authorized-explicit-selection` submission contract, and `subagent_model` is never omitted — omitting it inherits the main-session model. For a pinned task an explicit `--model` value must match the pin; changing the authorization always goes through the interactive interview re-authorization; an unattended wake turn never re-pins automatically
+- **Source**: the persona is defined solely in `runtime/workflow/persona.py`, and the compiler (v24-compile) embeds it verbatim into the generated Workflow source — the host runtime does not consume plugin agent definitions; role simulation relies on the persona text embedded in the script
+- **Positioning**: the precise executor of a bounded objective — execute only the delivered objective, never redesign the architecture; no architecture decisions beyond the objective, no scope expansion, no drive-by refactors
+- **Scope discipline**: modify only the repo-relative paths covered by the node's ownership; honor the declared interfaces and constraints; the same repository may be edited concurrently by other agents — never revert others' unrelated changes
+- **Ambiguity handling**: on substantive ambiguity, scope conflicts, or spec gaps, never decide unilaterally — return an explicit reassessment request in the result's `reassessment` field for the main session to adjudicate
+- **Honest local_check execution**: when non-empty, execute every item and record results and failures faithfully; when empty, invent no checks; never fabricate output, never omit failures
+- **Result contract (NodeResult, exactly six fields)**: `node_id` / `status` (complete | partial | blocked) / `changes` / `local_checks` / `reassessment` / `gaps` — a completion claim without evidence is invalid; a result whose status contradicts the actual evidence is rejected at main-session validation
+- **Main-session-side meaning**: the text worker has no invocable subagent definition and no dispatch credentials or marker mechanism — every constraint on it comes from the node declaration (embedded in the ask instruction) and the completion guard's post-hoc checks
 
-## visual-implementer 契约（视觉任务实施者）
+## visual-implementer contract (visual-task implementer)
 
-- **定位**：视觉/交互任务的有界实施执行者（visual bounded implementation executor）
-- **模型**：GLM-5.3-Flash（多模态），思考档位 high（已固定，不附加覆盖）——静态绑定事实与维护操作见 agents/visual-implementer.md「绑定维护」节
-- **用途**：仅限视觉/交互任务实施——执行含 VISUAL ACCEPTANCE 扩展的五段式规格
-- **视觉反馈环（跨调用拓扑）**：实施者需要证据时返回 `VISUAL_CAPTURE_REQUEST` 并结束本次调用（不等待、不虚构）→ 主会话用其专属 Browser/Computer Use 采集截图落盘（主会话专用，子代理在 ZCode 策略层被禁止使用）→ 主会话发起携带完整状态的新调用（规范路径：五段式规格含 VISUAL ACCEPTANCE、当前 diff / 改动状态、上一轮 VISUAL_CAPTURE_REQUEST、截图路径、VISUAL_ROUND 轮次号；仅当运行时已验证稳定 resume 机制时才可作为可选优化，协议正确性不依赖 resume） → 实施者用 Read 亲自读取截图判定 → 不符合则修正并再次返回 `VISUAL_CAPTURE_REQUEST` → 每个 VISUAL ACCEPTANCE 验收点以 VISUAL_ROUND（1|2|3）跟踪，最多 3 轮采集-判定循环，禁止无限视觉打磨。协议格式见 agents/visual-implementer.md 的 VISUAL_CAPTURE_REQUEST 节
-- **重估信号**：验收标准不清、规格有歧义或视觉证据不可得时返回 blocked，交回主会话处理；不得以文字推测替代视觉验证
-- **报告**：使用含 FUNCTIONAL VERIFIED 与 VISUAL VERIFIED 两节的 IMPLEMENTATION REPORT 模板（模板见 agents/visual-implementer.md）
-- **生成方式**：`subagent_type: glm-conductor:visual-implementer`
+- **Positioning**: the bounded implementation executor for visual/interactive tasks
+- **Model**: GLM-5.3-Flash (multimodal), thinking tier high (fixed, no overrides attached) — static binding facts and maintenance operations in the 'Binding Maintenance' section of agents/visual-implementer.md
+- **Use**: visual/interactive task implementation only — executes the five-part spec with the VISUAL ACCEPTANCE extension
+- **Visual feedback loop (cross-call topology)**: when the implementer needs evidence it returns `VISUAL_CAPTURE_REQUEST` and ends the invocation (no waiting, no fabrication) -> the main session captures screenshots to disk with its dedicated Browser/Computer Use (main-session-only; subagents are barred from it at the ZCode policy layer) -> the main session starts a new invocation carrying the full state (canonical path: the five-part spec incl. VISUAL ACCEPTANCE, the current diff / change status, the previous round's VISUAL_CAPTURE_REQUEST, the screenshot paths, the VISUAL_ROUND round number; resuming the same implementer is an optional optimization only when the runtime has a verified stable resume mechanism — protocol correctness never depends on resume) -> the implementer personally Reads the screenshots and judges -> on mismatch it corrects and returns `VISUAL_CAPTURE_REQUEST` again -> every VISUAL ACCEPTANCE criterion is tracked with VISUAL_ROUND (1|2|3), at most 3 capture-judge rounds; unbounded visual polishing is forbidden. Protocol format in the 'VISUAL_CAPTURE_REQUEST' section of agents/visual-implementer.md
+- **Reassessment signal**: return blocked when the acceptance criteria are unclear, the spec is ambiguous, or visual evidence is unobtainable, and hand back to the main session; never substitute textual speculation for visual verification
+- **Report**: uses the IMPLEMENTATION REPORT template with the FUNCTIONAL VERIFIED and VISUAL VERIFIED sections (template in agents/visual-implementer.md)
+- **Dispatch**: `subagent_type: glm-conductor:visual-implementer`
 
-## visual-reviewer 契约（视觉任务审查者）
+## visual-reviewer contract (visual-task reviewer)
 
-- **定位**：全新上下文、与实施隔离的只读审查者（fresh-context, implementation-isolated reviewer）；独立性来自干净上下文与只读工具白名单，不宣称跨模型独立
-- **模型**：GLM-5.3-Flash（多模态，frontmatter 显式 provider 全限定绑定）——亲自读取截图进行视觉验收是角色契约的一部分；绑定不可用的宿主上本角色不可用（fail closed），绝不静默退回纯文本模型假装视觉审查；静态绑定事实与维护操作见 agents/visual-reviewer.md「绑定维护」节
-- **思考档位**：max（已固定）
-- **用途**：仅限视觉任务的 audit/full 路由，且必须在主会话验证之后调用；主职是独立视觉验收（截图证据 + VISUAL ACCEPTANCE + 用户可见回归），代码 diff 作为上下文读取，不替代主会话的代码审查
-- **职责分工**：主会话负责完整 diff、代码正确性、功能验证与范围/接口核验；visual-reviewer 负责视觉验收、交互证据、截图证据与用户可见回归
-- **输入六要素**（由主会话提供，缺项要求补齐而非猜测）：
-  - ROLE：声明本次为只读审查
-  - STATED GOAL：用户的原始目标原文
-  - ACCUMULATED CHANGE SET：允许文件清单 + 完整 diff，或基准/目标修订
-  - INTERFACES AND CONSTRAINTS：须保持兼容的接口与约束
-  - VERIFICATION EVIDENCE：验证命令映射到主会话实际输出的证据
-  - VISUAL EVIDENCE：截图文件路径清单 + 对应的 VISUAL ACCEPTANCE 标准
-- **审查范围**：以视觉符合度为主线（必须亲自 Read 每一张截图，对照 VISUAL ACCEPTANCE 判定实施者的视觉结论是否成立），外加用户可见回归与证据链完整性；正确性、完整性、回归风险、范围纪律、接口保留、测试充分性为附带核对（可报告，不替代主会话代码审查）
-- **VISUAL REVIEW 输出格式**：
+- **Positioning**: a fresh-context, implementation-isolated read-only reviewer; independence comes from the clean context and the read-only tool whitelist — no cross-model independence is claimed
+- **Model**: GLM-5.3-Flash (multimodal, explicit provider-qualified frontmatter binding) — personally reading the screenshots for visual acceptance is part of the role contract; on a host where the binding is unavailable this role is unavailable (fail closed), never silently falling back to a text model pretending to review visually; static binding facts and maintenance operations in the 'Binding Maintenance' section of agents/visual-reviewer.md
+- **Thinking tier**: max (fixed)
+- **Use**: visual-task audit/full routes only, invoked only after main-session validation; the primary duty is independent visual acceptance (screenshot evidence + VISUAL ACCEPTANCE + user-visible regressions); the code diff is read as context and never replaces the main session's code review
+- **Division of duties**: the main session owns the full diff, code correctness, functional verification and scope/interface checks; visual-reviewer owns visual acceptance, interaction evidence, screenshot evidence and user-visible regressions
+- **Six input elements** (provided by the main session; a missing element is requested, never guessed):
+  - ROLE: declares this a read-only review
+  - STATED GOAL: the user's original goal verbatim
+  - ACCUMULATED CHANGE SET: allowed-file list + full diff, or base/target revisions
+  - INTERFACES AND CONSTRAINTS: the interfaces and constraints that must stay compatible
+  - VERIFICATION EVIDENCE: verification commands mapped to the main session's actually observed output
+  - VISUAL EVIDENCE: the screenshot file path list + the corresponding VISUAL ACCEPTANCE criteria
+- **Review scope**: visual conformance is the main line (personally Read every screenshot and judge the implementer's visual conclusions against VISUAL ACCEPTANCE), plus user-visible regressions and evidence-chain completeness; correctness, completeness, regression risk, scope discipline, interface preservation and test sufficiency are secondary checks (reportable, never a substitute for the main session's code review)
+- **VISUAL REVIEW output format**:
 
   ```
   VISUAL REVIEW
   VERDICT: ship | fix-first | rethink
-  REASON: <基于视觉证据的决定性理由>
+  REASON: <the decisive reason based on visual evidence>
   FINDINGS:
-  - <截图路径 / VISUAL ACCEPTANCE 验收项>: <发现>（无则写"无"）
-  RESIDUAL VISUAL RISK: <最重要的剩余视觉风险>（无则写"无"）
+  - <screenshot path / VISUAL ACCEPTANCE criterion>: <finding> ("none" when none)
+  RESIDUAL VISUAL RISK: <the most important remaining visual risk> ("none" when none)
   ```
 
-- **裁决失效规则**：任何修复之后原裁决作废，必须换全新审查者复审；裁决经 CLI `review-record` 落账（change_id 绑定，先验证后评审）
-- **生成方式**：`subagent_type: glm-conductor:visual-reviewer`
+- **Verdict invalidation rule**: after any fix the verdict is void and a fresh reviewer must re-review; verdicts are recorded through the CLI `review-record` (change_id-bound; validate first, review second)
+- **Dispatch**: `subagent_type: glm-conductor:visual-reviewer`
 
-## glm-reviewer 契约（文本任务审查者）
+## glm-reviewer contract (text-task reviewer)
 
-审查者按任务模态选择——文本任务用本角色，视觉任务用 visual-reviewer（见上文）。
+The reviewer is chosen by task modality — text tasks use this role, visual tasks use visual-reviewer (above).
 
-- **定位**：全新上下文、与实施隔离的只读审查者（fresh-context, implementation-isolated reviewer）——不宣称跨模型独立；模型继承宿主/会话（frontmatter 无 model 字段），思考档位 max（已固定）
-- **用途**：仅限文本任务的 audit/full 路由，且必须在主会话验证之后调用；全新上下文 = 新鲜审查者
-- **输入五要素**（由主会话提供）：
-  - ROLE：声明本次为只读审查
-  - STATED GOAL：用户的原始目标原文，不得转写篡改
-  - ACCUMULATED CHANGE SET：允许文件清单 + 完整 diff，或基准/目标修订
-  - INTERFACES AND CONSTRAINTS：须保持兼容的签名、类型、模式、命令与约束
-  - VERIFICATION EVIDENCE：验证命令映射到主会话实际输出的证据
-- **审查范围七项**：正确性、完整性、回归风险、范围纪律（是否越界改动）、接口保留、测试充分性、实质风险
-- **GLM REVIEW 输出格式**：
+- **Positioning**: a fresh-context, implementation-isolated read-only reviewer — no cross-model independence is claimed; the model inherits the host/session (no model field in the frontmatter), thinking tier max (fixed)
+- **Use**: text-task audit/full routes only, invoked only after main-session validation; fresh context = fresh reviewer
+- **Five input elements** (provided by the main session):
+  - ROLE: declares this a read-only review
+  - STATED GOAL: the user's original goal verbatim, never paraphrased or altered
+  - ACCUMULATED CHANGE SET: allowed-file list + full diff, or base/target revisions
+  - INTERFACES AND CONSTRAINTS: the signatures, types, patterns, commands and constraints that must stay compatible
+  - VERIFICATION EVIDENCE: verification commands mapped to the main session's actually observed output
+- **Review scope, seven items**: correctness, completeness, regression risk, scope discipline (out-of-bounds changes), interface preservation, test sufficiency, substantive risk
+- **GLM REVIEW output format**:
 
   ```
   GLM REVIEW
   VERDICT: ship | fix-first | rethink
-  REASON: <基于证据的决定性理由>
+  REASON: <the decisive reason based on evidence>
   FINDINGS:
-  - <文件:行号> <发现>（无则写"无"）
-  RESIDUAL RISK: <最重要的剩余风险>（无则写"无"）
+  - <file:line> <finding> ("none" when none)
+  RESIDUAL RISK: <the most important remaining risk> ("none" when none)
   ```
 
-- **裁决失效规则**：任何修复之后原裁决作废，必须换全新审查者复审；裁决经 CLI `review-record` 落账（change_id 绑定，先验证后评审）
-- **隔离判定按观察而非按请求**：审查者工具为只读白名单即视为隔离已强制；若观察到任何写入尝试或越权行为，终止该通道
+- **Verdict invalidation rule**: after any fix the verdict is void and a fresh reviewer must re-review; verdicts are recorded through the CLI `review-record` (change_id-bound; validate first, review second)
+- **Isolation is judged by observation, not by request**: the reviewer's tools being a read-only whitelist counts as isolation enforced; if any write attempt or out-of-scope behavior is observed, terminate that channel
 
-## 主会话（架构师）契约
+## Main-session (architect) contract
 
-主会话保留以下职责（主模型继承宿主主会话、不可编程切换——Conductor 绝不要求、也绝不检查主会话的具体模型名；问询轮对架构/规划/验证软性建议强档模型，不阻塞其他已配置选择），以下职责不外派：
+The main session retains the following duties (the main model inherits the host main session and is not programmatically switchable — Conductor never requires and never inspects the main session's concrete model name; interview turns give soft advice toward strong-tier models for architecture / planning / validation, never blocking other configured choices); these duties are never delegated:
 
-- 需求与歧义解决
-- 架构与路由判断
-- 静态 DAG 编制与实施声明编写
-- 亲自检查完整 diff 并重跑验证命令
-- 路由重估判断
-- 验收与完成申报
+- requirements and ambiguity resolution
+- architecture and routing judgment
+- static DAG authoring and implementation-spec writing
+- personally inspecting the full diff and re-running the verification commands
+- route reassessment decisions
+- acceptance and the completion declaration
 
-辅助工作是替代而非重复主会话的工作：委派实施后主会话不再重复写实现，只做验证与验收。
+Auxiliary work substitutes for, and never repeats, the main session's work: after delegating implementation the main session does not write the implementation again — it validates and accepts.
 
-**能力边界**：主模型继承宿主主会话，Conductor 绝不仅凭模型名字或版本号断言其强弱与模态能力。视觉链路中主会话承担驱动与采集（启动应用、驱动浏览器/桌面、截图落盘），不得声称自己做了视觉判定；视觉判定由显式绑定多模态模型的视觉角色（visual-implementer / visual-reviewer）完成。
+**Capability boundary**: the main model inherits the host main session, and Conductor never asserts its strength or modality capability from a model name or version alone. In the visual chain the main session drives and captures (launching apps, driving the browser / desktop, saving screenshots) and must never claim it made visual judgments; visual judgment is made by the explicitly bound multimodal visual roles (visual-implementer / visual-reviewer).
