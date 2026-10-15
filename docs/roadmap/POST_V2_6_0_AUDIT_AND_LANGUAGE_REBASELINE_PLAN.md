@@ -1,6 +1,6 @@
 # Post-v2.6.0 审查收口 + 语言与发布面重基线计划（v2.6.1 单一合并版本）
 
-- **状态**：IN PROGRESS —— 2026-10-15 owner 下令开工（full 路由 / assurance high / manual 连续性 / worker pin = account:bigmodel-individual-coding-plan/GLM-5.3-Flash）；feature 分支 `v2.6.1-language-rebaseline`，逐批本地 commit，收尾统一 merge + push + tag v2.6.1 + Release + 缓存刷新（既有流程）
+- **状态**：IMPLEMENTED —— 2026-10-15 全部批次收官（batches 1-6 + 5b 全链 ship：f48836c / 1c97e68 / c255b42 / 307ff4a / 4c2b040 / 30f2da9 / e3085cd / 781ff56 + 收口提交；每批 record-validation + glm-reviewer ship + task-complete）；full 路由 / assurance high / manual 连续性 / worker pin = account:bigmodel-individual-coding-plan/GLM-5.3-Flash；feature 分支 `v2.6.1-language-rebaseline` 收尾统一 merge + push + tag v2.6.1 + Release + 缓存刷新（既有流程）
 - **日期**：2026-10-15
 - **基线**：main @ 7eb40e3（v2.6.0 已发布：tag + Release Latest + 缓存/快照/登记全链）
 - **输入**：2026-10-15 主会话全仓审查（基准：ZCode plugin-creator 0.1.1 插件/marketplace 规范 + skill-creator 0.1.0 SKILL.md 编写规范；范围 = 111 个跟踪文件 + 本地未跟踪 tests/ 40 文件）+ owner 两轮讨论定案（语言政策：模型消费面 = 精简英文）

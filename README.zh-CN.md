@@ -259,8 +259,8 @@ python plugins/glm-conductor/runtime/cli.py writer-acquire . <task_id>
 ```text
 glm-conductor/
 ├── marketplace.json                # 插件市场 catalog 描述清单
-├── .zcode-plugin/                  # 插件 manifest 与元数据配置
 ├── plugins/glm-conductor/
+│   ├── .zcode-plugin/              # 插件 manifest（plugin.json）与元数据
 │   ├── agents/                     # 原生 Subagent 定义 (glm-reviewer, visual-*)
 │   ├── commands/                   # 斜杠命令定义 (/glm-conductor:quota)
 │   ├── hooks/                      # ZCode 钩子实现 (session_start.py, stop_gate.py)

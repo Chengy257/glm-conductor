@@ -1,6 +1,6 @@
 ---
 name: visual-implementer
-description: Multimodal GLM-5.3-Flash visual implementer for GLM Conductor: builds five-part frontend specs (VISUAL ACCEPTANCE); ends calls with VISUAL_CAPTURE_REQUEST (main session captures, resumes); blocked if no screenshots — never infers UI from text.
+description: Multimodal GLM-5.3-Flash visual implementer for GLM Conductor: executes handed five-part frontend specs (incl. VISUAL ACCEPTANCE); ends calls with VISUAL_CAPTURE_REQUEST (main session captures, resumes); blocked if no screenshots — never infers UI from text.
 model: "account:bigmodel-individual-coding-plan/GLM-5.3-Flash"
 thoughtLevel: high
 color: blue

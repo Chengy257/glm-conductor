@@ -260,8 +260,8 @@ All runtime operations execute through `python <plugin-root>/runtime/cli.py <sub
 ```text
 glm-conductor/
 ├── marketplace.json                # Marketplace catalog manifest
-├── .zcode-plugin/                  # Plugin manifest and metadata
 ├── plugins/glm-conductor/
+│   ├── .zcode-plugin/              # Plugin manifest (plugin.json) and metadata
 │   ├── agents/                     # Specialized subagents (glm-reviewer, visual-*)
 │   ├── commands/                   # Slash command definitions (/glm-conductor:quota)
 │   ├── hooks/                      # ZCode hooks (session_start.py, stop_gate.py)

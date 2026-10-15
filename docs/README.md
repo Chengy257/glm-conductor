@@ -1,6 +1,6 @@
 # GLM Conductor 文档索引
 
-本目录是 GLM Conductor 文档的入口。v2.4 起当前真相源 = 仓库代码 + `architecture.md`（v2.4 口径）；其余内容按下列两组定位。
+本目录是 GLM Conductor 文档的入口。v2.4 起当前真相源 = 仓库代码 + `architecture.md`（v2.6.1 口径）；其余内容按下列两组定位。
 
 ## 从这里开始（Start here）
 
