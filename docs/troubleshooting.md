@@ -1,225 +1,227 @@
-# GLM Conductor 故障排查（v2.6.0）
+# GLM Conductor Troubleshooting (v2.6.1)
 
-> 面向用户的排障手册：按「现象 → 判定 → 处置」组织，只写结论性行为事实；每条事实标注实现模块路径供核对。架构全貌见 [architecture.md](architecture.md)，概念入门见 [core-concepts.md](core-concepts.md)。
+> A user-facing troubleshooting manual: organized as "symptom → verdict → disposition", stating only conclusive behavioral facts; every fact cites the implementing module path for verification. For the full architecture see [architecture.md](architecture.md); for the concept primer see [core-concepts.md](core-concepts.md).
 >
-> runtime CLI 统一入口是 `plugins/glm-conductor/runtime/cli.py`（本文以 `<cli>` 代指；安装后以实际插件缓存路径为准）。用可用的 Python 3 解释器执行（Windows 无 `python3` 启动器时用 `python`）。v2.6.0 的 CLI 子命令仅（权威命令面，与 `runtime/cli.py` 顶部 USAGE 一致）：`review-record` / `quota-resolve` / `quota-wait` / `quota-resume-authorize` / `quota-resume-decision` / `quota-resume-confirm` / `v24-compile` / `writer-acquire` / `writer-release` / `writer-show` / `task-record-workflow-run` / `v24-record-run`（legacy 低层薄壳）/ `workflow-model-select` / `worker-model-pin` / `quota-automation-bind` / `quota-automation-clear` / `quota-continuity-preflight` / `task-create` / `record-validation` / `task-complete` / `task-fail` / `task-cancel` / `exit-waiting`；额度诊断另有独立脚本 `runtime/quota/report.py`。查询本文与 USAGE 未列出的子命令（permit / lease / wave / clock / bridge / policy / verify-* / host-check 等）没有意义——那些面连同后端已不存在。
+> The single entry of the runtime CLI is `plugins/glm-conductor/runtime/cli.py` (this document writes `<cli>` for it; after installation use the actual plugin cache path). Run it with an available Python 3 interpreter (use `python` on Windows when no `python3` launcher exists). The v2.6.1 CLI subcommands are exactly (the authoritative command face, matching the USAGE at the top of `runtime/cli.py`): `review-record` / `quota-resolve` / `quota-wait` / `quota-resume-authorize` / `quota-resume-decision` / `quota-resume-confirm` / `v24-compile` / `writer-acquire` / `writer-release` / `writer-show` / `task-record-workflow-run` / `v24-record-run` (legacy low-level thin shell) / `workflow-model-select` / `worker-model-pin` / `quota-automation-bind` / `quota-automation-clear` / `quota-continuity-preflight` / `task-create` / `record-validation` / `task-complete` / `task-fail` / `task-cancel` / `exit-waiting`; quota diagnostics additionally have the standalone script `runtime/quota/report.py`. Asking about a subcommand not listed in this document or in USAGE (permit / lease / wave / clock / bridge / policy / verify-* / host-check etc.) is meaningless — those faces no longer exist, nor do their backends.
 
-## 1. 额度诊断：report.py 双模式与套餐口径
+## 1. Quota diagnostics: report.py dual modes and plan caliber
 
-**何时用**：任务停在 `waiting_quota` / `waiting_user` 不动；恢复决策反复 `remain-waiting`；想确认当前额度窗口与 reset 时间。
+**When to use**: a task is stuck at `waiting_quota` / `waiting_user` making no progress; resume decisions keep returning `remain-waiting`; you want to confirm the current quota windows and reset times.
 
-**怎么跑**（只读诊断，退出码恒 0——不是闸门，不要据退出码拦截）：
-
-```
-python <插件根>/runtime/quota/report.py            # 文本：人读
-python <插件根>/runtime/quota/report.py --json     # 机器可读（供编排决策）
-```
-
-**输出解读**：各窗口（`5-hour` / `weekly`）的 used / remaining / reset、`status:`（`AVAILABLE` / `PRESSURE` / `EXHAUSTED` / `UNKNOWN`）与 `plan:`（continue / checkpoint / resume_at / periodic_fallback）恢复建议。三种诊断态：
-
-文本输出示意（正常态）：
+**How to run** (read-only diagnostics; the exit code is always 0 — this is not a gate, do not intercept based on it):
 
 ```
-GLM Coding Plan Quota Report  (2026-09-21 08:30 UTC)
-provider: bigmodel
-  5-hour : used 62%  remaining 38%  resets 2026-09-21 15:04 (+6h34m)
-  status : AVAILABLE
-  plan   : continue
+python <plugin-root>/runtime/quota/report.py            # text: human-readable
+python <plugin-root>/runtime/quota/report.py --json     # machine-readable (for orchestration decisions)
 ```
 
-1. **正常报告**——窗口明细 + status + plan；
-2. **探测失败**——每 provider 一行错误分类（auth / unavailable / malformed / network / unknown，不含 key 与响应体）；
-3. **unavailable**——未找到凭证，按输出中的配置指引处理（环境变量 `GLM_CONDUCTOR_QUOTA_API_KEY` 优先；已登录 ZCode 的 `~/.zcode/v2/config.json` provider 配置为文档化回退）。
+**Output interpretation**: for each window (`5-hour` / `weekly`) the used / remaining / reset values, `status:` (`AVAILABLE` / `PRESSURE` / `EXHAUSTED` / `UNKNOWN`) and the `plan:` recovery advice (continue / checkpoint / resume_at / periodic_fallback). Three diagnostic modes.
 
-**lite 套餐口径**：周窗（weekly）是**可选窗**——lite 套餐实测只有 5 小时窗，解析层容忍 weekly 缺席且绝不假设双窗必然存在（`runtime/quota/parser.py`；按语义字段判窗：unit=3/number=5 → five_hour，unit=6/number=1 → weekly）。lite 用户看到"只有 5-hour 一行"是正常形态，不是故障。
+Sample of the current human-readable output (normal state). **Language note (owner ruling): report.py's human-readable output is intentionally kept in Chinese — the `/glm-conductor:quota` contract presents it to the user as-is — so it is quoted verbatim below:**
 
-**运行时解析**：`python <cli> quota-resolve <repo_root> [--force-refresh]` 输出四级层级解析结果（新鲜缓存 ≤300s → provider → 陈旧缓存 → `UNKNOWN`，绝不默认 AVAILABLE；`--force-refresh` 跳过缓存强制走 provider）——`runtime/quota/resolver.py`。四态的恢复语义（完成守卫不消费额度；四态只喂给 quota_resume 决策链）：
+```
+GLM CODING PLAN (provider: zai, source: zcode-provider)
 
-| status | 含义 | `scheduled_activation_decision` 行为 |
+5-hour:
+  used: 40%
+  remaining: 60%
+  reset: 2h 14m
+
+weekly: not present
+
+status: AVAILABLE — 窗口余量充足
+plan: continue（额度余量充足，继续当前工作）
+```
+
+1. **Normal report** — window details + status + plan;
+2. **Probe failure** — one error-classification line per provider (auth / unavailable / malformed / network / unknown; no key and no response body);
+3. **unavailable** — no credentials found; follow the configuration guidance in the output (environment variable `GLM_CONDUCTOR_QUOTA_API_KEY` first; the provider configuration of a logged-in ZCode `~/.zcode/v2/config.json` is the documented fallback).
+
+**lite plan caliber**: the weekly window is an **optional window** — lite plans in practice have only the 5-hour window; the parsing layer tolerates a missing weekly and never assumes both windows necessarily exist (`runtime/quota/parser.py`; windows are identified by semantic fields: unit=3/number=5 → five_hour, unit=6/number=1 → weekly). A lite user seeing "only the 5-hour line" is the normal shape, not a fault.
+
+**Runtime resolution**: `python <cli> quota-resolve <repo_root> [--force-refresh]` outputs the four-level hierarchy resolution (fresh cache ≤300s → provider → stale cache → `UNKNOWN`; never defaults to AVAILABLE; `--force-refresh` skips the cache and forces a provider pass) — `runtime/quota/resolver.py`. The resume semantics of the four states (the completion guard consumes no quota; the four states only feed the quota_resume decision chain):
+
+| status | Meaning | `scheduled_activation_decision` behavior |
 | --- | --- | --- |
-| `AVAILABLE` / `PRESSURE` | 可用（PRESSURE 是余量压力，仍可恢复） | 已授权、有预算**且已武装**（automation_id 非空）→ `resume-authorized`；auto 未武装 → `remain-waiting`（reason 含 `continuity-unarmed`） |
-| `EXHAUSTED` | 耗尽 | `remain-waiting` |
-| `UNKNOWN` | 数据不可得（无凭证 / 网络失败 / 无缓存） | `remain-waiting`——绝不虚构可用性 |
+| `AVAILABLE` / `PRESSURE` | usable (PRESSURE is remaining-margin pressure; a resume is still allowed) | authorized, with budget **and armed** (automation_id non-empty) → `resume-authorized`; auto but unarmed → `remain-waiting` (the reason contains `continuity-unarmed`) |
+| `EXHAUSTED` | exhausted | `remain-waiting` |
+| `UNKNOWN` | data unobtainable (no credentials / network failure / no cache) | `remain-waiting` — availability is never fabricated |
 
-**恢复操作入口**（AF-03 起）：等待 / 授权 / 决策 / 确认四步的稳定入口是 CLI `quota-wait` / `quota-resume-authorize` / `quota-resume-decision` / `quota-resume-confirm`（单行 JSON 输出，见 `runtime/cli.py`）——额度恢复的运行时操作走这四个子命令，不用 `python3 -c` 直调 runtime API（授权本身仍由用户在技能 / 策略层把关，CLI 不自助放行）。**auto 连续性武装**（v2.4.1）另有三命令：`quota-automation-bind` / `quota-automation-clear` / `quota-continuity-preflight`——mode=auto 的任务在启动 / 自动 resume 前必须「建 Scheduled Task → bind → preflight PASS」（先武装后开工）；`quota-continuity-preflight` 返回 `ready=false` 时以**退出码 2** 报告（这是 launch/resume 阻断信号，不是命令故障）。
+**Resume operation entry points** (since AF-03): the stable entries for the four steps wait / authorize / decide / confirm are the CLI `quota-wait` / `quota-resume-authorize` / `quota-resume-decision` / `quota-resume-confirm` (single-line JSON output; see `runtime/cli.py`) — quota-resume runtime operations go through these four subcommands, not `python3 -c` direct calls into the runtime API (authorization itself is still gated by the user at the skill / policy layer; the CLI does not self-authorize). **Auto continuity arming** (v2.4.1) has three more commands: `quota-automation-bind` / `quota-automation-clear` / `quota-continuity-preflight` — a mode=auto task must complete "create the Scheduled Task → bind → preflight PASS" before launch / automatic resume (arm-before-work); when `quota-continuity-preflight` returns `ready=false` it reports with **exit code 2** (that is the launch/resume block signal, not a command fault).
 
-**窗口机制口径**：reset_at 时刻窗口恢复 100%（周窗优先）；下一个 reset_at 只在新窗口内发生模型调用时才物化——纯查询绝不推进它（`runtime/quota/window_math.py` / `time_utils.py`）。
+**Window-mechanics caliber**: at the reset_at instant the window restores to 100% (weekly takes precedence); the next reset_at materializes only when a model call happens inside the new window — a pure query never advances it (`runtime/quota/time_utils.py` — the canonical landing point of these time primitives for parser / resolver / report; the former window_math dead code was deleted in v2.6.0).
 
-## 2. v2.3 遗留任务：检测与处置
+## 2. v2.3 legacy tasks: detection and disposition
 
-**现象**：恢复摘要 / 完成守卫报「v2.3 遗留任务：请在 2.3.x 下收尾或显式放弃（v2.4 不自动迁移、不伪造 v2.4 完成证据）」；或 `load_task` / 生命周期操作被拒绝并携带同一句指引。恢复注入中遗留任务渲染为一行式（`runtime/recovery.py`）：
+**Symptom**: the recovery summary / completion guard reports "v2.3 legacy task: wrap up or explicitly abandon it under 2.3.x (v2.4 does not auto-migrate and never fabricates v2.4 completion evidence)"; or `load_task` / a lifecycle operation is refused carrying the same guidance. In the recovery injection a legacy task renders as one line (`runtime/recovery.py`):
 
 ```
-[v2.3] refactor-auth-9c1d2e — v2.3 遗留任务：请在 2.3.x 下收尾或显式放弃
-                            （v2.4 不自动迁移、不伪造 v2.4 完成证据）
-    Next:    explicitly retire legacy task
+Legacy task refactor-auth-9c1d2e: v2.3 task detected — v2.3 legacy task: wrap up or explicitly abandon it under 2.3.x (v2.4 does not auto-migrate and never fabricates v2.4 completion evidence); next action: explicitly retire legacy task
 ```
 
-**判定**：v2.4 只读检测、绝不迁移（`runtime/state.py` 的 `detect_legacy_task` / `is_legacy_state`）。命中以下任一标记即 v2.3 遗留：
+**Verdict**: v2.4 only detects, never migrates (`detect_legacy_task` / `is_legacy_state` in `runtime/state.py`). Any of the following markers makes it a v2.3 legacy task:
 
-- 顶层集合键 `work_units` / `permits` / `leases` / `receipts`；
-- `work_units[i]` 内的 `permit` / `lease` / `receipt` 运行时字段；
-- `status` 是非空字符串但不在 v2.4 七态词汇内（v2.3 阶段态，如 `finalizing`）。
+- the top-level collection keys `work_units` / `permits` / `leases` / `receipts`;
+- the `permit` / `lease` / `receipt` runtime fields inside `work_units[i]`;
+- `status` is a non-empty string outside the v2.4 seven-state vocabulary (a v2.3 phase state, e.g. `finalizing`).
 
-**处置**：
+**Disposition**:
 
-1. 该任务若还想完成 → 切回 v2.3.x 插件版本收尾（v2.3.x 可经 Git 历史 / tag 随时找回）；
-2. 不再需要 → 显式放弃：归档 / 删除 `.glm-conductor/tasks/<task-id>/` 任务目录（仓库真实改动以 git 为准，与任务账本无关）；
-3. 之后照常在 v2.4 下重建任务——**不要**手工把遗留 state.json 改写成 v2.4 形态（缺 v2.4 必填键的文件 `validate_state` 照常报错，伪造完成证据不会被完成守卫采信）。
+1. If the task should still be completed → switch back to the v2.3.x plugin version to close it out (v2.3.x can always be recovered from Git history / tags);
+2. If no longer needed → explicitly abandon: archive / delete the `.glm-conductor/tasks/<task-id>/` task directory (real repository changes are what git says; the task ledger is unrelated to them);
+3. Afterwards rebuild the task under v2.4 as usual — do **not** hand-edit a legacy state.json into v2.4 shape (`validate_state` reports an error as usual for files missing v2.4 required keys, and fabricated completion evidence is never accepted by the completion guard).
 
-## 3. 写者守卫残留：`writer-show` 确认 + `--force` 清除
+## 3. Writer-guard leftovers: inspect with `writer-show`, release with `--force`
 
-**现象**：完成守卫查 1 拦截：「仓库写者守卫正被其他任务持有」，但报出的持有任务其实早已消亡（会话崩溃、任务目录被手工删除等）；新委派 `writer-acquire` 冲突；或（AF-04 起）委派任务完成被拦：「完成被阻断：任务 <id> 已注册委派 run，但仓库写者守卫预约缺失（missing writer reservation…）」——有 run id 的委派任务在注册（`runtime.task.record_workflow_run`；规范 CLI 是 `task-record-workflow-run <repo_root> <task_id> <run-id>`——写 state + 守卫前置 + 事件 + repo_root 账本单据；`v24-record-run` 为 legacy 低层薄壳，不写 state 也不带守卫前置）与完成两处都要求仍持有本仓库写预约，这是生命周期不变式，不覆盖 Conductor 协议之外的裸宿主 Workflow 调用。
+**Symptom**: completion-guard check 1 blocks with "Completion blocked: this repository's writer guard is held by another task (task …)", but the reported holding task has long since died (session crash, task directory deleted by hand, etc.); a new delegated `writer-acquire` conflicts; or (since AF-04) a delegated task's completion is blocked: "Completion blocked: task <id> has a registered delegated run, but the repository writer guard reservation is missing (missing writer reservation …)" — a delegated task with a run id is required, at both registration (`runtime.task.record_workflow_run`; the canonical CLI is `task-record-workflow-run <repo_root> <task_id> <run-id>` — writes state + the guard precondition + the event + the repo_root ledger document; `v24-record-run` is a legacy low-level thin shell: it writes no state and carries no guard precondition) and at completion, to still hold this repository's write reservation. This is a lifecycle invariant and does not cover bare host Workflow invocations outside the Conductor protocol.
 
-**判定**：先看当前持有者：
+**Verdict**: first inspect the current holder:
 
 ```
 python <cli> writer-show <repo_root>
 ```
 
-输出 `{holder: {repo_identity, task_id, workflow_run_id, created_at} | null}`。`writer-acquire` 的冲突返回同口径的持有者信息（`{"ok": false, "conflict": {…持有者三键…}}`，零写入）。守卫**永不自动过期**——无 TTL / generation / heartbeat（`runtime/writer_guard.py` 规格），`created_at` 只是诊断信息，残留记录无论多旧都照样冲突。
+The output is `{holder: {repo_identity, task_id, workflow_run_id, created_at} | null}`. A `writer-acquire` conflict returns the same-caliber holder information (`{"ok": false, "conflict": {…the three holder keys…}}`, zero writes). The guard **never expires automatically** — no TTL / generation / heartbeat (the `runtime/writer_guard.py` spec); `created_at` is diagnostic information only, and a leftover record conflicts no matter how old it is.
 
-**处置**（按优先级）：
+**Disposition** (by priority):
 
-1. 委派任务被「预约缺失」拦截（守卫记录被手工删除等，任务本身还在）→ 用本任务身份重新取预约补挂 run id：`writer-acquire <repo_root> <task_id> --run-id <run_id>`（同任务重复 acquire 幂等成功）；此时若预约已被其他任务持有，走下面 2 / 3；
-2. 持有任务还活着 → 等它收尾（终态收尾 `task.complete` / `fail` / `cancel` 自动释放守卫），或在该任务内走完完成守卫；
-3. 持有任务确已消亡（目录已删 / 用户确认放弃）→ 显式清除：
+1. A delegated task blocked by "reservation missing" (the guard record was deleted by hand etc.; the task itself is still alive) → re-acquire the reservation under this task's identity to re-attach the run id: `writer-acquire <repo_root> <task_id> --run-id <run_id>` (a repeated acquire by the same task is an idempotent success); if the reservation is already held by another task at that point, go to 2 / 3 below;
+2. The holding task is still alive → wait for it to wrap up (terminal closure `task.complete` / `fail` / `cancel` releases the guard automatically), or walk that task through the completion guard;
+3. The holding task is confirmed dead (directory deleted / the user confirmed abandonment) → explicit release:
 
 ```
 python <cli> writer-release <repo_root> <holder_task_id> --force
 ```
 
-`--force` 是"inspect 之后由操作者显式清除"的运维通道：以**持有者自身的 task_id** 执行释放（守卫模块本身不设绕过持有者的旁路），stdout 报出被清除的持有者四字段信息。正常（非残留）释放不要带 `--force`。
+`--force` is the operations channel of "explicit release by the operator after inspection": the release is executed with **the holder's own task_id** (the guard module itself provides no bypass around the holder), and stdout reports the cleared holder's four-field information. A normal (non-leftover) release does not carry `--force`.
 
-## 4. reviewer 模型绑定分治：评审者跑在哪个模型上
+## 4. The reviewer model-binding split: which model a reviewer runs on
 
-**背景事实**（v2.4 AF-02 起文本/视觉分治）：`agents/glm-reviewer.md` 的 frontmatter **没有 `model` 字段**——宿主实测表明，单模型宿主上不可解析的固定 model id 会让评审者确定性无法启动（普通 Agent 面直接硬失败）；去掉 model 字段后文本评审者**继承宿主 / 当前会话的模型**，对文本审查契约而言继承即可满足（`scripts/validate_plugin.py` 检查 2 机械锚定：glm-reviewer 出现 model 字段即 FAIL）。`agents/visual-reviewer.md` 则相反：视觉审查契约要求直接读图，继承纯文本主会话模型会「启动成功但丧失契约能力」——其 frontmatter **必须**是 provider 全限定的多模态 Flash 绑定（`account:…/GLM-5.3-Flash`，与 visual-implementer 同款；validate 检查 2 同步锚定：model 缺失、裸 ID 或非 Flash 后缀即 FAIL）。
+**Background fact** (text/visual split since v2.4 AF-02): the frontmatter of `agents/glm-reviewer.md` has **no `model` field** — host testing showed that an unresolvable fixed model id on a single-model host makes the reviewer deterministically unable to start (the plain Agent face hard-fails outright); without the model field the text reviewer **inherits the host / current session model**, which satisfies the text review contract (`scripts/validate_plugin.py` check 2 mechanically anchors this: glm-reviewer carrying a model field is a FAIL). `agents/visual-reviewer.md` is the opposite: the visual review contract requires reading images directly, and inheriting a text-only main-session model would mean "starting successfully but losing the contract capability" — its frontmatter **must** be a provider-qualified multimodal Flash binding (`account:…/GLM-5.3-Flash`, the same as visual-implementer; validate check 2 anchors it in sync: a missing model, a bare id, or a non-Flash suffix is a FAIL).
 
-**含义与排查**：
+**Meaning and troubleshooting**:
 
-- 文本评审者（`glm-reviewer`）与主会话同模型是**预期行为**，不是回退故障；独立性的来源是**全新上下文 + 只读工具白名单**，不是跨模型；
-- 视觉评审（`visual-reviewer`）跑在已验证的多模态 GLM-5.3-Flash 绑定上；宿主上绑定不可用（启动报 account-connection-unavailable 等）时按视觉例外的 fail-closed 纪律停止视觉高保障路线并告知用户——不得退回文本模型（glm-reviewer 或主会话）充当视觉终审，也不得用文本推测界面正常；
-- 对照：`visual-implementer`（实施者，非评审者）同样**保留** provider 全限定 `model: "account:…/GLM-5.3-Flash"` 字段——两个视觉角色同款绑定，文本评审者不共用该规则；
-- agent 定义只在会话启动时快照：修改 agents 定义后须**新开会话**再派发才生效。
+- A text reviewer (`glm-reviewer`) running on the same model as the main session is **expected behavior**, not a fallback fault; independence comes from the **fresh context + read-only tool whitelist**, not from a cross-model setup;
+- The visual review (`visual-reviewer`) runs on the verified multimodal GLM-5.3-Flash binding; when that binding is unavailable on the host (startup errors such as account-connection-unavailable), stop the visual high-assurance route per the visual exception's fail-closed discipline and tell the user — never fall back to a text model (glm-reviewer or the main session) as the visual final review, and never infer from text that the interface is fine;
+- Contrast: `visual-implementer` (an implementer, not a reviewer) likewise **keeps** the provider-qualified `model: "account:…/GLM-5.3-Flash"` field — the two visual roles share the same binding, and the text reviewer does not fall under that rule;
+- Agent definitions are snapshotted only at session start: after modifying an agent definition you must **start a new session** before dispatching for the change to take effect.
 
-| agent | model 字段 | 实际模型 | 通道 |
+| agent | model field | actual model | channel |
 | --- | --- | --- | --- |
-| glm-reviewer | 无 | 继承宿主 / 会话模型 | 原生 Custom Subagent |
-| visual-reviewer | `account:…/GLM-5.3-Flash`（全限定） | 固定 Flash 多模态（不可用即 fail closed） | 原生 Custom Subagent |
-| visual-implementer | `account:…/GLM-5.3-Flash`（全限定） | 固定 Flash 多模态 | 原生 Custom Subagent（视觉例外） |
-| 文本 worker（delegate/full） | 无 agent 定义 | persona 内嵌进生成源 | Native Workflow |
+| glm-reviewer | none | inherits the host / session model | native Custom Subagent |
+| visual-reviewer | `account:…/GLM-5.3-Flash` (fully qualified) | fixed Flash multimodal (fail closed when unavailable) | native Custom Subagent |
+| visual-implementer | `account:…/GLM-5.3-Flash` (fully qualified) | fixed Flash multimodal | native Custom Subagent (the visual exception) |
+| text worker (delegate/full) | no agent definition | the persona is embedded into the generated source | Native Workflow |
 
-## 5. Workflow worker 模型选型：`workflow-model-select` 拒绝的处置
+## 5. Workflow worker model selection: handling `workflow-model-select` rejections
 
-**现象**：`workflow-model-select` 退出码 2——零候选 / 多候选歧义 / 显式 id 未配置 / 裸别名（缺 `account:` 前缀）/ `--model` 与任务 pin 不一致 / `--task-ref` 指向无 pin 任务且未给 `--model` / 消费任务 pin 时报「任务 pin 已失效，请重新问答授权」；或技能层报「选型失败绝不 CreateWorkflow」。
+**Symptom**: `workflow-model-select` exits 2 — zero candidates / multi-candidate ambiguity / an explicit id that is not configured / a bare alias (missing the `account:` prefix) / a `--model` inconsistent with the task pin / a `--task-ref` pointing at an unpinned task with no `--model` given / when consuming a task pin: "the task pin is void; re-run the launch interview for authorization"; or the skill layer reports "a selection failure never proceeds to CreateWorkflow".
 
-**判定**（v2.4.1 起 delegate/full 的提交硬闸，INV-MODEL-01；v2.5 起支持任务级 pin 消费；v2.5.2 起 Flash 档判据版本无关）：
+**Verdict** (the submission hard gate of delegate/full since v2.4.1, INV-MODEL-01; task-level pin consumption since v2.5; the Flash-tier criterion version-independent since v2.5.2):
 
 ```
-python <cli> workflow-model-select '<JSON 数组或文件路径>' [--model <exact-id>] [--task-ref <task_id>] [--repo-root <path>]
+python <cli> workflow-model-select '<JSON array or file path>' [--model <exact-id>] [--task-ref <task_id>] [--repo-root <path>]
 ```
 
-- 输入是主会话从宿主模型列表（ListModels 等）提取的已配置精确 id 集合（推荐写入临时 JSON 文件后传文件路径；内联 `["..."]` 亦可）；`--repo-root`（v2.5.2）显式解析任务账本根（缺省当前工作目录）；
-- **Flash 档为软推荐（v2.6.0 WP-M1）**：软推荐候选 = 模型段以 `-Flash` 结尾的已配置精确 id（版本无关）；不带 `--task-ref` 的裸调用恰一个 Flash 候选 → 自动选定（便捷路径）；多个 → 歧义拒绝并列出全部候选；零个 → 拒绝（检查宿主模型配置）；**非 Flash 已配置精确 id 经 `--model` 显式授权或任务 pin 注入一律合法**（角色中性，仅因名字/后缀被拒是 no-go 红线）；
-- **`--task-ref <task_id>`（v2.5；v2.6.0 严口径）**：读取任务顶层 `worker_model` pin，取值优先级 = 任务 pin > `--model` 显式值（**必须与 pin 一致**，不一致即拒——普通 `--model` 不得绕过 pin，变更走交互问答重新授权并以 `worker-model-pin` 更新）> Flash 软推荐自动选型（**仅限不带 `--task-ref` 的裸调用**）；**任务无 pin 且未给 `--model` → 退出码 2 转启动问答**（绝不隐式授权单候选，恰一 Flash 候选也拒）。消费**必查当次宿主列表**：pin 形状非法（含盘面漂移非 str / 空串）或不在本次 configured 集合 → 退出码 2「任务 pin 已失效，请重新问答授权」，绝不回退自动选型、绝不静默换模型（写入侧 `worker-model-pin` 只做形状预检、绝不查宿主面——`runtime/cli.py`）；任务缺失 / v2.3 遗留任务 → 退出码 1；
-- 裸 `GLM-5.3-Flash`（无 `account:` 前缀）与未配置 id 一律拒绝——省略 `subagent_model` 会使 Workflow 继承主会话模型，是 v2.4.0 缺陷 A，协议硬禁止；非 Flash 已配置 id 经显式授权合法（见上）。
+- The input is the set of configured exact ids the main session extracted from the host model list (ListModels etc.; passing a temporary JSON file path is recommended; an inline `["..."]` also works); `--repo-root` (v2.5.2) resolves the task ledger root explicitly (default: the current working directory);
+- **The Flash tier is a soft recommendation (v2.6.0 WP-M1)**: the soft-recommendation candidates = the configured exact ids whose model segment ends with `-Flash` (version-independent); a bare invocation without `--task-ref` with exactly one Flash candidate → auto-selected (the convenience path); multiple → ambiguous, rejected with all candidates listed; zero → rejected (check the host model configuration); **a configured non-Flash exact id authorized via an explicit `--model` or injected via a task pin is always legal** (role-neutral; rejection merely for a name/suffix is a no-go red line);
+- **`--task-ref <task_id>` (v2.5; the strict caliber since v2.6.0)**: reads the task's top-level `worker_model` pin; the value priority = task pin > an explicit `--model` value (**which must match the pin**; a mismatch is rejected — a plain `--model` must not bypass the pin; changes go through the interactive interview re-authorization and an updated `worker-model-pin`) > Flash soft-recommendation auto-selection (**only for bare invocations without `--task-ref`**); **a task with no pin and no `--model` given → exit code 2 and route back to the launch interview** (a single candidate is never implicitly authorized; even exactly one Flash candidate is rejected). Consumption **always checks the current host list**: an illegal pin shape (including on-disk drift to a non-str / empty string) or a pin not in this run's configured set → exit code 2 "the task pin is void; re-run the launch interview for authorization", never falling back to auto-selection, never switching models silently (the write side, `worker-model-pin`, does shape pre-checks only and never checks the host surface — `runtime/cli.py`); a missing task / a v2.3 legacy task → exit code 1;
+- A bare `GLM-5.3-Flash` (without the `account:` prefix) and unconfigured ids are always rejected — omitting `subagent_model` makes the Workflow inherit the main-session model, which is the v2.4.0 defect A and hard-forbidden by the protocol; a configured non-Flash id is legal via explicit authorization (see above).
 
-**处置**（按拒绝原因，选型成功后 CreateWorkflow 的 `subagent_model` 一律**逐字取**返回契约值）：
+**Disposition** (by rejection reason; after a successful selection, CreateWorkflow's `subagent_model` always takes the returned contract value verbatim):
 
-| 拒绝原因 | 处置 |
+| Rejection reason | Disposition |
 | --- | --- |
-| 零候选 | 检查账号是否配置了 Flash 模型 / 修复配置后重试；亦可经 `--model` 显式授权非 Flash 已配置 id（软推荐候选为零不代表无合法选择） |
-| 多候选歧义（无显式值亦无任务 pin） | 交互回合走任务启动问答第二题重新授权（orchestration §6.0）→ `worker-model-pin` 落盘 → 后续提交带 `--task-ref`；或本次提交直接 `--model <exact-id>` |
-| **任务 pin 已失效**（退出码 2，v2.5） | 候选集漂移（套餐过期 / 新 plan 加入）属预期安全行为——新候选不自动采用、旧 pin 不自动替换。交互回合内重跑问答第二题重新授权，`worker-model-pin` 异值显式覆盖（输出带 prev/new）后继续；**无人值守唤醒 / 恢复轮绝不弹问**——阻断提交、转等待用户，等用户回来再重新授权 |
-| 显式 id 未配置 / 裸别名 | 换 provider 全限定已配置精确 id（不限 Flash）；绝不猜测回退、绝不静默改用其他模型、绝不省略参数提交 |
+| Zero candidates | check whether the account has a Flash model configured / fix the configuration and retry; alternatively authorize a configured non-Flash id explicitly via `--model` (zero soft-recommendation candidates does not mean zero legal choices) |
+| Multi-candidate ambiguity (no explicit value and no task pin) | in an interactive turn, re-authorize via question 2 of the task launch interview (orchestration §6.0) → persist with `worker-model-pin` → later submissions carry `--task-ref`; or pass `--model <exact-id>` directly for this submission |
+| **Task pin void** (exit code 2, since v2.5) | candidate-set drift (a plan expiring / a new plan joining) is expected safe behavior — new candidates are never auto-adopted, an old pin is never auto-replaced. In an interactive turn, re-run interview question 2 to re-authorize; `worker-model-pin` explicitly overwrites a different value (the output carries prev/new) and work continues; **unattended wake / resume turns never ask** — block the submission, move to waiting-for-user, and re-authorize when the user returns |
+| Explicit id not configured / bare alias | switch to a provider-qualified configured exact id (not limited to Flash); never guess a fallback, never silently switch to another model, never submit with the parameter omitted |
 
-## 6. 「hook 不拦 Workflow 子代理」：宿主事实与含义
+## 6. "Hooks do not intercept Workflow subagents": the host fact and its meaning
 
-**宿主事实**（W0 复验，2026-09-20 在当前构建上确认）：ZCode Native Workflow 的子 actor **不触发插件钩子**——workflow 子代理在活动任务存在时零 hook 可见痕迹。这是宿主结构性事实，不是配置问题，插件侧不可修复。
+**Host fact** (W0 re-verification, confirmed on the current build 2026-09-20): the sub actors of a ZCode Native Workflow **do not trigger plugin hooks** — a workflow subagent leaves zero hook-visible trace while an active task exists. This is a structural host fact, not a configuration problem, and it is not fixable on the plugin side.
 
-**含义（v2.4 因此这样设计）**：
+**Meaning (why v2.4 is designed this way)**:
 
-- **写前拦截在主实施路径上不可实现**——v2.3 式的派发 permit 门 / Agent 注入 / Bash 策略钩子已删除（只覆盖主会话 Bash 的策略钩子留着会暗示主路径并不享有的覆盖面）；
-- 确定性强制收敛到**两端**：编译期（ownership 阶段规划 + 一仓库一写者守卫）与终局（完成守卫四查）。越界改动**会被发生**，但不可能静默通过完成守卫——查 2 逐条点名越界路径；
-- 因此"worker 改了不该改的文件"的正确处置是：修复 / 撤销改动 → 重跑主验证（diff 变了 change_id 必变，旧验证自动过期）→ 重新过完成守卫；
-- 钩子（SessionStart / Stop）只对**主会话**生效且依赖 `python3` 在 PATH；钩子自身故障 fail-open（stderr 报 `ENFORCEMENT DEGRADED` 后放行，绝不卡死会话）——看到该报文说明守卫本轮没干活，属降级可见，不是放行许可；
-- 需要权限约束时，用宿主原生权限设施 + worker 约束（节点的 `interfaces` / `constraints` 声明与 persona 纪律），不要试图恢复派发面钩子。
+- **Pre-write interception is impossible on the main implementation path** — the v2.3-style dispatch permit gates / agent injection / Bash policy hooks were deleted (keeping a policy hook that only covered main-session Bash would imply a coverage the main path never had);
+- Deterministic enforcement converged onto **the two ends**: compile time (ownership stage planning + one writer guard per repository) and the endgame (the completion guard's four checks). Out-of-scope changes **do happen**, but they can never silently pass the completion guard — check 2 names the out-of-scope paths one by one;
+- The correct disposition for "a worker changed files it should not have" is therefore: fix / revert the changes → re-run main validation (the diff changed so the change_id necessarily changed; the old validation is automatically stale) → pass the completion guard again;
+- The hooks (SessionStart / Stop) take effect only in the **main session** and depend on `python3` being on PATH; a failure of the hooks themselves fails open (stderr reports `ENFORCEMENT DEGRADED` and then allows — the session is never deadlocked); seeing that message means the guard did not do its work this round: it is a visible degradation, not a permission to pass;
+- When a permission constraint is needed, use the host's native permission facilities + worker constraints (the node's `interfaces` / `constraints` declarations and persona discipline); do not try to restore dispatch-surface hooks.
 
-## 7. 状态文件位置速查（排障先找对文件）
+## 7. State file locations at a glance (find the right file first)
 
-| 状态 | 位置 | 说明 |
+| State | Location | Notes |
 | --- | --- | --- |
-| 任务状态 | `<repo>/.glm-conductor/tasks/<task-id>/state.json` | 七态 schema 真相源（`runtime/state.py`） |
-| 任务事件 | `<repo>/.glm-conductor/tasks/<task-id>/events.jsonl` | append-only，任务级十事件词汇（`runtime/journal.py`） |
-| 写者守卫 | `<repo>/.glm-conductor/writer_guard.json` | 仓库级单条预约（§3） |
-| run 关联 | `<repo>/.glm-conductor/workflow-runs/run-<task_ref 编码>.json` | 任务 ↔ Workflow run 的 id 关联（`runtime/workflow/adapter.py`） |
-| 额度缓存 | `<repo>/.glm-conductor/quota-cache.json` | 标准化快照，绑定 provider 身份指纹，不含凭证（`runtime/quota/resolver.py`） |
-| 钩子清单 | `plugins/glm-conductor/hooks/hooks.json` | 仅 SessionStart + Stop 两钩子（安装 / 更新后的新会话生效） |
+| task status | `<repo>/.glm-conductor/tasks/<task-id>/state.json` | the seven-state schema source of truth (`runtime/state.py`) |
+| task events | `<repo>/.glm-conductor/tasks/<task-id>/events.jsonl` | append-only; the task-level ten-event vocabulary (`runtime/journal.py`) |
+| writer guard | `<repo>/.glm-conductor/writer_guard.json` | the single repository-level reservation (§3) |
+| run association | `<repo>/.glm-conductor/workflow-runs/run-<percent-encoded task_ref>.json` | the id association of task ↔ Workflow run (`runtime/workflow/adapter.py`) |
+| quota cache | `<repo>/.glm-conductor/quota-cache.json` | a normalized snapshot, bound to the provider identity fingerprint, containing no credentials (`runtime/quota/resolver.py`) |
+| hook manifest | `plugins/glm-conductor/hooks/hooks.json` | only the two hooks SessionStart + Stop (effective in a new session after install / update) |
 
-全部在**仓库级** `.glm-conductor/` 下（建议写入 `.git/info/exclude` 本地排除）；该目录是编排器自身账本——不算仓库改动，也永不参与 change_id。账本根的定位口径：钩子进程优先 `ZCODE_PROJECT_DIR`，缺失回退当前工作目录——手工排障时以 `.glm-conductor/tasks/` 所在目录为准。Workflow run 的进行中状态不在上表：那是宿主自有事实，用 ZCode 的 run 观测面查询，Conductor 只存 run id。
+All of them live under the **repository-level** `.glm-conductor/` (prefer adding it to `.git/info/exclude` for local exclusion); that directory is the orchestrator's own ledger — it does not count as repository changes and never participates in change_id. How the ledger root is located: the hook process prefers `ZCODE_PROJECT_DIR`, falling back to the current working directory when missing — for manual troubleshooting, use the directory containing `.glm-conductor/tasks/`. The in-progress state of a Workflow run is not in the table above: that is a host-owned fact; query it through ZCode's run observation face — Conductor only stores the run id.
 
-## 8. Windows 环境下 `python3` 钩子命令排查
+## 8. Troubleshooting the `python3` hook command on Windows
 
-**现象**：在 Windows 平台上，宿主提示无法运行钩子脚本或报 `python3: command not found` / `The system cannot find the file specified`；完成守卫或恢复注入未生效。
+**Symptom**: on Windows the host reports that it cannot run the hook scripts, or errors with `python3: command not found` / `The system cannot find the file specified`; the completion guard or the recovery injection does not take effect.
 
-**判定**：
-1. `hooks/hooks.json` 依照 ZCode 规范声明使用 `python3` 启动脚本；
-2. Windows 部分纯标准版 Python 安装（未勾选 Python Launcher 或未配置别名）可能仅存在 `python.exe`，而在 PATH 中缺失 `python3.exe`。
+**Verdict**:
+1. `hooks/hooks.json` declares, per the ZCode spec, that scripts are launched with `python3`;
+2. Some plain standard Python installations on Windows (Python Launcher unchecked or no alias configured) have only `python.exe`, with `python3.exe` missing from PATH.
 
-**处置**：
-- **自检**：在 PowerShell 中执行：
+**Disposition**:
+- **Self-check**: run in PowerShell:
   ```powershell
   Get-Command python3
   ```
-  若报错未找到命令，说明当前仅有 `python`。
-- **快速建立别名硬链接**（管理员或用户级 PowerShell）：
+  If it errors that the command was not found, only `python` exists.
+- **Quickly create a hard-link alias** (admin or user-level PowerShell):
   ```powershell
   $pyPath = (Get-Command python).Source
   $pyDir = Split-Path $pyPath
   New-Item -ItemType HardLink -Path "$pyDir\python3.exe" -Value $pyPath
   ```
-  创建后重新执行 `python3 --version` 验证输出，之后新开 ZCode 会话即可正常调起钩子。
+  After creating it, run `python3 --version` again to verify the output; a newly started ZCode session can then invoke the hooks normally.
 
-## 9. 超大仓（Monorepo）Git 超时与 `GLM_CONDUCTOR_GIT_TIMEOUT`
+## 9. Monorepo Git timeouts and `GLM_CONDUCTOR_GIT_TIMEOUT`
 
-**现象**：完成守卫或 change_id 计算时抛错：
-`git 调用失败：status 超时（>3.0 秒...）` 或 `git 调用失败：rev-parse HEAD 超时（>3.0 秒...）`。
+**Symptom**: the completion guard or the change_id computation raises:
+`git call failed: status timed out (>3.0 s, repo=…; …)` or `git call failed: rev-parse HEAD timed out (>3.0 s, repo=…; …)` — both messages continue: "if the repository is very large or has many dirty files, adjust the threshold via the GLM_CONDUCTOR_GIT_TIMEOUT environment variable" (the git-failure message texts of `runtime/ownership.py` / `runtime/change_id.py`).
 
-**判定**：
-- 为确保在 Stop 钩子的 5 秒硬超时限制内及时给出反馈，`runtime/ownership.py` 与 `runtime/change_id.py` 默认将 git 子进程超时设为 3.0 秒；
-- 在包含数万文件的超大 Monorepo 或网络挂载工作区中，工作区大量未跟踪改动（dirty files）可能导致 `git status --porcelain=v1 -z -uall` 瞬态耗时超出 3.0 秒。
+**Verdict**:
+- To return feedback in time within the Stop hook's 5-second hard-timeout budget, `runtime/ownership.py` and `runtime/change_id.py` default the git subprocess timeout to 3.0 seconds;
+- In a monorepo with tens of thousands of files or a network-mounted worktree, a large number of untracked dirty files in the worktree can push `git status --porcelain=v1 -z -uall` transiently past 3.0 seconds.
 
-**处置**：
-1. **环境变量动态调整**：通过设置 `GLM_CONDUCTOR_GIT_TIMEOUT`（支持范围 `1.0` ~ `30.0` 秒，浮点数）：
+**Disposition**:
+1. **Dynamic adjustment via the environment variable**: set `GLM_CONDUCTOR_GIT_TIMEOUT` (supported range `1.0` – `30.0` seconds, a float):
    - PowerShell: `$env:GLM_CONDUCTOR_GIT_TIMEOUT = "6.0"`
    - Bash: `export GLM_CONDUCTOR_GIT_TIMEOUT=6.0`
-2. **清理或忽略冗余未跟踪文件**：检查 `.gitignore` 是否将构建产物、缓存目录（如 node_modules、build、tmp）有效排除，减少 `git status` 扫描耗时。
+2. **Clean up or ignore redundant untracked files**: check that `.gitignore` effectively excludes build artifacts and cache directories (e.g. node_modules, build, tmp) to reduce `git status` scan time.
 
-## 10. v2.3 遗留任务一键批量归档工具
+## 10. One-shot bulk archiving for v2.3 legacy tasks
 
-**现象**：长期使用由 v2.3 升级而来的仓库，`.glm-conductor/tasks/` 中留存大量旧版本任务目录，恢复摘要或列表提示较多 legacy 任务。
+**Symptom**: on a repository long upgraded from v2.3, `.glm-conductor/tasks/` retains many old-version task directories; the recovery summary or a listing reports many legacy tasks.
 
-**处置**：
-使用仓库附带的专用归档脚本 [`scripts/archive_legacy_tasks.py`](../scripts/archive_legacy_tasks.py)：
-- **预览待归档遗留任务（Dry-run，默认安全模式，零写盘）**：
+**Disposition**: use the repository's dedicated archive script [`scripts/archive_legacy_tasks.py`](../scripts/archive_legacy_tasks.py):
+- **Preview the legacy tasks to archive (dry-run; the default safe mode, zero disk writes)**:
   ```bash
   python scripts/archive_legacy_tasks.py
   ```
-- **确认执行物理归档**：
+- **Confirm and execute the physical archive**:
   ```bash
   python scripts/archive_legacy_tasks.py --confirm
   ```
-- **工作机制**：精准复用 `runtime.state.detect_legacy_task` 识别 v2.3 任务，安全平移至 `.glm-conductor/archived-tasks/<task-id>/`。**绝不触碰** v2.4+ 的活跃或已完成任务，**绝不触碰** 损坏目录与非任务目录。
+- **How it works**: it reuses `runtime.state.detect_legacy_task` precisely to identify v2.3 tasks and moves them safely to `.glm-conductor/archived-tasks/<task-id>/`. It **never touches** active or completed v2.4+ tasks, and **never touches** corrupt or non-task directories.
 
-## 11. visual-reviewer 绑定启动即失败：宿主限制的写实（v2.5.2 W6）
+## 11. visual-reviewer binding fails at startup: an honest record of a host limitation (v2.5.2 W6)
 
-**现象**：视觉任务 assurance: high 派发 `glm-conductor:visual-reviewer` 时，子代理启动即报 `account-connection-unavailable` 类连接错误，视觉终审无法进行。
+**Symptom**: dispatching `glm-conductor:visual-reviewer` for a visual task with assurance: high, the subagent fails at startup with an `account-connection-unavailable` connection error and the visual final review cannot proceed.
 
-**判定**（本宿主实测限制，非插件配置问题）：`agents/visual-reviewer.md` 的 frontmatter 按契约（v2.4 AF-02）必须绑定 provider 全限定的多模态 Flash 模型（`account:…/GLM-5.3-Flash`）——继承纯文本主会话模型会"启动成功但丧失读图契约能力"，所以绑定不可用比静默降级更安全。当前宿主上该绑定的账户连接不可用（account 连接面尚未对该模型档开放），属**宿主侧限制**；插件侧零代码可修复（v2.5.2 W6 裁决：仅文档写实）。
+**Verdict** (a measured host limitation, not a plugin configuration problem): the frontmatter of `agents/visual-reviewer.md` must, per contract (v2.4 AF-02), bind a provider-qualified multimodal Flash model (`account:…/GLM-5.3-Flash`) — inheriting a text-only main-session model would mean "starting successfully but losing the image-reading contract capability", so an unavailable binding is safer than silent degradation. On the current host that binding's account connection is unavailable (the account connection face is not yet open for that model tier) — a **host-side limitation**; zero plugin-side code can fix it (v2.5.2 W6 ruling: documentation honesty only).
 
-**处置（fail closed 现状）**：
+**Disposition (the fail-closed status quo)**:
 
-- 视觉高保障路线按 fail-closed 纪律停止：向用户如实报告绑定不可用，**绝不退回文本模型**（glm-reviewer 或主会话）充当视觉终审、绝不用文本推测界面正常；
-- **人工验收替代**：视觉任务的验收由用户亲自查看截图 / 运行效果完成，或降档为 assurance: standard（主会话文本验证 + 用户目验）；
-- 待宿主修复该账户连接后，visual-reviewer 绑定即自动恢复可用（agent 定义无需改动——修复在宿主侧连接面）；agent 定义只在会话启动时快照，宿主修复后须**新开会话**再派发。
-
+- The visual high-assurance route stops per the fail-closed discipline: report the binding as unavailable to the user honestly, **never fall back to a text model** (glm-reviewer or the main session) as the visual final review, and never infer from text that the interface is fine;
+- **Manual acceptance instead**: the acceptance of visual tasks is done by the user personally viewing the screenshots / the running result, or downgraded to assurance: standard (main-session text validation + the user's own visual check);
+- Once the host fixes that account connection, the visual-reviewer binding becomes usable again automatically (no agent-definition change is needed — the fix is on the host's connection face); agent definitions are snapshotted only at session start, so after the host fix you must **start a new session** before dispatching.

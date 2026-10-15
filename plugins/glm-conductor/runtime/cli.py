@@ -43,7 +43,7 @@ v2.4 Phase 3（P3-D/E）收口面：
         rethink，词汇外 → 退出码 2）；note 缺省 None（透传 findings）。
         先验证后评审：任务尚无 validation 记录（status 与 change_id
         齐备）→ 拒绝；任务缺失 / v2.3 遗留任务 / 终态冻结 → 拒绝
-        （均退出码 1，错误 JSON 含中文原因）。成功输出单行 JSON
+        （均退出码 1，错误 JSON 含英文原因）。成功输出单行 JSON
         {task_id, review}（review 块含 reviewer / verdict / change_id /
         findings，change_id 现算——任何相关文件变化都会使记录过期）
         并落 review_recorded 事件。
@@ -259,10 +259,10 @@ v2.4 Phase 3（P3-D/E）收口面：
         退出码 1。输出单行 JSON {task_id, workflow_run_id, status}。
 
 输出与退出码契约：
-    stdout 恒为单行 JSON（json.dumps(..., ensure_ascii=True)，中文以
-    \\uXXXX 转义——管道 / Windows 控制台零编码依赖；例外：v24-compile
+    stdout 恒为单行 JSON（json.dumps(..., ensure_ascii=True)，非 ASCII
+    以 \\uXXXX 转义——管道 / Windows 控制台零编码依赖；例外：v24-compile
     缺省输出路径时把生成 TS 源以多行纯文本打到 stdout（显式 UTF-8，
-    生成源含中文））；stderr 不承载结构化输出。
+    W3b 起生成源为全英文零 CJK））；stderr 不承载结构化输出。
     退出码：
       0 = 成功；
       2 = 校验拒绝（用法错误 / 参数值非法 / 盘上 state.json 结构性
@@ -299,7 +299,9 @@ v2.4 Phase 3（P3-D/E）收口面：
     直接运行。
 
 依赖：
-    仅 Python 3 标准库（json / pathlib / sys），零第三方依赖。
+    仅 Python 3 标准库（json / pathlib / sys）
+    + runtime.messages（v2.6.1 W3a 单源：USAGE 与全部用户可见消息
+      常量），零第三方依赖。
 """
 
 import json
@@ -311,37 +313,17 @@ PLUGIN_ROOT = pathlib.Path(__file__).resolve().parents[1]
 if str(PLUGIN_ROOT) not in sys.path:
     sys.path.insert(0, str(PLUGIN_ROOT))
 
-from runtime import state  # noqa: E402
+from runtime import messages, state  # noqa: E402
 
-USAGE = (
-    "用法: python3 plugins/glm-conductor/runtime/cli.py "
-    "review-record <repo_root> <task_id> <reviewer> <verdict> [note] | "
-    "quota-resolve <repo_root> [--force-refresh] | "
-    "quota-wait <repo_root> <task_id> [--force-refresh] | "
-    "quota-resume-authorize <repo_root> <task_id> <max_resumes> | "
-    "quota-resume-decision <repo_root> <task_id> [--force-refresh] | "
-    "quota-resume-confirm <repo_root> <task_id> | "
-    "v24-compile <dag-json> [--task-ref <id>] [--out <path>] | "
-    "writer-acquire <repo_root> <task_id> [--run-id <id>] | "
-    "writer-release <repo_root> <task_id> [--run-id <id>] [--force] | "
-    "writer-show <repo_root> | "
-    "[legacy 低层薄壳] v24-record-run <task_ref> <run-id> "
-    "[--artifact <path>] | "
-    "workflow-model-select <models-json> [--model <exact-id>] "
-    "[--task-ref <task_id>] [--repo-root <path>] | "
-    "worker-model-pin <repo_root> <task_id> <exact-id> | "
-    "quota-automation-bind <repo_root> <task_id> <automation_id> | "
-    "quota-automation-clear <repo_root> <task_id> [automation_id] | "
-    "quota-continuity-preflight <repo_root> <task_id> | "
-    "task-create <repo_root> <task_id> <goal> <mode> <assurance> "
-    "[--dag <path>] | "
-    "record-validation <repo_root> <task_id> <passed|failed> "
-    "[--summary <s>] [--commands <s>] ... | "
-    "task-complete <repo_root> <task_id> | "
-    "task-fail <repo_root> <task_id> | "
-    "task-cancel <repo_root> <task_id> | "
-    "exit-waiting <repo_root> <task_id> | "
-    "task-record-workflow-run <repo_root> <task_id> <run-id>")
+# v2.6.1 W3a 单源接线：USAGE 与全部用户可见消息改由 messages 模块单源
+# 供给（本名再导出保持 cli.USAGE 等既有读取面）。发布面静态契约锚随
+# 文案同迁——W3b 英文化后 validator 检查 16 重锚到 messages 单源英文值：
+# "the task pin is void; re-run the launch interview for authorization"
+# 与 "for pinned tasks the explicit --model value must equal the pin"
+# 两英文锚（scripts/validate_plugin.py 的 PIN_REJECTION_CLI_MARKERS 与
+# 模型选型锚；单源值在 messages.CLI_WORKFLOW_MODEL_SELECT_*，validator
+# 与 messages 两处同步改动）。
+USAGE = messages.CLI_USAGE
 
 
 class _UsageError(ValueError):
@@ -407,15 +389,9 @@ class _TaskRejected(Exception):
 # 盘上 state 结构性 ValueError 的稳定消息前缀（分类锚点——state 层
 # 消息即契约文案，改动须同步本表；锚定 state.load_state 的损坏解析
 # 拒绝与 _transaction_state / _transaction_commit 的严格读写闸）。
-# 任务缺失（"state 事务：任务 … 不存在"）与生命周期拒绝（遗留 /
-# 终态冻结 / 迁移矩阵外）不在此列——那仍归退出码 1。
-_STRUCTURAL_STATE_ERROR_PREFIXES = (
-    "state.json 损坏，无法解析",
-    "state 事务：盘上 state.json 归一任务标识",
-    "state 事务：盘上 state.json schema 非法",
-    "state 非法，无法保存",
-    "state 事务：新 state.task_id",
-)
+# 任务缺失（"state transaction: on-disk state.json normalized task id …"）
+# 与生命周期拒绝（遗留 / 终态冻结 / 迁移矩阵外）不在此列——那仍归退出码 1。
+_STRUCTURAL_STATE_ERROR_PREFIXES = messages.STRUCTURAL_STATE_ERROR_PREFIXES
 
 
 def _is_structural_state_rejection(exc) -> bool:
@@ -446,9 +422,8 @@ def _require_task_for_review(repo_root, task_id) -> None:
     1）。先于任何记录 I/O——拼错 task_id 得到「任务不存在」而非顺序
     闸的「先验证后评审」假象。"""
     if state.load_state(repo_root, task_id) is None:
-        raise _TaskMissing(
-            "任务 %s 不存在（%s 下无 state.json），无法记录审查"
-            % (task_id, repo_root))
+        raise _TaskMissing(messages.CLI_TASK_MISSING_REVIEW
+                           % (task_id, repo_root))
 
 
 def _review_record(repo_root, task_id, reviewer, verdict,
@@ -466,7 +441,7 @@ def _review_record(repo_root, task_id, reviewer, verdict,
     func_name = "review-record"
     if verdict not in state.REVIEW_VERDICTS:
         raise ValueError(
-            "%s：verdict %r 不在 state.REVIEW_VERDICTS 内（%s）"
+            messages.CLI_VERDICT_NOT_IN_REVIEW_VERDICTS
             % (func_name, verdict, ", ".join(state.REVIEW_VERDICTS)))
     _require_task_for_review(repo_root, task_id)
     try:
@@ -602,12 +577,12 @@ def _quota_resume_authorize(repo_root, task_id, raw_max_resumes) -> int:
         max_resumes = int(raw_max_resumes)
     except (TypeError, ValueError) as exc:
         raise ValueError(
-            "quota-resume-authorize：max_resumes 必须是 >= 0 的整数，"
-            "得到 %r" % (raw_max_resumes,)) from exc
+            messages.CLI_QUOTA_RESUME_AUTHORIZE_MAX_RESUMES
+            % (raw_max_resumes,)) from exc
     if max_resumes < 0:
         raise ValueError(
-            "quota-resume-authorize：max_resumes 必须是 >= 0 的整数，"
-            "得到 %r" % (raw_max_resumes,))
+            messages.CLI_QUOTA_RESUME_AUTHORIZE_MAX_RESUMES
+            % (raw_max_resumes,))
     try:
         st = task.authorize_quota_resume(repo_root, task_id, max_resumes)
     except ValueError as exc:
@@ -702,7 +677,7 @@ def _v24_compile(dag_json_path, task_ref=None, out_path=None) -> int:
       4. compiler.compile_workflow 只生成源码字符串——绝不执行；
       5. 输出：--out 给出时源码落盘（UTF-8 / LF），stdout 单行 JSON
          摘要 {ok, stages, nodes, out}；缺省把 TS 源打到 stdout（多行
-         纯文本，显式 UTF-8——生成源含中文）。
+         纯文本，显式 UTF-8——v2.6.1 W3b 起生成源全英文零 CJK）。
 
     --task-ref 给出时覆盖 DAG JSON 内的 task_context.task_ref
     （task_context 缺失 / 非对象时以覆盖值起底，goal / repository 缺键
@@ -720,14 +695,14 @@ def _v24_compile(dag_json_path, task_ref=None, out_path=None) -> int:
         with open(dag_json_path, "r", encoding="utf-8") as handle:
             dag = json.load(handle)
     except OSError as exc:
-        return rejected(["v24-compile：无法读取 DAG JSON %r：%s"
+        return rejected([messages.CLI_V24_COMPILE_READ_ERROR
                          % (dag_json_path, exc)])
     except ValueError as exc:  # json.JSONDecodeError 是 ValueError 子类
-        return rejected(["v24-compile：DAG JSON 解析失败（%s）：%s"
+        return rejected([messages.CLI_V24_COMPILE_PARSE_ERROR
                          % (dag_json_path, exc)])
     if not isinstance(dag, dict):
-        return rejected(["v24-compile：DAG JSON 顶层必须是 JSON 对象，"
-                         "得到 %s" % type(dag).__name__])
+        return rejected([messages.CLI_V24_COMPILE_TOP_NOT_OBJECT
+                         % type(dag).__name__])
     nodes = dag.get("nodes")
     task_context = dag.get("task_context")
     if task_ref is not None:
@@ -745,7 +720,7 @@ def _v24_compile(dag_json_path, task_ref=None, out_path=None) -> int:
             errors.extend(work_unit.validate_node(node))
         errors.extend(dependency.graph_errors(nodes))
     else:
-        errors.append("v24-compile：nodes 必须是数组，得到 %s"
+        errors.append(messages.CLI_V24_COMPILE_NODES_NOT_ARRAY
                       % type(nodes).__name__)
     if errors:
         return rejected(errors)
@@ -755,7 +730,8 @@ def _v24_compile(dag_json_path, task_ref=None, out_path=None) -> int:
         stages = ownership.plan_stages(nodes)
     except (ownership.OwnershipConflictError, ownership.OwnershipError,
             ValueError) as exc:
-        return rejected(["v24-compile：ownership 阶段规划拒绝：%s" % exc])
+        return rejected([messages.CLI_V24_COMPILE_OWNERSHIP_REJECTED
+                         % exc])
 
     # 4) 编译（只生成源码字符串；形状 / 图 / task_context 错误在此聚合；
     #    绝不自动执行生成源）
@@ -763,7 +739,7 @@ def _v24_compile(dag_json_path, task_ref=None, out_path=None) -> int:
         source = compiler.compile_workflow(nodes, task_context)
     except (compiler.WorkflowCompileError,
             ownership.OwnershipConflictError) as exc:
-        return rejected(["v24-compile：%s" % exc])
+        return rejected([messages.CLI_V24_COMPILE_REJECTED % exc])
 
     # 5) 输出
     if out_path is not None:
@@ -771,7 +747,7 @@ def _v24_compile(dag_json_path, task_ref=None, out_path=None) -> int:
         _emit({"ok": True, "stages": len(stages), "nodes": len(nodes),
                "out": out_path})
     else:
-        _force_utf8_stdout()  # 生成源含中文：显式 UTF-8（quota/report.py 同款）
+        _force_utf8_stdout()  # 生成源显式 UTF-8 输出（W3b 起全英文零 CJK）
         sys.stdout.write(source)
     return 0
 
@@ -786,7 +762,7 @@ def _writer_acquire(repo_root, task_id, run_id=None) -> int:
         result = writer_guard.acquire(repo_root, task_id,
                                       workflow_run_id=run_id)
     except writer_guard.WriterGuardError as exc:
-        raise ValueError("writer-acquire：%s" % exc) from exc
+        raise ValueError(messages.CLI_WRITER_ACQUIRE_REJECTED % exc) from exc
     _emit(result)
     return 0 if result["ok"] else 1
 
@@ -818,7 +794,7 @@ def _writer_release(repo_root, task_id, run_id=None, force=False) -> int:
         result = writer_guard.release(repo_root, task_id,
                                       workflow_run_id=run_id)
     except writer_guard.WriterGuardError as exc:
-        raise ValueError("writer-release：%s" % exc) from exc
+        raise ValueError(messages.CLI_WRITER_RELEASE_REJECTED % exc) from exc
     _emit(result)
     return 0 if result["ok"] else 1
 
@@ -844,7 +820,7 @@ def _v24_record_run(task_ref, run_id, artifact=None) -> int:
         record = adapter.record_run(task_ref, run_id,
                                     artifact_path=artifact)
     except adapter.WorkflowRunError as exc:
-        raise ValueError("v24-record-run：%s" % exc) from exc
+        raise ValueError(messages.CLI_V24_RECORD_RUN_REJECTED % exc) from exc
     _emit(record)
     return 0
 
@@ -877,16 +853,15 @@ def _load_configured_model_ids(models_json) -> list:
             document = json.load(handle)
     except OSError as exc:
         raise ValueError(
-            "workflow-model-select：参数 %r 既不是内联 JSON 数组，也无法"
-            "作为 JSON 文件路径读取：%s" % (models_json, exc))
+            messages.CLI_WORKFLOW_MODEL_SELECT_PARAM_NOT_JSON
+            % (models_json, exc))
     except ValueError as exc:  # json.JSONDecodeError 是 ValueError 子类
         raise ValueError(
-            "workflow-model-select：模型清单文件 %r 不是合法 JSON：%s"
+            messages.CLI_WORKFLOW_MODEL_SELECT_FILE_NOT_JSON
             % (models_json, exc))
     if not isinstance(document, list):
         raise ValueError(
-            "workflow-model-select：模型清单必须是 JSON 数组（模型 id "
-            "字符串集合），%r 顶层为 %s"
+            messages.CLI_WORKFLOW_MODEL_SELECT_NOT_ARRAY
             % (models_json, type(document).__name__))
     return document
 
@@ -910,13 +885,12 @@ def _load_task_worker_model_pin(ledger_root, task_id):
     st = state.load_state(ledger_root, task_id)
     if st is None:
         raise _PinTaskRejected(
-            "workflow-model-select：任务 %s 不存在（%s 下无 "
-            "state.json），无法消费任务 pin"
+            messages.CLI_WORKFLOW_MODEL_SELECT_TASK_MISSING
             % (task_id, ledger_root))
     if state.is_legacy_state(st):
         raise _PinTaskRejected(
-            "workflow-model-select：任务 %s 是 v2.3 遗留任务，无法"
-            "消费任务 pin：%s" % (task_id, state.LEGACY_STATE_GUIDANCE))
+            messages.CLI_WORKFLOW_MODEL_SELECT_TASK_LEGACY
+            % (task_id, state.LEGACY_STATE_GUIDANCE))
     pin = st.get("worker_model")
     if pin is None:
         return None  # 键缺失 / null 占位：无 pin（严口径拒由调用方处理）
@@ -924,9 +898,7 @@ def _load_task_worker_model_pin(ledger_root, task_id):
         # 盘面漂移（外部直写非 str / 空串）与 str 形状非法同口径：
         # 失效即拒，绝不静默当作「无 pin」放行（消费面对账统一 fail-closed）
         raise ValueError(
-            "workflow-model-select：任务 %s 的 worker_model pin 形状非法"
-            "（盘面漂移：%r）——任务 pin 已失效，请重新问答授权"
-            % (task_id, pin))
+            messages.CLI_WORKFLOW_MODEL_SELECT_PIN_DRIFT % (task_id, pin))
     return pin
 
 
@@ -979,34 +951,25 @@ def _workflow_model_select(models_json, model=None, task_ref=None,
                 submission.validate_worker_model(pin)
             except submission.WorkflowSubmissionError as exc:
                 raise ValueError(
-                    "workflow-model-select：任务 %s 的 worker_model "
-                    "pin 形状非法——任务 pin 已失效，请重新问答授权"
-                    "（%s）" % (task_ref, exc)) from exc
+                    messages.CLI_WORKFLOW_MODEL_SELECT_PIN_INVALID
+                    % (task_ref, exc)) from exc
             if pin not in configured:
                 raise ValueError(
-                    "workflow-model-select：任务 %s 的 worker_model "
-                    "pin %r 不在本次 configured 集合（共 %d 个模型）"
-                    "——任务 pin 已失效，请重新问答授权；绝不回退自动"
-                    "选型、绝不静默换模型"
+                    messages.CLI_WORKFLOW_MODEL_SELECT_PIN_NOT_CONFIGURED
                     % (task_ref, pin, len(configured)))
     if model is not None and pin is not None and model != pin:
         # 规格 §5.3 第 4 条：有 pin 任务普通 --model 不得绕过——显式
         # 值必须与 pin 一致；更换授权必经交互问答 + worker-model-pin
         raise ValueError(
-            "workflow-model-select：--model %r 与任务 %s 的 worker_model "
-            "pin %r 不一致——有 pin 任务的 --model 显式值必须与 pin 一致"
-            "（普通 --model 不得绕过任务 pin）；如需更换授权，请走交互"
-            "问答重新授权并以 worker-model-pin 更新任务 pin"
+            messages.CLI_WORKFLOW_MODEL_SELECT_MODEL_PIN_MISMATCH
             % (model, task_ref, pin))
     if model is None and pin is None and task_ref is not None:
         # 规格 §5.3：resume 遇无 pin 任务绝不隐式授权单候选（§5.2
         # 单一候选也须用户显式确认）——经问答的任务必有 pin（§6.0
         # 第二题落盘），可达本分支的 --task-ref 调用即未授权选型
         raise ValueError(
-            "workflow-model-select：任务 %s 无 worker_model pin 且未给 "
-            "--model 显式值——任务级 worker 选型必须经启动问答显式授权"
-            "（orchestration §6.0 第二题）并以 worker-model-pin 落盘，"
-            "绝不自动选型、绝不隐式授权单候选" % task_ref)
+            messages.CLI_WORKFLOW_MODEL_SELECT_NO_PIN_NO_MODEL
+            % task_ref)
     if model is None:
         model = pin  # 无显式值：任务 pin 注入显式选择（优先于自动选型）
     selected = submission.select_worker_model(configured,
@@ -1035,11 +998,11 @@ def _worker_model_pin(repo_root, task_id, model_id) -> int:
     try:
         submission.validate_worker_model(model_id)
     except submission.WorkflowSubmissionError as exc:
-        raise ValueError("worker-model-pin：%s" % exc) from exc
+        raise ValueError(messages.CLI_WORKER_MODEL_PIN_REJECTED % exc) from exc
     if state.load_state(repo_root, task_id) is None:
         raise _TaskMissing(
-            "任务 %s 不存在（%s 下无 state.json），无法写入 worker "
-            "模型 pin" % (task_id, repo_root))
+            messages.CLI_TASK_MISSING_WORKER_MODEL_PIN
+            % (task_id, repo_root))
     try:
         outcome = task.pin_worker_model(repo_root, task_id, model_id)
     except ValueError as exc:
@@ -1138,12 +1101,12 @@ def _load_dag_nodes(dag_path):
             document = json.load(handle)
     except OSError as exc:
         raise ValueError(
-            "task-create：无法读取 DAG JSON %r：%s" % (dag_path, exc)
+            messages.CLI_TASK_CREATE_DAG_READ_ERROR % (dag_path, exc)
         ) from exc
     except ValueError as exc:  # json.JSONDecodeError 是 ValueError 子类
         raise ValueError(
-            "task-create：DAG JSON 解析失败（%s）：%s"
-            % (dag_path, exc)) from exc
+            messages.CLI_TASK_CREATE_DAG_PARSE_ERROR % (dag_path, exc)
+        ) from exc
     if isinstance(document, list):
         nodes = document
     elif isinstance(document, dict):
@@ -1152,15 +1115,15 @@ def _load_dag_nodes(dag_path):
         nodes = None
     if not isinstance(nodes, list):
         raise ValueError(
-            "task-create：DAG JSON 顶层必须是节点数组或含 nodes 数组的"
-            " JSON 对象，%r 顶层为 %s"
+            messages.CLI_TASK_CREATE_DAG_TOP_INVALID
             % (dag_path, type(document).__name__))
     errors = []
     for node in nodes:
         errors.extend(work_unit.validate_node(node))
     errors.extend(dependency.graph_errors(nodes))
     if errors:
-        raise ValueError("task-create：%s" % "；".join(errors))
+        raise ValueError(
+            messages.CLI_TASK_CREATE_DAG_ERRORS % "; ".join(errors))
     return nodes
 
 
@@ -1176,14 +1139,14 @@ def _task_create(repo_root, task_id, goal, mode, assurance,
     from runtime import task  # 函数内 import：monkeypatch 友好
     if not isinstance(goal, str) or goal == "":
         raise ValueError(
-            "task-create：goal 必须是非空字符串，得到 %r" % (goal,))
+            messages.CLI_TASK_CREATE_GOAL_EMPTY % (goal,))
     if mode not in state.ROUTE_MODES:
         raise ValueError(
-            "task-create：mode %r 不在合法取值内（%s）"
+            messages.CLI_TASK_CREATE_MODE_INVALID
             % (mode, ", ".join(state.ROUTE_MODES)))
     if assurance not in state.ASSURANCE_LEVELS:
         raise ValueError(
-            "task-create：assurance %r 不在合法取值内（%s）"
+            messages.CLI_TASK_CREATE_ASSURANCE_INVALID
             % (assurance, ", ".join(state.ASSURANCE_LEVELS)))
     dag_nodes = _load_dag_nodes(dag_path) if dag_path is not None else ()
     try:
@@ -1214,17 +1177,16 @@ def _record_validation(repo_root, task_id, raw_status, summary=None,
     from runtime import task  # 函数内 import：monkeypatch 友好
     if raw_status not in state.VALIDATION_STATUSES:
         raise ValueError(
-            "record-validation：status %r 不在合法取值内（%s）"
+            messages.CLI_RECORD_VALIDATION_STATUS_INVALID
             % (raw_status, ", ".join(state.VALIDATION_STATUSES)))
     if summary is not None and summary == "":
         raise ValueError(
-            "record-validation：summary 必须是非空字符串（省略即 None）")
+            messages.CLI_RECORD_VALIDATION_SUMMARY_EMPTY)
     if commands is not None:
         for item in commands:
             if not isinstance(item, str) or item == "":
                 raise ValueError(
-                    "record-validation：commands 的各项必须是非空字符串"
-                    "（--commands 每次恰一条命令）")
+                    messages.CLI_RECORD_VALIDATION_COMMANDS_EMPTY)
     try:
         st = task.record_validation(repo_root, task_id, raw_status,
                                     summary=summary, commands=commands)
@@ -1247,7 +1209,8 @@ def _task_terminal(repo_root, task_id, finish_func, func_name) -> int:
     except ValueError as exc:
         if _is_structural_state_rejection(exc):
             raise  # 盘上 state 结构性拒绝 → 校验拒绝（退出码 2）
-        raise _TaskRejected("%s：%s" % (func_name, exc)) from exc
+        raise _TaskRejected(
+            messages.CLI_TASK_REJECTED_WRAP % (func_name, exc)) from exc
     _emit({"task_id": task_id, "status": st.get("status")})
     return 0
 
@@ -1297,7 +1260,7 @@ def _task_record_workflow_run(repo_root, task_id, run_id) -> int:
     from runtime import task  # 函数内 import：monkeypatch 友好
     if not isinstance(run_id, str) or run_id == "":
         raise ValueError(
-            "task-record-workflow-run：run-id 必须是非空字符串，得到 %r"
+            messages.CLI_TASK_RECORD_WORKFLOW_RUN_RUN_ID_EMPTY
             % (run_id,))
     try:
         st = task.record_workflow_run(repo_root, task_id, run_id)
@@ -1313,82 +1276,76 @@ def _task_record_workflow_run(repo_root, task_id, run_id) -> int:
 def _dispatch(args) -> int:
     """argv 分发；子命令 / 参数个数错误抛 _UsageError（退出码 2）。"""
     if not args:
-        raise _UsageError("缺少子命令。" + USAGE)
+        raise _UsageError(messages.CLI_USAGE_MISSING_SUBCOMMAND + USAGE)
     cmd, rest = args[0], args[1:]
     if cmd == "review-record":
         if len(rest) not in (4, 5):
             raise _UsageError(
-                "review-record 需要 <repo_root> <task_id> <reviewer> "
-                "<verdict> [note] 四或五个参数。" + USAGE)
+                messages.CLI_USAGE_REVIEW_RECORD + USAGE)
         return _review_record(
             rest[0], rest[1], rest[2], rest[3],
             rest[4] if len(rest) == 5 else None)
     if cmd == "quota-resolve":
         if len(rest) not in (1, 2):
             raise _UsageError(
-                "quota-resolve 需要 <repo_root> [--force-refresh] 一或"
-                "两个参数。" + USAGE)
+                messages.CLI_USAGE_QUOTA_RESOLVE + USAGE)
         force_refresh = False
         if len(rest) == 2:
             if rest[1] != "--force-refresh":
                 raise _UsageError(
-                    "quota-resolve 的可选参数只接受 --force-refresh。"
+                    messages.CLI_USAGE_QUOTA_RESOLVE_FLAG
                     + USAGE)
             force_refresh = True
         return _quota_resolve(rest[0], force_refresh=force_refresh)
     if cmd == "quota-wait":
         if len(rest) not in (2, 3):
             raise _UsageError(
-                "quota-wait 需要 <repo_root> <task_id> "
-                "[--force-refresh] 两或三个参数。" + USAGE)
+                messages.CLI_USAGE_QUOTA_WAIT + USAGE)
         force_refresh = False
         if len(rest) == 3:
             if rest[2] != "--force-refresh":
                 raise _UsageError(
-                    "quota-wait 的可选参数只接受 --force-refresh。"
+                    messages.CLI_USAGE_QUOTA_WAIT_FLAG
                     + USAGE)
             force_refresh = True
         return _quota_wait(rest[0], rest[1], force_refresh=force_refresh)
     if cmd == "quota-resume-authorize":
         if len(rest) != 3:
             raise _UsageError(
-                "quota-resume-authorize 需要 <repo_root> <task_id> "
-                "<max_resumes> 三个参数。" + USAGE)
+                messages.CLI_USAGE_QUOTA_RESUME_AUTHORIZE + USAGE)
         return _quota_resume_authorize(rest[0], rest[1], rest[2])
     if cmd == "quota-resume-decision":
         if len(rest) not in (2, 3):
             raise _UsageError(
-                "quota-resume-decision 需要 <repo_root> <task_id> "
-                "[--force-refresh] 两或三个参数。" + USAGE)
+                messages.CLI_USAGE_QUOTA_RESUME_DECISION + USAGE)
         force_refresh = False
         if len(rest) == 3:
             if rest[2] != "--force-refresh":
                 raise _UsageError(
-                    "quota-resume-decision 的可选参数只接受 "
-                    "--force-refresh。" + USAGE)
+                    messages.CLI_USAGE_QUOTA_RESUME_DECISION_FLAG
+                    + USAGE)
             force_refresh = True
         return _quota_resume_decision(rest[0], rest[1],
                                       force_refresh=force_refresh)
     if cmd == "quota-resume-confirm":
         if len(rest) != 2:
             raise _UsageError(
-                "quota-resume-confirm 需要 <repo_root> <task_id> 两个"
-                "参数。" + USAGE)
+                messages.CLI_USAGE_QUOTA_RESUME_CONFIRM + USAGE)
         return _quota_resume_confirm(rest[0], rest[1])
     if cmd == "v24-compile":
         # 位置参数 <dag-json> + 旗标对（--task-ref <id> / --out <path>，
         # 各至多一次、顺序不限）→ 一、三或五个参数
         if len(rest) not in (1, 3, 5):
             raise _UsageError(
-                "v24-compile 需要 <dag-json> [--task-ref <id>] "
-                "[--out <path>] 一、三或五个参数。" + USAGE)
+                messages.CLI_USAGE_V24_COMPILE + USAGE)
         task_ref = None
         out_path = None
         index = 1
         while index < len(rest):
             if index + 1 >= len(rest):
                 raise _UsageError(
-                    "v24-compile 的旗标 %r 缺少取值。" % rest[index]
+                    messages.CLI_USAGE_V24_COMPILE_FLAG_VALUE
+                    % rest[index]
                     + USAGE)
             flag, value = rest[index], rest[index + 1]
             if flag == "--task-ref" and task_ref is None:
@@ -1397,28 +1354,25 @@ def _dispatch(args) -> int:
                 out_path = value
             else:
                 raise _UsageError(
-                    "v24-compile 的可选参数只接受 --task-ref <id> 与 "
-                    "--out <path>（各至多一次）。" + USAGE)
+                    messages.CLI_USAGE_V24_COMPILE_FLAGS + USAGE)
             index += 2
         return _v24_compile(rest[0], task_ref=task_ref, out_path=out_path)
     if cmd == "writer-acquire":
         if len(rest) not in (2, 4):
             raise _UsageError(
-                "writer-acquire 需要 <repo_root> <task_id> "
-                "[--run-id <id>] 两或四个参数。" + USAGE)
+                messages.CLI_USAGE_WRITER_ACQUIRE + USAGE)
         run_id = None
         if len(rest) == 4:
             if rest[2] != "--run-id":
                 raise _UsageError(
-                    "writer-acquire 的可选参数只接受 --run-id <id>。"
+                    messages.CLI_USAGE_WRITER_ACQUIRE_FLAG
                     + USAGE)
             run_id = rest[3]
         return _writer_acquire(rest[0], rest[1], run_id=run_id)
     if cmd == "writer-release":
         if len(rest) < 2 or len(rest) > 5:
             raise _UsageError(
-                "writer-release 需要 <repo_root> <task_id> "
-                "[--run-id <id>] [--force] 两到五个参数。" + USAGE)
+                messages.CLI_USAGE_WRITER_RELEASE + USAGE)
         run_id = None
         force = False
         index = 2
@@ -1427,39 +1381,39 @@ def _dispatch(args) -> int:
             if flag == "--force":
                 if force:
                     raise _UsageError(
-                        "writer-release 的 --force 至多出现一次。" + USAGE)
+                        messages.CLI_USAGE_WRITER_RELEASE_FORCE_ONCE
+                        + USAGE)
                 force = True
                 index += 1
             elif flag == "--run-id":
                 if index + 1 >= len(rest):
                     raise _UsageError(
-                        "writer-release 的 --run-id 需要恰一个取值。"
+                        messages.CLI_USAGE_WRITER_RELEASE_RUN_ID_VALUE
                         + USAGE)
                 if run_id is not None:
                     raise _UsageError(
-                        "writer-release 的 --run-id 至多出现一次。" + USAGE)
+                        messages.CLI_USAGE_WRITER_RELEASE_RUN_ID_ONCE
+                        + USAGE)
                 run_id = rest[index + 1]
                 index += 2
             else:
                 raise _UsageError(
-                    "writer-release 的可选参数只接受 --run-id <id> 与 "
-                    "--force。" + USAGE)
+                    messages.CLI_USAGE_WRITER_RELEASE_FLAGS + USAGE)
         return _writer_release(rest[0], rest[1], run_id=run_id, force=force)
     if cmd == "writer-show":
         if len(rest) != 1:
             raise _UsageError(
-                "writer-show 需要 <repo_root> 一个参数。" + USAGE)
+                messages.CLI_USAGE_WRITER_SHOW + USAGE)
         return _writer_show(rest[0])
     if cmd == "v24-record-run":
         if len(rest) not in (2, 4):
             raise _UsageError(
-                "v24-record-run 需要 <task_ref> <run-id> "
-                "[--artifact <path>] 两或四个参数。" + USAGE)
+                messages.CLI_USAGE_V24_RECORD_RUN + USAGE)
         artifact = None
         if len(rest) == 4:
             if rest[2] != "--artifact":
                 raise _UsageError(
-                    "v24-record-run 的可选参数只接受 --artifact <path>。"
+                    messages.CLI_USAGE_V24_RECORD_RUN_FLAG
                     + USAGE)
             artifact = rest[3]
         return _v24_record_run(rest[0], rest[1], artifact=artifact)
@@ -1469,9 +1423,7 @@ def _dispatch(args) -> int:
         # 顺序不限）→ 一、三、五或七个参数
         if len(rest) not in (1, 3, 5, 7):
             raise _UsageError(
-                "workflow-model-select 需要 <models-json> "
-                "[--model <exact-id>] [--task-ref <task_id>] "
-                "[--repo-root <path>] 一、三、五或七个参数。" + USAGE)
+                messages.CLI_USAGE_WORKFLOW_MODEL_SELECT + USAGE)
         model = None
         task_ref = None
         repo_root = None
@@ -1479,7 +1431,7 @@ def _dispatch(args) -> int:
         while index < len(rest):
             if index + 1 >= len(rest):
                 raise _UsageError(
-                    "workflow-model-select 的旗标 %r 缺少取值。"
+                    messages.CLI_USAGE_WORKFLOW_MODEL_SELECT_FLAG_VALUE
                     % rest[index] + USAGE)
             flag, value = rest[index], rest[index + 1]
             if flag == "--model" and model is None:
@@ -1490,9 +1442,8 @@ def _dispatch(args) -> int:
                 repo_root = value
             else:
                 raise _UsageError(
-                    "workflow-model-select 的可选参数只接受 "
-                    "--model <exact-id>、--task-ref <task_id> 与 "
-                    "--repo-root <path>（各至多一次）。" + USAGE)
+                    messages.CLI_USAGE_WORKFLOW_MODEL_SELECT_FLAGS
+                    + USAGE)
             index += 2
         return _workflow_model_select(rest[0], model=model,
                                       task_ref=task_ref,
@@ -1500,40 +1451,35 @@ def _dispatch(args) -> int:
     if cmd == "worker-model-pin":
         if len(rest) != 3:
             raise _UsageError(
-                "worker-model-pin 需要 <repo_root> <task_id> "
-                "<exact-id> 三个参数。" + USAGE)
+                messages.CLI_USAGE_WORKER_MODEL_PIN + USAGE)
         return _worker_model_pin(rest[0], rest[1], rest[2])
     if cmd == "quota-automation-bind":
         if len(rest) != 3:
             raise _UsageError(
-                "quota-automation-bind 需要 <repo_root> <task_id> "
-                "<automation_id> 三个参数。" + USAGE)
+                messages.CLI_USAGE_QUOTA_AUTOMATION_BIND + USAGE)
         return _quota_automation_bind(rest[0], rest[1], rest[2])
     if cmd == "quota-automation-clear":
         if len(rest) not in (2, 3):
             raise _UsageError(
-                "quota-automation-clear 需要 <repo_root> <task_id> "
-                "[automation_id] 两或三个参数。" + USAGE)
+                messages.CLI_USAGE_QUOTA_AUTOMATION_CLEAR + USAGE)
         return _quota_automation_clear(
             rest[0], rest[1], rest[2] if len(rest) == 3 else None)
     if cmd == "quota-continuity-preflight":
         if len(rest) != 2:
             raise _UsageError(
-                "quota-continuity-preflight 需要 <repo_root> <task_id> "
-                "两个参数。" + USAGE)
+                messages.CLI_USAGE_QUOTA_CONTINUITY_PREFLIGHT + USAGE)
         return _quota_continuity_preflight(rest[0], rest[1])
     if cmd == "task-create":
         # 位置参数 <repo_root> <task_id> <goal> <mode> <assurance> +
         # 可选旗标对 --dag <path> → 五或七个参数
         if len(rest) not in (5, 7):
             raise _UsageError(
-                "task-create 需要 <repo_root> <task_id> <goal> <mode> "
-                "<assurance> [--dag <path>] 五或七个参数。" + USAGE)
+                messages.CLI_USAGE_TASK_CREATE + USAGE)
         dag_path = None
         if len(rest) == 7:
             if rest[5] != "--dag":
                 raise _UsageError(
-                    "task-create 的可选参数只接受 --dag <path>。" + USAGE)
+                    messages.CLI_USAGE_TASK_CREATE_FLAG + USAGE)
             dag_path = rest[6]
         return _task_create(rest[0], rest[1], rest[2], rest[3], rest[4],
                             dag_path=dag_path)
@@ -1543,9 +1489,7 @@ def _dispatch(args) -> int:
         # 一条命令）——旗标恒成对出现在位置参数之后
         if len(rest) < 3 or (len(rest) - 3) % 2 != 0:
             raise _UsageError(
-                "record-validation 需要 <repo_root> <task_id> "
-                "<passed|failed> [--summary <s>] [--commands <s>] ..."
-                "（旗标成对出现）。" + USAGE)
+                messages.CLI_USAGE_RECORD_VALIDATION + USAGE)
         summary = None
         commands = []
         index = 3
@@ -1557,9 +1501,7 @@ def _dispatch(args) -> int:
                 commands.append(value)
             else:
                 raise _UsageError(
-                    "record-validation 的可选参数只接受 --summary <s>"
-                    "（至多一次）与 --commands <s>（可重复，每次恰一条"
-                    "命令）。" + USAGE)
+                    messages.CLI_USAGE_RECORD_VALIDATION_FLAGS + USAGE)
             index += 2
         return _record_validation(rest[0], rest[1], rest[2],
                                   summary=summary,
@@ -1567,37 +1509,34 @@ def _dispatch(args) -> int:
     if cmd == "task-complete":
         if len(rest) != 2:
             raise _UsageError(
-                "task-complete 需要 <repo_root> <task_id> 两个参数。"
-                + USAGE)
+                messages.CLI_USAGE_TASK_COMPLETE + USAGE)
         from runtime import task  # 函数内 import：monkeypatch 友好
         return _task_terminal(rest[0], rest[1], task.complete,
                               "task-complete")
     if cmd == "task-fail":
         if len(rest) != 2:
             raise _UsageError(
-                "task-fail 需要 <repo_root> <task_id> 两个参数。" + USAGE)
+                messages.CLI_USAGE_TASK_FAIL + USAGE)
         from runtime import task  # 函数内 import：monkeypatch 友好
         return _task_terminal(rest[0], rest[1], task.fail, "task-fail")
     if cmd == "task-cancel":
         if len(rest) != 2:
             raise _UsageError(
-                "task-cancel 需要 <repo_root> <task_id> 两个参数。"
-                + USAGE)
+                messages.CLI_USAGE_TASK_CANCEL + USAGE)
         from runtime import task  # 函数内 import：monkeypatch 友好
         return _task_terminal(rest[0], rest[1], task.cancel, "task-cancel")
     if cmd == "exit-waiting":
         if len(rest) != 2:
             raise _UsageError(
-                "exit-waiting 需要 <repo_root> <task_id> 两个参数。"
-                + USAGE)
+                messages.CLI_USAGE_EXIT_WAITING + USAGE)
         return _exit_waiting(rest[0], rest[1])
     if cmd == "task-record-workflow-run":
         if len(rest) != 3:
             raise _UsageError(
-                "task-record-workflow-run 需要 <repo_root> <task_id> "
-                "<run-id> 三个参数。" + USAGE)
+                messages.CLI_USAGE_TASK_RECORD_WORKFLOW_RUN + USAGE)
         return _task_record_workflow_run(rest[0], rest[1], rest[2])
-    raise _UsageError("未知子命令 %r。" % cmd + USAGE)
+    raise _UsageError(
+        messages.CLI_USAGE_UNKNOWN_SUBCOMMAND % cmd + USAGE)
 
 
 def main(argv=None) -> int:
@@ -1638,7 +1577,8 @@ def main(argv=None) -> int:
         _emit({"error": str(exc)})
         return 1
     except Exception as exc:  # 意外兜底
-        _emit({"error": "%s: %s" % (type(exc).__name__, exc)})
+        _emit({"error": messages.CLI_UNEXPECTED_ERROR
+               % (type(exc).__name__, exc)})
         return 1
 
 

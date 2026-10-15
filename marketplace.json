@@ -4,9 +4,17 @@
   "plugins": [
     {
       "name": "glm-conductor",
-      "version": "2.6.0",
+      "version": "2.6.1",
       "source": "./plugins/glm-conductor",
-      "description": "Main-session (host model) architect with selective routing (Delegability x Assurance): delegated work compiles from a canonical DAG into ZCode Native Workflows, fresh-context read-only reviewers cover high-assurance routes, and minimal deterministic guarantees (change_id, ownership scope, writer guard, completion guard) plus optional user-authorized bounded quota resume keep delegated work verifiable and recoverable"
+      "description": "Main-session (host model) architect with selective routing (Delegability x Assurance): delegated work compiles from a canonical DAG into ZCode Native Workflows, fresh-context read-only reviewers cover high-assurance routes, and minimal deterministic guarantees (change_id, ownership scope, writer guard, completion guard) plus optional user-authorized bounded quota resume keep delegated work verifiable and recoverable",
+      "displayName": "GLM Conductor",
+      "displayName_i18n": {
+        "zh-CN": "GLM Conductor"
+      },
+      "description_i18n": {
+        "zh-CN": "面向 ZCode 中 GLM 编码智能体的选择性路由、原生 Workflow 执行、最小确定性保障与可选有界额度恢复。"
+      },
+      "category": "developer-tools"
     }
   ]
 }

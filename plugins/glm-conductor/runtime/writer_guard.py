@@ -51,8 +51,10 @@
     仓库不变式在并发下成立；读侧永不见撕裂文件。
 
 依赖：
-    仅 Python 3 标准库 + runtime.durable_io；3.7 兼容语法（注解引号
-    形式）；无 per-unit 语义、无 scheduler / epoch 概念。
+    仅 Python 3 标准库 + runtime.durable_io
+    + runtime.messages（v2.6.1 W3a 单源：结构校验消息常量）；
+    3.7 兼容语法（注解引号形式）；无 per-unit 语义、无 scheduler /
+    epoch 概念。
 
 来源：
     v2.4 Phase 1 工作包 P1-E（docs/roadmap/V2_4_PHASE_1_*.md，单元 U5）。
@@ -61,7 +63,7 @@
 import os
 from datetime import datetime, timezone
 
-from runtime import durable_io
+from runtime import durable_io, messages
 
 
 class WriterGuardError(Exception):
@@ -92,8 +94,7 @@ def _validate_task_id(task_id) -> None:
     """task_id 结构校验：必须是非空字符串（id 由调用方供给，本模块不造）。"""
     if not isinstance(task_id, str) or task_id == "":
         raise WriterGuardError(
-            "writer_guard：task_id 必须是非空字符串（由调用方供给），得到 %r"
-            % (task_id,))
+            messages.WRITER_GUARD_TASK_ID_INVALID % (task_id,))
 
 
 def _validate_workflow_run_id(workflow_run_id) -> None:
@@ -101,8 +102,7 @@ def _validate_workflow_run_id(workflow_run_id) -> None:
     if workflow_run_id is not None and (
             not isinstance(workflow_run_id, str) or workflow_run_id == ""):
         raise WriterGuardError(
-            "writer_guard：workflow_run_id 必须是 None 或非空字符串，得到 %r"
-            % (workflow_run_id,))
+            messages.WRITER_GUARD_RUN_ID_INVALID % (workflow_run_id,))
 
 
 def _holder_record(current):

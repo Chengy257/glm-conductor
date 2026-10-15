@@ -1,45 +1,45 @@
 ---
 name: orchestration
-description: GLM 双轴选择性路由 + 原生 Workflow 编排。主会话任架构师，按 Delegability × Assurance 两个独立维度在首次任务委派前声明 SELECTIVE ROUTE（solo/delegate/audit/full）；任何实施任务启动必经一次强制任务启动问答（单轮三问、零模型判断：跨额度自动唤醒启用与否 + 有界 max_resumes 预算；worker 模型列宿主全部已配置候选、用户显式选定——不限 Flash，Flash 为软推荐位，单一候选也须确认；地板载体间隔默认 1h 可调）——答「启用」落 quota-resume-authorize 与双通道武装序列（地板 CronCreate + 首个精度睡眠，先于 CreateWorkflow），答出模型落 worker-model-pin 任务级 pin；delegate/full 经 v24-compile 把静态节点 DAG 确定性编译为宿主原生 Workflow 源码，由主会话以用户授权的显式 subagent_model 提交执行——提交前必经宿主模型列表 → workflow-model-select 选型硬闸（用户授权显式选型 user-authorized-explicit-selection，Flash 档软推荐，--task-ref 自动取任务级 pin，pin 失效专门拒绝即停，有 pin 任务 --model 必须与 pin 一致），选型失败绝不 CreateWorkflow、绝不省略 subagent_model、绝不继承主会话模型（writer-acquire 取仓库写预约 → 记录 run 关联 → 等待结构化结果）；实施完成后主会话亲自验证并经 record-validation 记录，assurance:high 时引入全新上下文的只读审查者并经 review-record 申报裁决；视觉任务走子代理例外通道。适用于构建并验证功能、多步骤交付、前端/视觉任务、需要委派实施或独立代码审查的任务。
+description: GLM orchestration: dual-axis routing (solo/delegate/audit/full), mandatory launch interview (wake, worker model, floor interval), DAG-to-Workflow compilation, validation, high-assurance review. Use for implementation, visual work, or code review.
 ---
 
-# GLM 编排：双轴选择性路由 + 原生 Workflow
+# GLM Orchestration: Dual-Axis Selective Routing + Native Workflow
 
-## 1. 角色与前置
+## Role and prerequisites
 
-主会话担任架构师。主模型继承宿主主会话、不可编程切换——Conductor 绝不要求、也绝不检查主会话的具体模型名，模型能力强弱与模态能力绝不仅凭名字或版本号断言。以下职责保留在主会话，不外派：
+The main session is the architect. The main model inherits the host main session and is not programmatically switchable — Conductor never requires and never inspects the main session's concrete model name, and never judges model strength or modality capability from a name or version alone. The following duties stay in the main session and are never delegated:
 
-- 需求与歧义解决
-- 架构与路由判断
-- 任务分解（静态 DAG 编制）
-- 实施规格与节点声明编写
-- 完整 diff 检查与验证重跑（主验证）
-- 路由重估决策
-- 最终验收与完成申报
+- requirements and ambiguity resolution
+- architecture and routing judgment
+- task decomposition (static DAG authoring)
+- implementation specs and node declarations
+- full-diff inspection and verification re-runs (main validation)
+- route reassessment decisions
+- final acceptance and completion declaration
 
-子智能体只能实施或审查，不得成为新的编排者。§6.0 启动问答对架构/规划/验证软性建议强档模型——仅是建议：用户选择其他已配置模型时不阻塞、不拒绝、不检查主会话模型名。
+Subagents may only implement or review; they never become a new orchestrator.
 
-分工边界（v2.4 冻结）：GLM Conductor 拥有语义编排与验收（路由、DAG、验证、审查、完成守卫）；ZCode 拥有执行编排（Workflow 运行、子代理生命周期、调度）。Conductor 不镜像宿主执行状态。
+Division of labor: GLM Conductor owns semantic orchestration and acceptance (routing, DAG, validation, review, completion guard); ZCode owns execution orchestration (workflow runs, subagent lifecycle, scheduling). Conductor never mirrors host execution state.
 
-## 2. 双轴路由判断
+## Two-axis routing
 
-不要把所有状态压缩成一个风险等级。先独立回答两个问题，再查路由矩阵：
+Do not compress all situation state into a single risk level. Answer two questions independently, then consult the routing matrix:
 
-**轴 A — Delegability（可委派性）**：剩余的实施工作是否足够有界、规格足够完备，可以委派出去？
+**Axis A — Delegability**: is the remaining implementation bounded and specification-complete enough to delegate?
 
-**轴 B — Assurance（保障等级）**：实施完成并通过主会话验证后，是否需要一次全新上下文的独立终审？
+**Axis B — Assurance**: once implementation passes main-session validation, does the task need one independent final review from a fresh context?
 
-两轴独立判断，互不推导。判据全表见 references/role-contracts.md。
+The two axes are judged independently; neither derives from the other. The full criteria table lives in references/role-contracts.md.
 
-## 3. ROUTING PREFLIGHT（路由前置侦察）
+## ROUTING PREFLIGHT
 
-PREFLIGHT 不是路由，是路由的证据准备：双轴判断前若关键事实未知，先用只读侦察补齐，不用弱证据强行提前定路由。
+PREFLIGHT is not routing — it is evidence preparation for routing: when key facts are unknown before the dual-axis judgment, close them with read-only reconnaissance first; never fix the route early on weak evidence.
 
-**触发条件**（以下任一未知即触发）：根因 / 实施边界 / ownership 集合 / 接口契约 / 验证方案 / 隐藏耦合风险。任务已经显式（上述全部已知）时跳过——不为侦察而侦察。
+**Triggers** (any unknown item triggers it): root cause / implementation boundary / ownership set / interface contracts / verification plan / hidden coupling risk. Skip when the task is already explicit (all items known) — never reconnoiter for its own sake.
 
-**执行方式**：优先用 ZCode 内置只读 Explore 能力，必要时主会话亲自读码；不新增自定义侦察代理。侦察只读，不改动仓库。
+**Method**: prefer ZCode's built-in read-only Explore capability; the main session reads code itself when needed. No custom reconnaissance agents are added. Reconnaissance is read-only and never modifies the repository.
 
-**产出**（侦察完成后、SELECTIVE ROUTE 声明前输出；模板逐字，条目全部来自实际观察——文件/符号/调用链证据，不得包含推测性事实；OPEN AMBIGUITY 留空表示无未决歧义）：
+**Output** (after reconnaissance, before the SELECTIVE ROUTE declaration; template verbatim; every entry comes from actual observation — file/symbol/call-graph evidence, never speculative facts; an empty OPEN AMBIGUITY means no open ambiguity):
 
 ```
 ROUTING PREFLIGHT REPORT
@@ -63,21 +63,21 @@ OPEN AMBIGUITY:
 - ...
 ```
 
-该报告直接喂给双轴判断（§2）、TASK CONTEXT PACK 与静态节点声明（§5 / references/role-contracts.md）。
+The report feeds the dual-axis judgment ('Two-axis routing'), the TASK CONTEXT PACK, and the static node declarations ('Task state and static DAG authoring' / references/role-contracts.md).
 
-## 4. SELECTIVE ROUTE 声明
+## SELECTIVE ROUTE declaration
 
-在任何实施委派（CreateWorkflow 提交或子智能体调用）之前必须输出一次（原样保留代码块）：
+Output once before any implementation delegation (a CreateWorkflow submission or a subagent invocation); keep the code block verbatim:
 
 ```
 SELECTIVE ROUTE
 mode: solo | delegate | audit | full
 delegability: low | high
 assurance: standard | high
-reason: <简明的、基于证据的理由>
+reason: <concise, evidence-based reason>
 ```
 
-示例：
+Example:
 
 ```
 SELECTIVE ROUTE
@@ -87,190 +87,149 @@ assurance: standard
 reason: implementation is bounded by explicit interfaces, owned files, and deterministic verification
 ```
 
-声明之前不得委派任何实施。delegability 是轴 A 的判断记录；进入任务状态（state.json）的只有 mode 与 assurance 两键（`runtime.task.create_task` 摘取口径，v2.4 schema 不持久化其余轴）。
+Never delegate any implementation before the declaration. `delegability` records the Axis-A judgment; only the two keys mode and assurance enter task state (state.json) — `runtime.task.create_task` extracts exactly those two keys, and the task schema does not persist the other axis.
 
-## 5. 任务状态与静态 DAG 编制
+## Task state and static DAG authoring
 
-### 5.1 任务创建
+### Task creation
 
-需要完成守卫保护的任务（delegate/full、audit，以及任何跨回合的长任务）在声明 SELECTIVE ROUTE 后、经 §6.0 启动问答创建任务状态：
+Tasks needing completion-guard protection (delegate/full, audit, and any cross-turn long task) create task state after the SELECTIVE ROUTE declaration and through the 'Task launch interview':
 
-- 入口（CLI 具名命令）：`cli.py task-create <repo_root> <task_id> <goal> <mode> <assurance> [--dag <path>]`（校验后落 `.glm-conductor/tasks/<task-id>/state.json` + journal `route_selected` 事件；route 只存 mode 与 assurance 两键；--dag 读 DAG JSON 文件，兼容 v24-compile 同款格式）
-- TASK_ID 用「语义前缀 + 随机十六进制后缀」机械唯一格式（规则见 continuity 技能）
-- 启动问答（§6.0）对任何实施任务强制——纯会话内小任务同样被问（零判断的已接受代价）；其中问答确认无需守卫的任务可不建 state.json（问答答「不启用」且路由为 solo 时自然如此）——无状态文件时完成守卫零干预
+- Entry (named CLI command): `cli.py task-create <repo_root> <task_id> <goal> <mode> <assurance> [--dag <path>]` (after validation writes `.glm-conductor/tasks/<task-id>/state.json` + a journal `route_selected` event; the route stores only mode and assurance; `--dag` reads a DAG JSON file in the same format v24-compile accepts)
+- TASK_ID uses the mechanically unique "semantic prefix + random hex suffix" format (rules in the continuity skill section 'Task state and runtime files')
+- The 'Task launch interview' is mandatory for every implementation task — pure small in-session tasks are asked too (the accepted cost of zero judgment); tasks the interview confirms as guard-free need no state.json (the natural outcome of answering "not enable" with a solo route) — with no state file the completion guard does zero intervention.
 
-### 5.2 静态节点（Work Unit = 编译期声明）
+### Static nodes (Work Unit = compile-time declaration)
 
-delegate/full 需要多段实施时，把任务分解为静态节点 DAG。节点只声明编译期事实，零运行时状态（`runtime/work_unit.py` 为权威形状）：
+When delegate/full work needs multiple stages, decompose it into a static node DAG. Nodes declare compile-time facts only, zero runtime state (`runtime/work_unit.py` is the authoritative shape):
 
-| 节点字段 | 必填 | 语义（五段语义的落点） |
+| Node field | Required | Meaning |
 | --- | --- | --- |
-| `id` | 必填 | 节点标识，单 DAG 内唯一 |
-| `objective` | 必填 | 有界实施目标（对应五段规格 OBJECTIVE） |
-| `depends_on` | 必填 | 前置节点 id 数组——纯 DAG：禁止环、自依赖、缺失引用 |
-| `ownership` | 必填 | 仓库相对路径 scope 数组，非空（对应 FILES AND OWNERSHIP） |
-| `interfaces` | 可选 | 须保持兼容的接口面 |
-| `constraints` | 可选 | 额外约束（仓库规范、安全边界、排除范围） |
-| `local_check` | 可选 | 本地检查命令（worker 诚实执行，为空不虚构） |
+| `id` | yes | node identifier, unique within one DAG |
+| `objective` | yes | bounded implementation goal (maps to the five-part OBJECTIVE) |
+| `depends_on` | yes | array of predecessor node ids — pure DAG: cycles, self-dependencies and missing references are forbidden |
+| `ownership` | yes | non-empty array of repo-relative path scopes (maps to FILES AND OWNERSHIP) |
+| `interfaces` | optional | interface surfaces that must stay compatible |
+| `constraints` | optional | extra constraints (repo conventions, safety boundaries, exclusions) |
+| `local_check` | optional | local check commands (the worker executes them honestly; empty means none are invented) |
 
-编制纪律：
+Authoring discipline:
 
-- **每个节点必须仍然小到能接收一个完整的有界 objective**——需要再拆说明分解不足；无文件范围（ownership 空）的节点不可编译
-- 依赖只表达编译期顺序事实；编译器把无依赖冲突的节点并入同一阶段并行、其余串行（`ownership.plan_stages`：scope 明确重叠的候选确定性串行，歧义冲突直接拒绝）
-- **两个并发实施的节点 ownership 不得重叠**——这是唯一需要的并行安全声明；写相互斥由仓库写者守卫（§6）兜底
-- 五段式实施规格模板（OBJECTIVE / FILES AND OWNERSHIP / INTERFACES / CONSTRAINTS / VERIFICATION）仍是节点声明的思维框架与视觉通道的交付格式，见 references/role-contracts.md
-- **节点对应交付物，不对应实施步骤（编制反模式）**：objective 只能用「交付了什么」表述；写不出交付物、只列得出步骤序（先 / 再 / 然后）的是步骤型节点，应向上合并；节点内的实施顺序由 worker 自主决定
+- **Every node must stay small enough to receive one complete bounded objective** — needing a further split means decomposition was insufficient; a node with no file scope (empty ownership) is not compilable.
+- Dependencies express compile-time order facts only; the compiler merges nodes without conflicting dependencies into the same stage in parallel and runs the rest serially (`ownership.plan_stages`: candidates with clearly overlapping scopes go deterministically serial; ambiguous conflicts are rejected outright).
+- **Two concurrently implementing nodes must not overlap ownership** — this is the only parallel-safety declaration required; mutual write exclusion is backstopped by the repository writer guard ('Execution procedure for delegate/full').
+- The five-part implementation spec template (OBJECTIVE / FILES AND OWNERSHIP / INTERFACES / CONSTRAINTS / VERIFICATION) remains the thinking frame for node declarations and the delivery format of the visual channel; see references/role-contracts.md.
+- **Nodes map to deliverables, not implementation steps (authoring anti-pattern)**: an objective may only be phrased as "what gets delivered"; if no deliverable can be stated and only a step sequence (first / then / next) can be listed, it is a step-type node and must be merged upward; in-node implementation order is the worker's own decision.
 
-## 6. delegate/full 的执行程序（原生 Workflow）
+## Execution procedure for delegate/full
 
-delegate/full 的唯一实施基底是 ZCode 原生 Workflow。主会话按以下固定顺序执行（运行时调用一律走 CLI：`python3 plugins/glm-conductor/runtime/cli.py <子命令>`，退出码 0=成功 / 2=校验拒绝 / 1=运行期拒绝；禁止 `python3 -c` 拼复杂内联脚本）：
+The only implementation substrate for delegate/full is a ZCode Native Workflow. The main session follows the fixed order below. Runtime calls always go through the runtime CLI named subcommands: `python3 plugins/glm-conductor/runtime/cli.py <subcommand>` — exit codes 0 = success / 2 = validation rejection (including a preflight ready=false block) / 1 = runtime rejection. The authoritative command list is the USAGE at the top of cli.py: never hunt for commands yourself, never invent `python3 -c` inline scripts, and never use command forms outside USAGE.
 
-### 6.0 任务启动问答（launch interview，v2.5.2）
+### Task launch interview
 
-**触发点在 create_task 之前，触发零模型判断（v2.5.2 D3 强制化）**：凡将启动实施的任务**必问一次**——任何实施任务都问，**没有豁免条款**（v2.5 的「纯会话内小任务不问」豁免已删除：零判断的代价是极小任务也被问一次，已接受）。问答是实施启动的强制入口，不是可选礼貌；唤醒轮 / 恢复轮绝不弹问（见节尾）。
+**The trigger point precedes create_task, with zero model judgment**: every task about to start implementation is asked exactly once — all implementation tasks are asked, **there is no exemption** (the interview is the mandatory entry to implementation start, not optional politeness; the accepted cost of zero judgment is that even minimal tasks get asked once). Wake turns / resume turns never interview (the boundary rule is at the end of this section).
 
-**单轮三问（AskUserQuestion 单轮三问合并，绝不拆成多轮）**：
+**Single round of three questions (merged into one AskUserQuestion round, never split into multiple rounds)**:
 
-1. **跨额度自动唤醒**：启用 / 不启用。启用时同轮选定**有界 max_resumes 预算选项**（预算必须显式有界，绝不无界授权）；不启用即 manual 连续性（额度耗尽即停，等用户回来）。
-2. **worker 模型**（凡有实施委派的任务必问；solo 无委派不问无关的 worker 选择）：问询前已活体调宿主模型列表（ListModels），**全部已配置候选入清单**——不限 provider（不限 bigmodel）、不限 Flash；ListModels 的 `levels` 是思考档位（disabled / low / high / max——disabled=关闭推理选项，不影响该模型可用性），仅真正的行级禁用标注才排除并当场与用户确认。展示与收敛（单轮完成、绝不拆多轮）：候选 ≤4 个时直接作 AskUserQuestion 选项；**候选 >4 个时在题干文本列全清单**（每个候选给出完整精确的 provider 全限定 id + 一句域说明——已知的套餐/成本/能力备注如实写，无据可查标 unknown 绝不虚构），选项收敛为「软推荐项 + Other 自由输入精确 id」。**Flash 档是软推荐位**（有界实施的成本/速度友好档），不是准入条件；**选定模型默认以 max 推理档运行（宿主默认思考档位），档位不随 pin 存储**——pin 只存模型 id。**单一候选也须用户显式确认**，绝不静默自动指派；零合适候选时解释原因并阻塞该角色，绝不静默继承主会话模型、绝不挑别家 provider。主会话模型同题软性建议：架构/规划/验证建议强档模型，仅建议、不阻塞其他已配置选择。
-3. **地板载体间隔**：跨额度唤醒启用时确认地板 recurring 载体的间隔——默认 **1h**（推荐；兜底迟到均值 ~30 分钟），可调（如重要任务 1h、经济任务 4h；**不得等于窗口长度 5h 整**，会与 reset 秒级竞速）。第一题答「不启用」时此题不出现。
+1. **Cross-quota auto wake**: enable / not enable. If enabled, the same round also selects a **bounded max_resumes budget option** (the budget must be explicitly bounded, never an unbounded authorization); not enabled means manual continuity (stop at quota exhaustion and wait for the user to return).
+2. **Worker model** (mandatory for every task with implementation delegation; solo and other no-delegation tasks are not asked the irrelevant worker question): before asking, make a live call to the host model list (ListModels) and put **all configured candidates on the list** — no provider restriction (not only bigmodel) and not only Flash. ListModels `levels` are reasoning tiers (disabled / low / high / max — disabled is the reasoning-off option and does not affect that model's availability); only a genuine row-level disabled flag excludes a candidate, and it is confirmed with the user on the spot. Display and convergence (single round, never multiple rounds): with ≤4 candidates, use them directly as AskUserQuestion options; with >4 candidates, list the full set in the question text (each candidate with its full precise provider-qualified id plus a one-line domain note — known plan/cost/capability remarks are written honestly; anything unverifiable is marked unknown and never fabricated), and the options converge to "the soft recommendation + Other free-text exact id". **The Flash tier is a soft-recommendation slot** (the cost/speed-friendly tier for bounded implementation), not an admission condition; **the selected model defaults to the max reasoning tier (the host default reasoning tier), and the tier is not stored in the pin** — the pin stores the model id only. **A single candidate also requires explicit user confirmation**, never silent auto-assignment; with zero suitable candidates, explain why and block that role — never silently inherit the main-session model and never pick a different provider on your own. The main-session model gets soft advice in the same question: strong-tier models are recommended for architecture/planning/validation — advice only: choosing another configured model triggers no blocking, no refusal, and no main-session model-name check.
+3. **Floor carrier interval**: when cross-quota wake is enabled, confirm the interval of the floor recurring carrier — default **1h** (recommended; mean fallback lateness ~30 minutes), adjustable (e.g. 1h for important tasks, 4h for economical ones; **it must not equal the window length of a full 5h**, which races the reset at second granularity). When question 1 is "not enable", this question does not appear.
 
-**答后落盘（三题各自独立落）**：
+**After the answers (three independent writes)**:
 
-- 第一题答「启用」→ `quota-resume-authorize <repo_root> <task_id> <max_resumes>`，随后立即走双通道武装序列（§6.2 auto 分支 + continuity「双通道唤醒」节；授权成立后立即 `quota-resume-decision --force-refresh` 取观测 reset_at——任何额度状态都可观测，单一观测口径：最早的有效未来观测 reset，与额度状态无关；地板载体同批建立，存在有效未来 reset 时首个精度睡眠同批发出，全部先于 CreateWorkflow，INV-CONT-01）
-- 第二题选定模型 → `worker-model-pin <repo_root> <task_id> <exact-id>`——写入任务级 worker 模型 pin（state 顶层键 `worker_model`）。**pin 是用户授权的任务级偏好，不是任务身份**（与 §6.1 第 8 条的区分见该节），任务全生命周期默认使用（含唤醒恢复后的新 run 提交）；**pin 只存模型 id、不含思考档位**（选定模型默认以 max 推理档运行）；写入只做形状校验（角色中性——非 Flash 已配置精确 id 同样合法）、不查宿主面，消费必查宿主面（§6.1）
-- 第三题确认值 → 地板 CronCreate 的 `interval` 参数（小时整数；默认 1）——问答确认值即载体终身间隔，创建后不再变更
+- Question 1 "enable" → `quota-resume-authorize <repo_root> <task_id> <max_resumes>`, then immediately the dual-channel arming sequence (auto branch of 'Launch sequence (branch overview)' + the continuity skill section 'Launch sequence (runbook, arm-before-work)'; right after the authorization, `quota-resume-decision --force-refresh` obtains the observed reset_at — any quota status is observable under the single observation rule: the earliest valid future observed reset, regardless of quota status; the floor carrier is established in the same batch, and when a valid future reset exists the first precision sleep is issued in the same batch — all before CreateWorkflow, INV-CONT-01)
+- Question 2 selected model → `worker-model-pin <repo_root> <task_id> <exact-id>` — writes the task-level worker model pin (state top-level key `worker_model`). **The pin is a user-authorized task-level preference, not task identity** (the distinction from rule 8 of 'Worker model selection gate' is stated there); it is the default for the whole task lifetime (including new run submissions after wake resumes); **the pin stores the model id only, no reasoning tier** (the selected model defaults to the max reasoning tier); the write does shape validation only (role-neutral — a configured non-Flash exact id is equally legal) and never checks the host surface; consumption always checks the host surface ('Worker model selection gate').
+- Question 3 confirmed value → the `interval` parameter of the floor CronCreate (integer hours; default 1) — the interview-confirmed value is the carrier's lifetime interval and is never changed after creation.
 
-**交互回合边界**：问答只发生在交互回合；**唤醒轮 / 恢复轮绝不弹问**——无人值守回合遇到本应问答才能解除的阻塞（如 pin 失效）一律 fail closed：阻断提交、转等待用户，绝不以弹问制造死锁。
+**Interaction-turn boundary**: the interview happens only in interactive turns; **wake turns / resume turns never interview** — an unattended turn that hits a blocker only an interview could clear (e.g. a stale pin) fails closed: block the submission and hand over to waiting-for-user; never create a deadlock by asking.
 
-**与 §6.1 的衔接**：第二题凡有实施委派必问（单一候选也须用户显式确认）；完整接续（问答 → pin → `workflow-model-select --task-ref` 自动取 pin）见 §6.1。
+### Worker model selection gate
 
-### 6.1 worker 模型选型硬闸（INV-MODEL-01，用户授权显式选型）
+INV-MODEL-01, user-authorized explicit selection: before every CreateWorkflow submission, a user-authorized explicit worker model selection must be complete. This is a mandatory sequence, not optional advice — a failed step stops, and the next step is never entered in an impaired state. The Flash tier is a **soft recommendation**, not an admission gate: a configured non-Flash exact id authorized by the user (interview confirmation, task pin, or an explicit `--model` value) is equally legal.
 
-每次 CreateWorkflow 提交前必须完成用户显式授权的 worker 模型选型。这是强制序列而非可选建议——前一步失败即停，绝不带病进入下一步。Flash 档是**软推荐**而非准入硬门：已配置的非 Flash 精确 id 经用户授权（问答确认、任务 pin 或 `--model` 显式值）同样合法：
+1. **Call the host model list**: ListModels or an equivalent host model-discovery surface, taking the full set of configured models (model discovery belongs to the host; the runtime never builds its own list). **Recommended path: write the list to a temporary JSON file and pass the file path** (an inline array is only the convenience form for short lists).
+2. **Extract configured exact ids**: keep only provider-qualified `account:<account>/<model>` exact ids (bare aliases are not selectable).
+3. **Run workflow-model-select**: `cli.py workflow-model-select <models-json> [--model <exact-id>] [--task-ref <task-id>] [--repo-root <path>]` (models-json takes a file path or an inline array; --repo-root resolves the task ledger root explicitly and defaults to the current working directory). Value priority: **task pin > explicit `--model` value (must match the pin) > Flash soft-recommendation auto-selection (bare invocations without --task-ref only)** — the task pin is read by `--task-ref` from the `worker_model` persisted by the 'Task launch interview', and a hit is injected as an explicit selection. **For a task with a pin, an explicit `--model` value must match the pin**, and a mismatch is rejected (a plain `--model` must not bypass a task pin; changes go through interactive re-authorization). **`--task-ref` with no pin on the task and no `--model` → rejected and routed back to the 'Task launch interview'** (an interviewed task always has a pin; reaching this state means selection was never authorized — a legacy resume without a pin is never implicitly authorized for a single candidate). A bare invocation without --task-ref and without an explicit value takes the Flash soft-recommendation convenience path: exactly one Flash-tier candidate is auto-selected (**the Flash-tier criterion is version-independent**: the model segment ends with `-Flash`, so future-generation models such as GLM-6-Flash match out of the box — a convenience path, not an admission gate); zero candidates → reject (never a silent fallback); multiple candidates → ambiguous, reject and list all of them (never silently take the first); in an interactive turn, continue at question 2 of the 'Task launch interview': **interview (a single candidate is also confirmed) → persist with `worker-model-pin` → later submissions carry `--task-ref` and auto-read the pin**. **A configured non-Flash exact id is legal**: authorized via an explicit `--model` or injected via a task pin, it is selected (role-neutral shape validation, no tier restriction); bare aliases and unconfigured ids are always rejected.
+4. **Selection failure never proceeds to CreateWorkflow**: a validation rejection (exit code 2) is the hard gate — report the reason and stop this delegation; never guess a fallback and never silently switch to another model.
+5. **Submit with the returned exact subagent_model**: CreateWorkflow's `subagent_model` takes the selection return value verbatim (provider-qualified exact id — user-authorized explicit selection, no tier restriction).
+6. **Never omit subagent_model** — omitting it inherits the main-session model.
+7. **Never select a model through an unauthorized path** — any configured exact id (including non-Flash text models) is legally selected only by explicit user authorization ('Task launch interview' confirmation, a task pin, or an explicit `--model` value); bare aliases and unconfigured ids are always rejected; never fabricate a model id; worker selection is never judged from a model name or version alone.
+8. **Diagnostics may report; identity must not**: diagnostic output may report the actually selected model id (a successful selection returns `{subagent_model, model_policy: "user-authorized-explicit-selection"}` as the submission contract), but model selection is not task identity — never write the selected model into state.json / the journal as a task identifier.
 
-1. **调用宿主模型列表**：ListModels 等宿主模型发现面，取已配置模型全集（模型发现归宿主，runtime 绝不自建模型清单）；**推荐路径：把列表写成临时 JSON 文件再传文件路径**（内联数组仅短列表便捷形态）
-2. **提取配置精确 id**：只保留 provider 全限定 `account:<账户>/<模型>` 形态的精确 id（裸别名不可选）
-3. **跑 workflow-model-select**：`cli.py workflow-model-select <models-json> [--model <exact-id>] [--task-ref <task-id>] [--repo-root <path>]`（models-json 传文件路径或内联数组；--repo-root 显式解析任务账本根，缺省当前工作目录）。取值优先级（v2.6.0）：**任务 pin > `--model` 显式值（必须与 pin 一致）> Flash 软推荐自动选型（仅限不带 --task-ref 的裸调用）**——任务 pin 由 `--task-ref` 从 §6.0 问答落盘的 `worker_model` 读取，命中即注入显式选定；**有 pin 任务的 `--model` 显式值必须与 pin 一致**，不一致即拒绝（普通 `--model` 不得绕过任务 pin，变更走交互重授权）。**--task-ref 且任务无 pin 且无 --model → 拒绝转 §6.0 问答**（经问答的任务必有 pin；可达此态即未授权选型——resume legacy 无 pin 绝不隐式授权单候选）。无 --task-ref 的裸调用无显式值走 Flash 软推荐便捷路径：恰一 Flash 档候选自动选定（**Flash 档判据版本无关**：模型段以 `-Flash` 结尾，GLM-6-Flash 等未来代际同档模型开箱命中——便捷路径而非准入硬门）；零候选拒绝（拒绝静默回退）；多候选歧义拒绝并列出全部候选（绝不静默取第一个），交互回合转 §6.0 问答第二题接续：**问答（单一候选也确认）→ `worker-model-pin` 落盘 → 后续提交带 `--task-ref` 自动取 pin**。**非 Flash 已配置精确 id 合法**：经 `--model` 显式授权或任务 pin 注入即选定（角色中性形状校验，不限档位）；裸别名、未配置 id 仍一律拒绝
-4. **选型失败绝不 CreateWorkflow**：校验拒绝（退出码 2）是硬闸——报告原因并停止本次委派；绝不猜测回退、绝不静默改用其他模型
-5. **以返回的精确 subagent_model 提交**：CreateWorkflow 的 `subagent_model` 逐字取选型返回值（provider 全限定精确 id——用户授权显式选型，不限档位）
-6. **绝不省略 subagent_model**——省略即继承主会话模型，是 v2.4.0 缺陷 A 的直接复现
-7. **绝不经未授权路径选定模型**——已配置的任意精确 id（含非 Flash 文本模型）只经用户显式授权（§6.0 问答确认、任务 pin、`--model` 显式值）合法选定；裸别名、未配置 id 一律拒绝；绝不虚构模型 id；worker 选择绝不仅凭模型名字或版本号作判据
-8. **诊断可报、身份不落**：诊断输出可报告实际选定的模型 id（选型成功返回 `{subagent_model, model_policy: "user-authorized-explicit-selection"}` 提交契约），但模型选型不是任务身份——绝不把选定模型写入 state.json / journal 当作任务标识
+**Pin consumption semantics (stale pin rejected)**: a pin is written without checking the host surface, but consumption always checks the host surface — every `workflow-model-select --task-ref` reconciles against the current host model list, and a pin missing from the list is **specifically rejected** (exit code 2: the task pin is stale, re-authorize via the launch interview), never falling back to auto-selection and never silently swapping models. **For a task with a pin, an explicit `--model` value must match the pin** (mismatch exits 2) — a plain `--model` must not bypass a task pin; changing the authorization always goes through an interactive interview re-authorization plus a `worker-model-pin` update (returns a prev/new pair, both visible). Candidate drift is thereby naturally safe: new candidates are never auto-adopted, and a stale pin is never auto-replaced. A stale pin is a selection failure and falls under rule 4's hard gate; interactive turns may re-interview, wake turns / resume turns never ask — block the submission and wait for the user; **an unattended wake turn never re-pins automatically and never silently swaps models**. The pin is evidence of an interview decision under the Conductor interaction contract, not a cryptographic proof of user consent (no overclaiming).
 
-**pin 的消费语义（失效即拒）**：任务 pin 的写入不查宿主面，消费必查宿主面——每次 `workflow-model-select --task-ref` 对账当次宿主模型列表，pin 不在列表即**专门拒绝**（退出码 2：「pin 已失效，请重新问答授权」），绝不回退自动选型、绝不静默换模型。**有 pin 任务的 `--model` 显式值必须与 pin 一致**（不一致退出码 2）——普通 `--model` 不得绕过任务 pin；更换授权必经交互问答重新授权并以 `worker-model-pin` 更新任务 pin（返回 prev/new 双值可见）。候选漂移由此天然安全：新候选不自动采用，旧 pin 过期不自动替换。pin 失效属选型失败，同受第 4 条硬闸约束；交互回合可重新问答授权，唤醒轮 / 恢复轮绝不弹问——阻断提交、转等待用户；**无人值守唤醒轮绝不自动重 pin、绝不静默换模型**。pin 是 Conductor 交互契约下的问答决策证据，不是密码学层面的用户同意证明（不过度声明）。
+**Rule 8 versus the task pin**: what rule 8 forbids is treating a model selection result as **task identity** (written into state/journal as the task identifier); the `worker_model` pin is not task identity — it is the **task-level model preference** the user explicitly authorized in the 'Task launch interview' (the task-lifetime worker model default), and the task's identity is always task_id. The two coexist: the pin upgrades the selection decision from a per-submission temporary action to "one authorization, the task-lifetime default", and rule 8 "diagnostics may report; identity must not" holds unchanged.
 
-**第 8 条与任务 pin 的区分**：第 8 条禁止的是把模型选型结果当作**任务身份**（写入 state/journal 当任务标识）；`worker_model` pin 不是任务身份——它是用户在 §6.0 问答中显式授权的**任务级模型偏好**（任务全生命周期的 worker 模型默认值），任务的身份始终是 task_id。两者并行不悖：pin 恰是把选型决策从每次提交的临时动作升格为「一次授权、任务内默认」，第 8 条「诊断可报、身份不落」原样成立。
+**The compiler is TypeScript model-agnostic (host binding fact)**: the v24-compile generated TS source neither carries nor sets the worker model — `subagent_model` is a run-level submission property the host binds at run submission (CreateWorkflow) time. Model choice can therefore happen only at the submission boundary: the compiled output is valid for any worker model, and running the wrong model is the submission action's responsibility, not the compiler's.
 
-**编译器 TypeScript 模型无关（宿主绑定事实）**：v24-compile 生成的 TS 源不携带、也设置不了 worker 模型——`subagent_model` 是宿主在 run 提交（CreateWorkflow）时刻绑定的 run 级提交属性。因此模型选择只能发生在提交边界上：编译产物对任何 worker 模型成立，跑错模型的责任在提交动作，不在编译器。
+### Launch sequence (branch overview)
 
-### 6.2 启动序列（manual / auto 双分支，runbook 化）
-
-运行时命令一律走 runtime CLI 具名子命令：`python3 plugins/glm-conductor/runtime/cli.py <子命令>`（退出码 0=成功 / 2=校验拒绝——含 preflight ready=false 阻断 / 1=运行期拒绝；**权威命令清单 = cli.py 顶部 USAGE**——模型不需要自己找命令，不允许发明 `python3 -c` 内联脚本，不允许使用 USAGE 之外的命令形态）。
-
-**manual 连续性**（§6.0 问答第一题答「不启用」即落此分支——问答是两分支共同的强制入口，不是 auto 专属；第三题不出现）：
+Both branches share one mandatory entry — the 'Task launch interview' — and one compact call order (the full runbook lives in the continuity skill section 'Launch sequence (runbook, arm-before-work)'):
 
 ```
-问答（§6.0 单轮三问，第一题答「不启用」）
--> task-create <repo_root> <task_id> <goal> <mode> <assurance> [--dag <path>]
--> v24-compile <dag-json> [--task-ref <id>] [--out <path>]
--> ListModels -> 写临时 JSON 文件
--> workflow-model-select <models文件> [--task-ref <task_id>] [--repo-root <repo_root>]
--> writer-acquire <repo_root> <task_id>
--> CreateWorkflow（subagent_model=选型返回值）
--> task-record-workflow-run <repo_root> <task_id> <run-id>
+manual: task-create -> v24-compile -> ListModels -> workflow-model-select -> writer-acquire -> CreateWorkflow (subagent_model=selection result) -> task-record-workflow-run
+auto:    task-create -> quota-resume-authorize -> quota-resume-decision --force-refresh (observed reset_at = the earliest valid future observed reset, regardless of quota status) -> host CronCreate floor carrier -> quota-automation-bind -> quota-continuity-preflight (must PASS) -> first precision sleep (only when a valid future reset exists; reset_at null -> not issued, report the floor-only downgrade honestly) -> worker-model-pin -> v24-compile -> ListModels -> workflow-model-select --task-ref -> writer-acquire -> CreateWorkflow (subagent_model=selection result) -> task-record-workflow-run
 ```
 
-**auto 连续性（入口 = §6.0 问答确认启用后）**：第一题答「启用」即先落授权，预算在问答中一并选定；用户陈述只是授权意图，不是无界授权。**先武装后开工（arm-before-work，INV-CONT-01）+ 建立动作优先**：地板载体与首个精度睡眠在 CreateWorkflow 之前同批建立——完整唤醒契约（统一唤醒协议、停靠轮、续臂、终态清理）见 `skills/continuity`「双通道唤醒」节，本节是其编排侧入口：
+The complete runbook — both branches with every step, the arm-before-work (INV-CONT-01) requirements, the three-part success statement, and the floor-carrier failure prohibitions — lives in the continuity skill section 'Launch sequence (runbook, arm-before-work)'.
 
-```
-问答（§6.0 单轮三问：第一题「启用」+预算；第三题确认地板间隔，默认 1h）
--> task-create <repo_root> <task_id> <goal> <mode> <assurance> [--dag <path>]
--> quota-resume-authorize <repo_root> <task_id> <max_resumes>
--> 立即 quota-resume-decision <repo_root> <task_id> --force-refresh 取观测
-   reset_at（任何额度状态都可观测——单一观测口径：最早的有效未来观测 reset，
-   与额度状态无关；active/no-op 分支同样透传，不要求任务在 waiting_quota）
--> 宿主 CronCreate 地板载体：intervalUnit=hourly, interval=<问答确认值，默认 1>,
-   recurring=true, prompt=统一唤醒协议（动作优先，绝不枚举工具清单；
-   模板见 continuity/references/long-horizon.md）
--> quota-automation-bind <repo_root> <task_id> <真实返回的 automation id>
--> quota-continuity-preflight <repo_root> <task_id> 必须 PASS（ready=false 即阻断启动）
--> 发首个精度睡眠：后台 sleep 到（观测 reset_at + 300s）——仅当本次观测含有效
-   未来 reset 时发出；reset_at 为 null 时**不发**、如实陈述 floor-only 降级
-   （只有地板在臂），绝不谎称精度层已武装——命令模板逐字抄写自
-   long-horizon.md「精度层睡眠模板」（bash 动态计算秒数，模型零算术；
-   宿主接受后台进程即记录在案）
--> worker-model-pin <repo_root> <task_id> <精确 id>（问答第二题选定过时；
-   消费语义「失效即拒」见 §6.1）
--> v24-compile <dag-json> [--task-ref <id>] [--out <path>]
--> ListModels -> 写临时 JSON 文件
--> workflow-model-select <models文件> --task-ref <task_id> [--repo-root <repo_root>]
--> writer-acquire <repo_root> <task_id>
--> CreateWorkflow（subagent_model=选型返回值）
--> task-record-workflow-run <repo_root> <task_id> <run-id>
-```
+### Launch details (both branches)
 
-**成功陈述三分（v2.6.0）**：auto 启动成功的汇报必须区分三个独立事实——(a) **auto 授权已落**（mode=auto + 有界预算）；(b) **地板载体已绑定**（真实 automation id 入 state + preflight PASS）；(c) **精度睡眠已实际发出**（宿主接受后台进程）。三者缺一如实陈述缺项：缺 (c) 即 **floor-only 可见降级**（只有地板兜底在臂），绝不是「精度层已武装」；缺 (b) 即 auto 阻断（不开工、按降级报告）。
+- **Write the DAG JSON**: `{"task_context": {"task_ref": <task-id>, "goal": ..., "repository": ...}, "nodes": [...]}` (nodes in the 'Task state and static DAG authoring' shape)
+- **Compile**: `cli.py v24-compile <dag-json> [--task-ref <id>] [--out <path>]` — per-node shape validation + whole-graph validation + ownership stage planning + deterministic TypeScript source. A validation failure exits 2 and reports all errors at once; **the generated source is never executed automatically**.
+- **Take the repository write reservation**: `cli.py writer-acquire <repo_root> <task_id>` — at most one active Conductor write Workflow per Git repository; on conflict it exits 1 and reports the current holder (reconcile before retrying, never force parallel writes).
 
-地板载体创建失败时三禁：**绝不谎称 auto 连续性已启用**；**绝不绑假 id**；**绝不按 auto/until_done 承诺继续**——按调用上下文报告降级（本轮仅手动连续性可用）或交运营者处理。武装、唤醒与终态清理契约见 `skills/continuity`。
+### Post-submission procedure
 
-### 6.3 启动细则（两分支共用）
+1. **Record the run association (canonical command)**: as soon as the run id exists, run `cli.py task-record-workflow-run <repo_root> <task_id> <run-id>` — one call persists state.workflow_run_id + an association document under the ledger root `.glm-conductor/workflow-runs/` (independent of the process CWD; any CWD lands in the repo_root ledger) + a journal `workflow_started` event + an idempotent writer-guard run-id backfill (all through the task layer's existing transactional primitives). The AF-04 writer-guard precondition (delegate/full must first hold this repository's write reservation via `writer-acquire`) rejects on failure (exit code 1) and **never writes a fake `workflow_started`**. `cli.py v24-record-run <task_ref> <run-id>` is a **legacy low-level thin shell** (kept, behavior unchanged: it only writes the adapter association document, resolves directories relative to the current working directory, writes no state, emits no event, and touches no guard) — it is not a task lifecycle entry; the orchestration runbook always uses the canonical command.
+2. **Wait for the structured result**: the completion notification is delivered by the host (GetWorkflowRun shows progress). Each node returns one NodeResult: `node_id / status (complete | partial | blocked) / changes / local_checks / reassessment / gaps` — all results are aggregated by node id.
+3. **Closure**: after acceptance passes, `cli.py task-complete <repo_root> <task_id>` (terminal transition + `task_completed` event + automatic writer-guard release); failure/cancellation go through `cli.py task-fail` / `cli.py task-cancel <repo_root> <task_id>` (both also release the guard).
 
-- **写 DAG JSON**：`{"task_context": {"task_ref": <task-id>, "goal": ..., "repository": ...}, "nodes": [...]}`（节点即 §5.2 形状）
-- **编译**：`cli.py v24-compile <dag-json> [--task-ref <id>] [--out <path>]`——逐节点形状校验 + 全图校验 + ownership 阶段规划 + 确定性 TypeScript 源。校验失败退出码 2 并一次报出全部错误；**生成源绝不自动执行**
-- **取仓库写预约**：`cli.py writer-acquire <repo_root> <task_id>`——一个 Git 仓库至多一个活跃 Conductor 写 Workflow；冲突时退出码 1 并报当前持有者（先对账再重试，绝不强行并行写）
+Interruption and recovery (workflow stall, quota wait, auto wake) live in the continuity skill; completion-guard semantics live in the enforcement skill.
 
-### 6.4 提交后程序
+## Main-session validation
 
-1. **记录 run 关联（规范命令，v2.6.0 WP-R4）**：拿到 run id 后立即 `cli.py task-record-workflow-run <repo_root> <task_id> <run-id>`——一条调用完成 state.workflow_run_id 落盘 + 账本根 `.glm-conductor/workflow-runs/` 关联单据（与进程 CWD 无关，任意 CWD 调用皆落 repo_root 账本）+ journal `workflow_started` 事件 + 写者守卫 run id 幂等补挂（全经任务层既有事务原语）；AF-04 写者守卫前置（delegate/full 必须先经 `writer-acquire` 持有本仓库写预约）失败即拒绝（退出码 1）且**绝不落假 `workflow_started`**。`cli.py v24-record-run <task_ref> <run-id>` 自 v2.6.0 起降级为 **legacy 低层薄壳**（保留、行为不变：只落 adapter 关联单据、目录相对当前工作目录，不写 state、不落事件、不动守卫）——不是任务生命周期入口，编排 runbook 一律走规范命令
-2. **等待结构化结果**：完成通知经宿主送达（GetWorkflowRun 可查进度）。每个节点返回一份 NodeResult：`node_id / status（complete | partial | blocked）/ changes / local_checks / reassessment / gaps`——全部结果按节点 id 聚合返回
-3. **收尾**：验收通过后 `cli.py task-complete <repo_root> <task_id>`（终态迁移 + `task_completed` 事件 + 自动释放写者守卫）；失败/取消走 `cli.py task-fail` / `cli.py task-cancel <repo_root> <task_id>`（同样释放守卫）
+- Workflow results and worker reports are only **claims** (implementation claim): the main session must personally inspect the full diff, check that the changed scope ⊆ the union of DAG ownership, and re-run the verification commands before validation evidence exists.
+- After validation, persist the task-level validation record: `cli.py record-validation <repo_root> <task_id> <passed|failed> [--summary <s>] [--commands <s>] ...` (--commands is repeatable, exactly one command each; change_id is computed and stored at write time; the relevant path set = the union of all DAG node ownership)
+- **change_id freshness**: any later change to relevant files invalidates the validation (and the subsequent review) record — after a fix, re-validate and re-record; writing an old value back to extend its life is forbidden.
+- After aggregating multi-node results, the main session still performs task-level global validation (cross-node integration/build/lint) — node-level local_check never automatically substitutes for global validation.
 
-中断与恢复（Workflow 停摆、额度等待、auto 唤醒）见 `skills/continuity`；完成守卫语义见 `skills/enforcement`。
+## High-assurance review
 
-## 7. 主会话验证（main validation）
+Choose a fresh-context read-only reviewer by task modality:
 
-- Workflow 结果与工作者报告都只是**声明**（implementation claim）：主会话必须亲自检查完整 diff、核对改动范围是否 ⊆ DAG ownership 并集、重跑验证命令，才能形成验证证据
-- 验证完成后落任务级验证记录：`cli.py record-validation <repo_root> <task_id> <passed|failed> [--summary <s>] [--commands <s>] ...`（--commands 可重复、每次恰一条命令；change_id 现算并存，相关路径集 = DAG 全节点 ownership 并集）
-- **change_id 新鲜度**：任何相关文件在此之后的再变化都会使验证（与后续审查）记录过期——修复后必须重验重录；禁止回写旧值续命
-- 多节点结果聚合后主会话仍须做任务级全局验证（跨节点集成/构建/lint）——节点级 local_check 永不自动替代全局验证
+- Text tasks → `glm-reviewer` (read-only whitelist; the model inherits the host/session — no cross-model independence is claimed; independence comes from the fresh context and read-only isolation)
+- Visual tasks → `visual-reviewer` (multimodal read-only, GLM-5.3-Flash frontmatter binding, primary duty independent visual acceptance: personally read the screenshots against VISUAL ACCEPTANCE and check user-visible regressions; the diff is context only). When that binding is unavailable on the host (startup errors such as account-connection-unavailable), the visual high-assurance route fails closed: report the binding as unavailable to the user and never fall back to a text model (glm-reviewer or the main session) as the visual final review.
 
-## 8. 高保证评审（仅 assurance: high）
+Discipline:
 
-按任务模态选择全新上下文的只读审查者：
+- The review is invoked only after main-session validation; the input elements (STATED GOAL / ACCUMULATED CHANGE SET / INTERFACES AND CONSTRAINTS / VERIFICATION EVIDENCE — visual tasks add VISUAL EVIDENCE) are provided by the main session; a missing element is requested, never guessed.
+- There are exactly three verdicts: `ship` / `fix-first` / `rethink`. fix-first: on the audit route the main session fixes, on the full route the implementing party fixes; after the fix the main session re-validates and a **new** reviewer re-reviews. rethink: revise the architecture; completion must not be reported. fix-first / rethink never satisfy the completion guard.
+- Verdicts are recorded through the CLI: `cli.py review-record <repo_root> <task_id> <reviewer> <verdict> [note]` — **validate first, review second** (rejected when no validation record exists), with change_id computed and bound; any later change to relevant files invalidates the verdict, requiring re-review and re-record.
+- The completion guard (assurance: high) accepts only review records with verdict=ship and a fresh change_id.
 
-- 文本任务 → `glm-reviewer`（只读白名单，模型继承宿主/会话——不宣称跨模型独立，独立性来自全新上下文与只读隔离）
-- 视觉任务 → `visual-reviewer`（多模态只读，GLM-5.3-Flash frontmatter 显式绑定，主职独立视觉验收：亲自读截图对照 VISUAL ACCEPTANCE、检查用户可见回归；diff 仅作上下文）。宿主上该绑定不可用（启动报 account-connection-unavailable 等连接错误）时视觉高保障路线 fail closed：向用户报告绑定不可用，绝不退回文本模型（glm-reviewer 或主会话）充当视觉终审
+## Visual exception path
 
-纪律：
+Visual/interactive tasks (frontend UI, layout, dashboards, form interactions, visual regressions) bypass the native Workflow text channel and dispatch the `visual-implementer` subagent directly:
 
-- 审查必须在主会话验证之后调用；输入要素（STATED GOAL / ACCUMULATED CHANGE SET / INTERFACES AND CONSTRAINTS / VERIFICATION EVIDENCE，视觉任务另加 VISUAL EVIDENCE）由主会话提供，缺项要求补齐而非猜测
-- 裁决只有三个：`ship` / `fix-first` / `rethink`。fix-first：audit 路由主会话修正、full 路由由修复实施方修正，修正后主会话重验，再换**全新**审查者复审；rethink：修订架构，不得报告完成。fix-first / rethink 永不满足完成守卫
-- 裁决落账走 CLI：`cli.py review-record <repo_root> <task_id> <reviewer> <verdict> [note]`——**先验证后评审**（无 validation 记录即拒绝），change_id 现算绑定；任何相关文件再变化都会使裁决过期，须重新审查重录
-- 完成守卫（assurance: high 时）只认 verdict=ship 且 change_id 新鲜的审查记录
+- The main session captures screenshots to disk with its dedicated Browser/Computer Use capability (the subagent has no capture right); the implementer ends its invocation with a `VISUAL_CAPTURE_REQUEST` to request evidence, and the main session starts a new invocation carrying the full state to continue (VISUAL_ROUND 1-3, at most 3 rounds).
+- Visual judgment is made by the multimodal roles (visual-implementer / visual-reviewer personally Read the screenshots); the main session only drives and captures (Conductor never asserts its own multimodal capability from the main model's name) and must not claim it made visual judgments.
+- Visual tasks with assurance: high get an independent final review by `visual-reviewer` (verdict and review-record flow as in 'High-assurance review').
 
-## 9. 视觉例外路径（子代理通道，照旧）
+Criteria, templates and protocol details live in references/role-contracts.md and references/operations.md.
 
-视觉/交互任务（前端界面、布局、dashboard、表单交互、视觉回归）不走原生 Workflow 文本通道，直接派发 `visual-implementer` 子智能体实施：
+## Reviewer and implementer preflight
 
-- 主会话用其专属 Browser/Computer Use 能力采集截图落盘（子代理无采集权）；实施者以 `VISUAL_CAPTURE_REQUEST` 结束调用索取证据，主会话发起携带完整状态的新调用续作（VISUAL_ROUND 1-3，最多 3 轮）
-- 视觉判定由多模态角色完成（visual-implementer / visual-reviewer 亲自 Read 截图）；主会话只承担驱动与采集（Conductor 绝不仅凭主会话模型的名字断言其模态能力），不得声称自己做了视觉判定
-- 视觉任务 assurance: high 时用 `visual-reviewer` 独立终审（裁决与 review-record 流程同 §8）
+- The visual channel requires `glm-conductor:visual-implementer` in the Agent tool's available agent types; for assurance: high, check `glm-conductor:glm-reviewer` / `glm-conductor:visual-reviewer` by modality.
+- delegate/full text implementation runs through the native Workflow (the worker persona is embedded in the compiled source by the compiler) and needs no subagent preflight; the worker model selection gate ('Worker model selection gate') is also fail-closed but is not this section's subagent preflight; solo and assurance: standard need no preflight at all.
+- Models and reasoning tiers are fixed in the subagent definitions; never attach model overrides at invocation time.
+- For assurance: high visual work the final review must be the multimodal `visual-reviewer`; if its GLM-5.3-Flash binding is unavailable on the host (startup errors such as account-connection-unavailable), treat it as fail closed per 'High-assurance review' — the route stops rather than falling back to a text model.
+- Extra requirement of the visual channel: confirm screenshot evidence can be written to disk and read by the implementer; if unobtainable, stop the visual channel.
+- When any required role is missing, unavailable, or name-mismatched: stop that channel, tell the user to check plugin installation (Settings → Plugin Management), and never silently substitute another subagent type.
 
-判据、模板与协议细节见 references/role-contracts.md 与 references/operations.md。
+## ROUTE REASSESSMENT
 
-## 10. 审查者与实施者预检（fail-closed）
-
-- 视觉通道需要 `glm-conductor:visual-implementer` 在 Agent 工具的可用类型列表中；assurance: high 按模态核对 `glm-conductor:glm-reviewer` / `glm-conductor:visual-reviewer`
-- delegate/full 的文本实施经原生 Workflow 执行（worker persona 由编译器内嵌生成源），无需子智能体预检；worker 模型选型硬闸（§6.1）同属 fail-closed，但不属本节子智能体预检；solo 与 assurance: standard 无需任何预检
-- 模型与思考档位已固定在子智能体定义中，调用时不得附加模型覆盖
-- 视觉高保障终审（assurance: high 视觉任务）必须使用多模态 `visual-reviewer`：其 GLM-5.3-Flash 绑定在宿主上不可用（启动报 account-connection-unavailable 等连接错误）时按 fail closed 处理——向用户报告绑定不可用并停止视觉高保障路线，绝不退回文本模型充当视觉终审
-- 视觉通道额外要求：确认截图证据可以落盘并由实施者读取；不可得即停止视觉通道
-- 任何所需角色缺失、不可用或名称不符时：停止该通道，告知用户检查插件安装（Settings → Plugin Management），不得静默替换为其他子智能体类型
-
-## 11. ROUTE REASSESSMENT
-
-路由不是单向阶梯。路由变化必须来自**新观察到的证据**，可以双向重估：
+Routing is not a one-way ladder. A route change must come from **newly observed evidence** and may be reassessed in both directions:
 
 ```
 ROUTE REASSESSMENT
@@ -280,10 +239,10 @@ assurance: <old> -> <new>
 mode: <old> -> <new>
 
 evidence:
-<新观察到的证据>
+<newly observed evidence>
 ```
 
-示例 A（下调可委派性）：delegate 执行中节点结果频繁返回 `reassessment` 重估请求、暴露隐藏的跨模块耦合 →
+Example A (delegability down): delegate execution keeps returning node results with `reassessment` requests, exposing hidden cross-module coupling →
 
 ```
 delegability: high -> low
@@ -292,9 +251,9 @@ mode: delegate -> audit
 evidence: node results kept returning reassessment requests exposing hidden cross-module coupling
 ```
 
-主会话接管实施 → 验证 → 审查者终审。
+The main session takes over: implementation → validation → reviewer final review.
 
-示例 B（上调可委派性）：solo 调查后 root cause、架构、文件、验证均已确定，剩余工作完全机械 →
+Example B (delegability up): after solo investigation the root cause, architecture, files and verification are all determined and the remaining work is purely mechanical →
 
 ```
 delegability: low -> high
@@ -302,8 +261,8 @@ mode: solo -> delegate
 evidence: root cause, architecture, owned files and verification are now fully determined; remaining work is mechanical
 ```
 
-前提：主会话尚未重复完成同一实施。无新证据时不得变更路由；不得为了省事或直觉变更。重估后把 `workflow_reassessed` 事件追加到任务 journal。
+Precondition: the main session has not itself repeatedly completed the same implementation. With no new evidence the route must not change; it is never changed for convenience or on a hunch. After a reassessment, append a `workflow_reassessed` event to the task journal.
 
-## 12. 完成衔接
+## Completion hand-off
 
-任务收尾（complete/fail/cancel）与完成判定由 Stop 完成守卫把关：仓库写者守卫、ownership 越界、主会话验证、独立审查四查全过才提交 completed。守卫语义、change_id 新鲜度与降级行为见 `skills/enforcement`。
+Task closure (complete/fail/cancel) and the completion judgment are gated by the Stop completion guard: repository writer guard, ownership overrun, main-session validation, and independent review — all four checks must pass before completed is committed. Guard semantics, change_id freshness and degraded behavior live in the enforcement skill.

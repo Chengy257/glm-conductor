@@ -1,67 +1,67 @@
-# GLM Conductor 架构（权威文档，v2.6.0）
+# GLM Conductor Architecture (authoritative reference, v2.6.1)
 
-> 本文档是 GLM Conductor 的**唯一架构真相源**，描述插件**当前**（v2.6.0）的实际运行时行为——每一节回答"系统现在是什么"，不叙述开发历程；已删除的模块不写成"deprecated 运行路径"——它们不存在了（退役对照见 §21）。
-> 一句话定位：**GLM Conductor owns semantic orchestration and acceptance; ZCode owns execution orchestration.**
-> 契约细节以插件目录为准（`plugins/glm-conductor/` 下的 agents 与 skills）；本文档与其保持一致，冲突时以修复到一致为准。概念入门见 [core-concepts.md](core-concepts.md)，排障指引见 [troubleshooting.md](troubleshooting.md)。
+> This document is the **single source of architectural truth** for GLM Conductor: it describes the **actual current** (v2.6.1) runtime behavior — every section answers "what the system is now" and does not narrate development history; removed modules are never described as "deprecated run paths" — they no longer exist (see §21 for the retirement map).
+> One-line positioning: **GLM Conductor owns semantic orchestration and acceptance; ZCode owns execution orchestration.**
+> Contract details defer to the plugin directory (the agents and skills under `plugins/glm-conductor/`); this document stays consistent with it, and on conflict the resolution is to fix back into consistency. For the conceptual introduction see [core-concepts.md](core-concepts.md); for troubleshooting see [troubleshooting.md](troubleshooting.md).
 
-## 1. 定位与职责分割
+## 1. Positioning and responsibility split
 
-GLM Conductor 是 ZCode 插件，为 GLM 双模型体系（GLM-5.3 主会话 + GLM-5.3-Flash 子智能体）提供轻量语义编排层。v2.4 按一条重基线规则划界：
+GLM Conductor is a ZCode plugin that provides a lightweight semantic orchestration layer for the GLM dual-model setup (GLM-5.3 main session + GLM-5.3-Flash subagents). v2.4 drew the boundary with one rebaseline rule:
 
-> **如果 ZCode 已拥有某个执行事实，Conductor 不得再对同一事实建模。Conductor 只持久化宿主不知道的语义。**
+> **If ZCode already owns an execution fact, the Conductor must not model that same fact again. The Conductor persists only semantics the host does not know.**
 
-| Conductor 拥有 | ZCode 拥有 |
+| Conductor owns | ZCode owns |
 | --- | --- |
-| 路由策略 | Workflow 执行生命周期 |
-| 规范实施 DAG（静态节点） | 子 actor 生命周期 |
-| ownership 语义 | 依赖执行机制 |
-| 任务目标 / 约束 | 并行调度 |
-| 任务级验收 | 重试 / 停止 / 恢复机制 |
-| 高保障独立评审 | Workflow run 可观测性 |
-| 终局变更新鲜度（change_id） | 后台执行 |
-| 配额自动恢复授权（有界） | Scheduled Task 激活基底 |
+| Routing policy | Workflow execution lifecycle |
+| Normative implementation DAG (static nodes) | Sub-actor lifecycle |
+| ownership semantics | Dependency execution machinery |
+| Task objective / constraints | Parallel scheduling |
+| Task-level acceptance | Retry / stop / resume machinery |
+| High-assurance independent review | Workflow run observability |
+| Terminal change freshness (change_id) | Background execution |
+| Quota auto-resume authorization (bounded) | Scheduled Task activation substrate |
 
-v2.4 明确**不是**：第二套任务运行时、Workflow 引擎、权限引擎、溯源系统、调度平台或额度控制平面。主会话（GLM-5.3）始终是唯一编排者：需求歧义解决、路由判断、DAG 规格编写、验证与验收、评审派发；委派实施走 ZCode Native Workflow，主会话不重复实现任何执行机制。
+v2.4 is explicitly **not**: a second task runtime, a Workflow engine, a permission engine, a provenance system, a scheduling platform, or a quota control plane. The main session (GLM-5.3) is always the sole orchestrator: requirement disambiguation, routing judgment, DAG spec authoring, validation and acceptance, review dispatch; delegated implementation goes through the ZCode Native Workflow — the main session never re-implements any execution machinery.
 
-## 2. 路由矩阵
+## 2. Routing matrix
 
-路由保持两个独立轴，先分别回答、再查矩阵；`executor` 不再是普通文本工作的独立路由维度——`solo/audit` 即主会话实施，`delegate/full` 即 Native Workflow 实施（视觉例外见 §13）。
+Routing keeps two independent axes: answer each first, then consult the matrix; `executor` is no longer a separate routing dimension for ordinary text work — `solo/audit` means main-session implementation, `delegate/full` means Native Workflow implementation (the visual exception is §13).
 
-- **Delegability（可委派性）**：剩余实施是否足够有界、规格足够完备？objective / 文件边界 / 接口 / 约束 / 验证均明确且架构已定 → high；架构未定、root cause 未知、实质歧义、判断密集 → low
-- **Assurance（保障等级）**：主会话验证之后，一次全新上下文的独立终审是否有实质价值？影响面有限、回归风险可控 → standard；宽影响面、高回归风险、破坏性行为、大规模用户可见变更 → high
+- **Delegability**: is the remaining implementation sufficiently bounded and the spec sufficiently complete? objective / file boundaries / interfaces / constraints / verification all explicit and the architecture settled → high; unsettled architecture, unknown root cause, substantive ambiguity, judgment-heavy → low
+- **Assurance**: after main-session validation, does a fresh-context independent final review add substantive value? limited blast radius, contained regression risk → standard; wide blast radius, high regression risk, destructive behavior, large user-visible change → high
 
-| Delegability | Assurance | Route | 实施 | 独立评审 |
+| Delegability | Assurance | Route | Implementation | Independent review |
 | --- | --- | --- | --- | --- |
-| low | standard | `solo` | GLM-5.3 主会话 | 否 |
-| high | standard | `delegate` | Native Workflow | 否 |
-| low | high | `audit` | GLM-5.3 主会话 | 是 |
-| high | high | `full` | Native Workflow | 是 |
+| low | standard | `solo` | GLM-5.3 main session | no |
+| high | standard | `delegate` | Native Workflow | no |
+| low | high | `audit` | GLM-5.3 main session | yes |
+| high | high | `full` | Native Workflow | yes |
 
-主会话在编排动作之前输出一次 SELECTIVE ROUTE 声明（四字段 + 基于证据的理由）：
+The main session outputs one SELECTIVE ROUTE declaration before any orchestration action (four fields + an evidence-based reason):
 
 ```
 SELECTIVE ROUTE
 mode: solo | delegate | audit | full
 delegability: low | high
 assurance: standard | high
-reason: <简明的、基于证据的理由>
+reason: <concise, evidence-based reason>
 ```
 
-路由变化必须来自新观察到的证据，可双向重估（ROUTE REASSESSMENT）——实施者在 NodeResult.reassessment 返回的重估请求、评审者的 rethink 裁决均为有效重估证据；无新证据不得变更路由，不得为省事升 / 降档：
+A route change must come from newly observed evidence and may be reassessed in both directions (ROUTE REASSESSMENT) — a reassessment request returned by an implementer in NodeResult.reassessment and a reviewer's rethink verdict are both valid reassessment evidence; without new evidence the route must not change, and no route may be bumped up or down for convenience:
 
 ```
 ROUTE REASSESSMENT
 delegability: <old> -> <new>
 assurance: <old> -> <new>
 mode: <old> -> <new>
-evidence: <新观察到的证据>
+evidence: <newly observed evidence>
 ```
 
-## 3. 静态 DAG
+## 3. Static DAG
 
-Work Unit 在 v2.4 退化为**静态 DAG 节点声明**（`runtime/work_unit.py` 纯数据层 + `runtime/dependency.py` 纯图校验层）：节点描述"要做什么"，不携带任何"执行到哪了"。单元运行时语义——status / attempt / 结果历史 / 单元验证 / 单元 receipts / 单元租约 / dispatch permits / 单元生命周期事件——全部不存在。
+In v2.4 the Work Unit degenerated into a **static DAG node declaration** (`runtime/work_unit.py` as the pure data layer + `runtime/dependency.py` as the pure graph validation layer): a node describes "what to do" and carries no "how far execution has gotten". Per-unit runtime semantics — status / attempt / result history / unit validation / unit receipts / unit leases / dispatch permits / unit lifecycle events — do not exist at all.
 
-节点形状（必填：`id` / `objective` / `depends_on` / `ownership`；可选：`interfaces` / `constraints` / `local_check`）：
+Node shape (required: `id` / `objective` / `depends_on` / `ownership`; optional: `interfaces` / `constraints` / `local_check`):
 
 ```yaml
 id: parser
@@ -74,114 +74,115 @@ interfaces:
 constraints:
   - no schema migration
 local_check:
-  - pytest tests/parser -q   # 可选
+  - pytest tests/parser -q   # optional
 ```
 
-- **依赖图**：`depends_on` 同 DAG 内引用；`graph_errors` 聚合报重复 id / 缺失依赖 / 自依赖 / 环（报全部环成员）；`topo_order` / `stage_levels` 给出确定性拓扑序与层级（同输入同输出，零运行时状态读取）
-- **local_check 可选**：只是下游依赖不安全时的廉价节点健康闸，不是持久溯源；纯文档或无依赖节点可以没有。worker 本地检查只确立"本节点健康到足以让依赖方继续实施"，永不替代主会话任务级验收
-- 委派执行的默认单位是**一个完整可委派 DAG 对应一次 Native Workflow run**（典型投影：stage 1: A‖B → stage 2: C‖D → stage 3: E），不是按"波"反复零散启动：
+- **Dependency graph**: `depends_on` references within the same DAG; `graph_errors` aggregates duplicate ids / missing dependencies / self-dependencies / cycles (reporting every cycle member); `topo_order` / `stage_levels` give a deterministic topological order and level assignment (same input, same output, zero runtime-state reads)
+- **local_check is optional**: merely a cheap node-health gate for when downstream dependencies would otherwise be unsafe, not durable provenance; pure-documentation or dependency-free nodes may omit it. A worker's local checks only establish "this node is healthy enough for its dependents to keep implementing" and never replace main-session task-level acceptance
+- The default unit of delegated execution is **one fully delegatable DAG per Native Workflow run** (typical projection: stage 1: A‖B → stage 2: C‖D → stage 3: E), not repeated ad-hoc launches in "waves":
 
 ```
-（DAG）A ─┬─→ C ─┐             （生成 Workflow 阶段投影）
-        B ─┴─→ D ─┴─→ E        阶段 1: A、B（并行）
-                                阶段 2: C、D（并行）
-                                阶段 3: E
+(DAG) A ─┬─→ C ─┐             (generated Workflow stage projection)
+       B ─┴─→ D ─┴─→ E        Stage 1: A, B (parallel)
+                              Stage 2: C, D (parallel)
+                              Stage 3: E
 ```
 
-## 4. Workflow 编译器边界
+## 4. Workflow compiler boundary
 
-主实施路径：规范 DAG → Workflow 编译器（`runtime/workflow/compiler.py`）→ 生成的 ZCode Native Workflow 源码 → 宿主原生执行（并行 / 后台 / 重试 / 恢复全部归宿主）。
+The main implementation path: spec DAG → Workflow compiler (`runtime/workflow/compiler.py`) → generated ZCode Native Workflow source → host-native execution (parallelism / background / retry / resume all belong to the host).
 
-编译器 `compile_workflow(nodes, task_context)` 的固定管线：
+The compiler's fixed pipeline, `compile_workflow(nodes, task_context)`:
 
-1. 校验：逐节点 `work_unit.validate_node` + 全图 `dependency.graph_errors` + `task_context`（至少 `task_ref` / `goal` / `repository` 三个非空字符串），错误聚合抛 `WorkflowCompileError`；
-2. 阶段规划：`ownership.plan_stages`（§6）——ownership 歧义 / 非法模式以 `OwnershipConflictError` 原样上抛（冲突即拒，绝不猜测）；scope 明确重叠的候选被确定性串行排进后续组；
-3. 逐组生成：每组一个 `phase(name)` 标记 + 一个 `await Promise.all`（组内并行，每节点恰一个 `agent("node-<id>", persona).ask<NodeResult>(指令)`）；组间是顺序的顶层 await；
-4. 末尾 `return` 按节点 id 升序聚合全部节点结果。
+1. Validation: per-node `work_unit.validate_node` + whole-graph `dependency.graph_errors` + `task_context` (at least the three non-empty strings `task_ref` / `goal` / `repository`); errors aggregate into a raised `WorkflowCompileError`;
+2. Stage planning: `ownership.plan_stages` (§6) — ownership ambiguity / illegal patterns propagate verbatim as `OwnershipConflictError` (conflict means refusal, never guessing); candidates with explicitly overlapping scopes are deterministically serialized into later groups;
+3. Per-group generation: each group gets one `phase(name)` marker + one `await Promise.all` (parallel within the group, exactly one `agent("node-<id>", persona).ask<NodeResult>(instruction)` per node); between groups are sequential top-level awaits;
+4. A trailing `return` aggregates all node results in ascending node id order.
 
-生成源契约：确定性（无时间戳、无随机数，同一输入两次编译字节全等）；节点 id 原文出现在 actor 标签、ask 指令与结果映射中；persona 唯一权威来源是 `runtime/workflow/persona.py`（宿主 runtime 不消费插件 agent 定义，角色仿真必须把 persona 文本内嵌进脚本）；结果接口 `NodeResult` 恰六字段 `node_id / status("complete"|"partial"|"blocked") / changes / local_checks / reassessment / gaps`；生成源零 permit / lease 词汇（禁词扫描锚定）。
+Generated-source contract: deterministic (no timestamps, no randomness; two compilations of the same input are byte-identical); node ids appear verbatim in actor labels, ask instructions, and the results map; the single authoritative source of the persona is `runtime/workflow/persona.py` (the host runtime does not consume plugin agent definitions, so role simulation must inline the persona text into the script); the result interface `NodeResult` has exactly six fields `node_id / status("complete"|"partial"|"blocked") / changes / local_checks / reassessment / gaps`; the generated source is free of permit / lease vocabulary (anchored by the forbidden-word scan).
 
-**编译器不做**（这些是宿主 Native Workflow 的职责，Conductor 不再造）：就绪队列、dispatch wave、并发调度器、后台管理器、重试管理器、子 actor 生命周期账本、ask 回放、Workflow resume 引擎。编译器只生成源码、只做静态断言——**绝不启动任何 Workflow**；执行是主会话经宿主 CreateWorkflow 发起的事（CLI 入口 `v24-compile`，只产码或落盘）。
+**The compiler does not do** (these are the host Native Workflow's responsibilities; the Conductor does not rebuild them): ready queues, dispatch waves, concurrency schedulers, background managers, retry managers, sub-actor lifecycle ledgers, ask replay, Workflow resume engines. The compiler only generates source and only makes static assertions — **it never starts any Workflow**; execution is initiated by the main session through the host's CreateWorkflow (CLI entry `v24-compile`: it only produces code or writes it to disk).
 
-**编译器 TypeScript 模型无关（v2.4.1 明确）**：生成源不携带、也设置不了 worker 模型——`subagent_model` 是宿主在 CreateWorkflow 提交时刻绑定的 run 级提交属性。因此 worker 模型选择只能发生在提交边界：主会话经宿主模型列表 → `workflow-model-select`（`runtime/workflow/submission.py`，INV-MODEL-01；v2.6.0 起用户授权显式选型——全候选角色中性、Flash 档降为软推荐、单一候选也须用户显式确认）后随 CreateWorkflow 提交；省略 `subagent_model` 会使 run 继承主会话模型（v2.4.0 缺陷 A），Conductor 协议把它列为硬禁止。
+**The compiler is TypeScript-model-agnostic (explicit in v2.4.1)**: the generated source neither carries nor sets a worker model — `subagent_model` is a run-level submission property bound by the host at CreateWorkflow submission time. Worker model choice can therefore only happen at the submission boundary: the main session goes through the host model list → `workflow-model-select` (`runtime/workflow/submission.py`, INV-MODEL-01; since v2.6.0 selection requires explicit user authorization — all candidates role-neutral, the Flash tier demoted to a soft recommendation, and even a single candidate requires explicit user confirmation) and then submits with CreateWorkflow; omitting `subagent_model` makes the run inherit the main-session model (the v2.4.0 defect A), which the Conductor protocol lists as hard-forbidden.
 
-生成源形态（节选示意，实际产物以编译器输出为准）：
+Generated source shape (excerpt for illustration; the compiler output is authoritative):
 
 ```typescript
 interface NodeResult { node_id: string; status: "complete" | "partial" | "blocked";
   changes: string[]; local_checks: string[]; reassessment: string; gaps: string[]; }
-const persona: string = /* runtime/workflow/persona.py 的 TEXT_WORKER_PERSONA 原文 */;
+const persona: string = /* TEXT_WORKER_PERSONA from runtime/workflow/persona.py, verbatim */;
 const allResults: { [nodeId: string]: NodeResult } = {};
 
-// —— 阶段 1: parser, types ——（plan_stages 判定 scope 不相交，可并行）
-phase("阶段 1: parser, types");
+// == Stage 1: parser, types ==  (plan_stages judged the scopes disjoint: parallelizable)
+phase("Stage 1: parser, types");
 await Promise.all([
-  agent("node-parser", persona).ask<NodeResult>(/* build_ask 指令 */)
+  agent("node-parser", persona).ask<NodeResult>(/* build_ask instruction */)
     .then((result: NodeResult): void => { allResults["parser"] = result; }),
   agent("node-types", persona).ask<NodeResult>(/* ... */)
     .then((result: NodeResult): void => { allResults["types"] = result; }),
 ]);
-// ……后续阶段为顺序的顶层 await 语句……
-return [allResults["parser"], allResults["types"] /* 按节点 id 升序 */];
+// ...subsequent stages are sequential top-level await statements...
+return [allResults["parser"], allResults["types"] /* ascending node id order */];
 ```
 
-## 5. 宿主拥有的执行状态
+## 5. Host-owned execution state
 
-v2.4 有两个真相域：**静态语义真相**（Conductor 任务/DAG state）与**执行运行时真相**（ZCode Workflow run）。Conductor 不持久化任何 per-node 运行状态（running / completed 等）——那是宿主 `GetWorkflowRun` 的自有事实。
+v2.4 has two truth domains: **static semantic truth** (Conductor task/DAG state) and **execution runtime truth** (the ZCode Workflow run). The Conductor persists no per-node run state (running / completed etc.) — that is the host `GetWorkflowRun`'s own fact.
 
-唯一的持久关联是 `runtime/workflow/adapter.py` 的 run-id 单据：`record_run(repo_root, task_ref, workflow_run_id)` 把「任务 ↔ Workflow run」写为 repo_root 下 `.glm-conductor/workflow-runs/` 单一 JSON 记录（v2.6.0 起显式 repo_root 参数，缺省兼容 legacy CWD 口径；同任务重写整条替换——一任务一活跃 run；可选 `artifact_path` / `node_map`），`load_run` 读回。规范 CLI 入口是 `task-record-workflow-run`（AF-04 写者守卫前置、任意 CWD 落 repo_root 账本、失败零假事件）；`v24-record-run` 为 legacy 低层薄壳。**零状态镜像红线**：子 actor running/完成状态、重试计数、token 账目、后台任务状态、宿主健康度一律不落盘。任务侧对应物是 `state.workflow_run_id`（委派启动前为 null），由 `runtime.task.record_workflow_run` 落盘 + 镜像 adapter + `workflow_started` 事件。
+The only persistent association is the run-id record in `runtime/workflow/adapter.py`: `record_run(repo_root, task_ref, workflow_run_id)` writes the "task ↔ Workflow run" association as a single JSON record under `.glm-conductor/workflow-runs/` of repo_root (an explicit repo_root parameter since v2.6.0, with the legacy CWD basis as the compatible default; re-writing the same task replaces the whole record — one active run per task; optional `artifact_path` / `node_map`), and `load_run` reads it back. The canonical CLI entry is `task-record-workflow-run` (AF-04 writer-guard precondition, repo_root ledger from any CWD, zero fake events on failure); `v24-record-run` is the legacy low-level thin shell. **Zero state mirroring red line**: sub-actor running/completed states, retry counts, token accounting, background task states, host health — none of it is ever persisted. The task-side counterpart is `state.workflow_run_id` (null before a delegated launch), persisted by `runtime.task.record_workflow_run` + mirrored to the adapter + a `workflow_started` event.
 
 ```json
-// .glm-conductor/workflow-runs/run-<task_ref 百分号编码>.json
+// .glm-conductor/workflow-runs/run-<percent-encoded task_ref>.json
 { "task_ref": "redesign-settings-page-7f3a2c",
-  "workflow_run_id": "<宿主 CreateWorkflow 返回的 run id>",
+  "workflow_run_id": "<run id returned by the host CreateWorkflow>",
   "created_at": "2026-09-21T08:30:00.000Z" }
 ```
 
-主会话的委派启动顺序固化为：**任务启动问答**（v2.5.2：凡建状态任务在 create_task 之前强制一次单轮三问合并的问答（第三题为 auto 启用时的条件题，manual 分支两问）——① 跨额度自动唤醒与有界 `max_resumes` 预算，答「启用」先落 `quota-resume-authorize` 再走下方武装序列；② worker 模型（凡有实施委派必问：宿主全候选展示+显式确认，单一候选也确认；solo 等无委派任务不问），答出即落 `worker-model-pin`；问答只发生在交互回合，唤醒轮 / 恢复轮绝不弹问，契约见 orchestration §6.0）→ create task → `v24-compile` 产码 → **worker 模型选型硬闸**（宿主模型列表 → `workflow-model-select` 选定用户显式授权的 provider 全限定精确 id（不限档位，Flash 为软推荐）；带 `--task-ref <task_id>` 时按固定优先级取值：任务 pin > `--model` 显式值（必须与 pin 一致）> Flash 软推荐自动选型（仅裸调用），无 pin 无 `--model` 即拒转问答、pin 失效专门拒绝，见 §14；mode=auto 任务还须先完成连续性武装：建 Scheduled Task → `quota-automation-bind` → `quota-continuity-preflight` PASS）→ `writer-acquire` 取仓库写预约 → 宿主 CreateWorkflow（显式 `subagent_model`）启动 run → `record_workflow_run`（state.workflow_run_id + adapter 单据 + journal 事件）。run 的中途状态（进行中 / 卡在 ask / 已完成）一律经宿主 ListWorkflowRuns / GetWorkflowRun 观察，不进 Conductor 账本。
+The main session's delegation launch order is fixed as: **the task launch interview** (v2.5.2: every task that will create state must pass one mandatory single-round interview merging three questions before create_task (the third question is conditional on enabling auto; the manual branch asks two) — (1) cross-quota automatic wake and the bounded `max_resumes` budget: answering "enable" first persists `quota-resume-authorize` and then walks the arming sequence below; (2) the worker model (asked whenever there is any implementation delegation: the full host candidate list is shown with explicit confirmation, even for a single candidate; not asked for solo and other delegation-free tasks), and the answer is persisted as `worker-model-pin`; the interview happens only in interactive turns — wake rounds / resume rounds never pop questions; contract in orchestration §6.0) → create task → `v24-compile` produces the source → **the worker-model selection hard gate** (host model list → `workflow-model-select` selects the provider-fully-qualified exact id the user explicitly authorized (any tier; Flash is the soft recommendation); with `--task-ref <task_id>` the value resolves by fixed priority: task pin > explicit `--model` value (must equal the pin) > Flash soft-recommendation auto-selection (bare invocation only); no pin and no `--model` refuses into the interview; an invalidated pin is specifically refused — see §14; mode=auto tasks must also first complete continuity arming: create the Scheduled Task → `quota-automation-bind` → `quota-continuity-preflight` PASS) → `writer-acquire` takes the repository write reservation → host CreateWorkflow (explicit `subagent_model`) starts the run → `record_workflow_run` (state.workflow_run_id + adapter record + journal event). A run's mid-flight states (in progress / stuck on ask / finished) are always observed through the host's ListWorkflowRuns / GetWorkflowRun and never enter the Conductor ledger.
 
-## 6. ownership 与编译期冲突处理
+## 6. ownership and compile-time conflict handling
 
-宿主对同一文件的并发写是 silent last-writer-wins（W0 实测），编译期检查是唯一冲突屏障；v2.4 用两级 ownership 纪律，无任何运行时锁。
+Concurrent host writes to the same file are silent last-writer-wins (measured in W0); compile-time checking is the only conflict barrier; v2.4 uses two levels of ownership discipline with no runtime locks.
 
-**路径匹配语义**（`runtime/ownership.py`，完成守卫与编译期共用）：三种声明形式——精确文件（`src/auth.ts`）、目录前缀（裸路径 `src/auth` 等价 `src/auth/**`，按路径段匹配）、段级 glob（`**` 跨段、`*` / `?` 不跨段）。拒绝隐式扩张：`src/auth` 不覆盖 `src/authentication.ts`，`*.py` 不匹配 `sub/x.py`。
+**Path matching semantics** (`runtime/ownership.py`, shared by the completion guard and compile time): three declaration forms — exact file (`src/auth.ts`), directory prefix (a bare path `src/auth` equals `src/auth/**`, matched by path segments), segment-level glob (`**` crosses segments; `*` / `?` do not). Implicit expansion is rejected: `src/auth` does not cover `src/authentication.ts`; `*.py` does not match `sub/x.py`.
 
-| 声明 | 命中 | 不命中 |
+| Declaration | Matches | Does not match |
 | --- | --- | --- |
 | `src/auth.ts` | `src/auth.ts` | `src/auth.ts.bak` |
-| `src/auth`（= `src/auth/**`） | `src/auth/a.ts`、`src/auth/x/y.ts` | `src/authentication.ts` |
-| `*.py` | `a.py` | `sub/x.py`（`*` 不跨段） |
-| `a/**/b.ts` | `a/b.ts`、`a/x/b.ts`、`a/x/y/b.ts` | — |
+| `src/auth` (= `src/auth/**`) | `src/auth/a.ts`, `src/auth/x/y.ts` | `src/authentication.ts` |
+| `*.py` | `a.py` | `sub/x.py` (`*` does not cross segments) |
+| `a/**/b.ts` | `a/b.ts`, `a/x/b.ts`, `a/x/y/b.ts` | — |
 
-**编译期（Workflow 启动前）**：`plan_stages(nodes)` 确定性规划"组内 scope 两两不相交"的并行阶段——先静态校验，取 `dependency.stage_levels` 层级（跨层依赖保持权威），层内按 id 升序贪心装箱进第一个无重叠组，放不进则新开一组（即确定性串行）。两类失败以 `OwnershipConflictError` 编译期拒绝：模式非法；模式歧义（语义上匹配仓库根或一切路径，如 `**` / `*`——所有权声明覆盖一切即失去判定意义）。scope 明确重叠不是错误——被串行化，绝不猜测。无锁、无租约、无运行时预约。
+**Compile time (before Workflow launch)**: `plan_stages(nodes)` deterministically plans parallel stages whose in-group scopes are pairwise disjoint — static validation first, then the levels from `dependency.stage_levels` (cross-level dependencies stay authoritative); within a level, greedy bin-packing in ascending id order into the first group with no overlap, opening a new group when nothing fits (i.e. deterministic serialization). Two failure classes are rejected at compile time with `OwnershipConflictError`: an illegal pattern; an ambiguous pattern (semantically matching the repository root or all paths, such as `**` / `*` — an ownership declaration covering everything loses its discriminating meaning). Explicitly overlapping scope is not an error — it gets serialized, never guessed. No locks, no leases, no runtime reservations.
 
 ```
-（同层两个候选 scope 重叠 → 确定性串行，重叠判定是完备的路径语言相交判定）
-节点 authz（ownership: src/auth/**）  ┐  scopes_overlap("src/auth/**",
-节点 login（ownership: src/auth/login/**）┘   "src/auth/login/**") == True
-→ 同层规划为两组：阶段 i: authz → 阶段 i+1: login（组序即执行序）
+(two same-level candidate scopes overlap → deterministic serialization;
+ the overlap test is a complete path-language intersection test)
+Node authz (ownership: src/auth/**)        ┐  scopes_overlap("src/auth/**",
+Node login (ownership: src/auth/login/**)  ┘   "src/auth/login/**") == True
+→ planned as two groups in the same level: stage i: authz → stage i+1: login (group order is execution order)
 ```
 
-**任务级终局（验收前）**：`实际改动路径 ⊆ union(DAG ownership)`——由完成守卫查 2 执行（§12），是任务级检查而非 per-node 完成闸。
+**Task-level terminal check (before acceptance)**: `actually changed paths ⊆ union(DAG ownership)` — enforced by completion-guard check 2 (§12), a task-level check rather than a per-node completion gate.
 
-## 7. 一仓库一活跃写 Workflow
+## 7. One active write Workflow per repository
 
-v2.4 有意选择粗粒度仓库级写不变量（取代 v2.3 的 per-unit 租约系统）：
+v2.4 deliberately chooses the coarse-grained repository-level write invariant (replacing v2.3's per-unit lease system):
 
-> **一个 Git 仓库同一时刻至多一个活跃 Conductor 写 Workflow。**
+> **A Git repository has at most one active Conductor write Workflow at any moment.**
 
-实现是 `runtime/writer_guard.py`：仓库内单条持久预约记录 `.glm-conductor/writer_guard.json`（恰四字段 `repo_identity / task_id / workflow_run_id / created_at`），公共面仅 `acquire` / `release` / `inspect` 三函数。
+The implementation is `runtime/writer_guard.py`: a single persistent reservation record `.glm-conductor/writer_guard.json` inside the repository (exactly four fields `repo_identity / task_id / workflow_run_id / created_at`); the public surface is only the three functions `acquire` / `release` / `inspect`.
 
-- **永不自动过期**：全代码无 TTL / generation / heartbeat / 按时间过期的逻辑。`created_at` 仅为诊断信息，守卫判定绝不读取它——残留记录无论多旧一律冲突。恢复只有两条路：关联任务到达终态（`task.complete` / `fail` / `cancel` 自动释放）或操作者在 `writer-show` inspect 之后显式 `writer-release --force`
-- **并发安全**：读-改-写全程走 `durable_io.atomic_update_json`（独占锁 + 原子替换），两个并发 acquire 必有一方看到对方落盘的持有者；同 task 重复 acquire 幂等成功；冲突零写入并报出持有者 `task_id` 与 `workflow_run_id`
-- **生命周期强制（AF-04）**：写者守卫是 Conductor 生命周期不变式，在委派 run 注册与完成两处强制——`record_workflow_run`（delegate/full）要求当前任务已持有写预约（缺失 / 他人持有即 ValueError），既有落盘成功后把 run id 幂等补挂进预约记录；完成守卫查 1 对已注册委派 run（`workflow_run_id` 非空）的任务在守卫缺失时同样拦截（missing writer reservation）。协议之外的裸宿主 Workflow 调用（不经 Conductor 生命周期的 CreateWorkflow）不在此保证范围内——守卫不宣称拦截每一次 CreateWorkflow
-- 释放权威键是 `task_id`（`workflow_run_id` 仅诊断）；非持有者释放被拒绝且绝不代删他人预约；Workflow 内部并行在编译期 ownership 验证之后是允许的——守卫约束的是**仓库之间**的第二条写 Workflow
+- **Never auto-expires**: no TTL / generation / heartbeat / time-based expiry logic anywhere in the code. `created_at` is diagnostic only — the guard's judgment never reads it; a leftover record conflicts no matter how old. Recovery has exactly two paths: the associated task reaching a terminal state (`task.complete` / `fail` / `cancel` auto-release) or the operator explicitly running `writer-release --force` after a `writer-show` inspect
+- **Concurrency-safe**: read-modify-write always goes through `durable_io.atomic_update_json` (exclusive lock + atomic replace); of two concurrent acquires, one necessarily sees the other's persisted holder; a repeated acquire by the same task is idempotently successful; on conflict, zero writes and the holder's `task_id` and `workflow_run_id` are reported
+- **Lifecycle enforcement (AF-04)**: the writer guard is a Conductor lifecycle invariant, enforced at both delegated-run registration and completion — `record_workflow_run` (delegate/full) requires the current task to hold the write reservation (missing / held by another → ValueError), and after a successful persist it idempotently attaches the run id to the reservation record; completion-guard check 1 likewise blocks a task with a registered delegated run (non-empty `workflow_run_id`) when the guard is missing (missing writer reservation). A bare host Workflow call outside the protocol (a CreateWorkflow that bypasses the Conductor lifecycle) is outside this guarantee — the guard does not claim to intercept every CreateWorkflow
+- The authoritative release key is `task_id` (`workflow_run_id` is diagnostic only); release by a non-holder is refused and another holder's reservation is never deleted on their behalf; parallelism inside a Workflow is allowed after compile-time ownership validation — the guard constrains a **second write Workflow on the same repository**
 
-## 8. 任务状态（七态）
+## 8. Task state (seven states)
 
-任务状态文件是 `<账本根>/.glm-conductor/tasks/<task-id>/state.json`（`runtime/state.py`；同目录 `events.jsonl` 为 append-only journal）。`task_id` 是机械唯一标识：语义前缀 + 随机十六进制后缀（格式约束 `^[A-Za-z0-9][A-Za-z0-9-]*$`）。
+The task state file is `<ledger root>/.glm-conductor/tasks/<task-id>/state.json` (`runtime/state.py`; the sibling `events.jsonl` in the same directory is an append-only journal). `task_id` is a mechanically unique identifier: semantic prefix + random hex suffix (format constraint `^[A-Za-z0-9][A-Za-z0-9-]*$`).
 
-durable status 恰为七态：`active / waiting_quota / waiting_user / blocked / completed / cancelled / failed`。终态 = 后三者，**终态不得静默重开**（`TASK_TRANSITIONS` 无终态表项；显式重开只能走 `reopen_task`，落 `task_reopened` 事件）。合法迁移：
+The durable status is exactly seven states: `active / waiting_quota / waiting_user / blocked / completed / cancelled / failed`. Terminal = the last three, and **terminal states are never silently reopened** (`TASK_TRANSITIONS` has no terminal-state entries; explicit reopen goes only through `reopen_task`, which records a `task_reopened` event). Legal transitions:
 
 ```
 active          → waiting_quota | waiting_user | blocked | completed | cancelled | failed
@@ -190,10 +191,10 @@ waiting_user    → active | blocked | failed | cancelled
 blocked         → active | waiting_quota | waiting_user | failed | cancelled
 ```
 
-顶层 schema（`validate_state` 强制）：`task_id / goal / repository{root 必填} / route{mode 必填, assurance 可选} / dag / status / workflow_run_id / validation / review / quota_resume`；可选键恰两个：`phase`（`planning / workflow / validating / reviewing`——纯描述性标注，无转换矩阵）与 `worker_model`（v2.5 任务级 worker 模型 pin——存在才校验 null 或非空 str，缺省即不写键，旧任务加载零迁移；写入 `task.pin_worker_model`、消费 `workflow-model-select --task-ref`，见 §14）。`validation` / `review` 各只有一条任务级记录（§9 / §11），无逐单元证据。
+Top-level schema (enforced by `validate_state`): `task_id / goal / repository{root required} / route{mode required, assurance optional} / dag / status / workflow_run_id / validation / review / quota_resume`; exactly two optional keys: `phase` (`planning / workflow / validating / reviewing` — a purely descriptive annotation, no transition matrix) and `worker_model` (the v2.5 task-level worker model pin — validated only when present, as null or a non-empty string; absent by default, zero migration for old tasks; written by `task.pin_worker_model`, consumed by `workflow-model-select --task-ref`, see §14). `validation` / `review` each hold a single task-level record (§9 / §11), no per-unit evidence.
 
 ```json
-// state.json 示意（委派 high 保障任务，委派运行已启动）
+// state.json example (delegated high-assurance task with the delegated run started)
 { "task_id": "redesign-settings-page-7f3a2c",
   "goal": "…",
   "repository": { "root": "C:\\work\\demo" },
@@ -211,218 +212,223 @@ blocked         → active | waiting_quota | waiting_user | failed | cancelled
                     "resume_count": 0, "automation_id": null } }
 ```
 
-任务发现完整性：`discover_tasks` 对 tasks_root 全部子目录四分类（active / terminal / corrupt / orphaned）——损坏的 state.json 不会被解释成"没有任务"，corrupt 与 orphaned 被显式报告（完成守卫 stderr 提示后跳过，不参与拦截）。v2.3 遗留 state 只识别不兼容：`is_legacy_state` / `detect_legacy_task` 检测 `work_units` / `permits` / `leases` / `receipts` 集合键与 v2.3 阶段态 status 等标记，命中即按 `LEGACY_STATE_GUIDANCE` 报告（§18）。
+Task-discovery completeness: `discover_tasks` classifies every subdirectory of tasks_root into four buckets (active / terminal / corrupt / orphaned) — a corrupt state.json is never interpreted as "no tasks"; corrupt and orphaned are explicitly reported (one stderr line from the completion guard, then skipped, not participating in interception). v2.3 legacy states are recognized only to be declared incompatible: `is_legacy_state` / `detect_legacy_task` detect the `work_units` / `permits` / `leases` / `receipts` set keys and markers such as the v2.3 phase-state status, and on a hit report per `LEGACY_STATE_GUIDANCE` (§18).
 
-`repository.root` 是必填仓库根绑定（`bind_repository_root` 归一为绝对路径）：任务全部 git 求值（touched 清单、change_id）在生效根上做——绑定优先、账本根回退（`resolve_repository_root`）；账本恒在账本根。`.glm-conductor/` 是本地运行时账本：不算仓库改动（touched 求值与 change_id 均豁免该目录），优先写入 `.git/info/exclude` 本地排除。
+`repository.root` is a required repository-root binding (`bind_repository_root` normalizes it to an absolute path): all of a task's git evaluation (the touched list, change_id) happens on the effective root — binding first, ledger-root fallback (`resolve_repository_root`); the ledger always stays at the ledger root. `.glm-conductor/` is a local runtime ledger: it does not count as repository changes (both touched evaluation and change_id exempt this directory) and is preferably excluded locally via `.git/info/exclude`.
 
-## 9. change_id：唯一新鲜度原语
+## 9. change_id: the single freshness primitive
 
-`runtime/change_id.py` 的 `compute_change_id(repo_root, relevant_files)` 把「基线修订 + 相关文件集的归一化内容状态」确定性压缩为 `"sha256:" + 64 位十六进制`。入参是仓库相对的**字面文件路径**（不是 ownership scope 串，本函数不展开 scope——scope → 实际改动文件集的解析由 `task.relevant_changed_files` 负责）。语义：任何相关文件增 / 删 / 内容变化 / 相关文件集变化 / 基线变化都会改变标识；CRLF→LF 归一（同一逻辑内容不因换行风格改变标识）；`.glm-conductor/` 记账路径剔除（编排器写自己的账本不使自己过时）；归一去重排序（与输入顺序无关）；空相关集同样给出稳定标识。
+`runtime/change_id.py`'s `compute_change_id(repo_root, relevant_files)` deterministically compresses "baseline revision + the normalized content state of the relevant file set" into `"sha256:" + 64 hex characters`. The inputs are repo-relative **literal file paths** (not ownership scope strings; this function does not expand scopes — resolving scope → the actually-changed file set is `task.relevant_changed_files`'s job). Semantics: any relevant-file addition / deletion / content change / change of the relevant file set / baseline change alters the identifier; CRLF→LF normalization (the same logical content does not change the identifier because of line-ending style); `.glm-conductor/` bookkeeping paths excluded (the orchestrator writing its own ledger must not make itself stale); normalized dedup + sorting (independent of input order); an empty relevant set still yields a stable identifier.
 
-**单一实现红线**：同一函数被三处共用（禁止旁路重算）——主会话记录验证（`validation.change_id`）、记录评审（`review.change_id`）、完成守卫新鲜度比对（§12）。相关改动文件集的派生同被两侧共用：`task.relevant_changed_files(task_state, repo_root)` = ownership scope 并集（`task.ownership_scopes`）∩ git 工作区实际改动（`ownership.git_touched_files` + `classify_paths`）——记录侧与守卫侧同调此派生，标识才可比。owned 文件的增 / 删 / 改 / 改名 / 文件集变化都会改变标识；scope 外改动仍由 ownership 完成检查拦截，与新鲜度无关；`.glm-conductor/` 记账在 touched 与 change_id 两层各自剔除。任何 owned 相关文件变化都使既有验证 / 评审记录过时：「任何修复使先前验证 / 评审失效」由此自动成立；唯一恢复路径是重新验证 / 重新评审并记录新值，禁止回写旧值"续命"。
+**Single-implementation red line**: the same function is shared by three call sites (bypass recomputation forbidden) — main-session validation recording (`validation.change_id`), review recording (`review.change_id`), and the completion guard's freshness comparison (§12). The derivation of the relevant changed file set is likewise shared by both sides: `task.relevant_changed_files(task_state, repo_root)` = the ownership scope union (`task.ownership_scopes`) ∩ actual git working-tree changes (`ownership.git_touched_files` + `classify_paths`) — the recording side and the guard side both call this derivation, which is what makes the identifiers comparable. Additions / deletions / modifications / renames / set changes of owned files all alter the identifier; out-of-scope changes are still intercepted by the ownership completion check and are irrelevant to freshness; `.glm-conductor/` bookkeeping is excluded at both the touched and the change_id layers. Any change to an owned relevant file stales the existing validation / review records: "any fix invalidates prior validation / review" holds automatically; the only recovery path is re-validating / re-reviewing and recording the new values — writing back old values to "extend life" is forbidden.
 
-## 10. 主会话验证
+## 10. Main-session validation
 
-Workflow 结束后，GLM-5.3 主会话必须亲自完成主会话验证（main validation）：
+After the Workflow ends, the GLM-5.3 main session must personally complete the main validation:
 
-- 检查累积 diff 的任务范围与接口保留；
-- 跑**有限的、针对全任务的**集成 / 构建 / 测试命令——不机械重跑每个 worker 的 local_check（worker 本地检查只是节点健康闸，§3）；
-- 判定用户目标是否达成，并经 `runtime.task.record_validation` 记录 `passed | failed`——记录内嵌现算 change_id（§9），可选 `summary` / `commands` 人读摘要。
+- Check the accumulated diff for task scope and interface preservation;
+- Run a **finite, whole-task-targeted** set of integration / build / test commands — never mechanically re-running every worker's local_check (worker local checks are only node-health gates, §3);
+- Judge whether the user goal is met and record `passed | failed` via `runtime.task.record_validation` — the record embeds a freshly computed change_id (§9), with the optional human-readable `summary` / `commands`.
 
-验证记录是声明 + 新鲜度锚定，不要求 stdout 捕获、runner 身份或任何逐命令证据（v2.3 的 durable verification receipt 体系已不存在）。报告只是声明：无主会话亲自观察到的 diff 与命令输出，完成声明无效。`record_review` 要求先有完整 validation 记录（先验证后评审，§11）。
+The validation record is declaration + freshness anchoring; it requires no stdout capture, no runner identity, and no per-command evidence (v2.3's durable verification receipt system no longer exists). A report is only a declaration: without the diff and command output personally observed by the main session, a completion claim is invalid. `record_review` requires a complete validation record first (validate before review, §11).
 
-## 11. 评审者路径
+## 11. Reviewer path
 
-`assurance=high`（路由 `audit` / `full`）在**主会话验证之后**引入一次全新上下文的独立评审（fresh-context read-only review）。评审者是原生 Custom Subagent——`glm-reviewer`（文本，`GLM REVIEW` 裁决）与 `visual-reviewer`（视觉，`VISUAL REVIEW` 裁决）——全新上下文 + 宿主强制的只读工具白名单（Read / Glob / Grep / LS / NotebookRead / WebFetch / WebSearch）构成独立性；评审者不实施任何修复。
+`assurance=high` (routes `audit` / `full`) adds one fresh-context independent review (a fresh-context read-only review) **after main-session validation**. The reviewers are native Custom Subagents — `glm-reviewer` (text, `GLM REVIEW` verdict) and `visual-reviewer` (visual, `VISUAL REVIEW` verdict) — and their independence is a fresh context + the host-enforced read-only tool whitelist (Read / Glob / Grep / LS / NotebookRead / WebFetch / WebSearch); reviewers never implement fixes.
 
-- **输入五要素**：ROLE / STATED GOAL / ACCUMULATED CHANGE SET / INTERFACES AND CONSTRAINTS / VERIFICATION EVIDENCE——缺任何一项应要求补齐而不是猜测
-- **裁决词汇**：`ship / fix-first / rethink`；fix-first / rethink 修复后主验证必须先刷新（diff 变了 change_id 必变），复审必须换**全新评审者**——旧裁决不因修复而复活
-- **持久化最小化**：仅一条任务级 review 记录（`runtime.task.record_review`；CLI `review-record`）：`{reviewer, verdict, change_id, findings?}` + `review_recorded` 事件。v2.3 的评审调用真实性链、tool-use ID 证明、receipts 目录、runner 身份、journal/state 双镜像全部不存在
-- **模型绑定**：文本/视觉审查者分治（v2.4 AF-02）——`glm-reviewer` frontmatter **无 `model` 字段**，继承宿主/会话模型（W0 发现：单模型宿主上不可解析的固定 model id 会让评审者确定性无法启动），文本审查契约继承即可满足；`visual-reviewer` 契约要求直接读图，frontmatter **必须显式绑定**多模态 `GLM-5.3-Flash`（继承纯文本主模型会启动成功但丧失读图契约能力），绑定不可用的宿主上视觉高保障路线 fail closed
+- **Five input essentials**: ROLE / STATED GOAL / ACCUMULATED CHANGE SET / INTERFACES AND CONSTRAINTS / VERIFICATION EVIDENCE — if any is missing, ask for it instead of guessing
+- **Verdict vocabulary**: `ship / fix-first / rethink`; after fix-first / rethink fixes, main validation must refresh first (a changed diff always changes the change_id), and re-review must use a **brand-new reviewer** — an old verdict is never revived by fixes
+- **Minimal persistence**: a single task-level review record only (`runtime.task.record_review`; CLI `review-record`): `{reviewer, verdict, change_id, findings?}` + a `review_recorded` event. v2.3's review-invocation authenticity chain, tool-use ID proofs, receipts directories, runner identity, and the journal/state dual mirror all do not exist
+- **Model binding**: text/visual reviewers split (v2.4 AF-02) — the `glm-reviewer` frontmatter has **no `model` field**, inheriting the host/session model (W0 finding: an unresolvable fixed model id on a single-model host makes the reviewer deterministically unlaunchable; inheritance satisfies the text review contract); the `visual-reviewer` contract requires reading images directly, so its frontmatter **must explicitly bind** the multimodal `GLM-5.3-Flash` (inheriting the text-only main model launches successfully but loses the image-reading contract capability); on hosts where the binding is unavailable, the visual high-assurance route fails closed
 
-## 12. 完成守卫（四查）
+## 12. Completion guard (four checks)
 
-完成是显式受守卫的任务级操作。`hooks/stop_gate.py` 挂在 Stop 事件上，对触发域内任务做**四查**（`evaluate_completion(repo_root, task_id)` 同一套判定亦可导入调用）；任一失败输出一行 block JSON（恰好一条最严重、可操作的中文理由），全部通过时守卫就地执行 `runtime.task.complete`（`completed` + 释放写者守卫 + `task_completed` 事件）并放行。
+Completion is an explicit, guarded task-level operation. `hooks/stop_gate.py` hangs on the Stop event and runs the **four checks** against tasks in the trigger domain (the same judgment is importable as `evaluate_completion(repo_root, task_id)`); on any failure it outputs one line of block JSON (exactly one, most-severe, actionable English reason); when all checks pass, the guard executes `runtime.task.complete` in place (`completed` + releasing the writer guard + a `task_completed` event) and allows the stop.
 
-触发域：账本根 `discover_tasks` 的 active 桶中 `status == "active"` 的 v2.4 任务。停泊态（waiting_quota / waiting_user / blocked）是有意的停止点，一律放行；终态任务无可评估；v2.3 遗留任务放行并附一行处置指引（绝不假装能判完成）；corrupt / orphaned 目录不参与拦截，仅 stderr 一行提示；无活跃任务静默放行。v2.3 的 `finalizing` 完成请求态不存在——收尾发生在守卫全绿路径上，不存在"请求完成"的中间状态。
+Trigger domain: v2.4 tasks with `status == "active"` in the active bucket of the ledger root's `discover_tasks`. Parked states (waiting_quota / waiting_user / blocked) are intentional stopping points and are always allowed through; terminal tasks have nothing to evaluate; v2.3 legacy tasks are allowed through with one line of handling guidance (never pretending completion can be judged); corrupt / orphaned directories do not participate in interception, only one stderr line each; with no active task the guard allows silently. v2.3's `finalizing` completion-request state does not exist — wrap-up happens on the guard's all-green path; there is no intermediate "requesting completion" state.
 
-四查（按序，首败即返；求值根 = `resolve_repository_root` 生效仓库根）：
+The four checks (in order, first failure returns; the evaluation root = the effective repository root from `resolve_repository_root`):
 
 ```
-1. writer_guard ：仓库无其他任务的活跃写预约（持有者是自己放行——完成门即释放点）；
-                  已注册委派 run（workflow_run_id 非空）而守卫缺失同样拦截
-                  否 → block：他人持有——逐字报出持有者 task_id 与 workflow_run_id；
-                  守卫缺失——missing writer reservation（点名任务与 run id）
-2. ownership    ：git 实际改动路径 ⊆ dag 全节点 ownership 并集
-                  否 → block：越界路径逐条列出 + 参与比对的节点 id
-3. validation   ：validation.status == "passed" 且 validation.change_id == 当前 change_id
-                  否 → block：无通过记录，或记录已过期（两侧 change_id 都报）
-4. review       ：route.assurance == "high" 时 review.verdict == "ship"
-                  且 review.change_id == 当前 change_id
-                  否 → block：无 ship 裁决（fix-first / rethink 永不满足完成），或已过期
+1. writer_guard : no other task's active write reservation on the repository (self-holder passes — the completion gate is the release point);
+                  a registered delegated run (non-empty workflow_run_id) with a missing guard is blocked as well
+                  no → block: held by another — report the holder's task_id and workflow_run_id verbatim;
+                  guard missing — missing writer reservation (naming the task and the run id)
+2. ownership    : actually changed git paths ⊆ the ownership union of all dag nodes
+                  no → block: out-of-scope paths listed one by one + the node ids that took part in the comparison
+3. validation   : validation.status == "passed" and validation.change_id == the current change_id
+                  no → block: no passed record, or the record is stale (both change_ids reported)
+4. review       : when route.assurance == "high", review.verdict == "ship"
+                  and review.change_id == the current change_id
+                  no → block: no ship verdict (fix-first / rethink never satisfies completion), or stale
 ```
 
-配套语义：求值期结构性错误（非 git 仓库的 `ChangeIdError`、非法 scope 模式的 `OwnershipError` 等）按任务隔离降级放行（stderr 报告——基础设施故障不是完成证据）；钩子自身崩溃 fail-open（绝不阻断会话）；本钩子不向 journal 写任何事件（唯一的写入来自 `task.complete`）。越界改动不被阻止发生（Workflow 子 actor 不触发钩子，§20），但不可能静默通过完成守卫。
+Companion semantics: structural errors during evaluation (`ChangeIdError` for non-git repositories, `OwnershipError` for illegal scope patterns, etc.) degrade per task and allow (reported on stderr — an infrastructure failure is not completion evidence); a crash of the hook itself fails open (never blocks the session); this hook writes no journal events (the only write comes from `task.complete`). Out-of-scope changes are not prevented from happening (Workflow sub-actors do not trigger hooks, §20), but they cannot silently pass the completion guard.
 
-block 决策的宿主契约是 stdout 单行 JSON（ZCode 据此请求模型续跑，报文即续跑指令）：
+The host contract for the block decision is single-line JSON on stdout (ZCode uses it to ask the model to continue; the payload is the continuation instruction):
 
 ```json
-{"decision": "block", "reason": "完成被阻断：验证记录已过期——验证后任务相关文件又有变化（任务 redesign-settings-page-7f3a2c）。\n- 记录 change_id：sha256:…\n- 当前 change_id：sha256:…\n请重新验证并经 runtime.task.record_validation 刷新记录，再请求完成。"}
+{"decision": "block", "reason": "Completion blocked: the validation record is stale — task-relevant files changed again after validation (task redesign-settings-page-7f3a2c).\n- Recorded change_id: sha256:…\n- Current change_id: sha256:…\nRe-validate and refresh the record via runtime.task.record_validation, then request completion."}
 ```
 
-journal 任务级事件词汇（恰十名，`TASK_JOURNAL_EVENTS` / `journal.RECOMMENDED_EVENTS` 对齐）：`route_selected`（create_task）/ `workflow_started`（record_workflow_run）/ `workflow_reassessed`（声明的词汇名，主会话记录路由重估）/ `validation_recorded` / `review_recorded` / `waiting_quota`（enter / exit）/ `quota_resume_confirmed`（恢复计数落账）/ `task_completed` / `task_failed` / `task_cancelled`。词汇外事件名不存在。
+The task-level journal event vocabulary (exactly ten names, `TASK_JOURNAL_EVENTS` / `journal.RECOMMENDED_EVENTS` aligned): `route_selected` (create_task) / `workflow_started` (record_workflow_run) / `workflow_reassessed` (the declared vocabulary name; the main session records a route reassessment) / `validation_recorded` / `review_recorded` / `waiting_quota` (enter / exit) / `quota_resume_confirmed` (the resume count committed) / `task_completed` / `task_failed` / `task_cancelled`. Event names outside this vocabulary do not exist.
 
-## 13. 视觉例外
+## 13. Visual exception
 
-`visual-implementer` 是**能力例外**，不走 Native Workflow 工人通道，继续走 Custom Subagent 通道（保留宿主强制的多模态模型绑定与读写工具面），直到 Native Workflow 被单独证明能保持多模态 / 截图反馈契约。此例外不得成为第二条通用文本实施路径——普通文本 `delegate/full` 只有 Native Workflow 一种实施基底（v2.3 的 flash-implementer 文本执行者已删除，§21）。
+`visual-implementer` is a **capability exception**: it does not go through the Native Workflow worker channel and keeps using the Custom Subagent channel (keeping the host-enforced multimodal model binding and read-write tool surface) until Native Workflow is separately proven to preserve the multimodal / screenshot-feedback contract. This exception must not become a second general-purpose text implementation path — ordinary text `delegate/full` has exactly one implementation substrate, Native Workflow (v2.3's flash-implementer text executor is deleted, §21).
 
-视觉反馈环跨多次调用完成（Browser Use / Computer Use 为主会话专用，子代理无法驱动浏览器 / 桌面）：
+The visual feedback loop spans multiple invocations (Browser Use / Computer Use are main-session-only; subagents cannot drive a browser / desktop):
 
 ```
-visual-implementer 调用（实施代码改动）
-        ↓ 需要视觉证据 → 返回 VISUAL_CAPTURE_REQUEST，本次调用结束
-主会话采集截图落盘
+visual-implementer invocation (implements code changes)
+        ↓ visual evidence needed → return VISUAL_CAPTURE_REQUEST; this invocation ends
+Main session captures a screenshot to disk
         ↓
-新的 visual-implementer 调用（携带完整状态：规格、diff、上轮请求、截图路径、VISUAL_ROUND）
-        ↓ 实施者亲自 Read 截图、对照 VISUAL ACCEPTANCE 判定
-通过 → FUNCTIONAL VERIFICATION → 报告；不符合 → 修正后再发 VISUAL_CAPTURE_REQUEST
+New visual-implementer invocation (carrying full state: spec, diff, last round's request, screenshot paths, VISUAL_ROUND)
+        ↓ the implementer Reads the screenshots itself and judges against VISUAL ACCEPTANCE
+Pass → FUNCTIONAL VERIFICATION → report; not met → fix and issue VISUAL_CAPTURE_REQUEST again
 ```
 
-规范路径是"新的调用"：每次视觉轮次自包含，正确性不依赖子代理上下文保留（resume 仅为可选优化）。每个验收点以 `VISUAL_ROUND`（1|2|3）跟踪，最多 3 轮采集-判定循环，超出即 blocked 交回主会话重估；实施者不等待、不空转、不虚构截图结果；截图不可得时 fail-closed（视觉通道停止，不得改为纯文本验证交付）。`assurance=high` 的视觉任务由全新上下文的 `visual-reviewer` 做 `VISUAL REVIEW` 视觉终审（§11）。
+The canonical path is "the new invocation": each visual round is self-contained and correctness never depends on subagent context retention (resume is an optional optimization only). Every acceptance point is tracked by `VISUAL_ROUND` (1|2|3), with at most 3 capture-judge loops; beyond that it goes blocked back to the main session for reassessment; the implementer never waits, never idles, never fabricates screenshot results; when screenshots are unobtainable it fails closed (the visual channel stops; delivery must not be downgraded to text-only verification). Visual tasks with `assurance=high` get a `VISUAL REVIEW` visual final review by a fresh-context `visual-reviewer` (§11).
 
-## 14. 最小配额恢复
+## 14. Minimal quota resume
 
-额度连续性收敛为 Workflow 本身不提供的最小任务级能力：**有界、须授权的配额恢复（quota_resume）**。无 epoch、无订阅、无激活记账、无边界消费证明、无常驻观测进程——v2.3 的这些概念在 Conductor 中不存在。
+Quota continuity converges to the minimal task-level capability the Workflow itself does not provide: **bounded, authorization-gated quota resume (quota_resume)**. No epochs, no subscriptions, no activation bookkeeping, no boundary consumption proofs, no resident observation processes — these v2.3 concepts do not exist in the Conductor.
 
-state 顶层 `quota_resume` 块（冻结初始形状 `{mode: "manual", max_resumes: 0, resume_count: 0, automation_id: null}`）：
+The state top-level `quota_resume` block (frozen initial shape `{mode: "manual", max_resumes: 0, resume_count: 0, automation_id: null}`):
 
-- **mode**：`manual`（默认）/ `auto`。auto 不需要附加字段——授权由显式 `authorize_quota_resume(repo_root, task_id, max_resumes)` 调用落盘记录（要求任务处于 waiting_quota 或 active；`max_resumes >= resume_count`），绝不推断。`max_resumes=1` 即一次性恢复；`max_resumes=N` 提供有界多窗续跑
-- **预算不变量**：`resume_count <= max_resumes`（`validate_state` 保存时强制）
+- **mode**: `manual` (default) / `auto`. auto needs no extra fields — authorization is a persisted record from an explicit `authorize_quota_resume(repo_root, task_id, max_resumes)` call (requires the task to be waiting_quota or active; `max_resumes >= resume_count`), never inferred. `max_resumes=1` is a one-shot resume; `max_resumes=N` provides bounded multi-window continuation
+- **Budget invariant**: `resume_count <= max_resumes` (enforced by `validate_state` on save)
 
-等待与恢复路径（`runtime/task.py` 生命周期 API）：
-
-```
-额度耗尽 → enter_waiting_quota（status=waiting_quota；workflow_run_id 保留；
-           可选把最近一次归一化观测 status/reset_at/observed_at 记入 last_observation 供诊断）
-        → 原生 ZCode Scheduled Task 提供未来执行机会（宿主动作）
-定时轮次 → scheduled_activation_decision(task_id, quota_view) 幂等决策，判定顺序固定：
-  1. 非 waiting_quota → no-op（重复唤醒安全，零改写）
-  2. 观测 EXHAUSTED / UNKNOWN → remain-waiting（绝不虚构可用性）
-  3. mode 非 auto → waiting-user（等用户显式授权）
-  4. 预算耗尽 → waiting-user，且恰一次转 waiting_user（幂等：再唤醒即 no-op）
-  5. v2.4.1 连续性闸（INV-CONT-01）：mode=auto 且 automation_id 空 →
-     remain-waiting（reason 含 continuity-unarmed）——零状态写盘、零预算
-     消耗；武装缺失是运维活性故障而非授权耗尽，故不转 waiting_user
-  6. 可用（AVAILABLE/PRESSURE）+ 已授权 + 预算有余 + 已武装 → resume-authorized
-     （附 workflow_run_id；resume_count_after 仅暂存在返回值里——绝不写盘计数）
-        → 宿主 resume 调用真正被接受后 → confirm_resume_started：
-           resume_count +1（唯一落账点）+ 任务转回 active（phase=workflow）
-           + quota_resume_confirmed 事件——未确认的决策绝不消耗预算
-预算耗尽后任务停在 waiting_user 等用户；不再有自动动作
-```
-
-**先武装后开工（v2.4.1，arm-before-work）**：授权与武装是两个独立事实——`authorize` 是用户许可，`bind` 是未来激活见证，`preflight` 是两者齐备的机械确认。mode=auto 的任务必须在首个消耗额度的 Workflow 启动之前、以及任何自动 ResumeWorkflowRun 之前完成武装（`auto_continuity_armed = mode==auto AND automation_id 为非空 str`）。三个任务级 API（`runtime/task.py`）：`bind_quota_automation`（状态限 active/waiting_quota/waiting_user；同 id 幂等、异 id 拒绝不静默替换；绑定绝不推断 mode=auto）、`clear_quota_automation`（精确对账；只清 automation_id 不动 mode/预算；终态允许清理）、`quota_continuity_preflight`（纯读三态判定；只证明持久化绑定存在，绝不证明宿主侧激活仍存活——宿主存在性在恢复边界仍须宿主面核查）。CLI 面：`quota-automation-bind` / `quota-automation-clear` / `quota-continuity-preflight`（ready=false 以退出码 2 报告 = launch/resume 阻断信号）。调度策略（v2.5.2 双通道）：recurring Scheduled Task 是**唯一武装载体**——启动问答授权后即建于干净会话状态（默认 hourly 1h 地板，间隔由启动问答第三问确认），创建后终身不动（三态规律：载体首触发后本会话一切 Cron 变更失效，故成功唤醒后不删不改不重建，保持到终态清理 / 显式取消，INV-CONT-03）；精度由正交的**后台睡眠层**承担（每次唤醒轮收尾按已识别窗口的最早有效未来 `reset_at`（v2.6.0 单一观测口径，与额度状态无关）+grace 续臂，建立/续臂动作永远先于工作推进——完整 runbook 见 continuity 技能「双通道唤醒」节）；v2.5 的 one-shot 后继链已随双通道设计整体删除。
-
-**v2.5.2 双通道唤醒与任务级 pin**：决策链六步原样不动。两处扩展：
-
-- **决策输出无条件透传 `reset_at`（I4/W3 → v2.6.0 单一观测口径）**：`quota-resume-decision` 对**所有 action**（no-op / remain-waiting / waiting-user / resume-authorized）无条件附加 decision `reset_at`（ISO 字符串或 null）——**已识别窗口中最早的有效未来观测复位时刻**（UTC instant 显式解析比较，与额度状态无关——预防性武装：不管当前剩余多少都优先建立唤醒；`parser.plan_resume` 内部的 EXHAUSTED 保守口径保留，不对外）——供主会话按精度层睡眠模板换算后台睡眠目标（`reset_at` + 300s grace；bash 模板动态计算，模型零算术）；纯诊断透传，不参与任何判定；观测面与决策面同源同批（`_observation_view_of`），仅 cache 来源且无未来 reset 时恰强制刷新一次，仍无则如实披露 floor-only 降级，绝不虚构。唤醒架构（v2.5.2 双通道，宿主事实证据见 `docs/reviews/WAKE_TOPOLOGY_PROBE_RESULTS.md`）：**地板** = 启动即建的 recurring 载体（抗应用重启；首触发后终身不动——三态规律使响后变更失效，载体禁令自然满足）；**精度层** = 后台睡眠（退出自动唤起会话，实测秒级精确 + 8-11s 延迟；不抗应用重启，由地板兜底，首个地板唤醒重臂——自愈闭环）；两种触发源走同一统一唤醒协议（active 分支含 run 健康检查，停摆按恢复处理）。同会话单 automation 宿主约束（2026-10-03 活体实测，报文 `Cannot create a scheduled task inside a session that already belongs to a scheduled task`）：载体必须在干净会话状态（启动时）一次建成，此后绝无任何载体变更动作；边界写实（D8）：主会话同时至多一个 auto 任务。终态清理写实（D7）：载体试删预期失败（三态规律）→ 如实上报 automation id → 用户手动删除为预期运营动作 → 确认后 `quota-automation-clear`。
-- **任务级 worker 模型 pin（I1）随任务全生命周期生效**：写入 `task.pin_worker_model`（CLI `worker-model-pin`；经 submission 形态约定预检但**绝不查宿主面**——写入时点与提交时点宿主面可能不同，对账留给消费点；非终态才可写、同值幂等、异值显式覆盖带 prev/new；不新增 journal 事件）。唤醒/恢复轮的新 run 提交同样过选型硬闸：`workflow-model-select --task-ref` 消费任务顶层 `worker_model` pin 并**必查**当次 configured 集合——pin 形状非法或不在列表即专门拒绝（退出码 2），绝不回退自动选型、绝不静默换模型；无人值守回合遇 pin 失效一律阻断提交、转等待用户，绝不弹问（fail closed，契约见 orchestration §6.0 / §6.1）。
-
-观测词汇（`QUOTA_VIEW_STATUSES`）恰为 `AVAILABLE / PRESSURE / EXHAUSTED / UNKNOWN` 四态；UNKNOWN 绝不当作可用。配额恢复不改变路由（额度决定"何时"，不决定"谁做"）。
-
-典型时间线（auto 授权 + `max_resumes=1`）：
+The waiting and resume paths (the `runtime/task.py` lifecycle API):
 
 ```
-用户 authorize_quota_resume(max_resumes=1) → mode=auto
-创建地板载体（recurring）+ 发首个精度睡眠（同批、建立动作优先）
-→ bind_quota_automation → preflight PASS（armed）
-→ 才许 CreateWorkflow 启动（arm-before-work）
-额度耗尽 → waiting_quota（last_observation 记入）
-定时唤醒 #1 → 观测 EXHAUSTED → remain-waiting（零改写）
-定时唤醒 #2 → 观测 AVAILABLE、mode=manual → waiting-user（未授权）
-用户 authorize_quota_resume(max_resumes=1) → mode=auto
-定时唤醒 #3 → resume-authorized（暂存 resume_count_after=1）
-宿主 resume 被接受 → confirm_resume_started → resume_count=1、active
-定时唤醒 #4 → 观测 EXHAUSTED → 预算 1/1 耗尽 → waiting-user（恰一次转态）
-终态 → 载体试删一次（三态规律下预期失败）→ 上报 automation id
-→ 用户手动删除（预期运营动作）→ 确认后 clear 绑定
+Quota exhausted → enter_waiting_quota (status=waiting_quota; workflow_run_id retained;
+           optionally records the latest normalized observation status/reset_at/observed_at
+           into last_observation for diagnostics)
+        → a native ZCode Scheduled Task provides the future execution opportunity (host action)
+Scheduled rounds → scheduled_activation_decision(task_id, quota_view) idempotent decision, fixed order:
+  1. not waiting_quota → no-op (a duplicate wake is safe, zero writes)
+  2. observation EXHAUSTED / UNKNOWN → remain-waiting (never fabricate availability)
+  3. mode not auto → waiting-user (wait for explicit user authorization)
+  4. budget exhausted → waiting-user, with exactly one transition to waiting_user
+     (idempotent: another wake is a no-op)
+  5. v2.4.1 continuity gate (INV-CONT-01): mode=auto and automation_id empty →
+     remain-waiting (reason contains continuity-unarmed) — zero state writes,
+     zero budget consumed; a missing arm is an operational-liveness failure,
+     not authorization exhaustion, so it does not move to waiting_user
+  6. available (AVAILABLE/PRESSURE) + authorized + budget remaining + armed →
+     resume-authorized (with workflow_run_id; resume_count_after is only staged
+     in the return value — never written to disk)
+        → after the host resume call is actually accepted → confirm_resume_started:
+           resume_count +1 (the only commit point) + the task returns to active
+           (phase=workflow) + a quota_resume_confirmed event — an unconfirmed
+           decision never consumes budget
+After the budget is exhausted the task stays at waiting_user for the user; no further automatic actions
 ```
 
-## 15. Global Quota Clock 拆离
+**Arm before work (v2.4.1, arm-before-work)**: authorization and arming are two independent facts — `authorize` is the user's permission, `bind` is the witness of a future activation, `preflight` is the mechanical confirmation that both are in place. A mode=auto task must complete arming before the first quota-consuming Workflow launch and before any automatic ResumeWorkflowRun (`auto_continuity_armed = mode==auto AND automation_id is a non-empty str`). Three task-level APIs (`runtime/task.py`): `bind_quota_automation` (status restricted to active/waiting_quota/waiting_user; same id idempotent, a different id refused without silent replacement; binding never infers mode=auto), `clear_quota_automation` (exact reconciliation; clears only automation_id and never touches mode/budget; cleanup is allowed in terminal states), `quota_continuity_preflight` (a pure-read three-state judgment; it proves only that the persisted binding exists, never that the host-side activation is still alive — host existence must still be checked against the host surface at the resume boundary). CLI surface: `quota-automation-bind` / `quota-automation-clear` / `quota-continuity-preflight` (ready=false reported with exit code 2 = a launch/resume blocking signal). Scheduling policy (v2.5.2 dual channel): the recurring Scheduled Task is the **only arming substrate** — created in a clean session state right after launch-interview authorization (default hourly with a 1h floor; the interval is confirmed by the launch interview's third question), never touched again after creation (three-state rule: after the substrate's first fire, every Cron change in this session is void, so after a successful wake it is never deleted, modified, or rebuilt, and is kept until terminal cleanup / explicit cancellation, INV-CONT-03); precision is carried by the orthogonal **background sleep layer** (each wake round ends by re-arming at the earliest valid future `reset_at` of the identified window (the v2.6.0 single-observation basis, independent of quota status) + grace; the create/re-arm action always precedes work advancement — full runbook in the continuity skill's "dual-channel wake" section); v2.5's one-shot successor chain was deleted wholesale with the dual-channel design.
 
-Global Quota Clock 是**独立的未来伴随项目**，不在 Conductor 责任边界内（v2.4 Phase 3 已整体拆出；可复用件清单见 `docs/roadmap/GLOBAL_QUOTA_CLOCK_EXTRACTION_INVENTORY.md`）。其 provider/账号级目标——按真实 reset 信息观察五小时额度窗口并在窗口边界后做低成本物化——属于 Clock 项目自己。
+**v2.5.2 dual-channel wake and the task-level pin**: the six-step decision chain stays verbatim. Two extensions:
 
-硬分离（双向）：
+- **The decision output unconditionally passes through `reset_at` (I4/W3 → the v2.6.0 single-observation basis)**: `quota-resume-decision` unconditionally attaches the decision `reset_at` (ISO string or null) for **all actions** (no-op / remain-waiting / waiting-user / resume-authorized) — the earliest valid future observation-reset instant of the identified window (UTC instants parsed and compared explicitly, independent of quota status — precautionary arming: build the wake regardless of how much quota remains; the conservative EXHAUSTED basis inside `parser.plan_resume` is kept and not exposed) — for the main session to convert the precision-layer sleep target from the sleep template (`reset_at` + 300s grace; the bash template computes dynamically, zero model arithmetic); pure diagnostic pass-through that participates in no judgment; the observation face and the decision face share the same source and the same batch (`_observation_view_of`), forcing exactly one refresh when the cache is the only source and no future reset exists, and honestly disclosing the floor-only degradation otherwise — never fabricating. Wake architecture (v2.5.2 dual channel; host fact evidence in `docs/reviews/WAKE_TOPOLOGY_PROBE_RESULTS.md`): the **floor** = the recurring substrate created at launch (survives app restarts; never touched after its first fire — the three-state rule voids post-wake changes, so the no-substrate-changes ban is satisfied naturally); the **precision layer** = background sleep (exiting automatically re-invokes the session, measured second-level precision + an 8-11s delay; it does not survive app restarts — the floor backstops it and the first floor wake re-arms it — a self-healing loop). Both trigger sources follow the same unified wake protocol (the active branch includes a run health check; a stalled run is handled as a resume). The one-automation-per-session host constraint (live-tested 2026-10-03, message `Cannot create a scheduled task inside a session that already belongs to a scheduled task`): the substrate must be built in one shot while the session is clean (at launch), and afterwards there are never any substrate mutation actions; boundary written plainly (D8): the main session has at most one auto task at a time. Terminal cleanup written plainly (D7): the substrate deletion is attempted once and expected to fail (the three-state rule) → the automation id is reported honestly → the user deleting it manually is the expected operational action → after confirmation, `quota-automation-clear`.
+- **The task-level worker model pin (I1) lives for the whole task lifecycle**: written by `task.pin_worker_model` (CLI `worker-model-pin`; shape pre-checked via the submission shape convention but **never queries the host surface** — the host surface at write time and at submission time may differ, and reconciliation is left to the consumption point; writable only in non-terminal states, same-value idempotent, different-value explicit overwrite with prev/new; no new journal event). New run submissions in wake/resume rounds pass the same selection hard gate: `workflow-model-select --task-ref` consumes the task top-level `worker_model` pin and **always checks** the current configured set — an invalid pin shape or a pin not in the list is specifically refused (exit code 2), never falling back to auto-selection, never silently switching models; an unattended round with an invalidated pin always blocks the submission and moves to waiting-for-user, never popping questions (fail closed; contract in orchestration §6.0 / §6.1).
 
-- Clock 项目可拥有：provider 身份、快照解析、reset 观察、时钟状态、周期低成本物化、自己的调度集成；
-- Clock 必须不知道：Conductor task_id、Work Unit、路由模式、实施 DAG、ownership、评审策略、任务级恢复记账；
-- **Conductor v2.4 的正确性绝不依赖 Global Quota Clock**：等待额度的任务凭自己的原生 Scheduled Task 路径保持可恢复——没装 Clock 一切照常工作。
+The observation vocabulary (`QUOTA_VIEW_STATUSES`) is exactly the four states `AVAILABLE / PRESSURE / EXHAUSTED / UNKNOWN`; UNKNOWN is never treated as available. Quota resume does not change routing (quota decides "when", not "who does it").
 
-Conductor 生产图中不存在 Clock 代码（无 clock / clock_store / clock automation 面，无宿主调度 SQLite 写路径）；Conductor 只保留只读的额度**观测**面（§17），它回答"现在能不能恢复"，不维护任何时钟。
+Typical timeline (auto authorized + `max_resumes=1`):
 
-## 16. 运行时模块布局与 CLI 面
+```
+User authorize_quota_resume(max_resumes=1) → mode=auto
+Create the floor substrate (recurring) + issue the first precision sleep (same batch; the creation action goes first)
+→ bind_quota_automation → preflight PASS (armed)
+→ only now may CreateWorkflow launch (arm-before-work)
+Quota exhausted → waiting_quota (last_observation recorded)
+Scheduled wake #1 → observation EXHAUSTED → remain-waiting (zero writes)
+Scheduled wake #2 → observation AVAILABLE, mode=manual → waiting-user (unauthorized)
+User authorize_quota_resume(max_resumes=1) → mode=auto
+Scheduled wake #3 → resume-authorized (staged resume_count_after=1)
+Host resume accepted → confirm_resume_started → resume_count=1, active
+Scheduled wake #4 → observation EXHAUSTED → budget 1/1 exhausted → waiting-user (exactly one transition)
+Terminal → attempt one substrate deletion (expected failure under the three-state rule) → report the automation id
+→ the user deletes it manually (the expected operational action) → after confirmation, clear the binding
+```
+
+## 15. Global Quota Clock separation
+
+The Global Quota Clock is an **independent future companion project**, outside the Conductor's responsibility boundary (split out wholesale in v2.4 Phase 3; see `docs/roadmap/GLOBAL_QUOTA_CLOCK_EXTRACTION_INVENTORY.md` for the reusable-parts inventory). Its provider/account-level goals — observing five-hour quota windows from real reset information and doing low-cost materialization after window boundaries — belong to the Clock project itself.
+
+Hard separation (both directions):
+
+- The Clock project may own: provider identity, snapshot parsing, reset observation, clock state, periodic low-cost materialization, its own scheduling integration;
+- The Clock must not know: Conductor task_id, Work Units, route modes, implementation DAGs, ownership, review policy, task-level resume bookkeeping;
+- **Conductor v2.4's correctness never depends on the Global Quota Clock**: a task waiting on quota stays resumable through its own native Scheduled Task path — without the Clock installed, everything works as usual.
+
+No Clock code exists in the Conductor production picture (no clock / clock_store / clock automation surface, no host-scheduling SQLite write path); the Conductor keeps only the read-only quota **observation** surface (§17), which answers "can we resume right now" and maintains no clock.
+
+## 16. Runtime module layout and CLI surface
 
 ```
 plugins/glm-conductor/
-├── agents/        # visual-implementer / glm-reviewer / visual-reviewer（无 flash-implementer）
-├── commands/      # quota.md（/glm-conductor:quota 驱动 report.py 只读诊断）
-├── hooks/         # hooks.json：SessionStart（恢复注入）+ Stop（完成守卫）——仅此两个钩子
-├── skills/        # orchestration / enforcement / continuity 三技能
-└── runtime/       # 纯标准库 Python（python3，零第三方依赖，3.7 兼容）
-    ├── state.py        # 七态任务状态层（schema / 转换表 / 发现四分类 / 遗留检测 / 仓库根绑定）
-    ├── change_id.py    # 任务级变更标识（§9 唯一新鲜度原语）
-    ├── task.py         # 任务生命周期 API（创建/记录/等待恢复/终态收尾）
-    ├── ownership.py    # 路径匹配 + git_touched_files + plan_stages 编译期规划
-    ├── work_unit.py    # 静态节点（构造 + 校验，零运行时字段）
-    ├── dependency.py   # 纯 DAG 校验与确定性排序
-    ├── workflow/       # persona + compiler + adapter + submission（§4 / §5 / 提交模型选型）
-    ├── writer_guard.py # 仓库写者守卫（§7）
-    ├── journal.py      # events.jsonl append-only（任务级十事件词汇）
-    ├── durable_io.py   # 共享原子写 / 独占锁原语（不 import runtime 包内任何模块）
-    ├── recovery.py     # SessionStart 恢复摘要（纯本地，§18）
-    ├── cli.py          # 运行时 CLI 唯一入口（下表）
-    └── quota/          # 11 个只读观测模块（§17）
+├── agents/        # visual-implementer / glm-reviewer / visual-reviewer (no flash-implementer)
+├── commands/      # quota.md (the /glm-conductor:quota command drives report.py read-only diagnostics)
+├── hooks/         # hooks.json: SessionStart (resume injection) + Stop (completion guard) — only these two hooks
+├── skills/        # the three skills orchestration / enforcement / continuity
+└── runtime/       # pure standard-library Python (python3, zero third-party dependencies, 3.7 compatible)
+    ├── state.py        # seven-state task state layer (schema / transition table / four-bucket discovery / legacy detection / repository-root binding)
+    ├── change_id.py    # task-level change identifier (§9, the single freshness primitive)
+    ├── task.py         # task lifecycle API (create / record / wait-resume / terminal wrap-up)
+    ├── ownership.py    # path matching + git_touched_files + plan_stages compile-time planning
+    ├── work_unit.py    # static nodes (construction + validation, zero runtime fields)
+    ├── dependency.py   # pure DAG validation and deterministic ordering
+    ├── workflow/       # persona + compiler + adapter + submission (§4 / §5 / submission model selection)
+    ├── writer_guard.py # repository writer guard (§7)
+    ├── journal.py      # events.jsonl append-only (the ten-event task-level vocabulary)
+    ├── durable_io.py   # shared atomic-write / exclusive-lock primitives (imports nothing from inside the runtime package)
+    ├── recovery.py     # SessionStart resume summary (purely local, §18)
+    ├── cli.py          # the runtime CLI's single entry point (the table below)
+    └── quota/          # 11 read-only observation modules (§17)
 ```
 
-runtime CLI 子命令（退出码 0 成功 / 2 校验拒绝 / 1 运行期拒绝；技能层 runtime 调用一律走本 CLI）：
+runtime CLI subcommands (exit code 0 success / 2 validation refusal / 1 runtime refusal; skill-layer runtime invocations always go through this CLI):
 
-| 子命令 | 作用 |
+| Subcommand | Purpose |
 | --- | --- |
-| `v24-compile <dag-json> [--task-ref] [--out]` | 静态 DAG → TS Workflow 源（只产码，绝不执行） |
-| `writer-acquire / writer-release [--force] / writer-show` | 仓库写者守卫操作面（§7） |
-| `task-record-workflow-run <repo_root> <task_id> <run-id>` | 任务 ↔ Workflow run 关联单据规范注册（§5；v2.6.0 WP-R4：AF-04 写者守卫前置、任意 CWD 落 repo_root 账本、失败零假事件） |
-| `[legacy 低层薄壳] v24-record-run <task_ref> <run-id>` | 同单据的 legacy 入口（缺省以 CWD 定 repo_root；规范面见上行） |
-| `workflow-model-select <models-json> [--model <exact-id>] [--task-ref <task_id>]` | worker 模型选型硬闸（INV-MODEL-01；用户授权显式选型：任务 pin > `--model`（必须与 pin 一致）> Flash 软推荐自动选型（仅裸调用）；无 pin 无 `--model` 拒转问答 / 零候选拒 / 多候选歧义拒 / pin 失效即拒；输出 `{subagent_model, model_policy}` 提交契约） |
-| `worker-model-pin <repo> <task_id> <exact-id>` | 任务级 worker 模型 pin 写入（§14；形状预检不查宿主面，非终态才可写，同值幂等 / 异值覆盖带 prev/new，无 journal 事件） |
-| `quota-automation-bind / quota-automation-clear / quota-continuity-preflight` | auto 连续性武装操作面（§14；preflight ready=false → 退出码 2 = launch/resume 阻断） |
-| `review-record <repo> <task> <reviewer> <verdict> [note]` | 任务级评审记录（先验证后评审） |
-| `quota-resolve <repo> [--force-refresh]` | 额度四态解析（§17） |
+| `v24-compile <dag-json> [--task-ref] [--out]` | static DAG → TS Workflow source (produces code only, never executes) |
+| `writer-acquire / writer-release [--force] / writer-show` | repository writer-guard operation surface (§7) |
+| `task-record-workflow-run <repo_root> <task_id> <run-id>` | canonical registration of the task ↔ Workflow run association record (§5; v2.6.0 WP-R4: AF-04 writer-guard precondition, repo_root ledger from any CWD, zero fake events on failure) |
+| `[legacy low-level thin shell] v24-record-run <task_ref> <run-id>` | legacy entry for the same record (defaults repo_root from CWD; the canonical surface is the row above) |
+| `workflow-model-select <models-json> [--model <exact-id>] [--task-ref <task_id>]` | worker model selection hard gate (INV-MODEL-01; explicit user-authorized selection: task pin > `--model` (must equal the pin) > Flash soft-recommendation auto-selection (bare invocation only); no pin and no `--model` refuses into the interview / zero candidates refuse / multi-candidate ambiguity refuses / an invalidated pin refuses; outputs the `{subagent_model, model_policy}` submission contract) |
+| `worker-model-pin <repo> <task_id> <exact-id>` | task-level worker model pin write (§14; shape pre-check without querying the host surface, writable only in non-terminal states, same value idempotent / different value overwrites with prev/new, no journal event) |
+| `quota-automation-bind / quota-automation-clear / quota-continuity-preflight` | auto continuity arming operation surface (§14; preflight ready=false → exit code 2 = a launch/resume block) |
+| `review-record <repo> <task> <reviewer> <verdict> [note]` | task-level review record (validate before review) |
+| `quota-resolve <repo> [--force-refresh]` | quota four-state resolution (§17) |
 
-额度诊断另有独立脚本 `runtime/quota/report.py`（`/glm-conductor:quota` 命令驱动，文本 + `--json` 双输出）。v2.3 的 permits / wave / verify-unit / verify-task / policy-* / wake-* / quota-clock-* / host-check 等子命令连同其后端已全部删除。
+Quota diagnostics additionally have the standalone script `runtime/quota/report.py` (driven by the `/glm-conductor:quota` command; text + `--json` dual output). v2.3's permits / wave / verify-unit / verify-task / policy-* / wake-* / quota-clock-* / host-check subcommands, along with their backends, are all deleted.
 
-## 17. 额度观测面（只读）
+## 17. Quota observation surface (read-only)
 
-`runtime/quota/` 恰 11 个观测模块，只回答三件事：当前 provider 额度状态、耗尽任务的相关 reset 时间、此刻尝试恢复是否合理。
+`runtime/quota/` is exactly 11 observation modules, answering only three things: the current provider quota status, the relevant reset time of an exhausted task, and whether attempting a resume right now is reasonable.
 
-- **provider 抽象**（`provider.py` / `parser.py`）：监控端点响应解析为标准化快照——按语义字段判窗（unit=3/number=5 → five_hour；unit=6/number=1 → weekly）；**周窗可选**（lite 套餐实测无周窗，解析层绝不假设双窗必然存在）；`evaluate` 四态评估（AVAILABLE / PRESSURE / EXHAUSTED / UNKNOWN，fail-open）与 `plan_resume` 恢复建议（continue / checkpoint / resume_at / periodic_fallback）
-- **provider 适配与硬化**（`zai.py` / `bigmodel.py` / `_http.py`）：HTTPS only、严格 host allowlist（api.z.ai / open.bigmodel.cn）、短超时（5s）、限长响应（64KiB）、重定向禁用、原始响应不落盘
-- **凭证链**（`credentials.py`）：环境变量 `GLM_CONDUCTOR_QUOTA_API_KEY` 优先，已登录 ZCode 的 `~/.zcode/v2/config.json` provider 配置为文档化回退；两者皆不可得 → unavailable；凭证只进内存、零落盘（错误消息不含 key，异常只透出分类词）
-- **运行时解析**（`resolver.py`）：`resolve_quota_status()` 四级层级——新鲜缓存（≤300s，不发网络）→ provider 抓取（四态评估 + 原子写缓存）→ 陈旧缓存回退 → UNKNOWN（绝不默认 AVAILABLE）；缓存绑定 provider 身份指纹（16 位非秘密 sha256 前缀，异身份缓存视同无缓存）；绝不重试网络
-- **诊断面**（`report.py`）：`python3 report.py [--json]`——zai → bigmodel 有界探测（任一成功即用），三种诊断态（正常报告 / 探测失败每 provider 一行错误分类 / unavailable 配置指引），退出码恒 0（诊断面不是闸门），stdout 零凭证输出
-- **窗口数学**（`time_utils.py` / `window_math.py`）：reset 时刻计算与窗口边界的规范落点（自 v2.3 实测口径逐字移入）
+- **Provider abstraction** (`provider.py` / `parser.py`): monitoring-endpoint responses parse into standardized snapshots — window classification by semantic fields (unit=3/number=5 → five_hour; unit=6/number=1 → weekly); **the weekly window is optional** (the lite plan was measured to have no weekly window; the parser never assumes both windows necessarily exist); `evaluate` gives the four-state assessment (AVAILABLE / PRESSURE / EXHAUSTED / UNKNOWN, fail-open) and `plan_resume` the resume recommendation (continue / checkpoint / resume_at / periodic_fallback)
+- **Provider adapters and hardening** (`zai.py` / `bigmodel.py` / `_http.py`): HTTPS only, a strict host allowlist (api.z.ai / open.bigmodel.cn), short timeouts (5s), length-capped responses (64KiB), redirects disabled, raw responses never persisted
+- **Credential chain** (`credentials.py`): the environment variable `GLM_CONDUCTOR_QUOTA_API_KEY` first; the logged-in ZCode `~/.zcode/v2/config.json` provider configuration as the documented fallback; if neither is available → unavailable; credentials stay in memory only, zero persistence (error messages contain no key; exceptions surface only a classification word)
+- **Runtime resolution** (`resolver.py`): `resolve_quota_status()` has a four-level hierarchy — fresh cache (≤300s, no network) → provider fetch (four-state assessment + atomic cache write) → stale cache fallback → UNKNOWN (never defaults to AVAILABLE); the cache is bound to the provider identity fingerprint (a 16-char non-secret sha256 prefix; a cache from another identity counts as no cache); the network is never retried
+- **Diagnostics face** (`report.py`): `python3 report.py [--json]` — bounded probing of zai → bigmodel (the first success wins), three diagnostic states (a normal report / a probe failure with one error classification line per provider / unavailable with configuration guidance), exit code always 0 (the diagnostics face is not a gate), zero credentials on stdout
+- **Window math** (`time_utils.py`): the canonical landing point for reset-time computation and window boundaries (moved in verbatim from the v2.3 measured basis; the dead `window_math.py` twin was deleted in v2.6.0)
 
-额度观察只作为恢复决策的证据使用，不作为路由轴。原生插件级 quota API（getQuotaRemaining / getQuotaResetTime / onQuotaReset 等）不存在，绝不虚构；不硬编码 5 小时重置。
+Quota observation is used only as evidence for resume decisions, never as a routing axis. Native plugin-level quota APIs (getQuotaRemaining / getQuotaResetTime / onQuotaReset etc.) do not exist and are never fabricated; the 5-hour reset is never hardcoded.
 
-## 18. 恢复与遗留任务
+## 18. Recovery and legacy tasks
 
-恢复入口收敛为两个，全部纯本地：
+Recovery entries converge to two, both purely local:
 
-| 入口 | 机制 | 语义 |
+| Entry | Mechanism | Semantics |
 | --- | --- | --- |
-| SessionStart 注入 | `hooks/session_start.py` + `runtime/recovery.py` | 新会话 / compact / clear 时对未完成任务注入 `GLM CONDUCTOR RESUME CONTEXT`（每任务仅 task id / goal / repository / status / route / workflow run id / quota 等待态 / 下一步安全动作；无任务时完全安静） |
-| 原生 Scheduled Task 唤醒 | 宿主 automation → 定时轮次（§14 决策链） | 等待额度任务的未来执行机会；重复唤醒是安全 no-op |
+| SessionStart injection | `hooks/session_start.py` + `runtime/recovery.py` | on new session / compact / clear, injects `GLM CONDUCTOR RESUME CONTEXT` for unfinished tasks (per task only: task id / goal / repository / status / route / workflow run id / quota wait state / next safe action; fully silent when there are no tasks) |
+| Native Scheduled Task wake | host automation → scheduled rounds (the §14 decision chain) | the future execution opportunity for a quota-waiting task; a duplicate wake is a safe no-op |
 
-下一安全动作词汇（`NEXT_ACTIONS`，恰七个）：inspect workflow / resume workflow / reassess repository / run main validation / run required review / wait for quota or user / explicitly retire legacy task。仓库 > 任何运行时记录：恢复以仓库真实状态为准。注入形态（无任务时 stdout 恒空、完全安静）：
+The next-safe-action vocabulary (`NEXT_ACTIONS`, exactly seven): inspect workflow / resume workflow / reassess repository / run main validation / run required review / wait for quota or user / explicitly retire legacy task. The repository outranks any runtime record: recovery defers to the repository's real state. Injection shape (stdout always empty when there are no tasks; fully silent):
 
 ```
 GLM CONDUCTOR RESUME CONTEXT
@@ -434,64 +440,64 @@ GLM CONDUCTOR RESUME CONTEXT
     Next:    wait for quota or user
 ```
 
-**v2.3 遗留任务**：v2.4 只检测、不迁移、不兼容运行。`detect_legacy_task` 给出 `legacy` 判定、标记清单与一行处置指引 `LEGACY_STATE_GUIDANCE`（"请在 2.3.x 下收尾或显式放弃"）；`load_task` / 生命周期 API / 完成守卫对遗留任务一律拒绝或放行并指引，绝不静默当作 v2.4 任务、绝不伪造 v2.4 完成证据。v2.3.x 可经 Git 历史 / tag 随时找回。
+**v2.3 legacy tasks**: v2.4 only detects; it neither migrates nor runs them compatibly. `detect_legacy_task` gives a `legacy` verdict, the marker list, and the one-line handling guidance `LEGACY_STATE_GUIDANCE` ("v2.3 legacy task: wrap up or explicitly abandon it under 2.3.x"); `load_task` / the lifecycle API / the completion guard always refuse or allow-with-guidance for legacy tasks — never silently treating them as v2.4 tasks, never fabricating v2.4 completion evidence. v2.3.x remains retrievable at any time via Git history / tags.
 
-## 19. 安全模型
+## 19. Security model
 
-- **额度网络面**：HTTPS only + host allowlist + 短超时 + 限长响应 + 禁重定向（§17）；凭证零落盘、异常只透出分类词；provider 身份指纹是 sha256 前缀截断，非秘密、不可逆
-- **授权方向绝不 fail-open**：quota_resume 的 auto 授权必须显式落盘；计数只在宿主接受 resume 后落账；预算不变量保存时强制——误拒只损失一次恢复时机，误放行是无授权的执行
-- **状态面最小暴露**：state.json / events.jsonl 无秘密值、无完整 prompt；events.jsonl append-only 且按任务隔离；`.glm-conductor/` 优先写入 `.git/info/exclude` 本地排除，不自动修改 tracked `.gitignore`
-- **生成源安全**：Workflow 编译产物不含时间戳 / 随机数 / 凭证；禁词扫描锚定 permit / lease 词汇零出现
-- **静态校验作为契约闸**：`scripts/validate_plugin.py` 15 项检查机械防止契约回潮（§22）
+- **Quota network face**: HTTPS only + host allowlist + short timeouts + length-capped responses + redirects disabled (§17); credentials never persisted; exceptions surface only a classification word; the provider identity fingerprint is a sha256 prefix truncation — non-secret, irreversible
+- **Authorization never fails open**: quota_resume's auto authorization must be explicitly persisted; the count is committed only after the host accepts the resume; the budget invariant is enforced on save — a false refusal only loses one resume opportunity, a false allow is execution without authorization
+- **Minimal state exposure**: state.json / events.jsonl contain no secret values and no full prompts; events.jsonl is append-only and isolated per task; `.glm-conductor/` is preferably excluded locally via `.git/info/exclude`, never auto-modifying a tracked `.gitignore`
+- **Generated-source safety**: Workflow compilation output contains no timestamps / randomness / credentials; the forbidden-word scan anchors zero occurrences of permit / lease vocabulary
+- **Static validation as the contract gate**: `scripts/validate_plugin.py` runs 16 checks to mechanically prevent contract regression (§22)
 
-## 20. 运行时边界（ZCode 宿主事实）
+## 20. Runtime boundaries (ZCode host facts)
 
-以下为 W0 宿主复验（2026-09-20 收口）与既有实测确立的宿主事实，v2.4 设计以此为约束：
+The following are host facts established by the W0 host re-verification (closed 2026-09-20) and prior live testing; v2.4's design takes them as constraints:
 
-- **Workflow 子 actor 不触发插件钩子**（结构性旁路，W0-A 在当前构建上复确认）：派发面钩子强制在主实施路径上不可实现——v2.4 因此把强制收敛到编译期（ownership 规划 + 写者守卫）与终局（完成守卫四查），并删除了只覆盖主会话 Bash 的策略钩子（留着会暗示主路径并不享有的覆盖面）。越界改动不被阻止发生，但不可能静默通过完成守卫
-- **定时轮次是所属会话的 mid-turn continuation**（W0 发现）：唤醒轮共享主会话环境与权限状态，不是新会话 / 新进程；应用关闭时的触发行为未验证——连续性设计不依赖它，恢复兜底归 SessionStart 注入
-- 一会话一 automation 是宿主硬规则（已有 scheduled task 的会话再创建被宿主直接拒绝）；fire 实际执行相对排定时刻有秒级延迟
-- 强制层钩子依赖 `python3` 在 PATH；钩子随插件分发、仅安装 / 更新后的新会话生效；agent 定义在会话启动时快照，运行中会话不热加载
-- 子智能体每次调用都是全新上下文、不能再派生子智能体（结构扁平）；只能看到会话启动时已连接的 MCP 服务；以前台调用受支持为前提
-- 插件与代理严禁替用户执行睡眠 / 唤醒 / 关机等 OS 电源操作（电源操作是用户本人权限）
+- **Workflow sub-actors do not trigger plugin hooks** (a structural bypass, re-confirmed on the current build in W0-A): enforcement through dispatch-face hooks is impossible on the main implementation path — v2.4 therefore converges enforcement to compile time (ownership planning + the writer guard) and the terminal check (the completion guard's four checks), and deleted the policy hook that only covered main-session Bash (keeping it would imply coverage the main path does not have). Out-of-scope changes are not prevented from happening, but they cannot silently pass the completion guard
+- **Scheduled rounds are the owning session's mid-turn continuation** (a W0 finding): a wake round shares the main session's environment and permission state; it is not a new session / new process; trigger behavior while the app is closed is unverified — the continuity design does not depend on it, and the recovery backstop is the SessionStart injection
+- One automation per session is a host hard rule (creating another in a session that already has a scheduled task is rejected outright by the host); an actual fire executes with seconds-level delay relative to the scheduled moment
+- Enforcement-layer hooks depend on `python3` being on PATH; hooks ship with the plugin and take effect only in new sessions after install / update; agent definitions are snapshotted at session start and not hot-reloaded in a running session
+- A subagent gets a fresh context on every invocation and cannot spawn further subagents (a flat structure); it sees only the MCP services connected at session start; foreground invocation is the supported premise
+- Plugins and agents must never perform OS power operations (sleep / wake / shutdown etc.) on the user's behalf (power operations are the user's own prerogative)
 
-## 21. v2.3 → v2.4 退役对照
+## 21. v2.3 → v2.4 retirement map
 
-下表是显式退役记录：这些名字在 v2.4 生产代码与文档中**不是运行路径，而是不存在**。历史证据保留在 CHANGELOG 与 docs/reviews / docs/roadmap（其中 v2.4 之前的架构描述只对 2.3.x 成立）。
+The table below is the explicit retirement record: in v2.4 production code and docs these names **are not run paths — they do not exist**. Historical evidence is kept in the CHANGELOG and docs/reviews / docs/roadmap (architecture descriptions from before v2.4 hold only for 2.3.x).
 
-| v2.3 概念 | v2.4 处置 | 取代物 |
+| v2.3 concept | v2.4 disposition | Replacement |
 | --- | --- | --- |
-| dispatcher / dispatch wave / dispatch permit | 删除（模块 + CLI + 钩子面） | Native Workflow 一次 run 执行整个 DAG |
-| per-unit lease（TTL / generation / heartbeat） | 删除 | 编译期 ownership 规划 + 仓库写者守卫 |
-| Work Unit 运行时状态（status / attempt / 结果史） | 删除 | 静态节点：只声明编译期事实 |
-| 单元 / 任务级 durable receipt（verify-unit / verify-task / runner 身份链） | 删除 | 任务级 validation / review 记录，change_id 锚定新鲜度 |
-| agent-run ledger / reconcile 对账 / resume manifest | 删除 | 宿主 GetWorkflowRun 观测 + 任务级最小恢复摘要 |
-| Bash 策略门（PreToolUse Bash） | 删除 | ZCode 原生权限设施 + worker constraints |
-| finalizing 完成请求态 / 完成门记账机 | 删除 | 完成守卫全绿路径直接收尾（四查） |
-| 执行相位 NORMAL / PRESSURE / DRAINING / BLOCKED | 删除 | 额度观测四态只作恢复证据 |
-| quota watcher / quota epoch / 订阅 / 激活记账 / 窗口消费证明 | 删除 | `quota_resume` 有界预算（resume_count / max_resumes） |
-| Window Primer / Activation Transport / Task Wake Bridge | 删除 | 原生 Scheduled Task 唤醒（宿主能力） |
-| Global Quota Clock（clock / clock_store / clock automation） | 拆离为独立伴随项目 | Conductor 仅保留只读额度观测（§17） |
-| 宿主调度 SQLite 适配器（host/ 直写 next_run_at） | 删除 | 只用宿主支持的 Scheduled Task 能力 |
-| flash-implementer（文本执行者 agent） | 删除 | Native Workflow 文本工人（persona 模板） |
-| continuity 生命周期轴（foreground / resumable / idle） | 删除 | 七态任务 + quota_resume 授权 + 原生唤醒 |
-| Layer A / Layer B 派发注入与 permit 门钩子 | 删除 | 钩子只剩 SessionStart + Stop 两个 |
+| dispatcher / dispatch wave / dispatch permit | deleted (module + CLI + hook face) | one Native Workflow run executes the whole DAG |
+| per-unit lease (TTL / generation / heartbeat) | deleted | compile-time ownership planning + the repository writer guard |
+| Work Unit runtime state (status / attempt / result history) | deleted | static nodes: declare compile-time facts only |
+| per-unit / per-task durable receipts (verify-unit / verify-task / runner identity chain) | deleted | task-level validation / review records with change_id-anchored freshness |
+| agent-run ledger / reconcile / resume manifest | deleted | host GetWorkflowRun observation + the minimal task-level resume summary |
+| Bash policy gate (PreToolUse Bash) | deleted | ZCode native permission facilities + worker constraints |
+| finalizing completion-request state / the completion-gate bookkeeping machine | deleted | the completion guard's all-green path wraps up directly (the four checks) |
+| execution phases NORMAL / PRESSURE / DRAINING / BLOCKED | deleted | the quota observation's four states serve only as resume evidence |
+| quota watcher / quota epoch / subscriptions / activation bookkeeping / window consumption proofs | deleted | the `quota_resume` bounded budget (resume_count / max_resumes) |
+| Window Primer / Activation Transport / Task Wake Bridge | deleted | native Scheduled Task wakes (host capability) |
+| Global Quota Clock (clock / clock_store / clock automation) | split into an independent companion project | the Conductor keeps only read-only quota observation (§17) |
+| host-scheduling SQLite adapter (host/ direct next_run_at writes) | deleted | only the host's supported Scheduled Task capability is used |
+| flash-implementer (text executor agent) | deleted | Native Workflow text workers (persona template) |
+| continuity lifecycle axis (foreground / resumable / idle) | deleted | seven-state tasks + quota_resume authorization + native wakes |
+| Layer A / Layer B dispatch injection and permit-gate hooks | deleted | hooks reduced to the two: SessionStart + Stop |
 
-## 22. 静态校验与测试
+## 22. Static validation and tests
 
-- `scripts/validate_plugin.py`（纯标准库，15 项检查）+ CI（静态校验 + 单元测试）维护契约一致性：扫描 `plugins/`、`README.md`、`marketplace.json` 与本文档；一律跳过 `__pycache__` 与 `*.pyc` / `*.pyo`
-- 测试（`tests/`，纯标准库 unittest）覆盖：静态节点与 DAG 校验、ownership 阶段规划与重叠判定、Workflow 编译器（确定性 / 禁词）、写者守卫（含并发）、七态状态层与转换门、change_id、任务生命周期、quota_resume 授权与恢复决策、完成守卫四查、恢复摘要、额度观测面；已删组件的测试随组件删除，不以 skip 形态留存
-- 版本策略：`plugin.json` 版本、CHANGELOG 最新条目保持一致（v2.4.0）
+- `scripts/validate_plugin.py` (pure standard library, 16 checks) + local gates (static validation + unit tests) maintain contract consistency (hosted CI was removed in v2.5.2; validation runs locally): it scans `plugins/`, `README.md`, `marketplace.json`, and this document; always skipping `__pycache__` and `*.pyc` / `*.pyo`
+- Tests (`tests/`, pure standard-library unittest) cover: static nodes and DAG validation, ownership stage planning and overlap judgment, the Workflow compiler (determinism / forbidden words), the writer guard (including concurrency), the seven-state layer and its transition gate, change_id, the task lifecycle, quota_resume authorization and resume decisions, the completion guard's four checks, the resume summary, the quota observation surface; tests for deleted components are deleted with the component and never kept as skips
+- Version policy: the `plugin.json` version and the latest CHANGELOG entry stay consistent (v2.6.1)
 
-## 23. 稳定边界与演化纪律
+## 23. Stable boundary and evolution discipline
 
-冻结边界（变更须经显式设计裁决并同步全部契约面）：
+Frozen boundaries (changes require an explicit design verdict and synchronization across every contract face):
 
-- 路由双轴 + 四路线（`solo / delegate / audit / full`）与三 agent 清单（visual-implementer / glm-reviewer / visual-reviewer）
-- TASK_ID 格式（语义前缀 + 随机十六进制后缀）与 `.glm-conductor/tasks/<task-id>/`（state.json + events.jsonl）状态布局
-- 七态词汇与 `TASK_TRANSITIONS`；完成守卫四查顺序与 block 报文契约
-- change_id 推导口径与"记录 / 守卫两侧同调同一实现"红线
-- writer_guard 记录四字段与"永不自动过期"语义；quota_resume 四键形状与预算不变量
-- runtime CLI 公共子命令面与退出码语义；journal 任务级十事件词汇
+- The two routing axes + four routes (`solo / delegate / audit / full`) and the three-agent roster (visual-implementer / glm-reviewer / visual-reviewer)
+- The TASK_ID format (semantic prefix + random hex suffix) and the `.glm-conductor/tasks/<task-id>/` (state.json + events.jsonl) state layout
+- The seven-state vocabulary and `TASK_TRANSITIONS`; the completion guard's four-check order and block-message contract
+- The change_id derivation basis and the "recording / guard sides call the same implementation" red line
+- The writer_guard record's four fields and the "never auto-expires" semantics; the quota_resume four-key shape and budget invariant
+- The runtime CLI's public subcommand surface and exit-code semantics; the journal's ten-event task-level vocabulary
 
-演化纪律：除非实际使用暴露出具体能力缺口，不新增路由维度或角色；运行时只针对高置信不变量（ownership 越界、证据过期、第二写者、无授权恢复）做确定性强制，不做语义解释型拦截；宿主已拥有的执行事实永远不再建模。
+Evolution discipline: unless actual usage exposes a concrete capability gap, no new routing dimensions or roles; the runtime performs deterministic enforcement only for high-confidence invariants (ownership out-of-scope, stale evidence, a second writer, unauthorized resume) and no semantic-interpretation interception; an execution fact the host already owns is never modeled again.

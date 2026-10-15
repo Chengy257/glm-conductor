@@ -217,7 +217,7 @@ def atomic_write_json(path, payload, *, indent=2, sort_keys=True,
                       sort_keys=sort_keys)
     if float(retry_interval) < 0:
         raise ValueError(
-            "atomic_write_json：retry_interval 必须 >= 0，得到 %r"
+            "atomic_write_json: retry_interval must be >= 0, got %r"
             % (retry_interval,))
     attempts = max(1, int(retry_attempts))
     path = os.fspath(path)
@@ -417,8 +417,8 @@ def _takeover_stale_lock(lock_path, pid, owner, stale_state, *,
     fd = _open_excl(claim_path)
     if fd is None:  # uuid4 唯一名冲突在实践不可能；保守按忙处理
         raise LockBusyError(
-            "exclusive_lock：%s 认领标记创建冲突（不可能路径，保守落败）"
-            % claim_path)
+            "exclusive_lock: %s claim-marker creation conflict"
+            " (impossible path; conservatively failing)" % claim_path)
     try:
         os.close(fd)  # 标记内容不承载语义，存在性即仲裁凭证
         verdict = _recheck_after_claim(lock_path, stale_fingerprint,
@@ -427,20 +427,21 @@ def _takeover_stale_lock(lock_path, pid, owner, stale_state, *,
             return None  # 锁刚消失（持有者正常释放）→ 回 O_EXCL 循环
         if verdict == "busy":
             raise LockBusyError(
-                "exclusive_lock：%s 在认领期间被他人接管或持有者复活"
-                % lock_path)
+                "exclusive_lock: %s taken over during the claim,"
+                " or the holder revived" % lock_path)
         sleep(max(0.0, float(poll_interval)))  # settle：让迟到认领落盘
         if not _claim_is_winner(claim_path, lock_path):
             raise LockBusyError(
-                "exclusive_lock：%s 陈旧锁接管仲裁落败（存在更小认领标记）"
-                % lock_path)
+                "exclusive_lock: %s stale-lock takeover arbitration lost"
+                " (a smaller claim marker exists)" % lock_path)
         verdict = _recheck_after_claim(lock_path, stale_fingerprint,
                                        stale_seconds=stale_seconds, now=now)
         if verdict == "gone":
             return None
         if verdict == "busy":
             raise LockBusyError(
-                "exclusive_lock：%s 在仲裁 settle 期间被他人接管" % lock_path)
+                "exclusive_lock: %s taken over by another party"
+                " during arbitration settle" % lock_path)
         _unlink_retry(lock_path, sleep=sleep)  # 认领赢家独有权利：删陈旧锁
         next_fd = None
         for _attempt in range(max(1, int(UNLINK_RETRY_ATTEMPTS))):
@@ -452,7 +453,8 @@ def _takeover_stale_lock(lock_path, pid, owner, stale_state, *,
             sleep(float(UNLINK_RETRY_INTERVAL_SECONDS))
         if next_fd is None:  # 有界重取耗尽 → 确定落败
             raise LockBusyError(
-                "exclusive_lock：%s 接管窗口被第三者抢先持有" % lock_path)
+                "exclusive_lock: %s takeover window was claimed by a third"
+                " party first" % lock_path)
         try:
             _write_lock_content(next_fd, pid, prior_generation + 1, owner)
         except BaseException:
@@ -487,8 +489,9 @@ def _acquire_lock(lock_path, *, timeout_seconds, poll_interval,
             # deadline 约束，绝不空转）
             if time.monotonic() >= deadline:
                 raise LockBusyError(
-                    "exclusive_lock：%s 在获取窗口反复错过可用间隙，有界等"
-                    "待 %.2f 秒后超时" % (lock_path, float(timeout_seconds)))
+                    "exclusive_lock: %s repeatedly missed the available"
+                    " window; bounded wait of %.2f s timed out"
+                    % (lock_path, float(timeout_seconds)))
             sleep(poll)
             continue
         now = datetime.now(timezone.utc)
@@ -496,12 +499,13 @@ def _acquire_lock(lock_path, *, timeout_seconds, poll_interval,
                             stale_seconds=stale_seconds, now=now):
             if time.monotonic() >= deadline:
                 raise LockBusyError(
-                    "exclusive_lock：%s 被新鲜持有者占用（pid=%r，"
-                    "created_at=%r），有界等待 %.2f 秒后超时" % (
+                    "exclusive_lock: %s held by a fresh holder (pid=%r,"
+                    " created_at=%r); bounded wait of %.2f s timed out" % (
                         lock_path,
                         state.get("pid") if kind == "ok" else None,
                         state.get("created_at") if kind == "ok"
-                        else "（内容写一半，mtime 龄期未超写入中闸）",
+                        else "(content half-written; mtime age under the"
+                             " in-progress write gate)",
                         float(timeout_seconds)))
             sleep(poll)
             continue

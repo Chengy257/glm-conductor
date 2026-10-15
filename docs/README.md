@@ -1,16 +1,16 @@
 # GLM Conductor 文档索引
 
-本目录是 GLM Conductor 文档的入口。v2.4 起当前真相源 = 仓库代码 + `architecture.md`（v2.4 口径）；其余内容按下列两组定位。
+本目录是 GLM Conductor 文档的入口。v2.4 起当前真相源 = 仓库代码 + `architecture.md`（v2.6.1 口径）；其余内容按下列两组定位。
 
 ## 从这里开始（Start here）
 
 - [README.md（仓库根）](../README.md) — 项目入口：v2.4 四支柱概览（选择性路由 / 原生 Workflow 执行 / 最小确定性保障 / 可选有界额度恢复）、安装与快速上手。中文镜像 [README.zh-CN.md](../README.zh-CN.md) 结构对齐。
-- [core-concepts.md](core-concepts.md) — 核心概念：v2.4 语义编排层（路由矩阵 / 规范 DAG / Workflow 编译边界 / change_id 与完成守卫 / 有界额度恢复）的概念性说明。
+- [core-concepts.md](core-concepts.md) — Concept dictionary for the semantic orchestration layer (routing matrix / canonical DAG / Workflow compilation boundary / change_id and the completion guard / bounded quota resume).
 
 ## 技术参考（Technical Reference）
 
-- [architecture.md](architecture.md) — **唯一架构真相源**：v2.4 运行时行为的权威技术描述（路由矩阵、静态 DAG、Workflow 编译器边界、宿主拥有的执行状态、ownership 冲突处理、单仓库写者守卫、任务状态、change_id、主会话验证、审查路径、完成守卫、视觉例外、最小额度恢复、Global Clock 分离）。
-- [troubleshooting.md](troubleshooting.md) — 面向用户的排障手册：按「现象 → 判定 → 处置」组织（额度诊断、v2.3 遗留任务检测、写者守卫陈旧释放等），每条标注实现模块路径供核对。
+- [architecture.md](architecture.md) — **The single source of architectural truth**: the authoritative technical description of the current runtime behavior (routing matrix, static DAG, Workflow compiler boundary, host-owned execution state, ownership conflict handling, per-repo writer guard, task state, change_id, main-session validation, review paths, completion guard, the visual exception, minimal quota resume, Global Clock separation).
+- [troubleshooting.md](troubleshooting.md) — User-facing troubleshooting manual organized as "symptom → verdict → disposition" (quota diagnostics, v2.3 legacy task detection, writer-guard stale release, etc.); every entry cites the implementing module path for verification.
 - [CHANGELOG.md（仓库根）](../CHANGELOG.md) — 发布级变更记录（用户可见与维护者相关的变更，不含实施过程细节；2.4.0 条目含重基线概述、删除面统计、保留语义与迁移说明）。
 - [GLOBAL_QUOTA_CLOCK_EXTRACTION_INVENTORY.md](roadmap/GLOBAL_QUOTA_CLOCK_EXTRACTION_INVENTORY.md) — Global Quota Clock 拆离清单：独立未来伴生项目的可复用能力目录与 must-not-migrate 边界。
 

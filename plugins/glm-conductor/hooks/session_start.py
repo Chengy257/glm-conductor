@@ -59,6 +59,11 @@ from pathlib import Path
 PLUGIN_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PLUGIN_ROOT))
 
+# 降级报文模板（fail-open 契约的 stderr 一行；W3a 集中、W3b 语言重基线
+# 核定英文值，ENFORCEMENT DEGRADED 前缀不变）
+DEGRADED_FAILURE_MESSAGE_TEMPLATE = (
+    "ENFORCEMENT DEGRADED: session_start failed: %r\n")
+
 
 def repo_root():
     """返回被检查的仓库根：优先 ZCODE_PROJECT_DIR（ZCode 钩子进程注入，
@@ -113,6 +118,5 @@ if __name__ == "__main__":
     except SystemExit:
         raise
     except Exception as exc:  # fail-open：恢复提示层降级可见，绝不阻塞启动
-        sys.stderr.write(
-            "ENFORCEMENT DEGRADED: session_start failed: %r\n" % (exc,))
+        sys.stderr.write(DEGRADED_FAILURE_MESSAGE_TEMPLATE % (exc,))
         sys.exit(0)

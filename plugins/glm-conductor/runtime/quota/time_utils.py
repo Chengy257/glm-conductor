@@ -24,9 +24,10 @@
     留驻原模块——微差即非重复，错误合并才是失败模式）：
       - runtime.quota.resolver._normalize_now 与
         runtime.quota.report._normalize_now：逻辑同构但 ValueError
-        文案锚定各自 API 名（"resolve_quota_status：" /
-        "format_duration_delta："），与 scheduler 变体
-        （"plan_resume："）非逐字相同，不合并；
+        文案锚定各自 API 名（本模块与 resolver 的锚已随 v2.6.1 W5b
+        英文化——"plan_resume: " / "resolve_quota_status: "；
+        report 的 "format_duration_delta：" 仍为中文面），三者非逐字
+        相同，不合并；
       - runtime.quota.resolver._format_iso_ms_z：毫秒精度 Z 形式，
         与秒精度 _format_iso_z 语义不同，不合并。
 
@@ -72,7 +73,7 @@ def _normalize_now(now):
     now 仅供测试注入当前时刻（或调用方传入参考时刻）使用；§30 规定
     resume_at 只由 reset + grace 决定，本函数的返回值不参与任何
     action / resume_at 的计算（避免测试与运行环境时钟耦合）。
-    非法输入 → ValueError（中文）。
+    非法输入 → ValueError（英文）。
     """
     if now is None:
         return datetime.now(timezone.utc)
@@ -83,8 +84,8 @@ def _normalize_now(now):
     moment = _parse_iso_utc(now)
     if moment is None:
         raise ValueError(
-            "plan_resume：now 必须是 datetime 或 ISO8601 字符串，得到 %r"
-            % (now,))
+            "plan_resume: now must be a datetime or ISO8601 string,"
+            " got %r" % (now,))
     return moment
 
 

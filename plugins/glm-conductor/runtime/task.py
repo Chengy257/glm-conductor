@@ -191,7 +191,7 @@ journal 词汇（TASK_JOURNAL_EVENTS，恰十名，绝不多不少）：
     失效即拒）与 §4 W1（pin_worker_model 单元规格）。
 """
 
-from runtime import change_id, journal, ownership, state, writer_guard
+from runtime import change_id, journal, messages, ownership, state, writer_guard
 from runtime.workflow import adapter as workflow_adapter
 from runtime.workflow import submission as workflow_submission
 
@@ -244,11 +244,10 @@ def _load_v24_state(repo_root, task_id) -> dict:
     """
     st = state.load_state(repo_root, task_id)
     if st is None:
-        raise ValueError(
-            "任务 %s 不存在（无 state.json），无法执行生命周期操作" % task_id)
+        raise ValueError(messages.TASK_MISSING % task_id)
     if state.is_legacy_state(st):
         raise ValueError(
-            "任务 %s 是 v2.3 遗留任务，v2.4 生命周期层拒绝操作：%s"
+            messages.TASK_LEGACY_LIFECYCLE
             % (task_id, state.LEGACY_STATE_GUIDANCE))
     return st
 
@@ -263,7 +262,7 @@ def _ensure_not_terminal(st, op) -> None:
     status = st.get("status")
     if status in state.TERMINAL_STATUSES:
         raise ValueError(
-            "%s：任务 %s 已是终态 %r，账本冻结（重开请走 state.reopen_task）"
+            messages.TASK_TERMINAL_FROZEN
             % (op, st.get("task_id"), status))
 
 
@@ -281,10 +280,9 @@ def _ensure_transition_allowed(st, new_status, op) -> None:
     allowed = state.TASK_TRANSITIONS.get(old_status, ())
     if new_status not in allowed:
         targets = ", ".join(allowed) if allowed \
-            else "无（终态不接受任何转换；显式重开请走 state.reopen_task）"
+            else messages.TASK_TRANSITION_NO_TARGETS
         raise ValueError(
-            "%s：status 转换 %r → %r 不在合法转换内（%s 的合法目标：%s；"
-            "完整转换表见 state.TASK_TRANSITIONS）"
+            messages.TASK_TRANSITION_DISALLOWED
             % (op, old_status, new_status, old_status, targets))
 
 
@@ -369,7 +367,7 @@ def _compute_change_id(st, repo_root) -> str:
 def create_task(repo_root, task_id, goal, route, dag_nodes=()) -> dict:
     """校验并持久化一个新 v2.4 任务，返回构造出的完整状态 dict。
 
-    - 持久化前显式 validate_state（聚合中文错误，任一错误即拒绝且零
+    - 持久化前显式 validate_state（聚合英文错误，任一错误即拒绝且零
       落盘）；state.update_task_state 状态事务（首存放行）的再校验
       二次把关；锁内复核任务仍不存在——预检与提交之间被并发创建的
       任务绝不以过时整态 dict 覆盖；
@@ -388,24 +386,21 @@ def create_task(repo_root, task_id, goal, route, dag_nodes=()) -> dict:
       事务提交成功后追加）。
     """
     if state.load_state(repo_root, task_id) is not None:
-        raise ValueError(
-            "create_task：任务 %s 已存在（盘上已有 state.json），拒绝重建"
-            "（绝不覆盖既有账本）" % task_id)
+        raise ValueError(messages.TASK_CREATE_ALREADY_EXISTS % task_id)
     st = state.new_task_state(
         task_id, goal, route, repository_root=repo_root,
         dag_nodes=dag_nodes)
     errors = state.validate_state(st)
     if errors:
-        raise ValueError("create_task：任务状态非法，拒绝持久化：%s"
-                         % "；".join(errors))
+        raise ValueError(
+            messages.TASK_CREATE_STATE_INVALID % "; ".join(errors))
 
     def _mutate(current):
         # 锁内新鲜盘面复核：预检与提交之间任务被并发创建即拒绝，
         # 绝不以过时整态 dict 覆盖既有账本
         if current is not None:
             raise ValueError(
-                "create_task：任务 %s 已存在（盘上已有 state.json），"
-                "拒绝重建（绝不覆盖既有账本）" % task_id)
+                messages.TASK_CREATE_ALREADY_EXISTS % task_id)
         return st
 
     state.update_task_state(repo_root, task_id, _mutate, allow_missing=True)
@@ -432,8 +427,8 @@ def load_task(repo_root, task_id) -> "dict | None":
         return None
     if state.is_legacy_state(st):
         raise ValueError(
-            "任务 %s 是 v2.3 遗留任务：%s" % (task_id,
-                                             state.LEGACY_STATE_GUIDANCE))
+            messages.TASK_LOAD_LEGACY
+            % (task_id, state.LEGACY_STATE_GUIDANCE))
     return st
 
 
@@ -466,8 +461,7 @@ def record_workflow_run(repo_root, task_id, workflow_run_id) -> dict:
     """
     if not isinstance(workflow_run_id, str) or workflow_run_id == "":
         raise ValueError(
-            "record_workflow_run：workflow_run_id 必须是非空字符串，得到 %r"
-            % (workflow_run_id,))
+            messages.TASK_RECORD_RUN_ID_EMPTY % (workflow_run_id,))
     st = _load_v24_state(repo_root, task_id)
     _ensure_not_terminal(st, "record_workflow_run")
     route = st.get("route")
@@ -479,15 +473,10 @@ def record_workflow_run(repo_root, task_id, workflow_run_id) -> dict:
         holder = writer_guard.inspect(effective_root)
         if holder is None:
             raise ValueError(
-                "record_workflow_run：委派 run 注册必须先持有本仓库写者"
-                "守卫（missing writer reservation）——任务 %s 当前无写"
-                "预约，请先经宿主侧 writer-acquire 取得写预约再注册"
-                % task_id)
+                messages.TASK_RECORD_RUN_NO_RESERVATION % task_id)
         if holder.get("task_id") != task_id:
             raise ValueError(
-                "record_workflow_run：本仓库写者守卫正被其他任务持有"
-                "（task_id=%r，workflow_run_id=%r），任务 %s 不得注册"
-                "委派 run"
+                messages.TASK_RECORD_RUN_GUARD_HELD_BY_OTHER
                 % (holder.get("task_id"),
                    holder.get("workflow_run_id"), task_id))
     def _mutate(current):
@@ -513,9 +502,7 @@ def record_workflow_run(repo_root, task_id, workflow_run_id) -> dict:
         if not outcome.get("ok"):
             conflict = outcome.get("conflict") or {}
             raise ValueError(
-                "record_workflow_run：补挂 run id 时本仓库写者守卫已被"
-                "其他任务持有（task_id=%r，workflow_run_id=%r），拒绝"
-                "本次注册"
+                messages.TASK_RECORD_RUN_GUARD_RACE
                 % (conflict.get("task_id"),
                    conflict.get("workflow_run_id")))
     return new_state
@@ -532,8 +519,7 @@ def _require_validation_record(st, task_id) -> None:
             or not isinstance(validation.get("change_id"), str) \
             or validation.get("change_id") == "":
         raise ValueError(
-            "record_review：任务 %s 尚无 validation 记录，拒绝记录 review"
-            "（先验证后评审；请先 record_validation）" % task_id)
+            messages.TASK_REVIEW_NO_VALIDATION % task_id)
 
 
 def record_validation(repo_root, task_id, status, summary=None,
@@ -559,22 +545,21 @@ def record_validation(repo_root, task_id, status, summary=None,
     """
     if status not in state.VALIDATION_STATUSES:
         raise ValueError(
-            "record_validation：status %r 不在合法取值内（%s）"
+            messages.TASK_RECORD_VALIDATION_STATUS_INVALID
             % (status, ", ".join(state.VALIDATION_STATUSES)))
     if summary is not None and (not isinstance(summary, str)
                                 or summary == ""):
         raise ValueError(
-            "record_validation：summary 必须是非空字符串或 None，得到 %r"
-            % (summary,))
+            messages.TASK_RECORD_VALIDATION_SUMMARY_INVALID % (summary,))
     if commands is not None:
         if not isinstance(commands, (list, tuple)):
             raise ValueError(
-                "record_validation：commands 必须是字符串数组或 None，"
-                "得到 %s" % type(commands).__name__)
+                messages.TASK_RECORD_VALIDATION_COMMANDS_TYPE
+                % type(commands).__name__)
         for item in commands:
             if not isinstance(item, str) or item == "":
                 raise ValueError(
-                    "record_validation：commands 的各项必须是非空字符串")
+                    messages.TASK_RECORD_VALIDATION_COMMAND_ITEM_EMPTY)
     st = _load_v24_state(repo_root, task_id)
     _ensure_not_terminal(st, "record_validation")
     # git 观察（change_id 现算）在状态锁外执行（慢 I/O 绝不入锁），
@@ -617,16 +602,15 @@ def record_review(repo_root, task_id, reviewer, verdict, findings=None) -> dict:
     """
     if not isinstance(reviewer, str) or reviewer == "":
         raise ValueError(
-            "record_review：reviewer 必须是非空字符串，得到 %r" % (reviewer,))
+            messages.TASK_RECORD_REVIEW_REVIEWER_EMPTY % (reviewer,))
     if verdict not in state.REVIEW_VERDICTS:
         raise ValueError(
-            "record_review：verdict %r 不在合法取值内（%s）"
+            messages.TASK_RECORD_REVIEW_VERDICT_INVALID
             % (verdict, ", ".join(state.REVIEW_VERDICTS)))
     if findings is not None and (not isinstance(findings, str)
                                  or findings == ""):
         raise ValueError(
-            "record_review：findings 必须是非空字符串或 None，得到 %r"
-            % (findings,))
+            messages.TASK_RECORD_REVIEW_FINDINGS_INVALID % (findings,))
     st = _load_v24_state(repo_root, task_id)
     _ensure_not_terminal(st, "record_review")
     _require_validation_record(st, task_id)
@@ -668,7 +652,7 @@ def set_status(repo_root, task_id, new_status) -> dict:
     """
     if new_status not in state.TASK_STATUSES:
         raise ValueError(
-            "set_status：status %r 不在合法取值内（%s）"
+            messages.TASK_SET_STATUS_INVALID
             % (new_status, ", ".join(state.TASK_STATUSES)))
     st = _load_v24_state(repo_root, task_id)
     _ensure_transition_allowed(st, new_status, "set_status")
@@ -693,7 +677,7 @@ def set_phase(repo_root, task_id, phase) -> dict:
     """
     if phase is not None and phase not in state.TASK_PHASES:
         raise ValueError(
-            "set_phase：phase %r 不在合法取值内（%s）"
+            messages.TASK_SET_PHASE_INVALID
             % (phase, ", ".join(state.TASK_PHASES)))
     st = _load_v24_state(repo_root, task_id)
     _ensure_not_terminal(st, "set_phase")
@@ -721,12 +705,11 @@ def _validate_quota_view(quota_view) -> dict:
     """
     if not isinstance(quota_view, dict):
         raise ValueError(
-            "quota_view 必须是归一化观测 JSON 对象（含 status/reset_at/"
-            "source/observed_at），得到 %s" % type(quota_view).__name__)
+            messages.TASK_QUOTA_VIEW_NOT_DICT % type(quota_view).__name__)
     status = quota_view.get("status")
     if status not in QUOTA_VIEW_STATUSES:
         raise ValueError(
-            "quota_view.status %r 不在合法取值内（%s）"
+            messages.TASK_QUOTA_VIEW_STATUS_INVALID
             % (status, ", ".join(QUOTA_VIEW_STATUSES)))
     return quota_view
 
@@ -834,25 +817,22 @@ def authorize_quota_resume(repo_root, task_id, max_resumes) -> dict:
     if isinstance(max_resumes, bool) or not isinstance(max_resumes, int) \
             or max_resumes < 0:
         raise ValueError(
-            "authorize_quota_resume：max_resumes 必须是 >= 0 的整数，"
-            "得到 %r" % (max_resumes,))
+            messages.TASK_AUTHORIZE_MAX_RESUMES_INVALID % (max_resumes,))
     _load_v24_state(repo_root, task_id)  # 缺失 / v2.3 遗留先拒（锁外）
 
     def _apply_authorize(current):
         status = current.get("status")
         if status not in ("waiting_quota", "active"):
             raise ValueError(
-                "authorize_quota_resume：任务 %s 处于 %r，授权要求任务"
-                "处于 waiting_quota 或 active" % (task_id, status))
+                messages.TASK_AUTHORIZE_STATUS_INVALID
+                % (task_id, status))
         block = current.get("quota_resume")
         if not isinstance(block, dict):
             block = state.default_quota_resume()
             current["quota_resume"] = block
         if max_resumes < block.get("resume_count", 0):
             raise ValueError(
-                "authorize_quota_resume：max_resumes %d 不得小于已用 "
-                "resume_count %r（预算不变量：resume_count <= "
-                "max_resumes）"
+                messages.TASK_AUTHORIZE_BUDGET_BELOW_COUNT
                 % (max_resumes, block.get("resume_count", 0)))
         block["mode"] = "auto"
         block["max_resumes"] = max_resumes
@@ -867,7 +847,7 @@ def scheduled_activation_decision(repo_root, task_id, quota_view) -> dict:
     quota_view：归一化配额观测 dict（status ∈ QUOTA_VIEW_STATUSES +
     reset_at/source/observed_at；由调用方从 resolver/report 获得）。
     返回 dict 恒含 action（SCHEDULED_ACTIVATION_ACTIONS 恰四值）与
-    reason（人读中文），判定顺序固定、每步幂等：
+    reason（人读英文，messages.TASK_DECISION_* 文案），判定顺序固定、每步幂等：
 
       1. 任务不处于 waiting_quota（含终态 / 已在 waiting_user）→
          {"action": "no-op"}——重复唤醒安全，绝不改写任何状态；
@@ -906,13 +886,12 @@ def scheduled_activation_decision(repo_root, task_id, quota_view) -> dict:
     if status != "waiting_quota":
         return {
             "action": "no-op",
-            "reason": "任务状态为 %r，非 waiting_quota（重复唤醒安全，"
-                      "不采取任何动作）" % (status,)}
+            "reason": messages.TASK_DECISION_NOT_WAITING % (status,)}
     view_status = quota_view.get("status")
     if view_status in ("EXHAUSTED", "UNKNOWN"):
-        reason = ("额度观测为 %s，继续等待" % view_status
+        reason = (messages.TASK_DECISION_EXHAUSTED % view_status
                   if view_status == "EXHAUSTED" else
-                  "额度观测为 UNKNOWN，不虚构可用性，继续等待")
+                  messages.TASK_DECISION_UNKNOWN)
         return {"action": "remain-waiting", "reason": reason}
     block = st.get("quota_resume")
     if not isinstance(block, dict):
@@ -920,8 +899,8 @@ def scheduled_activation_decision(repo_root, task_id, quota_view) -> dict:
     if block.get("mode") != "auto":
         return {
             "action": "waiting-user",
-            "reason": "quota_resume.mode=%r（未授权自动恢复），等用户"
-                      "显式 authorize_quota_resume" % (block.get("mode"),)}
+            "reason": messages.TASK_DECISION_NOT_AUTHORIZED
+                      % (block.get("mode"),)}
     resume_count = block.get("resume_count", 0)
     max_resumes = block.get("max_resumes", 0)
     if resume_count >= max_resumes:
@@ -939,8 +918,7 @@ def scheduled_activation_decision(repo_root, task_id, quota_view) -> dict:
         state.update_task_state(repo_root, task_id, _mutate)
         return {
             "action": "waiting-user",
-            "reason": "自动恢复预算已耗尽（resume_count=%d >= "
-                      "max_resumes=%d），任务转 waiting_user 等用户处理"
+            "reason": messages.TASK_DECISION_BUDGET_EXHAUSTED
                       % (resume_count, max_resumes)}
     # v2.4.1 连续性闸（INV-CONT-01）：auto 连续性未武装绝不走向宿主
     # resume 路径——纯决策返回，零状态写盘、零预算消耗
@@ -948,27 +926,17 @@ def scheduled_activation_decision(repo_root, task_id, quota_view) -> dict:
     if not isinstance(automation_id, str) or automation_id == "":
         return {
             "action": "remain-waiting",
-            "reason": "continuity-unarmed：auto 连续性未武装"
-                      "（quota_resume.automation_id=%r），缺少未来定时"
-                      "激活见证，绝不给出 resume-authorized；任务保持 "
-                      "waiting_quota、零预算消耗——这是运维活性缺失而非"
-                      "授权耗尽，请先经宿主侧创建定时激活并 "
-                      "bind_quota_automation 绑定，再经 "
-                      "quota_continuity_preflight 确认 ready"
+            "reason": messages.TASK_DECISION_CONTINUITY_UNARMED
                       % (automation_id,)}
     workflow_run_id = st.get("workflow_run_id")
     if not isinstance(workflow_run_id, str) or workflow_run_id == "":
         raise ValueError(
-            "scheduled_activation_decision：任务 %s 无关联 "
-            "workflow_run_id，无 run 可恢复，拒绝给出 resume-authorized"
-            % task_id)
+            messages.TASK_DECISION_NO_RUN % task_id)
     return {
         "action": "resume-authorized",
         "workflow_run_id": workflow_run_id,
         "resume_count_after": resume_count + 1,
-        "reason": "额度可用（%s）且已授权、预算有余（%d/%d）；计数仅"
-                  "暂存，宿主 resume 调用被接受后请调 "
-                  "confirm_resume_started 落账"
+        "reason": messages.TASK_DECISION_RESUME_AUTHORIZED
                   % (view_status, resume_count, max_resumes),
     }
 
@@ -998,14 +966,11 @@ def confirm_resume_started(repo_root, task_id) -> dict:
         status = current.get("status")
         if status != "waiting_quota":
             raise ValueError(
-                "confirm_resume_started：任务 %s 处于 %r，非 waiting_quota"
-                "——无暂存恢复决策可落账（重复确认安全：确认后任务已转"
-                " active）" % (task_id, status))
+                messages.TASK_CONFIRM_NOT_WAITING % (task_id, status))
         block = current.get("quota_resume")
         if not isinstance(block, dict) or block.get("mode") != "auto":
             raise ValueError(
-                "confirm_resume_started：任务 %s 的 quota_resume.mode=%r，"
-                "未授权自动恢复，拒绝落账"
+                messages.TASK_CONFIRM_NOT_AUTHORIZED
                 % (task_id,
                    block.get("mode") if isinstance(block, dict) else None))
 
@@ -1017,13 +982,11 @@ def confirm_resume_started(repo_root, task_id) -> dict:
         max_resumes = block.get("max_resumes")
         if _bad_count(resume_count) or _bad_count(max_resumes):
             raise ValueError(
-                "confirm_resume_started：任务 %s 的 quota_resume 计数形状"
-                "非法（resume_count=%r / max_resumes=%r），拒绝落账"
+                messages.TASK_CONFIRM_COUNT_SHAPE
                 % (task_id, resume_count, max_resumes))
         if resume_count >= max_resumes:
             raise ValueError(
-                "confirm_resume_started：任务 %s 预算已耗尽（resume_count="
-                "%d >= max_resumes=%d），无暂存决策可落账"
+                messages.TASK_CONFIRM_BUDGET_EXHAUSTED
                 % (task_id, resume_count, max_resumes))
         block["resume_count"] = resume_count + 1
         current["status"] = "active"
@@ -1052,9 +1015,7 @@ def _bind_automation_state(st, task_id, automation_id):
     status = st.get("status")
     if status not in AUTOMATION_BIND_STATUSES:
         raise ValueError(
-            "bind_quota_automation：任务 %s 处于 %r，绑定要求任务处于"
-            " %s（终态不得新增绑定事实；终态清理走 clear_quota_"
-            "automation）"
+            messages.TASK_BIND_STATUS_INVALID
             % (task_id, status, " / ".join(AUTOMATION_BIND_STATUSES)))
     block = st.get("quota_resume")
     if not isinstance(block, dict):
@@ -1065,10 +1026,7 @@ def _bind_automation_state(st, task_id, automation_id):
         return None  # 幂等：同 id 重绑零变更
     if current is not None:
         raise ValueError(
-            "bind_quota_automation：任务 %s 已绑定 automation_id %r，"
-            "拒绝静默替换为 %r（替换必须先经宿主侧生命周期对账，再走"
-            "显式 clear_quota_automation → bind_quota_automation 序列）"
-            % (task_id, current, automation_id))
+            messages.TASK_BIND_CONFLICT % (task_id, current, automation_id))
     block["automation_id"] = automation_id
     return st
 
@@ -1088,9 +1046,7 @@ def _clear_automation_state(st, task_id, automation_id):
         return None  # 幂等：本就未武装，零变更
     if automation_id is not None and automation_id != current:
         raise ValueError(
-            "clear_quota_automation：给定 automation_id %r 与任务 %s "
-            "的存量绑定 %r 不一致，拒绝清理（精确对账口径；无预期时"
-            "传 None 表示无条件清除现存绑定）"
+            messages.TASK_CLEAR_MISMATCH
             % (automation_id, task_id, current))
     block["automation_id"] = None
     return st
@@ -1119,8 +1075,7 @@ def bind_quota_automation(repo_root, task_id, automation_id) -> dict:
     """
     if not isinstance(automation_id, str) or automation_id == "":
         raise ValueError(
-            "bind_quota_automation：automation_id 必须是非空字符串，"
-            "得到 %r" % (automation_id,))
+            messages.TASK_BIND_ID_EMPTY % (automation_id,))
     st = _load_v24_state(repo_root, task_id)
     if _bind_automation_state(st, task_id, automation_id) is None:
         # 幂等：同 id 重绑零写盘，原样返回现状
@@ -1193,20 +1148,20 @@ def quota_continuity_preflight(repo_root, task_id) -> dict:
             "mode": mode if isinstance(mode, str) and mode != ""
                     else "manual",
             "automation_id": automation_id if armed else None,
-            "reason": "manual mode does not require scheduled activation",
+            "reason": messages.TASK_PREFLIGHT_MANUAL,
         }
     if armed:
         return {
             "ready": True,
             "mode": "auto",
             "automation_id": automation_id,
-            "reason": "auto continuity armed",
+            "reason": messages.TASK_PREFLIGHT_ARMED,
         }
     return {
         "ready": False,
         "mode": "auto",
         "automation_id": None,
-        "reason": "auto continuity is not armed",
+        "reason": messages.TASK_PREFLIGHT_UNARMED,
     }
 
 
@@ -1250,7 +1205,7 @@ def pin_worker_model(repo_root, task_id, model_id) -> dict:
         workflow_submission.validate_worker_model(model_id)
     except workflow_submission.WorkflowSubmissionError as exc:
         raise ValueError(
-            "pin_worker_model：%s" % exc) from exc
+            messages.TASK_PIN_REJECTED % exc) from exc
     st = _load_v24_state(repo_root, task_id)
     _ensure_not_terminal(st, "pin_worker_model")
     prev = st.get("worker_model")
@@ -1318,8 +1273,7 @@ def _finish(repo_root, task_id, terminal_status, event_name) -> dict:
     # 新鲜 state；重放判定以事务结果为准）
     if st.get("status") != terminal_status:
         raise ValueError(
-            "%s：状态事务提交后任务 %s 处于 %r，非目标终态 %r，拒绝"
-            "追加事件与释放守卫"
+            messages.TASK_FINISH_POST_COMMIT_MISMATCH
             % (event_name, task_id, st.get("status"), terminal_status))
     journal.append_event(
         repo_root, task_id,

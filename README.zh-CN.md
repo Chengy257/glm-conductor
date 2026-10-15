@@ -2,7 +2,7 @@
 
 [English](./README.md) | **简体中文**
 
-![Version](https://img.shields.io/badge/version-2.6.0-blue.svg)
+![Version](https://img.shields.io/badge/version-2.6.1-blue.svg)
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
 ![ZCode Plugin](https://img.shields.io/badge/ZCode-plugin-green.svg)
 ![Python](https://img.shields.io/badge/python-3.8%2B-blue.svg)
@@ -139,7 +139,7 @@ Workflow 工作者绝不静默继承会话模型——`subagent_model` 始终是
 - **[ZCode](https://zcode.z.ai) 3.14+**（已在 Native Workflow 与 Scheduled Task 上深度实测）
 - GLM Coding Plan 或 Z.ai 账号，且已配置可用模型（主会话建议强档模型承担规划/架构/验证；Flash 档模型软推荐用作经济的工作流工作者——任何已配置模型经用户授权均可选）
 - **Python 3.8+**，用于运行时钩子与 CLI 工具
-  - *Windows 提示：* 请确保 PATH 中可直接执行 `python3.exe`。若环境仅有 `python.exe`，请参见 [Windows 排障指引](./docs/troubleshooting.md#8-windows-环境下-python3-钩子命令排查)。
+  - *Windows 提示：* 请确保 PATH 中可直接执行 `python3.exe`。若环境仅有 `python.exe`，请参见 [Windows 排障指引](./docs/troubleshooting.md#8-troubleshooting-the-python3-hook-command-on-windows)。
 
 ### 从 ZCode 插件市场安装
 
@@ -259,8 +259,8 @@ python plugins/glm-conductor/runtime/cli.py writer-acquire . <task_id>
 ```text
 glm-conductor/
 ├── marketplace.json                # 插件市场 catalog 描述清单
-├── .zcode-plugin/                  # 插件 manifest 与元数据配置
 ├── plugins/glm-conductor/
+│   ├── .zcode-plugin/              # 插件 manifest（plugin.json）与元数据
 │   ├── agents/                     # 原生 Subagent 定义 (glm-reviewer, visual-*)
 │   ├── commands/                   # 斜杠命令定义 (/glm-conductor:quota)
 │   ├── hooks/                      # ZCode 钩子实现 (session_start.py, stop_gate.py)
@@ -294,7 +294,7 @@ glm-conductor/
 欢迎提交 Issue 与 Pull Request！在提交代码前，请确保通过全套质量门禁：
 
 ```bash
-# 1. 运行全部单元测试 (940+ 测试)
+# 1. 运行全部单元测试 (978 测试)
 python -m unittest discover -s tests -p "test_*.py"
 
 # 2. 运行静态契约校验 (16/16 检查)

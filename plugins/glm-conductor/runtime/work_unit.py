@@ -10,7 +10,7 @@
     被规划进 Workflow 拓扑，不存在运行中改状态的通道）。本模块
     是纯数据层（零 I/O、零网络、零第三方依赖）：
       - 构造：new_node() 构造静态节点 dict（可选字段缺省空列表）；
-      - 校验：validate_node() 返回中文错误列表（空列表 = 合法），
+      - 校验：validate_node() 返回英文错误列表（空列表 = 合法），
         错误路径前缀形如 node.<字段名>，聚合全部错误不短路。
 
 静态节点形状（v2.4 Phase 1 语义核心规格 §3）：
@@ -47,11 +47,12 @@ NODE_OPTIONAL_KEYS = ("interfaces", "constraints", "local_check")
 def _str_list_errors(path, value):
     """校验「字符串数组」：值必须是 list 且每项为非空 str。"""
     if not isinstance(value, list):
-        return ["%s 必须是数组" % path]
+        return ["%s must be an array" % path]
     errors = []
     for index, item in enumerate(value):
         if not isinstance(item, str) or item == "":
-            errors.append("%s[%d] 必须是非空字符串" % (path, index))
+            errors.append("%s[%d] must be a non-empty string"
+                          % (path, index))
     return errors
 
 
@@ -64,9 +65,10 @@ def _repo_relative_errors(path, value):
         盘符前缀如 "C:/"）报错——ownership scope 必须是仓库相对。
     """
     if not isinstance(value, list):
-        return ["%s 必须是数组" % path]
+        return ["%s must be an array" % path]
     if not value:
-        return ["%s 不能为空数组（无文件范围的节点不可编译）" % path]
+        return ["%s must not be an empty array (a node with no file "
+                "scope cannot be compiled)" % path]
     errors = _str_list_errors(path, value)
     for index, item in enumerate(value):
         if isinstance(item, str) and item:
@@ -75,7 +77,8 @@ def _repo_relative_errors(path, value):
                     (len(probe) >= 2 and probe[1] == ":"
                      and probe[0].isalpha()):
                 errors.append(
-                    "%s[%d] 必须是仓库相对路径，得到绝对路径 %r"
+                    "%s[%d] must be a repo-relative path, got absolute "
+                    "path %r"
                     % (path, index, item))
     return errors
 
@@ -83,17 +86,18 @@ def _repo_relative_errors(path, value):
 def _copy_str_list(name, value):
     """构造期形状校验：list/tuple 且各项非空 str；返回复制的新 list。
 
-    非法抛 TypeError / ValueError（中文消息，与 new_node 前缀一致）；
+    非法抛 TypeError / ValueError（英文消息，与 new_node 前缀一致）；
     入参一律复制为新的 list，不被调用方后续可变操作波及。
     """
     if not isinstance(value, (list, tuple)):
         raise TypeError(
-            "new_node：%s 必须是 list 或 tuple，得到 %s"
+            "new_node: %s must be a list or tuple, got %s"
             % (name, type(value).__name__))
     for item in value:
         if not isinstance(item, str) or item == "":
             raise ValueError(
-                "new_node：%s 的各项必须是非空字符串" % name)
+                "new_node: every item of %s must be a non-empty string"
+                % name)
     return list(value)
 
 
@@ -103,7 +107,7 @@ def new_node(node_id, objective, *, depends_on=(), ownership=(),
              interfaces=None, constraints=None, local_check=None) -> dict:
     """构造静态节点 dict（只构造 + 形状校验，不查语义约束）。
 
-    形状校验（非法抛 ValueError / TypeError，中文消息）：
+    形状校验（非法抛 ValueError / TypeError，英文消息）：
       - node_id：必须是非空 str（非 str → TypeError，空串 →
         ValueError）；id 在单个 DAG 内的唯一性由图校验
         （runtime.dependency.graph_errors）负责，构造不查全图；
@@ -123,10 +127,10 @@ def new_node(node_id, objective, *, depends_on=(), ownership=(),
     """
     if not isinstance(node_id, str):
         raise TypeError(
-            "new_node：node_id 必须是字符串，得到 %s"
+            "new_node: node_id must be a string, got %s"
             % type(node_id).__name__)
     if node_id == "":
-        raise ValueError("new_node：node_id 必须是非空字符串")
+        raise ValueError("new_node: node_id must be a non-empty string")
     return {
         "id": node_id,
         "objective": objective,
@@ -141,11 +145,12 @@ def new_node(node_id, objective, *, depends_on=(), ownership=(),
 # —— 校验 ——
 
 def validate_node(node) -> "list[str]":
-    """校验静态节点 dict，返回错误消息列表（中文，node.<字段> 前缀）。
+    """校验静态节点 dict，返回错误消息列表（英文，node.<字段> 前缀）。
 
-    空列表 = 合法。不抛异常；node 非 dict → ["node 必须是 JSON 对象"]。
-    规则（聚合全部错误，不短路）：
-      - 必填键齐全（NODE_REQUIRED_KEYS），缺一报「node 缺少必填键 %s」；
+    空列表 = 合法。不抛异常；node 非 dict → ["node must be a JSON
+    object"]。规则（聚合全部错误，不短路）：
+      - 必填键齐全（NODE_REQUIRED_KEYS），缺一报 "node is missing
+        required key %s"；
       - id：非空字符串；
       - objective：非空字符串；
       - depends_on：字符串数组，且不含自身 id（自依赖归节点级校验；
@@ -158,19 +163,19 @@ def validate_node(node) -> "list[str]":
       - 未知键忽略（向前兼容），不报错。
     """
     if not isinstance(node, dict):
-        return ["node 必须是 JSON 对象"]
+        return ["node must be a JSON object"]
     errors = []
     for key in NODE_REQUIRED_KEYS:
         if key not in node:
-            errors.append("node 缺少必填键 %s" % key)
+            errors.append("node is missing required key %s" % key)
     if "id" in node:
         value = node["id"]
         if not isinstance(value, str) or value == "":
-            errors.append("node.id 必须是非空字符串")
+            errors.append("node.id must be a non-empty string")
     if "objective" in node:
         value = node["objective"]
         if not isinstance(value, str) or value == "":
-            errors.append("node.objective 必须是非空字符串")
+            errors.append("node.objective must be a non-empty string")
     node_id = node.get("id")
     self_ref = isinstance(node_id, str) and node_id != ""
     if "depends_on" in node:
@@ -178,7 +183,8 @@ def validate_node(node) -> "list[str]":
                                        node["depends_on"]))
         if self_ref and isinstance(node["depends_on"], list) \
                 and node_id in node["depends_on"]:
-            errors.append("node.depends_on 自依赖：%r 出现在自身依赖中"
+            errors.append("node.depends_on self-dependency: %r appears "
+                          "in its own depends_on"
                           % node_id)
     if "ownership" in node:
         errors.extend(_repo_relative_errors("node.ownership",

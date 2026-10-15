@@ -33,8 +33,9 @@
       6. 禁词：同上范围内不得出现 `升级信号` / `上报升级` / `升级路由`；
       7. Continuity 安全（扫描范围同 5/6）：
          a) quota API 名称（getQuotaRemaining / getQuotaResetTime /
-            onQuotaReset）只允许出现在否定式声明行（同行含 `虚构` 或
-            `不存在`）；
+            onQuotaReset）只允许出现在否定式声明行（同行含 `虚构` /
+            `不存在` / "do not exist" / "never be invented"，中英
+            并行）；
          b) 先移除允许的任务专属 checkpoint 路径
             （.glm-conductor/tasks/<task-id>/checkpoint.md 与
             .glm-conductor/tasks/<id>/checkpoint.md），再检查不得残留
@@ -50,7 +51,7 @@
          VISUAL_ACCEPT_REQUEST 不得出现在扫描范围内；
       9. 权威架构文档契约：docs/architecture.md 必须存在；必含
          VISUAL_CAPTURE_REQUEST / TASK_ID / .glm-conductor/tasks/ /
-         ROUTE REASSESSMENT / VISUAL REVIEW / 随机十六进制后缀 /
+         ROUTE REASSESSMENT / VISUAL REVIEW / random hex suffix /
          solo / delegate / audit / full / foreground / resumable / idle；
          禁含 风险阶梯 / risk ladder / glm-advisor（均大小写不敏感）；
          `最新 checkpoint` / `latest checkpoint` 只允许出现在含否定词
@@ -58,14 +59,19 @@
      10. 任务标识：TASK_ID 必含于
          skills/continuity/SKILL.md、
          skills/continuity/references/long-horizon.md 与
-         docs/architecture.md；`随机十六进制后缀` 必含于 long-horizon.md
-         与 docs/architecture.md（「语义前缀+随机后缀」机械唯一格式）；
+         docs/architecture.md；「语义前缀+随机后缀」机械唯一格式的落点
+         标记统一英文锚 `random hex suffix`（long-horizon.md 于
+         v2.6.1 W2 改英文锚，docs/architecture.md 于 v2.6.1 W5 随文档
+         英文化收敛译文实际英文等价串）；
      11. 视觉规范拓扑：VISUAL_ROUND 必含于 agents/visual-implementer.md、
          skills/orchestration/references/operations.md、
          skills/orchestration/references/role-contracts.md 与
-         docs/architecture.md；`规范路径` 与 `完整状态` 必须同时含于
-         前三个文件（各自都要同时含两个标记）；`单次调用内等待` /
-         `同一调用内等待` 只允许出现在含否定词（不 / 禁止）的行
+         docs/architecture.md；`canonical path` 与 `full state` 必须同时
+         含于前三个文件（各自都要同时含两个标记；v2.6.1 W2 由
+         `规范路径`/`完整状态` 改英文锚）；`单次调用内等待` /
+         `同一调用内等待` 及其英文等价措辞（wait/waiting within a
+         single call / within the same call 等）只允许出现在含否定词
+         （不 / 禁止 / not / never / no channel）的行
          （在上述四个文件范围内检查）；
      12. 版本一致性：plugins/glm-conductor/.zcode-plugin/plugin.json 的
          version 字段必须等于 CHANGELOG.md 第一个 `## ` 标题行中的版本记号；
@@ -123,59 +129,87 @@
          §5.6）——六条件任一出现即 FAIL：
          a) orchestration 允许 delegate/full 继承模型，或 CreateWorkflow
             序列缺显式 subagent_model（模型选型硬闸标记 workflow-model-
-            select / subagent_model / 绝不省略 subagent_model /
-            user-authorized-explicit-selection / 选型失败绝不 必含，
+            select / subagent_model / Never omit subagent_model /
+            user-authorized-explicit-selection / Selection failure never
+            必含（v2.6.1 W2 随技能英文化改英文锚），
             v2.6.0 WP-M1 起旧「绝不替换主会话」主模型硬门锚随 Flash
             准入硬门退役同步移除；继承/省略措辞仅在含否定词的行
-            允许——glm-reviewer 继承宿主/会话模型是另一合法事实，不在
-            token 集内）；
+            允许（中英 token 并行）——glm-reviewer 继承宿主/会话模型是
+            另一合法事实，不在 token 集内）；
          b) auto/until_done 启动序列未把 scheduling/bind/preflight 置于
             CreateWorkflow 之前（authorize→bind→preflight→CreateWorkflow
             顺序链在 orchestration 与 continuity 两技能文档均须成立）；
          c) continuity 文档称 auto 可在 automation_id null 时 armed
-            （claim 形禁令 token 零容忍，出现即 FAIL——无否定行豁免）；
+            （claim 形禁令 token 零容忍，出现即 FAIL——无否定行豁免；
+            v2.6.1 W2 补英文等价 token）；
          d) 先 resume 后武装的逆序措辞（v2.5.2 重锚：one-shot 后继链已
-            随双通道设计删除；正向标记 = 建立动作优先 + 武装命令锚，
-            逆序措辞零容忍保留）；
+            随双通道设计删除；正向标记 = 建立动作优先（establish-first
+            / establishing / re-arming ... always precedes work
+            advancement，W2 英文锚）+ 武装命令锚，逆序措辞零容忍保留
+            （中英 token 并行））；
          e) 生产 runtime 重现 Global Quota Clock 或 sqlite 直写调度依赖
             （扫描限 plugins/glm-conductor/runtime 生产 .py 模块：
             sqlite 零容忍；Global Quota Clock 仅在含退役/否定词的行
             豁免——journal.py 既有退役注记不属依赖复活）。
          v2.5 扩展锚（任务启动契约，规格 §4 W5）+ v2.5.2 改锚（精确
-         唤醒与模型适配计划 §2.4）——任一缺失即 FAIL：
-         f) 任务启动问答节锚缺失（orchestration/SKILL.md 必含 §6.0
-            节标题、「触发点在 create_task 之前」触发条件、「没有
-            豁免条款」强制零判断、单轮三问合并题形、「地板载体间隔」
-            第三问与「唤醒轮 / 恢复轮绝不弹问」无人值守边界措辞）；
-         g) 任务 pin 失效即拒措辞缺失（runtime/cli.py 与
-            orchestration/SKILL.md 必含「pin 已失效，请重新问答授权」
-            专门拒绝与「绝不回退自动选型、绝不静默换模型」禁令）；
+         唤醒与模型适配计划 §2.4）——任一缺失即 FAIL（v2.6.1 W2 起
+         五文件英文化，文档面锚随译文改英文等价串；v2.6.1 W3b 起
+         cli.py 实现面文案单源 messages.py 并英文化，16g/16l 实现面
+         锚随迁 messages.py 英文原文；quota.md 等未翻译面保持原锚）：
+         f) 任务启动问答节锚缺失（orchestration/SKILL.md 必含
+            '### Task launch interview' 节标题、'The trigger point
+            precedes create_task' 触发条件、'there is no exemption'
+            强制零判断、'Single round of three questions' 合并题形、
+            'Floor carrier interval' 第三问与 'Wake turns / resume
+            turns never interview' 无人值守边界措辞）；
+         g) 任务 pin 失效即拒措辞缺失（v2.6.1 W3b 起 runtime 实现面
+            文案单源 messages.py：messages.py 必含 'the task pin is
+            void' / 're-run the launch interview for authorization'
+            专门拒绝与 'never fall back to automatic selection' /
+            'never switch models silently' 禁令；orchestration/SKILL.md
+            必含 'Pin consumption semantics (stale pin rejected)'
+            消费语义、'the task pin is
+            stale, re-authorize via the launch interview' 专门拒绝与
+            'never falling back to auto-selection' 禁令）；
          h) 双通道唤醒锚缺失（v2.5.2 W1：continuity/SKILL.md 必含
-            「双通道唤醒：地板载体 + 精度层睡眠」节标题、「终身不再
-            触碰」载体不变措辞、「reset_at + 300s」睡眠目标、「绝不
-            枚举工具清单」去 priming 规则与「滚动续臂」收尾措辞——
+            '## Dual-channel wake: floor carrier + precision sleep'
+            节标题、'never touched again for its lifetime' 载体不变
+            措辞、'reset_at + 300s' 睡眠目标、'never enumerates tool
+            names' 去 priming 规则与 'rolling re-arm' 收尾措辞——
             v2.5 的 one-shot 加发 / CronUpdate 禁令锚随设计删除退役）；
          i) CLI 生命周期命令面锚缺失（v2.5.2 W2/D1：task-create /
             record-validation / task-complete / task-fail / task-cancel /
             exit-waiting 六个子命令须同时见于 runtime/cli.py 与
             docs/troubleshooting.md 权威命令面）；
          j) 精度层睡眠模板锚缺失（v2.5.2 W1：long-horizon.md 必含
-            「精度层睡眠模板」节、run_in_background 后台形态与
-            date -u -d bash 动态计算标记——模型零算术契约的落点）；
+            '## Precision sleep template' 节、run_in_background 后台
+            形态与 date -u -d bash 动态计算标记——模型零算术契约的
+            落点）；
          k) 单一观测口径锚缺失（v2.6.0 WP-R2，规格 §2.2/§2.4/§2.5：
-            reset_at = 已识别窗口中最早的有效未来观测 reset、与额度
-            状态无关、任何 action 无条件透传含 no-op；唤醒首动作
+            reset_at = 已识别窗口中最早的有效未来观测 reset（earliest
+            valid future observed reset）、与额度状态无关（regardless
+            of quota status）、任何 action 无条件透传含 no-op
+            （unconditional pass-through）；唤醒首动作
             quota-resume-decision --force-refresh；floor-only 可见降级
             措辞——continuity SKILL / long-horizon / orchestration /
             quota.md 四文档必含），且 v2.5.2 阻塞窗（EXHAUSTED-only）
-            reset 提取口径退役措辞在前三文档 + quota.md 零容忍；
+            reset 提取口径退役措辞（中英 token 并行）在前三文档 +
+            quota.md 零容忍；
          l) 用户授权显式选型锚缺失（v2.6.0 WP-M1，规格 §5.1/§5.2/§5.3
             + owner 裁决 5/6：Flash 准入硬门降级软推荐后，orchestration
-            必含 Flash 软推荐 / 默认以 max 推理档运行（档位不随 pin
-            存储）/ 单一候选也须用户显式确认 / --model 必须与 pin 一致 /
-            绝不自动重 pin / 主模型继承宿主主会话 / 提交契约
-            model_policy 新值，cli.py 必含有 pin 任务 --model 不得绕过
-            与交互重授权措辞）。
+            必含 'soft recommendation' / 'defaults to the max reasoning
+            tier'（'the tier is not stored in the pin'）/ 'A single
+            candidate also requires explicit user confirmation' /
+            'must match the pin' / 'never re-pins automatically' /
+            'The main model inherits the host main session' / 提交契约
+            model_policy 新值；v2.6.1 W3b 起实现面锚单源 messages.py——
+            messages.py 必含有 pin 任务 --model 不得绕过（'must not
+            bypass the task pin'）与交互重授权（'re-authorize through
+            the interactive' + 'update the task pin with
+            worker-model-pin'）及无 pin 严口径（'never select
+            automatically, never treat a single candidate' +
+            'as implicit authorization'）措辞，cli.py 保留
+            user-authorized-explicit-selection 提交契约 token 锚）。
 
     扫描范围说明：检查 5/6/7/8（及 8 内的旧名负向检查）的扫描范围是显式
     列表——plugins/ 全部文件 + marketplace.json + README.md +
@@ -253,10 +287,13 @@ CANONICAL_AGENTS = (
 # 指向 commands/<name>.md 而非 agents/<name>.md，用负向后顾排除
 AGENT_REF_RE = re.compile(r"(?<!/)glm-conductor:([A-Za-z0-9_][A-Za-z0-9_-]*)")
 QUOTA_TOKENS = ("getQuotaRemaining", "getQuotaResetTime", "onQuotaReset")
-QUOTA_NEGATIONS = ("虚构", "不存在")
+# 否定词双语并行：中文文档面用 虚构/不存在，W2 英文化后的 continuity
+# SKILL / long-horizon 用 do not exist / never be invented（v2.6.1 W2 改锚）
+QUOTA_NEGATIONS = ("虚构", "不存在", "do not exist", "never be invented")
 # 7c：v2 alpha3 quota 感知上线后的措辞反转——「无 quota API」绝对化措辞
-# 在四个权威文档中必须零命中（「无原生 quota API」不含该子串，允许存在）
-QUOTA_ABSOLUTE_PHRASE = "无 quota API"
+# 在四个权威文档中必须零命中（「无原生 quota API」/"No native quota API"
+# 均不含该子串，允许存在）；中英双锚防回潮（v2.6.1 W2 改锚）
+QUOTA_ABSOLUTE_PHRASES = ("无 quota API", "no quota API")
 QUOTA_ABSOLUTE_FILES = (README, ARCH_DOC, CONTINUITY_SKILL, LONG_HORIZON)
 # 允许的任务专属 checkpoint 路径：<task-id> / <id> 均为单段占位
 ALLOWED_CHECKPOINT_RE = re.compile(
@@ -282,7 +319,7 @@ ARCH_REQUIRED_MARKERS = (
     ".glm-conductor/tasks/",
     "ROUTE REASSESSMENT",
     "VISUAL REVIEW",
-    "随机十六进制后缀",
+    "random hex suffix",
     "solo / delegate / audit / full",
     "foreground / resumable / idle",
 )
@@ -293,14 +330,30 @@ CHECKPOINT_REF_NEGATIONS = ("不", "禁止", "never", "not")
 
 # —— 检查 10：任务标识 ——
 TASK_ID_FILES = (CONTINUITY_SKILL, LONG_HORIZON, ARCH_DOC)
-HEX_SUFFIX_FILES = (LONG_HORIZON, ARCH_DOC)
+# 「语义前缀+随机后缀」机械唯一格式落点标记（v2.6.1 W2：long-horizon
+# 英文化后改英文锚；v2.6.1 W5：architecture.md 英文化，中文锚收敛为
+# 译文实际英文等价串 random hex suffix）
+HEX_SUFFIX_PLANS = (
+    (LONG_HORIZON, "random hex suffix"),
+    (ARCH_DOC, "random hex suffix"),
+)
 
 # —— 检查 11：视觉规范拓扑 ——
 VISUAL_TOPOLOGY_FILES = (VISUAL_IMPLEMENTER, OPERATIONS, ROLE_CONTRACTS)
 VISUAL_ROUND_FILES = VISUAL_TOPOLOGY_FILES + (ARCH_DOC,)
-VISUAL_TOPOLOGY_REQUIRED = ("规范路径", "完整状态")
-VISUAL_WAIT_TOKENS = ("单次调用内等待", "同一调用内等待")
-VISUAL_WAIT_NEGATIONS = ("不", "禁止")
+# v2.6.1 W2：跨调用握手拓扑改英文锚（规范路径/完整状态 → canonical
+# path/full state；visual-implementer.md 同步清除中文括注）
+VISUAL_TOPOLOGY_REQUIRED = ("canonical path", "full state")
+# 条件禁含 token 双语并行：中文文档面（architecture）用中文原锚，
+# 英文化后的 operations / role-contracts / visual-implementer 用英文
+# 等价措辞；英文否定词经小写化匹配（"No channel exists..." 行豁免）
+VISUAL_WAIT_TOKENS = (
+    "单次调用内等待", "同一调用内等待",
+    "wait within a single call", "waiting within a single call",
+    "wait within the same call", "waiting within the same call",
+    "wait loop inside one call",
+    "wait for the parent session within a single invocation")
+VISUAL_WAIT_NEGATIONS = ("不", "禁止", "not", "never", "no channel")
 
 # —— 检查 12：CHANGELOG 版本标题（第一个 `^## ` 行） ——
 CHANGELOG_HEADING_RE = re.compile(r"^##\s+(.+?)\s*$")
@@ -347,6 +400,9 @@ TEST_QUOTA_CREDENTIALS = os.path.join(TESTS_DIR, "test_quota_credentials.py")
 TEST_QUOTA_REPORT = os.path.join(TESTS_DIR, "test_quota_report.py")
 ORCHESTRATION_SKILL = os.path.join(SKILLS_DIR, "orchestration", "SKILL.md")
 CLI_PY = os.path.join(RUNTIME_DIR, "cli.py")
+# v2.6.1 W3a/W3b：cli.py 用户可见文案单源 messages.py（16g/16l 实现面
+# 锚的锚定文件——实现面措辞不再以 cli.py 原文出现）
+MESSAGES_PY = os.path.join(RUNTIME_DIR, "messages.py")
 RUNTIME_REQUIRED_FILES = (
     RUNTIME_INIT, STATE_PY, JOURNAL_PY, OWNERSHIP_PY,
     QUOTA_PARSER_PY, QUOTA_PROVIDER_PY, QUOTA_HTTP_PY, QUOTA_ZAI_PY,
@@ -401,15 +457,18 @@ SKILL_CONTRACT_MARKERS = (
 MODEL_GATE_MARKERS = (
     "workflow-model-select",
     "subagent_model",
-    "绝不省略 subagent_model",
+    "Never omit subagent_model",
     "user-authorized-explicit-selection",
-    "选型失败绝不",
+    "Selection failure never",
 )
 # 16a：delegate/full worker 模型继承/省略措辞只在否定行允许。glm-reviewer
 # 继承宿主/会话模型（§8）是另一合法事实，措辞不同，不落在本 token 集内。
+# v2.6.1 W2：orchestration 英文化后补英文等价 token（中文原锚保留给
+# 仍中文的文档面，防回潮）。
 MODEL_INHERIT_TOKENS = (
     "继承主会话", "继承会话模型",
-    "省略 subagent_model", "不指定 subagent_model")
+    "省略 subagent_model", "不指定 subagent_model",
+    "inherit the main-session model", "inherits the main-session model")
 PROTOCOL_NEGATIONS = ("不", "禁止", "绝不", "不得", "never", "not")
 # 16b：auto/until_done 启动序列顺序链（authorize → bind → preflight →
 # CreateWorkflow；存在性 + 次序双检，orchestration 与 continuity 均须成立）
@@ -428,23 +487,37 @@ ARMED_NULL_TOKENS = (
     "为空即已武装", "为 null 即已武装", "null 即已武装",
     "为空即 armed", "为 null 即 armed",
     "armed with automation_id null",
-    "未绑定即视为已武装", "为空即视为已武装")
+    "未绑定即视为已武装", "为空即视为已武装",
+    # v2.6.1 W2：continuity/long-horizon 英文化后的英文等价 claim 形
+    # token（合法反向表述 "is not armed"/"means unarmed"/"count as
+    # armed" 均不含这些子串，无误伤）
+    "empty means armed", "null means armed",
+    "armed when empty", "armed when null",
+    "armed with empty automation_id", "armed with null automation_id",
+    "empty automation_id is armed", "null automation_id is armed",
+    "treated as armed when empty", "treated as armed when unbound")
 ARMED_NULL_FILES = (CONTINUITY_SKILL, LONG_HORIZON)
 # 16d（v2.5.2 重锚，INV-CONT-02 精神延续——唤醒机制建立/续臂先于工作推进）：
 # v2.5 的 one-shot 后继链已随双通道设计整体删除；正向标记改为「建立动作
 # 优先总原则 + 武装命令锚」；逆序措辞禁令（先 resume 后武装类）原样保留。
+# v2.6.1 W2：正锚随文档英文化改英文等价串。
 ESTABLISH_FIRST_MARKER_PLANS = (
     (CONTINUITY_SKILL,
-     ("arm-before-work", "建立动作优先",
+     ("arm-before-work", "establish-first",
       "quota-automation-bind", "quota-continuity-preflight")),
     (LONG_HORIZON,
-     ("建立 / 续臂动作永远先于工作推进",
+     ("establishing / re-arming the wake machinery always precedes "
+      "work advancement",
       "quota-automation-bind", "quota-continuity-preflight")),
 )
-# 逆序措辞禁令（claim 形 token 零容忍，同 16c 口径）——先恢复后武装类
+# 逆序措辞禁令（claim 形 token 零容忍，同 16c 口径）——先恢复后武装类；
+# v2.6.1 W2 补英文等价 token（两文档现行合法措辞 "always precedes work" /
+# "never resume unarmed" 均不含这些子串，无误伤）
 ORDER_FORBIDDEN_TOKENS = (
     "先 resume 后", "先 ResumeWorkflowRun 后", "先恢复后武装",
-    "resume 后再创建后继")
+    "resume 后再创建后继",
+    "resume before arming", "ResumeWorkflowRun before arming",
+    "resume first, then arm", "resume before creating the successor")
 ORDER_FORBIDDEN_FILES = (CONTINUITY_SKILL, LONG_HORIZON)
 # 16e：生产 runtime 禁依赖（扫描限 plugins/glm-conductor/runtime 生产 .py）
 RUNTIME_SQLITE_TOKEN = "sqlite"  # 直写调度依赖：零容忍（生产 runtime 现零命中）
@@ -458,37 +531,42 @@ GQC_RETIREMENT_WORDS = ("删除", "退役", "移除", "下架",
 # 三组必含锚，任一缺失即 FAIL（实现拆解见模块 docstring 第 16 项 f-h）。
 # v2.5.2（精确唤醒与模型适配计划）将 f/g/h 三组锚随契约重写同步改锚，
 # 并追加 i（CLI 生命周期命令面）与 j（精度层睡眠模板）两组。
-# 16f：任务启动问答节锚（v2.5.2 D3/D4 文档面——orchestration §6.0 节
-# 存在 + create_task 之前触发 + 强制零判断（豁免删除）+ 单轮三问题形 +
-# 第三问（地板间隔）+ 无人值守禁弹问边界）
+# 16f：任务启动问答节锚（v2.5.2 D3/D4 文档面——问答节存在 + create_task
+# 之前触发 + 强制零判断（豁免删除）+ 单轮三问题形 + 第三问（地板间隔）+
+# 无人值守禁弹问边界；v2.6.1 W2 随 orchestration 英文化改英文锚）
 LAUNCH_INTERVIEW_MARKERS = (
-    "### 6.0 任务启动问答（launch interview，v2.5.2）",
-    "触发点在 create_task 之前",
-    "没有豁免条款",
-    "单轮三问（AskUserQuestion 单轮三问合并，绝不拆成多轮）",
-    "地板载体间隔",
-    "唤醒轮 / 恢复轮绝不弹问",
+    "### Task launch interview",
+    "The trigger point precedes create_task",
+    "there is no exemption",
+    "Single round of three questions",
+    "Floor carrier interval",
+    "Wake turns / resume turns never interview",
 )
-# 16g：任务 pin 失效即拒（v2.5 I1——cli.py 专门拒绝措辞 + 绝不回退
-# 自动选型禁令；orchestration 技能文档面同步锚定消费语义）
+# 16g：任务 pin 失效即拒（v2.5 I1——专门拒绝措辞 + 绝不回退自动选型
+# 禁令；orchestration 技能文档面同步锚定消费语义。
+# v2.6.1 W3b：实现面文案单源 messages.py 并英文化，锚随迁 messages.py
+# 英文原文——不再锚 cli.py 原文（实现点经 import 接线））
 PIN_REJECTION_CLI_MARKERS = (
-    "任务 pin 已失效，请重新问答授权",
-    "绝不回退自动选型、绝不静默换模型",
+    "the task pin is void",
+    "re-run the launch interview for authorization",
+    "never fall back to automatic selection",
+    "never switch models silently",
 )
 PIN_REJECTION_SKILL_MARKERS = (
-    "pin 的消费语义（失效即拒）",
-    "pin 已失效，请重新问答授权",
-    "绝不回退自动选型、绝不静默换模型",
+    "Pin consumption semantics (stale pin rejected)",
+    "the task pin is stale, re-authorize via the launch interview",
+    "never falling back to auto-selection",
 )
 # 16h：双通道唤醒锚（v2.5.2 W1 文档面——continuity「地板载体 + 精度层
 # 睡眠」节存在 + 载体终身不变 + 续臂收尾 + 去 priming 规则；v2.5 的
-# one-shot 加发 / CronUpdate 禁令锚随该设计删除同步退役）
+# one-shot 加发 / CronUpdate 禁令锚随该设计删除退役。
+# v2.6.1 W2 随 continuity 英文化改英文锚）
 DUAL_CHANNEL_MARKERS = (
-    "## 双通道唤醒：地板载体 + 精度层睡眠（启动即武装 + 滚动续臂）",
-    "终身不再触碰",
+    "## Dual-channel wake: floor carrier + precision sleep",
+    "never touched again for its lifetime",
     "reset_at + 300s",
-    "绝不枚举工具清单",
-    "滚动续臂",
+    "never enumerates tool names",
+    "rolling re-arm",
 )
 # 16i：CLI 生命周期命令面锚（v2.5.2 W2/D1——六个新子命令必须同时
 # 出现在 cli.py USAGE 与 troubleshooting 权威命令面，防三处漂移）
@@ -497,9 +575,9 @@ CLI_LIFECYCLE_SUBCOMMANDS = (
     "task-fail", "task-cancel", "exit-waiting")
 TROUBLESHOOTING_DOC = os.path.join(REPO_ROOT, "docs", "troubleshooting.md")
 # 16j：精度层睡眠模板锚（v2.5.2 W1——long-horizon 模板节存在 +
-# bash 动态计算（模型零算术）+ 后台运行形态）
+# bash 动态计算（模型零算术）+ 后台运行形态；v2.6.1 W2 节标题改英文锚）
 SLEEP_TEMPLATE_MARKERS = (
-    "## 精度层睡眠模板",
+    "## Precision sleep template",
     "run_in_background",
     "date -u -d",
 )
@@ -509,23 +587,31 @@ SLEEP_TEMPLATE_MARKERS = (
 # 未来观测时如实陈述 floor-only 可见降级（绝不谎称精度层已武装）。
 # 各文档锚定面：continuity（语义 + 协议 + 降级）、long-horizon（语义 +
 # 降级）、orchestration（§6.0/§6.2 启动序列同步）、quota.md（语义 +
-# 透传）。
+# 透传）。v2.6.1 W2：前三文档英文化后改英文等价锚（quota.md 语义句
+# 本就英文，原锚不动）。
 SINGLE_OBSERVATION_MARKERS = (
     (CONTINUITY_SKILL,
-     ("最早的有效未来观测", "与额度状态无关", "无条件透传", "floor-only",
+     ("earliest valid future observed reset", "regardless of quota status",
+      "unconditional pass-through", "floor-only",
       "quota-resume-decision <repo_root> <task_id> --force-refresh")),
     (LONG_HORIZON,
-     ("最早的有效未来观测", "与额度状态无关", "floor-only")),
+     ("earliest valid future observed reset", "regardless of quota status",
+      "floor-only")),
     (ORCHESTRATION_SKILL,
-     ("最早的有效未来观测", "与额度状态无关", "floor-only")),
+     ("earliest valid future observed reset", "regardless of quota status",
+      "floor-only")),
     (QUOTA_COMMAND,
-     ("最早的有效未来观测", "与额度状态无关", "无条件透传", "floor-only")),
+     ("earliest valid future observed reset_at", "regardless of quota status",
+      "unconditionally", "floor-only")),
 )
 # 16k 负向：v2.5.2 阻塞窗（EXHAUSTED-only）reset 提取口径措辞在文档面
 # 退役（claim 形零容忍，出现即 FAIL——旧口径与 v2.6.0 单一观测口径互斥；
-# 实现面口径改写由 tests/test_quota_*.py 与 runtime 模块自身锚定）
+# 实现面口径改写由 tests/test_quota_*.py 与 runtime 模块自身锚定）。
+# v2.6.1 W2：三文档均英文化，补英文等价退役措辞（中文原锚保留防回潮）
 BLOCKED_WINDOW_RETIRED_TOKENS = (
-    "阻塞窗口径", "EXHAUSTED 阻塞窗", "字典序最大值")
+    "阻塞窗口径", "EXHAUSTED 阻塞窗", "字典序最大值",
+    "blocked-window", "EXHAUSTED-only", "EXHAUSTED blocked window",
+    "lexicographic maximum")
 BLOCKED_WINDOW_RETIRED_FILES = (
     CONTINUITY_SKILL, LONG_HORIZON, QUOTA_COMMAND)
 # 16l：用户授权显式选型锚（v2.6.0 WP-M1，规格 §5.1/§5.2/§5.3 + owner 裁决
@@ -534,23 +620,28 @@ BLOCKED_WINDOW_RETIRED_FILES = (
 #   提示（档位不随 pin 存储）、单一候选也须用户显式确认、pin 一致性
 #   （--model 必须与 pin 一致）、无人值守绝不自动重 pin、主模型继承宿主
 #   主会话（主模型硬门退役后的正名锚）与提交契约 model_policy 新值；
-#   cli.py 必含有 pin 任务 --model 不得绕过与交互重授权措辞（实现面与
-#   文档面双锚防漂移）。
+#   实现面锚（v2.6.1 W3b 起单源 messages.py）：messages.py 必含有 pin
+#   任务 --model 不得绕过与交互重授权及无 pin 严口径措辞，cli.py 保留
+#   提交契约 token 锚（实现面与文档面双锚防漂移）。
 USER_AUTHORIZED_MODEL_MARKERS = (
     (ORCHESTRATION_SKILL,
-     ("Flash 软推荐",
-      "默认以 max 推理档运行",
-      "档位不随 pin 存储",
-      "单一候选也须用户显式确认",
-      "必须与 pin 一致",
-      "绝不自动重 pin",
-      "主模型继承宿主主会话",
+     ("soft recommendation",
+      "defaults to the max reasoning tier",
+      "the tier is not stored in the pin",
+      "A single candidate also requires explicit user confirmation",
+      "must match the pin",
+      "never re-pins automatically",
+      "The main model inherits the host main session",
       "user-authorized-explicit-selection")),
     (CLI_PY,
-     ("有 pin 任务的 --model 显式值必须与 pin 一致",
-      "问答重新授权并以 worker-model-pin 更新任务 pin",
-      "user-authorized-explicit-selection",
-      "绝不隐式授权单候选")),
+     ("user-authorized-explicit-selection",)),
+    (MESSAGES_PY,
+     ("for pinned tasks the explicit --model value must equal",
+      "must not bypass the task pin",
+      "re-authorize through the interactive",
+      "update the task pin with worker-model-pin",
+      "never select automatically, never treat a single candidate",
+      "as implicit authorization")),
 )
 
 
@@ -886,16 +977,18 @@ def check_7_continuity(results):
             ok = False
             continue
         for lineno, line in enumerate(text.splitlines(), 1):
-            if QUOTA_ABSOLUTE_PHRASE in line:
+            hit = [phrase for phrase in QUOTA_ABSOLUTE_PHRASES
+                   if phrase in line]
+            if hit:
                 absolute_hits += 1
                 details.append(
-                    "FAIL: %s:%d 出现「无 quota API」绝对化措辞: %s"
-                    % (shown, lineno, line.strip()))
+                    "FAIL: %s:%d 出现「无 quota API」绝对化措辞（%s）: %s"
+                    % (shown, lineno, "/".join(hit), line.strip()))
                 ok = False
     if absolute_hits == 0:
         details.append(
             "PASS: 四文档（README / architecture / continuity SKILL / "
-            "long-horizon）均无「无 quota API」绝对化措辞")
+            "long-horizon）均无「无 quota API」/「no quota API」绝对化措辞")
 
     if ok:
         details.append("PASS: quota API 名称均处于否定式声明行（同行含 虚构/不存在）")
@@ -995,11 +1088,12 @@ def check_10_continuity_id(results):
     details = []
     ok = True
 
-    # TASK_ID 必含于三个文件；`随机十六进制后缀` 必含于 long-horizon.md
-    # 与 docs/architecture.md（「语义前缀+随机后缀」机械唯一格式的落点标记）
+    # TASK_ID 必含于三个文件；「语义前缀+随机后缀」落点标记随文件语言
+    # 分锚（v2.6.1 W2：long-horizon 英文锚 / architecture 中文锚并行）
     plans = (
         (TASK_ID_FILES, ("TASK_ID",)),
-        (HEX_SUFFIX_FILES, ("随机十六进制后缀",)),
+    ) + tuple(
+        ((path,), (marker,)) for path, marker in HEX_SUFFIX_PLANS
     )
     for paths, markers in plans:
         for path in paths:
@@ -1430,7 +1524,9 @@ def check_16_v241_protocol(results):
          orchestration 必含 Flash 软推荐 / 默认 max 推理档提示（档位
          不随 pin 存储）/ 单一候选显式确认 / pin 一致性 / 无人值守
          绝不自动重 pin / 主模型继承宿主主会话 / model_policy 新值；
-         cli.py 必含有 pin 任务 --model 不得绕过与交互重授权措辞。
+         v2.6.1 W3b 起实现面文案单源 messages.py——messages.py 必含
+         有 pin 任务 --model 不得绕过与交互重授权及无 pin 严口径措辞
+         （cli.py 保留 model_policy token 锚）。
     """
     title = ("v2.4.1/v2.5/v2.5.2/v2.6.0 编排/连续性协议静态契约（模型选型硬闸 / "
              "用户授权显式选型 / arm-before-work / 建立动作优先 / 生产 runtime "
@@ -1584,20 +1680,25 @@ def check_16_v241_protocol(results):
                 "触发条件/两问题形/禁弹问措辞回退）" % (orch_shown, marker))
             ok = False
 
-    # —— 16g：任务 pin 失效即拒（v2.5 I1，cli.py + orchestration 双面） ——
+    # —— 16g：任务 pin 失效即拒（v2.5 I1；v2.6.1 W3b 起实现面文案单源
+    # messages.py——锚迁 messages.py 英文原文 + orchestration 双面） ——
     cli_shown = rel_display(CLI_PY)
     cli_text = read_text(CLI_PY)
-    if cli_text is None or not os.path.isfile(CLI_PY):
-        details.append("FAIL: %s 不存在或无法读取，无法执行 16g 检查" % cli_shown)
+    messages_shown = rel_display(MESSAGES_PY)
+    messages_text = read_text(MESSAGES_PY)
+    if messages_text is None or not os.path.isfile(MESSAGES_PY):
+        details.append("FAIL: %s 不存在或无法读取，无法执行 16g 检查"
+                       % messages_shown)
         ok = False
     else:
         for marker in PIN_REJECTION_CLI_MARKERS:
-            if marker in cli_text:
-                details.append("PASS: %s 含 pin 失效即拒锚 `%s`" % (cli_shown, marker))
+            if marker in messages_text:
+                details.append("PASS: %s 含 pin 失效即拒锚 `%s`"
+                               % (messages_shown, marker))
             else:
                 details.append(
                     "FAIL: %s 缺少 pin 失效即拒锚 `%s`（专门拒绝/绝不回退"
-                    "自动选型措辞缺失）" % (cli_shown, marker))
+                    "自动选型措辞缺失）" % (messages_shown, marker))
                 ok = False
     for marker in PIN_REJECTION_SKILL_MARKERS:
         if marker in orch_text:
@@ -1709,8 +1810,9 @@ def check_16_v241_protocol(results):
     # —— 16l：用户授权显式选型锚（v2.6.0 WP-M1，规格 §5.1/§5.2/§5.3） ——
     # Flash 准入硬门降级软推荐后的文档面 + 实现面双锚：orchestration 必含
     # 软推荐/默认 max 提示/单候选确认/pin 一致性/无人值守不重 pin/主模型
-    # 继承宿主/model_policy 新值；cli.py 必含 --model 不绕过 pin 与交互
-    # 重授权措辞。
+    # 继承宿主/model_policy 新值；v2.6.1 W3b 起实现面文案单源 messages.py
+    # （--model 不绕过 pin 与交互重授权及无 pin 严口径措辞锚 messages.py
+    # 英文原文，cli.py 保留 user-authorized-explicit-selection token）。
     for path, markers in USER_AUTHORIZED_MODEL_MARKERS:
         shown = rel_display(path)
         text = read_text(path)

@@ -1,5 +1,5 @@
 {
-  "description": "GLM Conductor hooks (ZCode plugin layout under hooks/hooks.json). SessionStart resume context + Stop completion guard only — v2.3 enforcement hooks (PreToolUse / PostToolUse / PostToolUseFailure) retired in Phase 2 W6.",
+  "description": "GLM Conductor hooks: SessionStart resume-context injection and Stop completion guard.",
   "hooks": {
     "SessionStart": [
       {

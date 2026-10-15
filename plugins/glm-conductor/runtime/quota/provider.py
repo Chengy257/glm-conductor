@@ -73,14 +73,14 @@ class QuotaProviderError(Exception):
     def __init__(self, message, kind):
         if kind not in ERROR_KINDS:
             raise ValueError(
-                "QuotaProviderError：kind %r 不在合法取值内（%s）"
+                "QuotaProviderError: kind %r not in the legal values (%s)"
                 % (kind, ", ".join(ERROR_KINDS)))
         super().__init__(message)
         self.message = message
         self.kind = kind
 
     def __str__(self):
-        return "%s（kind=%s）" % (self.message, self.kind)
+        return "%s (kind=%s)" % (self.message, self.kind)
 
 
 class QuotaProvider(object):
@@ -105,10 +105,12 @@ class QuotaProvider(object):
     def __init__(self, name, host):
         if not isinstance(name, str) or name == "":
             raise ValueError(
-                "QuotaProvider：name 必须是非空字符串，得到 %r" % (name,))
+                "QuotaProvider: name must be a non-empty string, got %r"
+                % (name,))
         if not isinstance(host, str) or host == "":
             raise ValueError(
-                "QuotaProvider：host 必须是非空字符串，得到 %r" % (host,))
+                "QuotaProvider: host must be a non-empty string, got %r"
+                % (host,))
         self.name = name
         self.host = host
 
@@ -121,5 +123,5 @@ class QuotaProvider(object):
           - 失败抛 QuotaProviderError，错误分类见 ERROR_KINDS。
         """
         raise NotImplementedError(
-            "QuotaProvider.fetch 是抽象方法：适配器必须实现"
-            "（契约见 runtime.quota.provider 模块 docstring）")
+            "QuotaProvider.fetch is abstract: adapters must implement it"
+            " (contract in the runtime.quota.provider module docstring)")

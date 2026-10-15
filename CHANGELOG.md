@@ -1,5 +1,43 @@
 # Changelog
 
+## 2.6.1
+
+Language rebaseline release — a single version carrying the whole post-v2.6.0 audit-and-language-rebaseline campaign: the model execution surface (skills, agents, runtime user-visible strings, error faces) is now concise English end to end, while the human diagnostics output stays Chinese per the owner language ruling; the three external docs ship English 1:1, tests/ is now tracked in the repository, and one continuity fix replaces the last legacy `v24-record-run` references with the canonical `task-record-workflow-run`. Companion plan: `docs/roadmap/POST_V2_6_0_AUDIT_AND_LANGUAGE_REBASELINE_PLAN.md`. Owner language ruling (2026-10-15): the model execution surface = concise English; human diagnostics output stays Chinese; historical CHANGELOG entries (≤2.5.0) stay Chinese. **Breaking: none** — string values and docs only, plus one behavioral continuity fix.
+
+### Phase 0 — Delegation continuity fix
+
+- Legacy `v24-record-run` references in the continuity face (`skills/continuity/SKILL.md` launch runbook, `references/long-horizon.md` lifecycle diagram) replaced by the canonical `task-record-workflow-run <repo_root> <task_id> <run-id>` (AF-04 writer-guard precondition, `state.workflow_run_id` persistence, `workflow_started` event); `v24-record-run` remains documented as the legacy low-level thin shell.
+
+### Skills — full English rebaseline
+
+- All skill faces are fully English — orchestration / continuity / enforcement SKILL.md plus the long-horizon, operations, and role-contracts references — under a content-parity discipline (translation preserves meaning and never weakens contract wording); pinned section names are preserved verbatim.
+
+### Model execution surface — fully English
+
+- Agents (glm-reviewer / visual-implementer / visual-reviewer), the quota command, the worker persona, the build_ask scaffold, and the compiler / work_unit / dependency / submission error faces are English.
+- `runtime/messages.py` is the single source of user-visible runtime strings (cli / task / state / writer_guard); the final residue sweep covered change_id / journal / durable_io and the quota family (_http / parser / provider / resolver / time_utils).
+- Compiled workflow artifacts are proven zero-CJK by an `isascii()`-strict regression test.
+
+### External docs — English 1:1
+
+- docs/architecture.md, docs/core-concepts.md, and docs/troubleshooting.md translated to English 1:1; README anchors converged, and the validator's positive anchors migrated to English (anti-regression token sets stay bilingual).
+
+### Human diagnostics face — unchanged Chinese
+
+- report.py's human-readable TEXT output stays Chinese (owner ruling); it is now rendered from structured fields (status / windows / action / resume_at), decoupled from the English machine reason face — `--json` keeps the parser's English reasons.
+
+### Repository and tooling
+
+- tests/ is now tracked in the repository (49 files) with a README local-testing section.
+
+### Product finding (documented, no behavior change)
+
+- `task-create --dag` does not validate ownership scope patterns; enforcement happens at writer-acquire / record-validation / the stop gate, so an illegal pattern degrades the guard visibly rather than silently passing.
+
+### Operations note
+
+- The campaign paused mid-flight on a provider quota stop (code 1308); delegated work was preserved via run chaining with cache import and explicit owner GUI model switches — no silent fallback.
+
 ## 2.6.0
 
 Reliability fixes and model-selection rebaseline — a minor release landing, in one pass, every finding of the post-v2.5.2 independent audit plus two contract rebaselines: per-task state transactions (P1-1), the degraded-reporting contract (P1-2), single reset_at with unconditional visibility and preventive arming (P1-3), a bounded Stop-guard budget (P2-1), canonical run registration (P2-2), seven P3 hygiene items, and the worker model-selection rebaseline (WP-M1 user-authorized explicit selection: host-wide candidates + Flash demoted to soft recommendation + pin cannot be bypassed + default-max reasoning-tier notice). Companion plan: `docs/roadmap/V2_6_0_IMPLEMENTATION_PLAN.md`. **Breaking: none** — state schema unchanged; existing v2.4/v2.5 tasks load with zero migration.

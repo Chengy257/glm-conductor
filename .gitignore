@@ -8,4 +8,5 @@ __pycache__/
 .glm-conductor/
 .local-dev/
 /release-kit-252/
-/tests/
+# Derived workflow-compile outputs (local artifacts, never source)
+gen/

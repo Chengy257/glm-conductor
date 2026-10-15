@@ -2,7 +2,7 @@
 
 **English** | [简体中文](./README.zh-CN.md)
 
-![Version](https://img.shields.io/badge/version-2.6.0-blue.svg)
+![Version](https://img.shields.io/badge/version-2.6.1-blue.svg)
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
 ![ZCode Plugin](https://img.shields.io/badge/ZCode-plugin-green.svg)
 ![Python](https://img.shields.io/badge/python-3.8%2B-blue.svg)
@@ -139,7 +139,7 @@ Tasks encountering provider quota exhaustion can safely pause in `waiting_quota`
 - **[ZCode](https://zcode.z.ai) 3.14+** (Native Workflow & Scheduled Task capabilities verified)
 - A GLM Coding Plan or Z.ai account with configured models available (a strong main-session model is recommended for planning/architecture/verification; Flash-tier models are soft-recommended for cost-effective workflow workers — any configured model is selectable with user authorization)
 - **Python 3.8+** for runtime hooks and CLI utilities
-  - *Windows Notice:* Ensure `python3.exe` is available in PATH. If only `python.exe` is present, see the [Windows Setup Guide](./docs/troubleshooting.md#8-windows-环境下-python3-钩子命令排查).
+  - *Windows Notice:* Ensure `python3.exe` is available in PATH. If only `python.exe` is present, see the [Windows Setup Guide](./docs/troubleshooting.md#8-troubleshooting-the-python3-hook-command-on-windows).
 
 ### Installation via ZCode Plugin Marketplace
 
@@ -260,8 +260,8 @@ All runtime operations execute through `python <plugin-root>/runtime/cli.py <sub
 ```text
 glm-conductor/
 ├── marketplace.json                # Marketplace catalog manifest
-├── .zcode-plugin/                  # Plugin manifest and metadata
 ├── plugins/glm-conductor/
+│   ├── .zcode-plugin/              # Plugin manifest (plugin.json) and metadata
 │   ├── agents/                     # Specialized subagents (glm-reviewer, visual-*)
 │   ├── commands/                   # Slash command definitions (/glm-conductor:quota)
 │   ├── hooks/                      # ZCode hooks (session_start.py, stop_gate.py)
@@ -295,8 +295,10 @@ glm-conductor/
 Contributions are welcome! Before opening a pull request, verify all automated quality gates:
 
 ```bash
-# 1. Run full unit test suite (940+ tests)
+# 1. Run full unit test suite (978 tests, shipped in this repository)
 python -m unittest discover -s tests -p "test_*.py"
+# Windows note: if plain `python` is an unregistered launcher or collection hits
+# encoding errors, run `PYTHONUTF8=1 python3 -m unittest discover -s tests -p "test_*.py"`
 
 # 2. Run static contract validator (16/16 checks)
 python scripts/validate_plugin.py

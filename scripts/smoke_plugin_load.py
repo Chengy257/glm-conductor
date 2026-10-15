@@ -14,7 +14,7 @@
     零网络、零模型调用、零状态写副作用；stdlib-only，Python 3.7 兼容。
 
 边界：
-    与 scripts/validate_plugin.py 互补——校验器做全量静态一致性（15 项
+    与 scripts/validate_plugin.py 互补——校验器做全量静态一致性（16 项
     检查），本脚本只做装载面冒烟，不重复其逐项断言。
 
 退出码：

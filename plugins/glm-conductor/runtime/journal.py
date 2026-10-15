@@ -88,12 +88,14 @@ def append_event(repo_root, task_id, event, *, ts=None):
     I/O 异常（OSError 等）自然向上抛，不吞。
     """
     if not isinstance(event, dict):
-        raise JournalError("event 必须是 dict，得到 %s" % type(event).__name__)
+        raise JournalError("event must be a dict, got %s" % type(event).__name__)
     name = event.get("event")
     if not isinstance(name, str) or not name:
-        raise JournalError('event 必须含非空 str 的 "event" 键')
+        raise JournalError('event must contain a non-empty str "event" key')
     if "ts" in event:
-        raise JournalError('event 不得自带 "ts" 键（时间戳由 append_event 管理）')
+        raise JournalError(
+            'event must not carry its own "ts" key'
+            " (timestamps are managed by append_event)")
 
     if ts is None:
         ts = datetime.now(timezone.utc).isoformat(timespec="milliseconds")
@@ -143,7 +145,8 @@ def read_events(repo_root, task_id, *, strict=False):
         if not isinstance(item, dict):
             if strict:
                 raise JournalError(
-                    "%s 第 %d 行不是合法的事件 JSON 对象" % (path, lineno))
+                    "%s line %d is not a valid event JSON object"
+                    % (path, lineno))
             continue
         events.append(item)
     return events
