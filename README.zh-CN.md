@@ -294,7 +294,7 @@ glm-conductor/
 欢迎提交 Issue 与 Pull Request！在提交代码前，请确保通过全套质量门禁：
 
 ```bash
-# 1. 运行全部单元测试 (940+ 测试)
+# 1. 运行全部单元测试 (978 测试)
 python -m unittest discover -s tests -p "test_*.py"
 
 # 2. 运行静态契约校验 (16/16 检查)

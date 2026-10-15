@@ -350,6 +350,11 @@ def _evaluate_window(item, threshold):
     }
 
 
+# 语言耦合提醒（v2.6.1 终门残留风险闭合项）：本函数与 plan_resume 的
+# reason 形状变化时，须同步 report.py 的中文渲染器（_status_reason_zh /
+# _plan_reason_zh——人读面按 owner 裁决 9 恒为中文）与
+# tests/test_quota_report.py 的中文全文锚；未识别形状会诚实降级为英文
+# reason 直出，不虚构中文。
 def _overall_reason(status, windows):
     """按总体状态构造英文一句话 reason（§28 风格示例）。"""
     exhausted = [w for w in windows if w["status"] == "EXHAUSTED"]
@@ -460,6 +465,8 @@ def _blocked_resets(evaluation, snapshot):
     return pairs
 
 
+# 语言耦合提醒：reason 形状变化须同步 report.py 中文渲染器与
+# test_quota_report.py 全文锚（见上方 _overall_reason 处的完整注记）。
 def plan_resume(evaluation, snapshot=None, *, now=None,
                 grace_seconds=DEFAULT_GRACE_SECONDS):
     """按 §29-§33 把评估结果翻译为恢复决策（纯函数，除时钟外零 I/O）。

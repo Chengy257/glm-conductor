@@ -127,9 +127,9 @@ class HooksJsonVersionAgnosticTest(unittest.TestCase):
                         "description 应回到版本无关自述：%r"
                         % description[:60])
         # 自述头部不得钉本插件版本（历史形态 "GLM Conductor v2.4 hooks"
-        # 会让每次发版都产生 description diff）；description 后段的
-        # 历史退役注（v2.3 enforcement hooks retired）是退役记录，
-        # 不是自述版本，不在禁止之列
+        # 会让每次发版都产生 description diff）；description 后段曾有的
+        # 历史退役注（v2.3 enforcement hooks retired）已在 v2.6.1 B4
+        # 配置清理中随英文重写移除，头部前缀检查保持不变
         self.assertNotRegex(description, r"^GLM Conductor v[\d.]+")
 
     def test_hook_event_surface_intact(self):

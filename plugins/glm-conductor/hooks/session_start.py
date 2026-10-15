@@ -59,8 +59,8 @@ from pathlib import Path
 PLUGIN_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PLUGIN_ROOT))
 
-# 降级报文模板（fail-open 契约的 stderr 一行；W3a 集中，值冻结逐字
-# 不变，ENFORCEMENT DEGRADED 前缀保持英文）
+# 降级报文模板（fail-open 契约的 stderr 一行；W3a 集中、W3b 语言重基线
+# 核定英文值，ENFORCEMENT DEGRADED 前缀不变）
 DEGRADED_FAILURE_MESSAGE_TEMPLATE = (
     "ENFORCEMENT DEGRADED: session_start failed: %r\n")
 

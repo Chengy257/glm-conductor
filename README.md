@@ -295,7 +295,7 @@ glm-conductor/
 Contributions are welcome! Before opening a pull request, verify all automated quality gates:
 
 ```bash
-# 1. Run full unit test suite (940+ tests, shipped in this repository)
+# 1. Run full unit test suite (978 tests, shipped in this repository)
 python -m unittest discover -s tests -p "test_*.py"
 # Windows note: if plain `python` is an unregistered launcher or collection hits
 # encoding errors, run `PYTHONUTF8=1 python3 -m unittest discover -s tests -p "test_*.py"`
