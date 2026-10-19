@@ -525,8 +525,9 @@ def _validate_worker_model(model_id) -> "list[str]":
 
     存在才校验：null（无 pin 占位）或非空 str（任务级 worker 模型
     id pin）。本层只收形状，绝不查宿主模型面——provider 全限定形态
-    约定（account: 前缀 / 两段非空 / 无空白；v2.6.0 WP-M1 起角色
-    中性，不再要求 Flash 后缀）归写入点 task.pin_worker_model 经
+    约定（两段 <provider>/<model>——account: 命名空间与非 account
+    provider 同合法 / 无空白；v2.6.0 WP-M1 起角色中性，不再要求
+    Flash 后缀）归写入点 task.pin_worker_model 经
     runtime.workflow.submission 预检，消费点每次对账当次 configured
     集合（失效即拒）；缺省（键不写）按「未授权 pin」解释，旧任务
     加载零迁移。

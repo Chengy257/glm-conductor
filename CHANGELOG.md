@@ -1,5 +1,22 @@
 # Changelog
 
+## 2.6.2
+
+Hotfix release with a single behavioral change: the worker model admission rule no longer requires the `account:` scheme prefix — the shape contract is now any provider-qualified two-segment id `<provider>/<model>`. The `account:<account>/<model>` namespace and non-`account` provider ids (e.g. host-bridged providers such as `opencode-go-responses/deepseek-v4.1-flash`) are equally selectable, fixing the misclassification of configured bridge-provider models as "bare aliases" (previously rejected with exit 2 by both `worker-model-pin` and `workflow-model-select`). Owner ruling 2026-10-19. **Breaking: none for previously legal ids** — every id accepted by v2.6.1 stays accepted.
+
+### Runtime — model id admission
+
+- `runtime/workflow/submission.py`: `_reject_reason` accepts any whitespace-free two-segment `<provider>/<model>` id (both sides of the first `/` non-empty) and drops the `account:`-prefix requirement; `_is_flash_tier_candidate` takes the model segment after the first `/` regardless of provider scheme (bridge-provider Flash ids join the soft-recommendation candidate set); the private `_ACCOUNT_SCHEME_PREFIX` constant is removed and no provider names are hardcoded (the source-purity scan stays green). Genuinely bare single-segment aliases (no `/`) are still rejected — they cannot address a provider and silently fall back to the main-session model. Thin-shell docstrings in `runtime/cli.py` / `runtime/task.py` / `runtime/state.py` synchronized. One documented edge change: the degenerate id `account:/<model>` (empty scheme payload) is now shape-legal; its validity is settled by host membership reconciliation.
+- Unchanged gates: configured-set exact-membership reconciliation, task-pin consumption (stale-pin rejection, `--model`-must-match-pin), and the AF-02 visual-agent frontmatter bindings (a separate contract, intentionally untouched).
+
+### Skills & docs
+
+- orchestration SKILL.md "Worker model selection gate" step 2 rewritten: keep every provider-qualified exact id of the form `<provider>/<model>` (the `account:` namespace and non-account providers equally selectable); exclude only genuinely bare aliases. docs/troubleshooting.md §5, docs/core-concepts.md §8, and the three docs' version headers synchronized; one stale manifest reference (`plugin.json` → `marketplace.json`) fixed in docs/architecture.md §22.
+
+### Tests
+
+- 982 tests (+4): the old negative case `team-a/GLM-5.3-Flash` (missing `account:` prefix) flips to accepted; new positive cases pin and select bridge-provider ids at API and CLI level (including the `--task-ref` consumption end-to-end); the degenerate `account:/<model>` edge is anchored as shape-legal.
+
 ## 2.6.1
 
 Language rebaseline release — a single version carrying the whole post-v2.6.0 audit-and-language-rebaseline campaign: the model execution surface (skills, agents, runtime user-visible strings, error faces) is now concise English end to end, while the human diagnostics output stays Chinese per the owner language ruling; the three external docs ship English 1:1, tests/ is now tracked in the repository, and one continuity fix replaces the last legacy `v24-record-run` references with the canonical `task-record-workflow-run`. Companion plan: `docs/roadmap/POST_V2_6_0_AUDIT_AND_LANGUAGE_REBASELINE_PLAN.md`. Owner language ruling (2026-10-15): the model execution surface = concise English; human diagnostics output stays Chinese; historical CHANGELOG entries (≤2.5.0) stay Chinese. **Breaking: none** — string values and docs only, plus one behavioral continuity fix.

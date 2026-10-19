@@ -1,6 +1,6 @@
-# GLM Conductor Architecture (authoritative reference, v2.6.1)
+# GLM Conductor Architecture (authoritative reference, v2.6.2)
 
-> This document is the **single source of architectural truth** for GLM Conductor: it describes the **actual current** (v2.6.1) runtime behavior — every section answers "what the system is now" and does not narrate development history; removed modules are never described as "deprecated run paths" — they no longer exist (see §21 for the retirement map).
+> This document is the **single source of architectural truth** for GLM Conductor: it describes the **actual current** (v2.6.2) runtime behavior — every section answers "what the system is now" and does not narrate development history; removed modules are never described as "deprecated run paths" — they no longer exist (see §21 for the retirement map).
 > One-line positioning: **GLM Conductor owns semantic orchestration and acceptance; ZCode owns execution orchestration.**
 > Contract details defer to the plugin directory (the agents and skills under `plugins/glm-conductor/`); this document stays consistent with it, and on conflict the resolution is to fix back into consistency. For the conceptual introduction see [core-concepts.md](core-concepts.md); for troubleshooting see [troubleshooting.md](troubleshooting.md).
 
@@ -487,7 +487,7 @@ The table below is the explicit retirement record: in v2.4 production code and d
 
 - `scripts/validate_plugin.py` (pure standard library, 16 checks) + local gates (static validation + unit tests) maintain contract consistency (hosted CI was removed in v2.5.2; validation runs locally): it scans `plugins/`, `README.md`, `marketplace.json`, and this document; always skipping `__pycache__` and `*.pyc` / `*.pyo`
 - Tests (`tests/`, pure standard-library unittest) cover: static nodes and DAG validation, ownership stage planning and overlap judgment, the Workflow compiler (determinism / forbidden words), the writer guard (including concurrency), the seven-state layer and its transition gate, change_id, the task lifecycle, quota_resume authorization and resume decisions, the completion guard's four checks, the resume summary, the quota observation surface; tests for deleted components are deleted with the component and never kept as skips
-- Version policy: the `plugin.json` version and the latest CHANGELOG entry stay consistent (v2.6.1)
+- Version policy: the `marketplace.json` version and the latest CHANGELOG entry stay consistent (v2.6.2)
 
 ## 23. Stable boundary and evolution discipline
 

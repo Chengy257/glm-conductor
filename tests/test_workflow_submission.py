@@ -9,8 +9,10 @@
 覆盖（规格 §3.4 H1 最低 14 用例 case01–case14 底盘 + v2.6.0 WP-M1
 重基线——规格 §5.2/§5.3：Flash 档判据从准入硬门降为软推荐候选分类
 器，非 Flash 已配置精确 id 合法）：
-    - validate_worker_model：恰为 account:<账户段>/<模型段> 的 id 接受
-      并原样返回——角色中性形状校验，非 Flash 已配置模型（含主会话
+    - validate_worker_model：provider 全限定两段 id（account:<账户段>/
+      <模型段> 命名空间与非 account 的 <provider>/<模型> 形态——2026-10-19
+      owner 裁定解除 account: 前缀唯一准入——同合法）接受并原样返回
+      ——角色中性形状校验，非 Flash 已配置模型（含主会话
       文本模型）合法（WP-M1）；None / 空串 / 纯空白拒绝（case02/03）；
       裸 GLM-5.3-Flash 拒绝——包括出现在 configured 集合中时
       （case04）；无关模型族 / 非后缀变体形状合法（WP-M1）；
@@ -94,7 +96,7 @@ class ValidateWorkerModelTest(unittest.TestCase):
         with self.assertRaises(WorkflowSubmissionError) as ctx:
             validate_worker_model("")
         self.assertIn("empty", str(ctx.exception))
-        # 补充：纯空白同样拒绝（不满足 account: 前缀形态）
+        # 补充：纯空白同样拒绝（无 '/' 分段形态）
         with self.assertRaises(WorkflowSubmissionError):
             validate_worker_model("   ")
 
@@ -170,11 +172,37 @@ class ValidateWorkerModelTest(unittest.TestCase):
         with self.assertRaises(WorkflowSubmissionError):
             validate_worker_model("GLM-5.3-Flash", ["GLM-5.3-Flash"])
 
+    def test_non_account_provider_qualified_accepted(self):
+        # 2026-10-19 owner 裁定解除 account: 前缀唯一准入：宿主桥接
+        # provider 的 providerId/modelId 复合 id 是真实已配置模型，
+        # 形状 / 成员 / 显式选型校验与 account: 命名空间完全同判
+        # （此前被一律误判为「裸别名」拒绝）
+        bridge = "opencode-go-responses/deepseek-v4.1-flash"
+        self.assertEqual(validate_worker_model(bridge), bridge)
+        self.assertEqual(
+            validate_worker_model(bridge, [bridge, TEXT_MODEL]), bridge)
+        self.assertEqual(
+            select_worker_model([bridge, TEXT_MODEL],
+                                explicit_model_id=bridge),
+            bridge)
+        # 非 account 前缀的 Flash 档形态同进软推荐候选集（恰一候选
+        # 自动选定）——模型段取首个 '/' 之后的整段，provider 段方案无关
+        bridge_flash = "opencode-go-responses/GLM-5.3-Flash"
+        self.assertEqual(
+            select_worker_model([bridge_flash, TEXT_MODEL]), bridge_flash)
+        # 边界锚：provider 段为退化方案前缀 'account:'（方案负载为空）
+        # 也是两段非空复合形态——形状面不再解析 scheme 内部语义，
+        # 真伪归宿主 configured 成员对账
+        self.assertEqual(
+            validate_worker_model("account:/GLM-5.3-Flash"),
+            "account:/GLM-5.3-Flash")
+
     def test_missing_segment_shapes_rejected(self):
-        for bad in ("account:/GLM-5.3-Flash",   # 缺账户段
-                    "account:team-a",           # 缺 '/' 与模型段
+        for bad in ("account:team-a",           # 缺 '/' 与模型段
                     "account:team-a/",          # 缺模型段
-                    "team-a/GLM-5.3-Flash"):    # 缺 account: 前缀
+                    "opencode-x",               # 非 account 形态同样缺 '/'
+                    "opencode-x/",              # 非 account 形态缺模型段
+                    "/GLM-5.3-Flash"):          # 缺 provider 段
             with self.assertRaises(WorkflowSubmissionError):
                 validate_worker_model(bad)
 

@@ -11,9 +11,11 @@
     不再是准入硬门——非 Flash 已配置模型仅因名字/后缀被拒是 no-go 红线
     ，规格 §5.2/§7.2）：
       - validate_worker_model(model_id, configured_model_ids=None)：
-        单个 worker 模型 id 预检——非空 str、account: 前缀、
-        account:<账户段>/<模型段> 形态（两段均非空、账户段不含 '/'、
-        全 id 无空白；角色中性形状校验，v2.6.0 WP-M1 起不再要求
+        单个 worker 模型 id 预检——非空 str、provider 全限定两段形态
+        <provider段>/<模型段>（首个 '/' 前后两段均非空、全 id 无空白
+        ；account:<账户段> 命名空间与非 account 的 provider id（宿主
+        桥接 provider 等）同合法——2026-10-19 owner 裁定解除 account:
+        前缀唯一准入；角色中性形状校验，v2.6.0 WP-M1 起不再要求
         Flash 后缀——未来陌生名字但已配置的 id 一律合法）；configured
         集合给出时要求精确成员，且集合形状非法即拒；成功原样返回该
         id（归一即恒等），失败抛 WorkflowSubmissionError（携人读原因）；
@@ -42,8 +44,10 @@
     任何 import 语句，零宿主 / 网络 / 文件系统调用；确定性——同输入
     重复调用返回值与错误消息逐字全等，无随机、无时间、无环境因素；
     绝不硬编码任何 account/provider 名（provider 身份一律来自宿主
-    配置集合，本模块只认 account: 方案前缀这一形态约定；模型发现归
-    宿主 ListModels，本模块绝不替宿主判断模型能力）。
+    配置集合，本模块只认 <provider段>/<模型段> 复合形态这一约定
+    ——account: 方案命名空间是 provider 段的合法取值之一，非 account
+    的 provider id 同样合法；模型发现归宿主 ListModels，本模块绝不
+    替宿主判断模型能力）。
 
 来源：
     docs/roadmap/V2_4_1_CONTINUITY_HOTFIX_IMPLEMENTATION_SPEC.md
@@ -53,7 +57,11 @@
     准入硬门降级为软推荐候选分类；model_policy 从 explicit-flash-
     required 改 user-authorized-explicit-selection；角色中性形状校验
     ——非 Flash 已配置 id 接受；零候选/多候选歧义仍拒绝交回启动问答
-    ——问答面在 orchestration §6.0，本模块只负责机械候选收敛）。
+    ——问答面在 orchestration §6.0，本模块只负责机械候选收敛）
+    + 2026-10-19 owner 裁定：解除 account: 方案前缀的唯一准入（宿主
+    桥接 provider 暴露的 providerId/modelId 复合 id 是真实已配置
+    模型，此前被一律误判为「裸别名」拒绝）；provider 全限定两段
+    形态与真裸别名（不含 '/' 的单段 id）拒绝维持不变。
 """
 
 
@@ -65,8 +73,6 @@
 # 不进自动选型候选集。
 FLASH_TIER_SUFFIX = "-Flash"
 
-# account: 方案前缀（形态约定，非具体账户名；具体账户名绝不硬编码）
-_ACCOUNT_SCHEME_PREFIX = "account:"
 # 提交契约 model_policy 的唯一合法值（规格 §5.3：用户授权显式选型）
 _MODEL_POLICY_VALUE = "user-authorized-explicit-selection"
 
@@ -83,36 +89,39 @@ class WorkflowSubmissionError(ValueError):
 def _reject_reason(model_id):
     """纯形状预检：id 合法返回 None；否则返回人读拒绝原因（不查 configured 集合）。
 
-    接受形态恰为：account:<账户段>/<模型段>，两段均非空、账户段不含
-    '/'、全 id 无空白字符（角色中性形状校验——v2.6.0 WP-M1 起不再
-    要求 Flash 档后缀：非 Flash 已配置模型（含主会话文本模型）合法
-    可用，模型能力/档位判断归用户授权与宿主发现面，绝不按名字/后缀
-    拒绝）。裸别名（无 account: 前缀）仍一律拒绝。
+    接受形态：provider 全限定两段 id——<provider段>/<模型段>，首个 '/'
+    前后两段均非空、全 id 无空白字符（account:<账户段> 命名空间与非
+    account 的 provider id——宿主桥接 provider 等——同合法，2026-10-19
+    owner 裁定解除 account: 前缀唯一准入；角色中性形状校验，v2.6.0
+    WP-M1 起不再要求 Flash 档后缀：非 Flash 已配置模型（含主会话文本
+    模型）合法可用，模型能力/档位判断归用户授权与宿主发现面，绝不按
+    名字/后缀拒绝）。真裸别名（不含 '/' 的单段 id）仍一律拒绝——宿主
+    模型发现面的 id 恒为 providerId/modelId 复合形态，无 '/' 的 id
+    无法定位 provider，按既有实测会静默回退主会话模型。
     """
     if not isinstance(model_id, str):
         return ("model_id must be a non-empty string, got %s"
                 % type(model_id).__name__)
     if model_id == "":
         return "model_id must not be an empty string"
-    if not model_id.startswith(_ACCOUNT_SCHEME_PREFIX):
-        return ("model id must start with the %r prefix "
-                "(provider-qualified; bare aliases are rejected): %r"
-                % (_ACCOUNT_SCHEME_PREFIX, model_id))
     if any(char.isspace() for char in model_id):
         return "model id must not contain whitespace characters: %r" \
             % (model_id,)
-    account_seg, sep, model_seg = model_id[len(_ACCOUNT_SCHEME_PREFIX):].partition("/")
-    if not sep or account_seg == "" or model_seg == "":
-        return ("model id must have the form "
-                "account:<account-segment>/<model-segment> (both "
-                "segments non-empty; the account segment contains "
-                "no '/'): %r" % (model_id,))
+    provider_seg, sep, model_seg = model_id.partition("/")
+    if not sep or provider_seg == "" or model_seg == "":
+        return ("model id must be a provider-qualified exact id of the "
+                "form <provider>/<model> (the account:<account>/<model> "
+                "scheme namespace and non-account provider ids are both "
+                "legal; bare aliases without a '/' are rejected): %r"
+                % (model_id,))
     return None
 
 
 def _is_flash_tier_candidate(model_id):
-    """软推荐档位分类：形状合法且模型段恰以 FLASH_TIER_SUFFIX 结尾并
-    长于后缀本身（裸 "-Flash" 模型段无基础名，不算档位命中）。
+    """软推荐档位分类：形状合法且模型段（首个 '/' 之后的整段）恰以
+    FLASH_TIER_SUFFIX 结尾并长于后缀本身（裸 "-Flash" 模型段无基础名，
+    不算档位命中；account: 与非 account provider 形态同判——provider
+    段只用于定位首个 '/'，不参与档位判断）。
 
     只用于 select_worker_model 的自动选型候选收集（软推荐便捷路径）；
     绝不参与 validate_worker_model 的准入判定——档位不是准入条件。
@@ -120,7 +129,7 @@ def _is_flash_tier_candidate(model_id):
     reason = _reject_reason(model_id)
     if reason is not None:
         return False
-    model_seg = model_id[len(_ACCOUNT_SCHEME_PREFIX):].partition("/")[2]
+    model_seg = model_id.partition("/")[2]
     return (model_seg.endswith(FLASH_TIER_SUFFIX)
             and len(model_seg) > len(FLASH_TIER_SUFFIX))
 
@@ -151,8 +160,8 @@ def validate_worker_model(model_id, configured_model_ids=None):
     configured_model_ids=None（缺省）表示未提供宿主配置集合，只做 id
     自身形状预检；给出时必须是 list/tuple 的非空字符串，且 model_id
     须为精确成员（精确字符串相等——不做大小写 / 空白归一，集合形状
-    非法即拒）。裸别名（无 account: 前缀）即使出现在 configured 集合
-    中也绝不接受。角色中性：档位（Flash 与否）不参与准入判定——
+    非法即拒）。裸别名（不含 '/' 的单段 id）即使出现在 configured
+    集合中也绝不接受。角色中性：档位（Flash 与否）不参与准入判定——
     已配置的任意精确 id 均合法。
     """
     reason = _reject_reason(model_id)

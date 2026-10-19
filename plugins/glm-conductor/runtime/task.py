@@ -100,10 +100,13 @@
     pin_worker_model(repo_root, task_id, model_id)
         任务级 worker 模型 pin 写入（v2.5 I1，授权一次任务内默认）：
         把经形状预检的 exact id 写入顶层 worker_model 键。形状预检
-        采用 runtime.workflow.submission 的形态约定（account: 前缀、
-        account:<账户段>/<模型段> 两段非空、账户段不含 '/'、全 id 无
+        采用 runtime.workflow.submission 的形态约定（provider 全限定
+        两段 <provider>/<model>——account: 命名空间与非 account
+        provider（宿主桥接等）同合法（2026-10-19 owner 裁定解除
+        account: 前缀唯一准入）、首个 '/' 前后两段非空、全 id 无
         空白——v2.6.0 WP-M1 起角色中性形状校验，不再要求 Flash 档
-        后缀：非 Flash 已配置精确 id 合法；裸别名 / 空值仍拒）但绝不
+        后缀：非 Flash 已配置精确 id 合法；不含 '/' 的裸别名 / 空值
+        仍拒）但绝不
         查宿主模型面——写入时点
         与提交时点宿主面可能不同，对账留给消费点（CLI
         workflow-model-select --task-ref 每次对账 configured 集合，
@@ -1175,11 +1178,13 @@ def pin_worker_model(repo_root, task_id, model_id) -> dict:
     使用，含唤醒恢复后的新 run 提交），不是任务身份。规则：
 
     - model_id 形状预检采用 runtime.workflow.submission 的形态约定
-      （account: 前缀、account:<账户段>/<模型段> 两段非空、账户段
-      不含 '/'、全 id 无空白——v2.6.0 WP-M1 起角色中性形状校验，
-      不再要求 Flash 档后缀：任意已配置精确 id 合法（含非 Flash /
-      未来陌生名字的已配置模型），非 Flash 仅因名字/后缀被拒是
-      no-go 红线；裸别名 / 空值仍拒）——经公共函数 validate_worker_
+      （provider 全限定两段 <provider>/<model>——account: 命名空间与
+      非 account provider（宿主桥接等）同合法（2026-10-19 owner 裁定
+      解除 account: 前缀唯一准入）、首个 '/' 前后两段非空、全 id 无
+      空白——v2.6.0 WP-M1 起角色中性形状校验，不再要求 Flash 档
+      后缀：任意已配置精确 id 合法（含非 Flash / 未来陌生名字的已配置
+      模型），非 Flash 仅因名字/后缀被拒是 no-go 红线；不含 '/' 的
+      裸别名 / 空值仍拒）——经公共函数 validate_worker_
       model 的纯形状预检（configured 缺省形态），结构性失败转
       ValueError（本模块错误口径）；绝不查宿主模型面：写入时点与提
       交时点宿主 configured 集合可能不同，对账留给消费点

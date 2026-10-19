@@ -2,7 +2,7 @@
 
 **English** | [简体中文](./README.zh-CN.md)
 
-![Version](https://img.shields.io/badge/version-2.6.1-blue.svg)
+![Version](https://img.shields.io/badge/version-2.6.2-blue.svg)
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
 ![ZCode Plugin](https://img.shields.io/badge/ZCode-plugin-green.svg)
 ![Python](https://img.shields.io/badge/python-3.8%2B-blue.svg)
@@ -295,7 +295,7 @@ glm-conductor/
 Contributions are welcome! Before opening a pull request, verify all automated quality gates:
 
 ```bash
-# 1. Run full unit test suite (978 tests, shipped in this repository)
+# 1. Run full unit test suite (982 tests, shipped in this repository)
 python -m unittest discover -s tests -p "test_*.py"
 # Windows note: if plain `python` is an unregistered launcher or collection hits
 # encoding errors, run `PYTHONUTF8=1 python3 -m unittest discover -s tests -p "test_*.py"`

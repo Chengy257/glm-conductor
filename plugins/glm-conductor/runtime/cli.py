@@ -181,9 +181,11 @@ v2.4 Phase 3（P3-D/E）收口面：
         任务级 worker 模型 pin 写入（v2.5 I1，task.pin_worker_model
         薄壳）：把经形状预检的 exact id 写入任务顶层 worker_model 键
         （授权问答答后落盘动作；任务全生命周期默认使用）。形状预检
-        采用 submission 形态约定（v2.6.0 WP-M1 起角色中性：account:
-        前缀 / 两段非空 / 无空白——任意已配置精确 id 合法，不再要求
-        Flash 后缀；裸别名 / 空值仍拒）但绝不查宿主模型面——写入不查
+        采用 submission 形态约定（v2.6.0 WP-M1 起角色中性、2026-10-19
+        起放宽：provider 全限定两段 <provider>/<model>——account:
+        命名空间与非 account provider（宿主桥接等）同合法 / 无空白
+        ——任意已配置精确 id 合法，不再要求 Flash 后缀；不含 '/' 的
+        裸别名 / 空值仍拒）但绝不查宿主模型面——写入不查
         宿主面，对账留给消费点。非终态任务才可写；同值幂等成功（零写
         盘）；异值显式覆盖（返回值带 prev 与 new——更换授权的规范落
         盘动作）。id 形状非法 → 参数值非法，退出码 2；任务层拒绝
@@ -986,9 +988,11 @@ def _worker_model_pin(repo_root, task_id, model_id) -> int:
     答后落盘动作；非终态才可写、同值幂等、异值显式覆盖带 prev/new；
     绝不查宿主模型面——对账留给消费点；绝不新增 journal 事件）。
     id 形状非法在 CLI 侧先经 submission.validate_worker_model 预检
-    （v2.6.0 WP-M1 起角色中性形状校验：account: 前缀 / 两段非空 /
-    无空白——任意已配置精确 id 合法，不再要求 Flash 后缀；裸别名 /
-    空值仍拒；宿主配置对账留给消费点）（参数值非法口径 → 退出码 2，
+    （v2.6.0 WP-M1 起角色中性形状校验、2026-10-19 起放宽：provider
+    全限定两段 <provider>/<model>（account: 命名空间与非 account
+    provider 同合法）/ 无空白——任意已配置精确 id 合法，不再要求
+    Flash 后缀；不含 '/' 的裸别名 / 空值仍拒；宿主配置对账留给消费
+    点）（参数值非法口径 → 退出码 2，
     与 review-record 的 verdict 词汇先闸同款）；任务层拒绝（任务缺失
     / v2.3 遗留 / 终态冻结）→ _PinRejected（退出码 1）。输出单行
     JSON {task_id, prev, new}（与 task.pin_worker_model 返回值同源

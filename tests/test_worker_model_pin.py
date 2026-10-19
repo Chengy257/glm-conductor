@@ -14,8 +14,10 @@ SPEC.md §5.3（v2.6.0：角色中性形状校验、有 pin 任务普通 --model
      拒绝非法 pin；save/load 往返保真；未知键忽略的向前兼容不变。
   2. task.pin_worker_model：首写 prev=None 且落盘；同值幂等零写盘；
      异值显式覆盖（返回值带 prev 与 new）；终态冻结拒绝；形状预检
-     （角色中性：account: 前缀 / 两段非空 / 无空白——非 Flash 已配
-     置精确 id 合法，裸别名 / 空值 / 缺段仍拒）拒绝且盘面零改动；
+     （角色中性：provider 全限定两段 <provider>/<model>——account:
+     命名空间与非 account provider（2026-10-19 owner 裁定）同合法
+     / 无空白——非 Flash 已配置精确 id 合法，不含 '/' 的裸别名 / 空
+     值 / 缺段仍拒）拒绝且盘面零改动；
      缺失任务 / v2.3 遗留任务拒绝；journal 十名冻结零新增事件名。
   3. CLI worker-model-pin：成功 / 幂等 / 覆盖（stdout 单行 JSON
      {task_id, prev, new}）；id 形状非法 → 退出码 2；任务缺失 /
@@ -222,17 +224,18 @@ class PinWorkerModelApiTest(unittest.TestCase):
     def test_shape_rejections_no_disk_change(self):
         """形状预检拒绝且盘面零改动（写入不查宿主面，只收形状）。
 
-        v2.6.0 WP-M1 角色中性：拒绝面收窄为纯形状——裸别名 / 缺账户
-        段或缺模型段 / 含空白 / 空串 / 非字符串；非 Flash 已配置精确
+        v2.6.0 WP-M1 角色中性 + 2026-10-19 放宽：拒绝面收窄为纯形状
+        ——裸别名（无 '/'）/ 缺 provider 段或缺模型段 / 含空白 / 空串
+        / 非字符串；非 Flash 与非 account provider 的已配置精确
         id 合法（另测）。"""
         self.make_task()
         task.pin_worker_model(self.repo, TID, FLASH_A)
         before = self.raw_state_bytes()
         bad_ids = (
-            "GLM-5.3-Flash",                    # 裸别名（无 account: 前缀）
-            "account:/GLM-5.3-Flash",           # 账户段为空
+            "GLM-5.3-Flash",                    # 裸别名（无 '/' provider 段）
             "account:team-a/",                  # 模型段为空
             "account:team-a",                   # 无 '/' 分隔
+            "opencode-x",                       # 非 account 形态同样无 '/'
             "account:team-a /GLM-5.3-Flash",    # 含空白
             "account:team-a/GLM-5.3-Flash\n",   # 尾随空白
             "", None, 42,
@@ -261,6 +264,19 @@ class PinWorkerModelApiTest(unittest.TestCase):
         outcome = task.pin_worker_model(self.repo, TID, FLASH_B)
         self.assertEqual(
             outcome, {"task_id": TID, "prev": TEXT_MODEL_ID, "new": FLASH_B})
+
+    def test_non_account_provider_pin_accepted(self):
+        """2026-10-19 owner 裁定解除 account: 前缀唯一准入：宿主桥接
+        provider 的 providerId/modelId 复合 id 同样合法 pin（此前被
+        误判为裸别名拒绝；宿主对账留给消费点）。"""
+        bridge = "opencode-go-responses/deepseek-v4.1-flash"
+        self.make_task()
+        outcome = task.pin_worker_model(self.repo, TID, bridge)
+        self.assertEqual(
+            outcome, {"task_id": TID, "prev": None, "new": bridge})
+        loaded = state.load_state(self.repo, TID)
+        self.assertEqual(loaded.get("worker_model"), bridge)
+        self.assertEqual(state.validate_state(loaded), [])
 
     def test_missing_task_rejected(self):
         """任务缺失（无 state.json）→ ValueError 拒绝。"""

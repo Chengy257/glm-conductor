@@ -78,6 +78,9 @@ FLASH_NEW = "account:team-a/GLM-6-Flash"          # 新代际 Flash 档
 TEXT_MAIN = "account:team-a/GLM-5.3"              # 非 Flash 文本模型
 CROSS_PROVIDER = "account:other-cloud/deepseek-v4.1"  # 跨 provider 非 Flash
 FUTURE = "account:team-a/GLM-9-Turbo"             # 未来陌生名（非 Flash）
+# 非 account 桥接 provider 复合 id（2026-10-19 owner 裁定解除 account:
+# 前缀唯一准入——此前被一律误判为「裸别名」拒绝）
+BRIDGE = "opencode-go-responses/deepseek-v4.1-flash"
 MIXED = [FLASH_OLD, FLASH_NEW, TEXT_MAIN, CROSS_PROVIDER, FUTURE]
 
 TID = "m1-ut-9d41c2"
@@ -178,8 +181,36 @@ class MixedHostListTest(M1CliFixture):
         code, stdout, _ = self.run_cli(
             "workflow-model-select", name, "--model", CROSS_PROVIDER)
         self.assertEqual(code, 0)
-        self.assertEqual(json.loads(stdout)["subagent_model"],
-                         CROSS_PROVIDER)
+        self.assertEqual(json.loads(stdout), {
+            "subagent_model": CROSS_PROVIDER,
+            "model_policy": "user-authorized-explicit-selection"})
+
+    def test_owner_selects_non_account_bridge_provider_accepted(self):
+        """2026-10-19 owner 裁定解除 account: 前缀唯一准入：非 account
+        桥接 provider 的 providerId/modelId 复合 id 精确成员即放行并
+        出⑦提交契约（此前被误判为「裸别名」拒 exit 2）。"""
+        name = self.write_models(MIXED + [BRIDGE])
+        code, stdout, stderr = self.run_cli(
+            "workflow-model-select", name, "--model", BRIDGE)
+        self.assertEqual((code, stderr), (0, ""))
+        self.assertEqual(json.loads(stdout), {
+            "subagent_model": BRIDGE,
+            "model_policy": "user-authorized-explicit-selection"})
+
+    def test_bridge_provider_pin_succeeds_and_consumed(self):
+        """2026-10-19：非 account 桥接 provider 复合 id 全链——pin 落盘
+        exit 0，--task-ref 消费放行同一 id（授权一次、任务内默认）。"""
+        self.make_task()
+        code, payload, stderr = self.run_cli_json(
+            "worker-model-pin", self.repo, TID, BRIDGE)
+        self.assertEqual((code, stderr), (0, ""))
+        self.assertEqual(
+            payload, {"task_id": TID, "prev": None, "new": BRIDGE})
+        name = self.write_models([BRIDGE, TEXT_MAIN])
+        code, stdout, _ = self.run_cli(
+            "workflow-model-select", name, "--task-ref", TID)
+        self.assertEqual(code, 0)
+        self.assertEqual(json.loads(stdout)["subagent_model"], BRIDGE)
 
     def test_owner_non_flash_pin_succeeds_and_consumed(self):
         """owner 选非 Flash 后 pin 写入成功；--task-ref 消费放行同一 id
