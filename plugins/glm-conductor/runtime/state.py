@@ -50,7 +50,10 @@ v2.4 顶层概念（schema 权威清单）：
     其中 automation_id 是当前关联的未来原生 Scheduled Task 见证
     ——auto 连续性的持久化武装事实，其存在是 Conductor preflight
     的要求，但绝不独立证明宿主侧激活仍存在；v2.4.1 无 epoch/
-    subscription 字段、无第二连续性状态机）。
+    subscription 字段、无第二连续性状态机；v2.7.0 W1 起块内另有
+    第五键 automation_kind——唤醒载体形态标签（native / os_timer /
+    sleep_only），缺省 native 向后兼容（存量四键 state 零迁移），
+    绝不参与授权 / 预算 / ready 判定）。
     validation 与 review 是任务级唯一记录（无逐单元证据）。
     v2.5 起另有可选顶层键 worker_model（I1 任务级 worker 模型 pin）：
     存在才校验（null 或非空 str），缺省即不写键——未问答授权即无
@@ -156,6 +159,14 @@ REVIEW_VERDICTS = ("ship", "fix-first", "rethink")
 # 不做推断；词汇外值（v2.3 的 manual/notify/auto_once/until_done
 # 四模式词）一律拒绝
 QUOTA_RESUME_MODES = ("manual", "auto")
+# quota_resume.automation_kind 词汇（v2.7.0 W1 唤醒载体四级矩阵的
+# 见证类型面，恰此三值）：native = 宿主原生定时激活见证（v2.4 现状
+# 语义，缺省值——存量四键 state 键缺省按 native 解释，零迁移）；
+# os_timer = OS 计划任务载体（schtasks/crontab → headless 唤醒轮）；
+# sleep_only = 仅后台 sleep 精度层（不跨应用重启，诚实降级标签）。
+# 本键只是载体形态标签：绝不参与授权 / 预算 / ready 判定（preflight
+# ready 语义不因 kind 变宽）。
+QUOTA_RESUME_AUTOMATION_KINDS = ("native", "os_timer", "sleep_only")
 
 # 顶层状态转换表：键 = 旧 status，值 = 允许的直接后继（终态无表项 =
 # 不接受任何转换——终态不得静默重开，显式重开只能走 reopen_task）。
@@ -206,19 +217,26 @@ LEGACY_STATE_GUIDANCE = messages.LEGACY_STATE_GUIDANCE
 
 # —— quota_resume 块（P3-B 定稿语义） ——
 
-# v2.4 顶层 quota_resume 块的冻结初始形状（恰为四键；P3-B 定稿额度
-# 续跑授权语义。模块常量只读，default_quota_resume() 每次返回全新
-# 拷贝，防止调用方改动波及本常量。auto 不需要附加字段；诊断性的
-# 最近观测（enter_waiting_quota 记入）不在本常量内——缺省即无观测）
+# v2.4 顶层 quota_resume 块的冻结初始形状（P3-B 定稿额度续跑授权
+# 语义；v2.7.0 W1 起恰为五键——新增第五键 automation_kind，缺省
+# native 向后兼容，存量四键 state.json 零迁移。模块常量只读，
+# default_quota_resume() 每次返回全新拷贝，防止调用方改动波及本
+# 常量。auto 不需要附加字段；诊断性的最近观测（enter_waiting_quota
+# 记入）不在本常量内——缺省即无观测）
 # automation_id（v2.4.1 语义澄清）：当前关联的未来原生 Scheduled
 # Task 见证——auto 连续性的持久化武装事实；其存在是 Conductor
 # preflight（task.quota_continuity_preflight）的要求，但绝不独立
 # 证明宿主侧激活仍存在（宿主存在性在恢复边界仍需宿主面检查）。
+# automation_kind（v2.7.0 W1 唤醒载体四级矩阵）：武装见证的载体
+# 类型标签（native=宿主原生定时激活 / os_timer=OS 计划任务载体 /
+# sleep_only=仅后台 sleep 精度层），只描述见证形态、绝不参与授权
+# 与预算判定。
 DEFAULT_QUOTA_RESUME = {
     "mode": "manual",
     "max_resumes": 0,
     "resume_count": 0,
     "automation_id": None,
+    "automation_kind": "native",
 }
 
 
@@ -227,9 +245,11 @@ def default_quota_resume() -> dict:
 
     每次调用构造新 dict，调用方改写返回值不影响模块常量
     DEFAULT_QUOTA_RESUME；形状恰为 mode="manual" / max_resumes=0 /
-    resume_count=0 / automation_id=None（P3-B 定稿初始态：未授权、
-    零预算——恢复只能走显式授权 + 调用方确认通道；automation_id
-    初始 None = 尚未绑定任何未来定时激活见证，auto 连续性未武装）。
+    resume_count=0 / automation_id=None / automation_kind="native"
+    （P3-B 定稿初始态：未授权、零预算——恢复只能走显式授权 + 调用
+    方确认通道；automation_id 初始 None = 尚未绑定任何未来定时激活
+    见证，auto 连续性未武装；automation_kind 初始 native = v2.7.0
+    W1 第五键的宿主原生载体缺省态，拷贝语义与四键时代完全不变）。
     """
     return dict(DEFAULT_QUOTA_RESUME)
 
@@ -496,7 +516,13 @@ def _validate_quota_resume(block):
         未来原生 Scheduled Task 见证——auto 连续性的持久化武装
         事实；其存在是 Conductor preflight 的要求，但绝不独立证明
         宿主侧激活仍存在。写入口径归 task.bind_quota_automation /
-        task.clear_quota_automation，本层只收形状）。
+        task.clear_quota_automation，本层只收形状）；
+      - automation_kind 可选键（v2.7.0 W1 唤醒载体四级矩阵的见证
+        类型面）：缺键按 native 解释（存量四键 state 零迁移，绝不
+        报错）；存在时必须 ∈ QUOTA_RESUME_AUTOMATION_KINDS（native
+        / os_timer / sleep_only——载体形态标签，绝不参与授权与
+        预算判定；枚举错误经 _enum_error 走 messages.STATE_ENUM_
+        ERROR 单源格式）。
     """
     if not isinstance(block, dict):
         return [messages.STATE_QUOTA_RESUME_NOT_OBJECT]
@@ -527,6 +553,15 @@ def _validate_quota_resume(block):
         value = block["automation_id"]
         if not isinstance(value, str) or value == "":
             errors.append(messages.STATE_QUOTA_RESUME_AUTOMATION_ID_INVALID)
+    # automation_kind（v2.7.0 W1 第五键，载体形态标签）：可选键——
+    # 缺键按 native 解释（存量四键 state 零迁移）；存在时必须 ∈
+    # 三值词汇（写入口径归 task.bind/clear_quota_automation，本层
+    # 只收形状）
+    if "automation_kind" in block \
+            and block["automation_kind"] not in QUOTA_RESUME_AUTOMATION_KINDS:
+        errors.append(_enum_error("quota_resume.automation_kind",
+                                  block["automation_kind"],
+                                  QUOTA_RESUME_AUTOMATION_KINDS))
     return errors
 
 

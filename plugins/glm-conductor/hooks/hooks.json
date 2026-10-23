@@ -9,7 +9,8 @@
             "type": "process",
             "command": "python3",
             "args": [
-              "${ZCODE_PLUGIN_ROOT}/hooks/session_start.py"
+              "${ZCODE_PLUGIN_ROOT}/hooks/session_start.py",
+              "${CLAUDE_SESSION_ID}"
             ],
             "timeoutMs": 5000,
             "statusMessage": "glm-conductor: building resume context…"

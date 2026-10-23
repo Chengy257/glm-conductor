@@ -80,27 +80,45 @@
         暂存计数落账：宿主 resume 调用真正被接受后由调用方调用——
         resume_count +1、任务转回 active（workflow 阶段）、落
         quota_resume_confirmed 事件。未确认的决策绝不消耗预算。
-    bind_quota_automation(repo_root, task_id, automation_id)
-        auto 连续性武装（v2.4.1，INV-CONT-01）：把当前关联的未来原生
-        Scheduled Task 见证 id 绑入 quota_resume.automation_id。任务
-        须存在且为 v2.4；id 非空 str；状态限 active/waiting_quota/
-        waiting_user；存量 None → 绑定、同 id → 幂等成功、异 id →
-        拒绝（绝不静默替换——替换必须走显式 clear-then-bind 且宿主侧
-        生命周期已对账）。绑定绝不推断 mode=auto（绑定 ≠ 授权自动
-        恢复），绝不持久化秘密/prompt，不追加 journal 事件。
+    bind_quota_automation(repo_root, task_id, automation_id, kind="native")
+        auto 连续性武装（v2.4.1，INV-CONT-01；v2.7.0 W1 增 kind）：
+        把当前关联的定时激活见证 id 绑入 quota_resume.automation_id，
+        并同写载体类型 automation_kind（与 id 同一次事务落盘）。任务
+        须存在且为 v2.4；id 非空 str；kind ∈
+        state.QUOTA_RESUME_AUTOMATION_KINDS（native / os_timer /
+        sleep_only，词汇外结构性拒绝先于一切读盘写盘）；状态限
+        active/waiting_quota/waiting_user；幂等口径按 (id, kind)
+        二元组——同 id 且同 kind → 幂等成功（零写盘）、同 id 但
+        kind 不同 → 拒绝（绝不静默改 kind；同款换绑须显式
+        clear-then-bind）、异 id → 拒绝（绝不静默替换——替换必须
+        走显式 clear-then-bind 且宿主侧生命周期已对账）。kind 与
+        见证 id 形态配套（bind 本身不特判 id 形态，配套关系由调用
+        方按唤醒载体矩阵保证）：native=宿主 CronCreate 原生见证
+        （v2.4 现状）；os_timer=OS 计划任务载体（id 取
+        "os:schtasks:glm-conductor-<task-id>" 形态）；sleep_only=
+        仅后台 sleep 精度层（id 取合成见证 "sleep-only"）。绑定绝不
+        推断 mode=auto（绑定 ≠ 授权自动恢复），绝不持久化秘密/
+        prompt，不追加 journal 事件。
     clear_quota_automation(repo_root, task_id, automation_id=None)
         清除 automation_id 绑定（终态清理与显式对账通道）：参数给出
-        且与存量不一致 → 拒绝；存量 None → 幂等成功；清为 None。
-        绝不改 mode / max_resumes / resume_count；终态任务允许清理
-        （完成后才能删绑定）。预期在宿主侧删除确认或操作者显式对账
-        后调用。不追加 journal 事件。
+        且与存量不一致 → 拒绝；存量 None → 幂等成功；清为 None 的
+        同时把 automation_kind 复位 "native"（quota_resume 保持五键
+        形态——存量四键 legacy 块清后补齐第五键）。绝不改 mode /
+        max_resumes / resume_count；终态任务允许清理（完成后才能
+        删绑定）。预期在宿主侧删除确认或操作者显式对账后调用。不
+        追加 journal 事件。
     quota_continuity_preflight(repo_root, task_id)
         连续性预检（纯读，绝不改状态）：manual → ready=true（manual
         模式无需定时激活）；auto + 非空 automation_id → ready=true
         （armed）；auto + 空 → ready=false（unarmed，即启动/恢复
         阻塞）。输出恒含 ready 布尔键 + mode + automation_id +
-        reason。只证明持久化绑定存在，绝不宣称宿主侧激活仍存活
-        （宿主存在性在恢复边界仍需宿主面检查）。
+        reason；v2.7.0 W1 起 armed 分支恰增 kind 键（= 盘上
+        quota_resume.automation_kind，键缺省按 native 解释）供报告
+        层区分降级标签——manual 分支与 unarmed 分支不含 kind 键
+        （manual 无定时激活语义、unarmed 无见证可言），既有四键
+        输出形状原样保持。ready 判定语义零变化（绝不因 kind 变宽）。
+        只证明持久化绑定存在，绝不宣称宿主侧激活仍存活（宿主存在性
+        在恢复边界仍需宿主面检查）。
     pin_worker_model(repo_root, task_id, model_id)
         任务级 worker 模型 pin 写入（v2.5 I1，授权一次任务内默认）：
         把经形状预检的 exact id 写入顶层 worker_model 键。形状预检
@@ -195,7 +213,11 @@ journal 词汇（TASK_JOURNAL_EVENTS，恰十名，绝不多不少）：
     continuity-unarmed 闸——INV-CONT-01 首选强化方案）
     + docs/roadmap/V2_5_TASK_LAUNCH_CONTRACT_AND_PRECISE_WAKE_PLAN.md
     §2 I1（任务级 worker 模型 pin：写入不查宿主面 / 消费必查宿主面 /
-    失效即拒）与 §4 W1（pin_worker_model 单元规格）。
+    失效即拒）与 §4 W1（pin_worker_model 单元规格）
+    + docs/roadmap/V2_7_0_IMPLEMENTATION_SPEC.md §3（W1 唤醒载体
+    四级矩阵：quota_resume 五键 automation_kind / bind 增 kind 的
+    幂等与冲突口径 / preflight armed 分支增 kind / clear 复位
+    kind；continuity-unarmed 镜像闸零改动）。
 """
 
 from runtime import change_id, journal, messages, ownership, state, writer_guard
@@ -1021,11 +1043,17 @@ def confirm_resume_started(repo_root, task_id) -> dict:
 
 # —— auto 连续性武装：绑定 / 清理 / 预检（v2.4.1 H2） ——
 
-def _bind_automation_state(st, task_id, automation_id):
+def _bind_automation_state(st, task_id, automation_id, kind="native"):
     """bind 的状态限 + 冲突闸 + 绑定落块（预检与锁内复核共用同一实现）。
 
-    automation_id 参数合法性由调用方先闸（非空 str）。返回 None =
-    存量同 id 幂等（零变更）；否则就地写入并返回 st。
+    automation_id / kind 参数合法性由调用方先闸（非空 str / 词汇内
+    kind）。幂等口径按 (id, kind) 二元组（v2.7.0 W1）：返回 None =
+    存量同 id 且同 kind 幂等（零变更）；否则就地写入并返回 st：
+      - 同 id 但 kind 不同 → 拒绝（绝不静默改 kind——载体形态是
+        武装事实的一部分，同款换绑须显式 clear→bind）；存量 kind
+        键缺省按 native 解释（legacy 四键块向后兼容）；
+      - 异 id（存量非 None）→ 拒绝（绝不静默替换，语义不变）；
+      - 存量 None → 绑定，automation_kind 与 id 同写。
     """
     status = st.get("status")
     if status not in AUTOMATION_BIND_STATUSES:
@@ -1037,19 +1065,27 @@ def _bind_automation_state(st, task_id, automation_id):
         block = state.default_quota_resume()
         st["quota_resume"] = block
     current = block.get("automation_id")
+    current_kind = block.get("automation_kind", "native")
+    if current == automation_id and current_kind == kind:
+        return None  # 幂等：同 id 且同 kind 重绑零变更
     if current == automation_id:
-        return None  # 幂等：同 id 重绑零变更
+        raise ValueError(
+            messages.TASK_BIND_KIND_CONFLICT
+            % (task_id, current, current_kind, kind))
     if current is not None:
         raise ValueError(
             messages.TASK_BIND_CONFLICT % (task_id, current, automation_id))
     block["automation_id"] = automation_id
+    block["automation_kind"] = kind
     return st
 
 
 def _clear_automation_state(st, task_id, automation_id):
-    """clear 的精确对账闸 + 清零（预检与锁内复核共用同一实现）。
+    """clear 的精确对账闸 + 清零并复位 kind（预检与锁内复核共用）。
 
-    返回 None = 存量本就未武装（幂等零变更）；否则清为 None 并返回
+    返回 None = 存量本就未武装（幂等零变更）；否则清 automation_id
+    为 None 并把 automation_kind 复位 "native"（v2.7.0 W1：quota_
+    resume 保持五键形态——存量四键 legacy 块清后补齐第五键），返回
     st。绝不改 mode / max_resumes / resume_count。
     """
     block = st.get("quota_resume")
@@ -1064,41 +1100,62 @@ def _clear_automation_state(st, task_id, automation_id):
             messages.TASK_CLEAR_MISMATCH
             % (automation_id, task_id, current))
     block["automation_id"] = None
+    block["automation_kind"] = "native"
     return st
 
-def bind_quota_automation(repo_root, task_id, automation_id) -> dict:
-    """绑定未来原生 Scheduled Task 见证 id（v2.4.1，INV-CONT-01）。
+def bind_quota_automation(repo_root, task_id, automation_id,
+                          kind="native") -> dict:
+    """绑定定时激活见证 id 及其载体类型（v2.4.1 INV-CONT-01；v2.7.0
+    W1 增 kind），返回更新后的状态 dict。
 
-    把 automation_id 写入 quota_resume.automation_id（auto 连续性
-    武装事实），返回更新后的状态 dict：
+    把 automation_id 与 kind 写入 quota_resume.automation_id /
+    automation_kind（auto 连续性武装事实，两键同一次事务落盘）：
 
-    - automation_id 必须是非空字符串（结构性拒绝 ValueError，先于
-      一切读盘写盘）；
+    - automation_id 必须是非空字符串；kind 必须 ∈
+      state.QUOTA_RESUME_AUTOMATION_KINDS（native / os_timer /
+      sleep_only，载体形态标签）——两者结构性拒绝 ValueError，均
+      先于一切读盘写盘（kind 枚举错误复用 messages.STATE_ENUM_ERROR
+      单源格式，路径标 quota_resume.automation_kind）；
+    - kind 与见证 id 形态配套（本函数不特判 id 形态，配套关系由
+      调用方按唤醒载体矩阵保证）：native=宿主 CronCreate 原生见证
+      （v2.4 现状）；os_timer=OS 计划任务载体（id 取
+      "os:schtasks:glm-conductor-<task-id>" 形态）；sleep_only=仅
+      后台 sleep 精度层（id 取合成见证 "sleep-only"）；
     - 任务必须存在且为 v2.4（缺失 / v2.3 遗留 → ValueError）；
     - 状态限 AUTOMATION_BIND_STATUSES（active / waiting_quota /
       waiting_user）；blocked 与终态拒绝——终态不得新增绑定事实；
-    - 存量 None → 绑定；存量与供给同 id → 幂等成功（零写盘原样
-      返回现状）；存量异 id → 拒绝，绝不静默替换（替换必须走显式
-      clear-then-bind 序列，且宿主侧生命周期先对账）；
+    - 幂等口径按 (id, kind) 二元组：存量 None → 绑定；存量与供给
+      同 id 且同 kind → 幂等成功（零写盘原样返回现状；存量 kind
+      键缺省按 native 解释——legacy 四键块向后兼容）；同 id 但
+      kind 不同 → 拒绝（绝不静默改 kind——同款换绑须显式
+      clear-then-bind）；存量异 id → 拒绝，绝不静默替换（替换必须
+      走显式 clear-then-bind 序列，且宿主侧生命周期先对账）；
     - 绝不推断 mode=auto：绑定 ≠ 授权自动恢复（授权与武装是两个
       独立事实，授权只能走 authorize_quota_resume 的显式落盘）；
     - 经 state.update_task_state 状态事务落盘（转换门 + 全量校验
-      二次把关；绑定块在锁内对新鲜 state 施加，状态限与冲突闸锁内
-      复核；同 id 幂等在取锁前零写盘原样返回现状）；
+      二次把关——automation_kind 词汇由 state._validate_quota_resume
+      收口；绑定块在锁内对新鲜 state 施加，状态限与冲突闸锁内
+      复核；同 id 同 kind 幂等在取锁前零写盘原样返回现状）；
     - 不追加 journal 事件（绑定事实由 state 落盘记录）；绝不持久化
       秘密 / prompt（本参数只是宿主定时激活的 id 见证）。
     """
     if not isinstance(automation_id, str) or automation_id == "":
         raise ValueError(
             messages.TASK_BIND_ID_EMPTY % (automation_id,))
+    if kind not in state.QUOTA_RESUME_AUTOMATION_KINDS:
+        raise ValueError(
+            messages.STATE_ENUM_ERROR
+            % ("quota_resume.automation_kind", kind,
+               ", ".join(state.QUOTA_RESUME_AUTOMATION_KINDS)))
     st = _load_v24_state(repo_root, task_id)
-    if _bind_automation_state(st, task_id, automation_id) is None:
-        # 幂等：同 id 重绑零写盘，原样返回现状
+    if _bind_automation_state(st, task_id, automation_id, kind) is None:
+        # 幂等：同 id 且同 kind 重绑零写盘，原样返回现状
         return st
 
     def _mutate(current):
-        result = _bind_automation_state(current, task_id, automation_id)
-        # 存量同 id（并发竞态兜底）：零变更，原样返回新鲜现状
+        result = _bind_automation_state(current, task_id, automation_id,
+                                        kind)
+        # 存量同 id 同 kind（并发竞态兜底）：零变更，原样返回新鲜现状
         return current if result is None else result
 
     return state.update_task_state(repo_root, task_id, _mutate)
@@ -1113,7 +1170,9 @@ def clear_quota_automation(repo_root, task_id, automation_id=None) -> dict:
     - automation_id 参数给出（非 None）且与存量不一致 → 拒绝
       （精确对账：绝不清掉预期之外的绑定）；
     - 存量 None → 幂等成功（零写盘原样返回现状）；
-    - 只把 automation_id 清为 None，绝不改 mode / max_resumes /
+    - 把 automation_id 清为 None 的同时把 automation_kind 复位
+      "native"（v2.7.0 W1：quota_resume 保持五键形态——存量四键
+      legacy 块清后补齐第五键）；绝不改 mode / max_resumes /
       resume_count（授权与预算是独立事实，清理武装不动授权）；
     - 终态任务允许清理（完成后才能删绑定；终态冻结的是 validation /
       review / run 关联等新事实，武装解除是对既有事实的对账收尾）；
@@ -1146,6 +1205,13 @@ def quota_continuity_preflight(repo_root, task_id) -> dict:
     - mode=auto 且 automation_id 空 / 非 str → ready=false
       （unarmed——按 CLI 约定即启动 / 恢复阻塞）。
 
+    kind 键口径（v2.7.0 W1，测试锚定形状）：恰在 armed 分支增第五
+    键 kind = 盘上 quota_resume.automation_kind（键缺省按 native
+    解释——legacy 四键块向后兼容），供报告层区分唤醒载体降级标签；
+    manual 分支与 unarmed 分支不含 kind 键（manual 无定时激活语义、
+    unarmed 无见证可言——既有四键输出形状原样保持）。ready 判定
+    语义零变化：绝不因 kind 变宽。
+
     本函数是持久化绑定存在性的证明，绝不宣称宿主侧激活仍存活
     （规格红线：宿主存在性在恢复边界仍需宿主面独立检查）；绝不
     写盘、绝不落 journal、绝不虚构 automation id（输出原样携带
@@ -1170,6 +1236,7 @@ def quota_continuity_preflight(repo_root, task_id) -> dict:
             "ready": True,
             "mode": "auto",
             "automation_id": automation_id,
+            "kind": block.get("automation_kind", "native"),
             "reason": messages.TASK_PREFLIGHT_ARMED,
         }
     return {

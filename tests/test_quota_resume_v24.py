@@ -46,7 +46,18 @@
     - state 层校验收口：mode 恰为 manual/auto（auto 合法，v2.3 四
       模式旧词拒绝）；max_resumes/resume_count 为 >= 0 整数（bool
       拒绝）；预算不变量 resume_count <= max_resumes（save_state
-      同闸）。
+      同闸）；
+    - v2.7.0 W1 唤醒载体四级矩阵（TestAutomationKindV270）：quota_
+      resume 第五键 automation_kind 缺省 native（恰五键）；存量四键
+      state 零迁移兼容（加载 / bind / preflight 不报错，kind 按
+      native 解释）；bind 幂等口径按 (id, kind) 二元组——同 id 同
+      kind 幂等零写盘 / 同 id 异 kind 拒绝（绝不静默改 kind）/
+      异 id 拒绝（kind 无关）；词汇外 kind 结构性拒绝先于一切读盘
+      写盘；clear 复位 kind 为 native（quota_resume 保持五键形态，
+      存量四键块清后补齐第五键）；preflight 恰 armed 分支增 kind 键
+      （manual / unarmed 分支不含，既有四键输出原样）；state 层对
+      automation_kind 可选键的校验收口（缺键合法 / 三值词汇 /
+      词汇外拒绝）。
 
 全部离线：任务账本在 tempfile.TemporaryDirectory 内，绝不触碰仓库
 内 .glm-conductor/ 真实账本；adapter 的 RUNS_DIR 每测试注入临时
@@ -150,9 +161,12 @@ class TestAuthorize(QuotaResumeCase):
     def test_default_manual_never_authorizes(self):
         """默认 manual/0/0/null：可用观测决策 waiting-user，零转态零计数。"""
         st = self.make_task()
+        # v2.7.0 W1 起 quota_resume 恰为五键（第五键 automation_kind
+        # 缺省 native——宿主原生载体缺省态）
         self.assertEqual(st["quota_resume"],
                          {"mode": "manual", "max_resumes": 0,
-                          "resume_count": 0, "automation_id": None})
+                          "resume_count": 0, "automation_id": None,
+                          "automation_kind": "native"})
         task.enter_waiting_quota(self.repo, self.TID)
         decision = self.decide(quota_view("AVAILABLE"))
         self.assertEqual(decision["action"], "waiting-user")
@@ -525,9 +539,10 @@ class TestAutomationBinding(QuotaResumeCase):
         """绑定后预检 ready=true；绑定事实落盘；journal 零新增事件。"""
         self.arm()
         report = task.quota_continuity_preflight(self.repo, self.TID)
+        # v2.7.0 W1：armed 分支恰增 kind 键（缺省 bind 即 native）
         self.assertEqual(report, {
             "ready": True, "mode": "auto",
-            "automation_id": self.AUTO_ID,
+            "automation_id": self.AUTO_ID, "kind": "native",
             "reason": "auto continuity armed"})
         self.assertEqual(
             self.load()["quota_resume"]["automation_id"], self.AUTO_ID)
@@ -652,7 +667,7 @@ class TestAutomationBinding(QuotaResumeCase):
         st = task.bind_quota_automation(self.repo, self.TID, self.AUTO_ID)
         self.assertEqual(st["quota_resume"], {
             "mode": "manual", "max_resumes": 0, "resume_count": 0,
-            "automation_id": self.AUTO_ID})
+            "automation_id": self.AUTO_ID, "automation_kind": "native"})
         self.assertEqual(st["status"], "active")
         # manual + 已武装：预检仍按 manual 分支 ready（无需定时激活）
         report = task.quota_continuity_preflight(self.repo, self.TID)
@@ -677,9 +692,10 @@ class TestAutomationBinding(QuotaResumeCase):
         before = self.load()["quota_resume"]
         self.assertEqual(before["resume_count"], 1)
         st = task.clear_quota_automation(self.repo, self.TID)
+        # clear 复位 kind native（v2.7.0 W1：quota_resume 保持五键形态）
         self.assertEqual(st["quota_resume"], {
             "mode": "auto", "max_resumes": 3, "resume_count": 1,
-            "automation_id": None})
+            "automation_id": None, "automation_kind": "native"})
         self.assertEqual(self.load()["status"], "waiting_quota")
 
     # 13. auto scheduled decision cannot lead to host resume path unarmed
@@ -741,6 +757,272 @@ class TestAutomationBinding(QuotaResumeCase):
         task.complete(self.repo, self.TID)
         with self.assertRaises(ValueError):
             task.bind_quota_automation(self.repo, self.TID, "late-bind")
+
+
+# —— 3c. v2.7.0 W1 唤醒载体四级矩阵：quota_resume 五键 automation_kind ——
+#
+# 规格 docs/roadmap/V2_7_0_IMPLEMENTATION_SPEC.md §3：第五键缺省
+# native 向后兼容（存量四键 state 零迁移）；bind 幂等口径升为
+# (id, kind) 二元组；clear 复位 kind；preflight 恰 armed 分支增
+# kind 键。本组用例与 3b 组（v2.4.1 §4.5 十四用例）互补：3b 锚定
+# 「kind 语义不存在时」的既有形状，本组锚定 kind 引入后的新口径。
+
+class TestAutomationKindV270(QuotaResumeCase):
+    """v2.7.0 W1 五键面：缺省值 / 旧四键兼容 / bind kind 幂等与冲突 /
+    clear 复位 / preflight kind。全部离线（tempfile 仓库根）。"""
+
+    TID = QuotaResumeCase.TID
+    AUTO_ID = "sched-witness-1"
+    OS_ID = "os:schtasks:glm-conductor-w1-demo"
+    SLEEP_ID = "sleep-only"
+
+    def state_bytes(self, task_id=TID):
+        """读取 state.json 原始字节（零写盘断言用）。"""
+        return state.state_path(self.repo, task_id).read_bytes()
+
+    def make_legacy_four_key_state(self, task_id=TID):
+        """构造存量四键 state（pop 第五键后经 save_state 正门落盘）。
+
+        automation_kind 为可选键（缺键按 native 解释）——save_state
+        校验闸对四键块放行，落盘即真实存量形态。"""
+        st = self.make_task(task_id)
+        st["quota_resume"].pop("automation_kind")
+        state.save_state(self.repo, st)
+        return st
+
+    # —— 五键缺省值 ——
+
+    def test_default_block_is_exactly_five_keys_native(self):
+        """DEFAULT_QUOTA_RESUME 恰五键、kind 缺省 native；default_
+        quota_resume() 返回全新拷贝（改返回值不波及常量）。"""
+        self.assertEqual(
+            sorted(state.DEFAULT_QUOTA_RESUME),
+            ["automation_id", "automation_kind", "max_resumes",
+             "mode", "resume_count"])
+        self.assertEqual(state.DEFAULT_QUOTA_RESUME["automation_kind"],
+                         "native")
+        block = state.default_quota_resume()
+        self.assertEqual(block["automation_kind"], "native")
+        block["automation_kind"] = "os_timer"
+        self.assertEqual(state.DEFAULT_QUOTA_RESUME["automation_kind"],
+                         "native", "常量只读：拷贝语义不破")
+        self.assertEqual(state.QUOTA_RESUME_AUTOMATION_KINDS,
+                         ("native", "os_timer", "sleep_only"))
+
+    def test_create_task_lands_five_key_block(self):
+        """create_task 落盘五键块：kind 初始 native、其余四键同旧值。"""
+        st = self.make_task()
+        self.assertEqual(st["quota_resume"], {
+            "mode": "manual", "max_resumes": 0, "resume_count": 0,
+            "automation_id": None, "automation_kind": "native"})
+        self.assertEqual(state.validate_state(self.load()), [])
+
+    # —— 旧四键 state 兼容（零迁移，kind 按 native 解释） ——
+
+    def test_legacy_four_key_state_loads_and_binds_as_native(self):
+        """存量四键 state：加载零报错；缺省 bind 幂等口径按 native
+        解释——同 id 缺省 kind 重绑幂等零写盘。"""
+        self.make_legacy_four_key_state()
+        loaded = self.load()
+        self.assertNotIn("automation_kind", loaded["quota_resume"])
+        self.assertEqual(state.validate_state(loaded), [])
+        st = task.bind_quota_automation(self.repo, self.TID, self.AUTO_ID)
+        self.assertEqual(st["quota_resume"]["automation_id"], self.AUTO_ID)
+        # legacy 块 kind 键缺省按 native 解释 → 缺省 bind 视为同 id 同 kind
+        before = self.state_bytes()
+        st = task.bind_quota_automation(self.repo, self.TID, self.AUTO_ID)
+        self.assertEqual(st["quota_resume"]["automation_id"], self.AUTO_ID)
+        self.assertEqual(self.state_bytes(), before, "幂等零写盘")
+
+    def test_legacy_four_key_state_preflight_reports_native(self):
+        """存量四键 state：武装后 preflight 报 kind=native（键缺省按
+        native 解释，绝不报错、绝不虚构其他形态）。"""
+        self.make_legacy_four_key_state()
+        task.authorize_quota_resume(self.repo, self.TID, 3)
+        task.bind_quota_automation(self.repo, self.TID, self.AUTO_ID)
+        report = task.quota_continuity_preflight(self.repo, self.TID)
+        self.assertEqual(report["kind"], "native")
+        self.assertTrue(report["ready"])
+
+    def test_state_validation_accepts_four_and_five_key_blocks(self):
+        """state 层校验：四键块（kind 缺键）与五键块（三值词汇内）
+        均合法——可选键语义。"""
+        base = state.new_task_state(
+            "quota-kind-valid", "验证 automation_kind 可选键语义",
+            {"mode": "solo"}, repository_root=tempfile.gettempdir())
+        four_key = dict(base)
+        four_key["quota_resume"] = {
+            "mode": "manual", "max_resumes": 0, "resume_count": 0,
+            "automation_id": None}
+        self.assertEqual(state.validate_state(four_key), [])
+        for kind in ("native", "os_timer", "sleep_only"):
+            five_key = dict(base)
+            five_key["quota_resume"] = {
+                "mode": "auto", "max_resumes": 3, "resume_count": 1,
+                "automation_id": None, "automation_kind": kind}
+            self.assertEqual(state.validate_state(five_key), [])
+
+    def test_state_validation_refuses_unknown_kind(self):
+        """state 层校验：词汇外 kind → 拒绝，错误路径恰
+        quota_resume.automation_kind。"""
+        st = self.make_task()
+        st["quota_resume"]["automation_kind"] = "cron"
+        errors = state.validate_state(st)
+        self.assertTrue(
+            any(item.startswith("quota_resume.automation_kind")
+                for item in errors), errors)
+
+    # —— bind 幂等口径 (id, kind)：同 id 同 kind 幂等 / 异 kind 拒 / 异 id 拒 ——
+
+    def test_bind_same_id_same_kind_idempotent_zero_write(self):
+        """同 id 同 kind 重绑 → 幂等成功零写盘；kind 原样保留。"""
+        self.make_task()
+        task.bind_quota_automation(self.repo, self.TID, self.OS_ID,
+                                   kind="os_timer")
+        before = self.state_bytes()
+        st = task.bind_quota_automation(self.repo, self.TID, self.OS_ID,
+                                        kind="os_timer")
+        self.assertEqual(st["quota_resume"]["automation_id"], self.OS_ID)
+        self.assertEqual(st["quota_resume"]["automation_kind"], "os_timer")
+        self.assertEqual(self.state_bytes(), before, "幂等零写盘")
+
+    def test_bind_same_id_different_kind_refused(self):
+        """同 id 异 kind → 拒绝（绝不静默改 kind；换绑须显式
+        clear→bind），盘面 id 与 kind 原样。"""
+        self.make_task()
+        task.bind_quota_automation(self.repo, self.TID, self.OS_ID,
+                                   kind="os_timer")
+        before = self.state_bytes()
+        with self.assertRaises(ValueError) as ctx:
+            task.bind_quota_automation(self.repo, self.TID, self.OS_ID,
+                                       kind="sleep_only")
+        self.assertIn(
+            messages.TASK_BIND_KIND_CONFLICT
+            % (self.TID, self.OS_ID, "os_timer", "sleep_only"),
+            str(ctx.exception))
+        self.assertEqual(self.state_bytes(), before, "拒绝零写盘")
+        block = self.load()["quota_resume"]
+        self.assertEqual(block["automation_id"], self.OS_ID)
+        self.assertEqual(block["automation_kind"], "os_timer")
+
+    def test_bind_different_id_refused_regardless_of_kind(self):
+        """异 id 重绑 → 拒绝（绝不静默替换），供给何种 kind 均不绕过。"""
+        self.make_task()
+        task.bind_quota_automation(self.repo, self.TID, self.AUTO_ID,
+                                   kind="native")
+        for other_id, other_kind in ((self.OS_ID, "os_timer"),
+                                     (self.SLEEP_ID, "sleep_only")):
+            with self.assertRaises(ValueError) as ctx:
+                task.bind_quota_automation(self.repo, self.TID, other_id,
+                                           kind=other_kind)
+            self.assertIn(
+                messages.TASK_BIND_CONFLICT
+                % (self.TID, self.AUTO_ID, other_id),
+                str(ctx.exception))
+        block = self.load()["quota_resume"]
+        self.assertEqual(block["automation_id"], self.AUTO_ID)
+        self.assertEqual(block["automation_kind"], "native")
+
+    def test_bind_unknown_kind_refused_before_any_io(self):
+        """词汇外 kind → 结构性拒绝先于一切读盘写盘（任务不存在也先
+        撞 kind 闸）。"""
+        self.make_task()
+        before = self.state_bytes()
+        for bad in ("cron", "OS_TIMER", "", None):
+            with self.assertRaises(ValueError) as ctx:
+                task.bind_quota_automation(self.repo, self.TID,
+                                           self.OS_ID, kind=bad)
+            self.assertIn("quota_resume.automation_kind",
+                          str(ctx.exception))
+        # 任务不存在：kind 闸先于任务缺失（结构性参数闸的先后口径）
+        with self.assertRaises(ValueError) as ctx:
+            task.bind_quota_automation(self.repo, "ghost-task",
+                                       self.OS_ID, kind="cron")
+        self.assertIn("quota_resume.automation_kind",
+                      str(ctx.exception))
+        self.assertEqual(self.state_bytes(), before, "拒绝零写盘")
+
+    def test_bind_with_kind_does_not_infer_auto_or_touch_budget(self):
+        """kind 路径 bind 同样绝不推断 mode=auto、绝不动预算。"""
+        self.make_task()
+        st = task.bind_quota_automation(self.repo, self.TID, self.OS_ID,
+                                        kind="os_timer")
+        self.assertEqual(st["quota_resume"]["mode"], "manual")
+        self.assertEqual(st["quota_resume"]["max_resumes"], 0)
+        self.assertEqual(st["quota_resume"]["resume_count"], 0)
+        self.assertEqual(st["status"], "active")
+
+    # —— clear 复位 kind 为 native ——
+
+    def test_clear_resets_kind_to_native(self):
+        """clear 清 id 的同时把 kind 复位 native（五键形态保持）。"""
+        self.make_task()
+        task.bind_quota_automation(self.repo, self.TID, self.OS_ID,
+                                   kind="os_timer")
+        st = task.clear_quota_automation(self.repo, self.TID, self.OS_ID)
+        self.assertIsNone(st["quota_resume"]["automation_id"])
+        self.assertEqual(st["quota_resume"]["automation_kind"], "native")
+        block = self.load()["quota_resume"]
+        self.assertIsNone(block["automation_id"])
+        self.assertEqual(block["automation_kind"], "native")
+        self.assertEqual(state.validate_state(self.load()), [])
+
+    def test_clear_refills_kind_on_legacy_four_key_block(self):
+        """存量四键块 clear → 补齐第五键 native（保持五键形态）。"""
+        self.make_legacy_four_key_state()
+        task.bind_quota_automation(self.repo, self.TID, self.SLEEP_ID,
+                                   kind="sleep_only")
+        self.assertEqual(
+            self.load()["quota_resume"]["automation_kind"], "sleep_only")
+        st = task.clear_quota_automation(self.repo, self.TID)
+        self.assertIsNone(st["quota_resume"]["automation_id"])
+        self.assertEqual(st["quota_resume"]["automation_kind"], "native")
+        self.assertIn("automation_kind", self.load()["quota_resume"])
+
+    def test_clear_idempotent_keeps_native(self):
+        """clear 幂等（存量已空）：kind 恒 native、零写盘。"""
+        self.make_task()
+        before = self.state_bytes()
+        st = task.clear_quota_automation(self.repo, self.TID)
+        self.assertIsNone(st["quota_resume"]["automation_id"])
+        self.assertEqual(st["quota_resume"]["automation_kind"], "native")
+        self.assertEqual(self.state_bytes(), before, "幂等零写盘")
+
+    # —— preflight 恰 armed 分支含 kind ——
+
+    def test_preflight_armed_reports_bound_kind(self):
+        """armed 分支 kind = 盘上 automation_kind 原样（os_timer /
+        sleep_only 两非缺省形态各锚一例；armed 前先授权进 auto）。"""
+        for witness_id, kind in ((self.OS_ID, "os_timer"),
+                                 (self.SLEEP_ID, "sleep_only")):
+            task_id = "kind-preflight-%s" % kind.replace("_", "-")
+            self.make_task(task_id)
+            task.authorize_quota_resume(self.repo, task_id, 3)
+            task.bind_quota_automation(self.repo, task_id, witness_id,
+                                       kind=kind)
+            report = task.quota_continuity_preflight(self.repo, task_id)
+            self.assertTrue(report["ready"])
+            self.assertEqual(report["kind"], kind)
+            self.assertEqual(report["automation_id"], witness_id)
+
+    def test_preflight_manual_and_unarmed_branches_have_no_kind(self):
+        """manual 分支与 unarmed 分支不含 kind 键（既有四键输出形状
+        原样保持；kind 只在 armed 分支出现）。"""
+        self.make_task()
+        manual = task.quota_continuity_preflight(self.repo, self.TID)
+        self.assertNotIn("kind", manual)
+        task.authorize_quota_resume(self.repo, self.TID, 3)
+        unarmed = task.quota_continuity_preflight(self.repo, self.TID)
+        self.assertFalse(unarmed["ready"])
+        self.assertNotIn("kind", unarmed)
+        # 武装后 armed 分支恰增 kind（恰五键报告）
+        task.bind_quota_automation(self.repo, self.TID, self.AUTO_ID,
+                                   kind="os_timer")
+        armed = task.quota_continuity_preflight(self.repo, self.TID)
+        self.assertEqual(
+            sorted(armed),
+            ["automation_id", "kind", "mode", "ready", "reason"])
+        self.assertEqual(armed["kind"], "os_timer")
 
 
 # —— 4. state 层校验收口（mode 词汇 / 非负整数 / 预算不变量） ——

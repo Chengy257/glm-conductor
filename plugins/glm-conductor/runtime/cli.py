@@ -265,6 +265,42 @@ v2.4 Phase 3（P3-D/E）收口面：
         workflow_started。run-id 结构非法（空串）→ 退出码 2；任务层
         拒绝（任务缺失 / v2.3 遗留 / 终态冻结 / 守卫前置失配）→
         退出码 1。输出单行 JSON {task_id, workflow_run_id, status}。
+    os-carrier-install <repo_root> <task_id> [--session <id>]
+            [--interval <hours>] [--prompt <s>]
+        L1 OS 唤醒载体安装（v2.7.0 W1，runtime.carrier 薄壳；D4/D6
+        终裁——OS 载体只做 floor 节拍，命令落点在本 CLI，subprocess
+        精确 argv 绝不拼 shell）。session 缺省读 SessionStart 钩子落
+        的 .glm-conductor/session-witness.json 兜底（--session 显式
+        优先；两处皆缺 → 退出码 2）；interval 缺省读任务盘面
+        floor_interval_hours（schema 未引入该键时落缺省 1；--interval
+        显式优先，须 >= 1 整数）；prompt 缺省用 carrier 内建紧约束
+        兜底（统一唤醒协议模板归技能层，--prompt 显式覆盖）。唤醒
+        命令经 carrier.resolve_wake_argv 机器级解析（默认装位
+        zcode.cjs → node+cjs 冻结形态 --workflow-mode alwaysOn；PATH
+        zcode → PATH 形态；皆缺 → 退出码 1，先跑 wake-carrier-probe
+        对账）。Windows 走 schtasks /Create /F（任务名
+        glm-conductor-<task-id>，同名强覆盖=重装幂等）；POSIX 走
+        crontab 读-改-写幂等（marker 块移除再追加）。输出单行 JSON
+        {ok, task_name, argv} + 诊断附加键 returncode / stderr 尾部；
+        OS 拒绝（ok=false）→ 退出码 1。
+    os-carrier-remove <repo_root> <task_id>
+        L1 OS 唤醒载体删除（v2.7.0 W1，carrier.remove_carrier 薄壳；
+        终局清理 L1 任务以此替代原生删除尝试——OS 删除真实有效，无
+        三态劣化：Windows schtasks /Delete /F 对不存在任务如实
+        ok=false + stderr 尾部，POSIX crontab 无匹配 marker 块零写
+        no-op ok=true，均以 OS 工具真实退出码为唯一事实）。输出单行
+        JSON {ok, task_name, argv} + 诊断附加键 returncode / stderr
+        尾部；ok=false → 退出码 1。
+    wake-carrier-probe <repo_root>
+        L1 能力探针（v2.7.0 W1，carrier.probe 薄壳；纯本地零写零
+        执行副作用——调度器只 shutil.which 可执行性，绝不建探针
+        任务）。输出单行 JSON {platform, zcode_cli, scheduler,
+        recommendation} 恒退出码 0：zcode CLI 探测序 = PATH zcode →
+        默认装位 zcode.cjs 存在性 → node+cjs 组合；recommendation =
+        "os_timer"（CLI+调度器俱可用）| "sleep_only"（任一缺；
+        schtasks 受限环境自然降级，R3 无硬失败）。探针只判 L1 能力
+        ——L0 native 的 CronCreate 宿主工具存在性归 runbook 判定，
+        绝不触碰宿主工具面。
 
 输出与退出码契约：
     stdout 恒为单行 JSON（json.dumps(..., ensure_ascii=True)，非 ASCII
@@ -333,6 +369,11 @@ from runtime import messages, state  # noqa: E402
 # 与 messages 两处同步改动）。
 USAGE = messages.CLI_USAGE
 
+# v2.7.0 W1（B4）carrier 三子命令 USAGE 段：单源常量在
+# messages.CLI_USAGE_CARRIER_EXTENSION（批次集成自暂置本模块的拼接段
+# 上移，值逐字节不变）；validator 检查 16m 的三命令锚即本段子命令名。
+USAGE = USAGE + messages.CLI_USAGE_CARRIER_EXTENSION
+
 
 class _UsageError(ValueError):
     """用法 / 子命令 / 参数个数错误——校验拒绝类，退出码 2。"""
@@ -392,6 +433,14 @@ class _TaskRejected(Exception):
     CLI 侧先闸走退出码 2，见各子命令实现；盘上 state 结构性拒绝
     亦不经本类——经 _is_structural_state_rejection 分类后按
     ValueError 原样透传为校验拒绝，退出码 2）。"""
+
+
+class _CarrierRejected(Exception):
+    """OS 唤醒载体操作面（os-carrier-install）环境级失败：机器上
+    既无默认装位 zcode.cjs 也无 PATH zcode（carrier.CarrierError
+    口径）——运行期异常，退出码 1（安装前置能力缺失，操作者先跑
+    wake-carrier-probe 对账；参数值非法仍走 ValueError 退出码 2，
+    OS 工具拒绝走执行面 ok=false 退出码 1，不经本类）。"""
 
 
 # 盘上 state 结构性 ValueError 的稳定消息前缀（分类锚点——state 层
@@ -1292,6 +1341,146 @@ def _task_record_workflow_run(repo_root, task_id, run_id) -> int:
     return 0
 
 
+# —— v2.7.0 W1（B4）：OS 唤醒载体三子命令 CLI 面 ——
+#
+# 本节是 runtime.carrier（纯构造 + 执行 + 探针）的薄壳：argv 解析、
+# session 兜底读取、interval 缺省解析在这里，OS 载体的构造规则 /
+# subprocess 执行 / 探针全在 carrier 模块内（精确 argv，list 形，
+# 恒 shell=False）。退出码沿用既有口径：用法 / 参数值非法 → 2；
+# OS 工具拒绝（ok=false）与环境级失败（CarrierError）→ 1；probe 恒
+# 0（纯本地零写零执行副作用，受限环境自然降 sleep_only，无硬失败）。
+
+def _load_witness_session(repo_root):
+    """os-carrier-install 的 session 兜底读取：读 SessionStart 钩子
+    落的 <repo_root>/.glm-conductor/session-witness.json（载荷
+    {"session_id": <id>, "updated_at": <UTC ISO>}，hooks/session_start
+    write_session_witness 同源），取 session_id（兼容键
+    CLAUDE_SESSION_ID 次之——钩子模板变量名的直记形态）。文件缺失 /
+    不可读 / 非法 JSON / 无有效 session_id → ValueError（参数值
+    非法口径，退出码 2，错误含期望路径）。只读，绝不写盘。"""
+    witness_path = (pathlib.Path(repo_root) / ".glm-conductor"
+                    / "session-witness.json")
+    document = None
+    try:
+        with open(witness_path, "r", encoding="utf-8") as handle:
+            document = json.load(handle)
+    except (OSError, ValueError):
+        document = None
+    session = (document.get("session_id")
+               if isinstance(document, dict) else None)
+    if not isinstance(session, str) or session == "":
+        session = (document.get("CLAUDE_SESSION_ID")
+                   if isinstance(document, dict) else None)
+    if not isinstance(session, str) or session == "":
+        raise ValueError(
+            messages.CLI_OS_CARRIER_SESSION_MISSING % (witness_path,))
+    return session
+
+
+def _load_board_interval_hours(repo_root, task_id):
+    """os-carrier-install 的 interval 缺省读取（best-effort，spec
+    §3.3「间隔沿用 interview Q3 值」的盘面读点）：读任务顶层
+    floor_interval_hours 键（int 且 >= 1 才采纳）。当前 v2.4 schema
+    尚无该键（schema authority 归 runtime/state.py）——读不到即由
+    调用方落缺省 1；任务缺失 / 盘面异常一律静默视为「盘面无」，绝不
+    因缺省读取阻断安装。"""
+    try:
+        st = state.load_state(repo_root, task_id)
+    except Exception:
+        return None
+    interval = st.get("floor_interval_hours") if st else None
+    if isinstance(interval, int) and not isinstance(interval, bool) \
+            and interval >= 1:
+        return interval
+    return None
+
+
+def _os_carrier_install(repo_root, task_id, session=None, interval_raw=None,
+                        prompt=None) -> int:
+    """os-carrier-install：安装 L1 OS 唤醒载体（carrier.install_carrier
+    薄壳）。CLI 侧先闸（参数值非法 → 退出码 2）：task_id 非空；
+    --session 给出时非空；--interval 解析为 >= 1 整数。缺省解析：
+    session 缺省读 .glm-conductor/session-witness.json 兜底
+    （_load_witness_session；两处皆缺 → 退出码 2）；interval 缺省读
+    任务盘面（_load_board_interval_hours，盘面无则 1）；prompt 缺省
+    用 carrier.DEFAULT_WAKE_PROMPT（统一唤醒协议模板归技能层，
+    --prompt 显式覆盖）。唤醒命令经 carrier.resolve_wake_argv 机器级
+    解析（默认装位 cjs → node+cjs 冻结形态；PATH zcode → PATH 形态；
+    皆缺 → carrier.CarrierError → _CarrierRejected，退出码 1——
+    先跑 wake-carrier-probe 对账），再按平台渲染为 command_line、以
+    task_name=glm-conductor-<task-id> 执行安装。输出单行 JSON
+    {ok, task_name, argv}（另附执行诊断附加键 returncode / stderr
+    尾部——OS 拒绝时的对账凭据）；ok=false → 退出码 1。POSIX 安装
+    为读-改-写幂等（marker 块移除再追加，与 Windows /F 同语义）。"""
+    from runtime import carrier  # 函数内 import：monkeypatch 友好
+    if not isinstance(task_id, str) or task_id == "":
+        raise ValueError(messages.CLI_OS_CARRIER_TASK_ID_EMPTY % (task_id,))
+    if session is not None and session == "":
+        raise ValueError(messages.CLI_OS_CARRIER_SESSION_EMPTY % (session,))
+    if interval_raw is not None:
+        try:
+            interval_hours = int(interval_raw)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                messages.CLI_OS_CARRIER_INTERVAL_INVALID % (interval_raw,)) from exc
+        if interval_hours < 1:
+            raise ValueError(
+                messages.CLI_OS_CARRIER_INTERVAL_INVALID % (interval_raw,))
+    else:
+        interval_hours = (_load_board_interval_hours(repo_root, task_id)
+                          or 1)
+    if session is None:
+        session = _load_witness_session(repo_root)
+    if prompt is None:
+        prompt = carrier.DEFAULT_WAKE_PROMPT
+    try:
+        wake_argv = carrier.resolve_wake_argv(session, repo_root, prompt)
+    except carrier.CarrierError as exc:
+        raise _CarrierRejected(str(exc)) from exc
+    task_name = carrier.carrier_task_name(task_id)
+    command_line = carrier.render_command_line(wake_argv)
+    result = carrier.install_carrier(task_name, command_line,
+                                     interval_hours)
+    _emit({"ok": result["ok"], "task_name": task_name,
+           "argv": result["argv"], "returncode": result["returncode"],
+           "stderr": result["stderr"]})
+    return 0 if result["ok"] else 1
+
+
+def _os_carrier_remove(repo_root, task_id) -> int:
+    """os-carrier-remove：删除 L1 OS 唤醒载体（carrier.remove_carrier
+    薄壳；终局清理 L1 任务以此替代原生删除尝试——**OS 删除真实有效，
+    无三态劣化**：与原生 Cron 删除可能以「已不存在 / 未知 / 失败」
+    三态含混回报不同，本命令以 OS 工具真实退出码为唯一事实，Windows
+    对不存在任务如实 ok=false，POSIX 无匹配块零写 no-op ok=true）。
+    CLI 侧先闸 task_id 非空（退出码 2）。输出单行 JSON
+    {ok, task_name, argv}（另附诊断附加键 returncode / stderr 尾部）；
+    ok=false → 退出码 1。repo_root 仅承接调用面形态（OS 删除按
+    task_name 全局定位，与仓库盘面零交互）。"""
+    from runtime import carrier  # 函数内 import：monkeypatch 友好
+    if not isinstance(task_id, str) or task_id == "":
+        raise ValueError(messages.CLI_OS_CARRIER_TASK_ID_EMPTY % (task_id,))
+    task_name = carrier.carrier_task_name(task_id)
+    result = carrier.remove_carrier(task_name)
+    _emit({"ok": result["ok"], "task_name": task_name,
+           "argv": result["argv"], "returncode": result["returncode"],
+           "stderr": result["stderr"]})
+    return 0 if result["ok"] else 1
+
+
+def _wake_carrier_probe(repo_root) -> int:
+    """wake-carrier-probe：L1 能力探针（carrier.probe 薄壳，纯本地
+    零写零执行副作用——绝不建探针任务）。输出单行 JSON
+    {platform, zcode_cli, scheduler, recommendation} 恒退出码 0：
+    recommendation= os_timer（CLI+调度器俱可用）| sleep_only（任一
+    缺——含 schtasks 受限环境自然降级，R3 无硬失败）。探针只判 L1
+    能力；L0 native 的 CronCreate 存在性归 runbook 判定。repo_root
+    仅承接调用面形态。"""
+    from runtime import carrier  # 函数内 import：monkeypatch 友好
+    _emit(carrier.probe(repo_root))
+    return 0
+
+
 def _dispatch(args) -> int:
     """argv 分发；子命令 / 参数个数错误抛 _UsageError（退出码 2）。"""
     if not args:
@@ -1569,6 +1758,45 @@ def _dispatch(args) -> int:
             raise _UsageError(
                 messages.CLI_USAGE_TASK_RECORD_WORKFLOW_RUN + USAGE)
         return _task_record_workflow_run(rest[0], rest[1], rest[2])
+    if cmd == "os-carrier-install":
+        # 位置参数 <repo_root> <task_id> + 旗标对（--session <id> /
+        # --interval <hours> / --prompt <s>，各至多一次、顺序不限）
+        # → 二、四、六或八个参数
+        if len(rest) < 2 or len(rest) > 8 or (len(rest) - 2) % 2 != 0:
+            raise _UsageError(
+                messages.CLI_USAGE_OS_CARRIER_INSTALL + USAGE)
+        session = None
+        interval_raw = None
+        prompt = None
+        index = 2
+        while index < len(rest):
+            if index + 1 >= len(rest):
+                raise _UsageError(
+                    messages.CLI_USAGE_OS_CARRIER_INSTALL_FLAGS + USAGE)
+            flag, value = rest[index], rest[index + 1]
+            if flag == "--session" and session is None:
+                session = value
+            elif flag == "--interval" and interval_raw is None:
+                interval_raw = value
+            elif flag == "--prompt" and prompt is None:
+                prompt = value
+            else:
+                raise _UsageError(
+                    messages.CLI_USAGE_OS_CARRIER_INSTALL_FLAGS + USAGE)
+            index += 2
+        return _os_carrier_install(rest[0], rest[1], session=session,
+                                   interval_raw=interval_raw,
+                                   prompt=prompt)
+    if cmd == "os-carrier-remove":
+        if len(rest) != 2:
+            raise _UsageError(
+                messages.CLI_USAGE_OS_CARRIER_REMOVE + USAGE)
+        return _os_carrier_remove(rest[0], rest[1])
+    if cmd == "wake-carrier-probe":
+        if len(rest) != 1:
+            raise _UsageError(
+                messages.CLI_USAGE_WAKE_CARRIER_PROBE + USAGE)
+        return _wake_carrier_probe(rest[0])
     raise _UsageError(
         messages.CLI_USAGE_UNKNOWN_SUBCOMMAND % cmd + USAGE)
 
@@ -1586,7 +1814,9 @@ def main(argv=None) -> int:
     （worker-model-pin 写入被 runtime.task 拒绝）/ _PinTaskRejected
     （workflow-model-select --task-ref 消费面被任务层拒绝）/
     _TaskRejected（v2.5.2 起任务生命周期操作面与 v2.6.0 规范 run
-    注册 task-record-workflow-run 被 runtime.task 拒绝）
+    注册 task-record-workflow-run 被 runtime.task 拒绝）/
+    _CarrierRejected（v2.7.0 W1 起 os-carrier-install 的机器级
+    唤醒命令解析失败——无默认装位 cjs 亦无 PATH zcode）
     → 1；
     其余意外异常 → 1（错误 JSON 含异常类型名，stdout 契约不破）。
     盘上 state 结构性拒绝（JSON 损坏解析 / schema 残缺 / 任务标识
@@ -1607,7 +1837,7 @@ def main(argv=None) -> int:
         return 2
     except (_TaskMissing, _ReviewRejected, _QuotaRejected,
             _AutomationRejected, _PinRejected, _PinTaskRejected,
-            _TaskRejected) as exc:
+            _TaskRejected, _CarrierRejected) as exc:
         _emit({"error": str(exc)})
         return 1
     except Exception as exc:  # 意外兜底

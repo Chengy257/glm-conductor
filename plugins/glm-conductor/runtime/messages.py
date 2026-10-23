@@ -630,3 +630,46 @@ WRITER_GUARD_TASK_ID_INVALID = (
 WRITER_GUARD_RUN_ID_INVALID = (
     "writer_guard: workflow_run_id must be None or a non-empty "
     "string, got %r")
+
+
+# ============================================================
+# —— v2.7.0 W1/W2：唤醒载体四级降级 + 免确认面单源常量 ——
+# ============================================================
+
+# bind 同 id 换 kind 的拒绝文案（runtime/task.py bind_quota_automation；
+# 原 B4 节点暂置 task.py，批次集成按单源纪律上移至此，值逐字节不变）
+TASK_BIND_KIND_CONFLICT = (
+    "bind_quota_automation: task %s is already bound to automation_id"
+    " %r with automation_kind %r; refusing to silently rebind the"
+    " same witness with kind %r (the carrier kind is never switched"
+    " silently; rebinding under another carrier kind goes through the"
+    " explicit clear_quota_automation → bind_quota_automation sequence)")
+
+# carrier 三子命令 USAGE 段（CLI_USAGE 主串缀尾，cli.py USAGE 直读单源）
+CLI_USAGE_CARRIER_EXTENSION = (
+    " | os-carrier-install <repo_root> <task_id> "
+    "[--session <id>] [--interval <hours>] [--prompt <s>] | "
+    "os-carrier-remove <repo_root> <task_id> | "
+    "wake-carrier-probe <repo_root>")
+
+CLI_USAGE_OS_CARRIER_INSTALL = (
+    "os-carrier-install requires <repo_root> <task_id> [--session <id>] "
+    "[--interval <hours>] [--prompt <s>]: two to eight arguments "
+    "(flags come in pairs).")
+CLI_USAGE_OS_CARRIER_INSTALL_FLAGS = (
+    "os-carrier-install accepts only --session <id>, --interval <hours>, "
+    "and --prompt <s> as optional arguments (each at most once).")
+CLI_USAGE_OS_CARRIER_REMOVE = (
+    "os-carrier-remove requires <repo_root> <task_id>: two arguments.")
+CLI_USAGE_WAKE_CARRIER_PROBE = (
+    "wake-carrier-probe requires exactly one argument: <repo_root>")
+CLI_OS_CARRIER_TASK_ID_EMPTY = (
+    "os-carrier: task_id must be a non-empty string, got %r")
+CLI_OS_CARRIER_SESSION_EMPTY = (
+    "os-carrier-install: --session must be a non-empty string, got %r")
+CLI_OS_CARRIER_SESSION_MISSING = (
+    "os-carrier-install: no session id available; pass --session <id> "
+    "or ensure %s exists (written by the SessionStart hook)")
+CLI_OS_CARRIER_INTERVAL_INVALID = (
+    "os-carrier-install: interval hours must be an integer >= 1, "
+    "got %r")

@@ -152,7 +152,15 @@ class HooksJsonVersionAgnosticTest(unittest.TestCase):
                     self.assertEqual(hook["type"], "process")
                     self.assertEqual(hook["command"], "python3")
                     self.assertLessEqual(int(hook["timeoutMs"]), 5000)
-                    self.assertEqual(len(hook["args"]), 1)
+                    # args[0] 恒为脚本路径；SessionStart 自 v2.7.0 W1
+                    # 起可携带 ${CLAUDE_SESSION_ID} 会话见证模板参（恰 2）
+                    if event == "SessionStart":
+                        self.assertEqual(
+                            hook["args"],
+                            ["${ZCODE_PLUGIN_ROOT}/hooks/session_start.py",
+                             "${CLAUDE_SESSION_ID}"])
+                    else:
+                        self.assertEqual(len(hook["args"]), 1)
                     scripts.append(hook["args"][0])
         self.assertEqual(
             scripts,

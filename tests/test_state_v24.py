@@ -341,11 +341,13 @@ class TestTaskRecords(unittest.TestCase):
                 "verdict=%r 应拒绝" % bad)
 
     def test_quota_resume_placeholder_shape(self):
-        """quota_resume 占位块恰为四键冻结初始形状。"""
+        """quota_resume 占位块恰为五键冻结初始形状（v2.7.0 W1 增
+        automation_kind，缺省 native——旧四键盘面加载零迁移按 native
+        解释，本断言只钉构造面恒五键）。"""
         self.assertEqual(
             state.default_quota_resume(),
             {"mode": "manual", "max_resumes": 0, "resume_count": 0,
-             "automation_id": None})
+             "automation_id": None, "automation_kind": "native"})
         self.assertIsNot(state.default_quota_resume(),
                          state.DEFAULT_QUOTA_RESUME,
                          "必须返回全新拷贝，不暴露模块常量")

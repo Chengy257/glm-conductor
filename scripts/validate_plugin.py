@@ -90,6 +90,12 @@
          type=process/command=python3、args 指向
          ${ZCODE_PLUGIN_ROOT}/hooks/permission_request_workflow.py
          （脚本真实存在由逐 hook args 存在性校验统一把关，缺失即 FAIL）；
+         v2.7.0 W1 起 13.5 另设 SessionStart 会话见证正锚：其某 entry 的
+         内层 hook args 数组必含 ${CLAUDE_SESSION_ID} 模板参数（W1 L1
+         OS 载体唤醒命令的会话 id 来源，钩子侧落
+         .glm-conductor/session-witness.json fail-open；该参数为宿主
+         模板变量而非插件内路径，不参与 ${ZCODE_PLUGIN_ROOT}/ 存在性
+         校验，缺失即 FAIL）；
      14. runtime 状态层与技能契约标记：plugins/glm-conductor/runtime/ 下的
          __init__.py / state.py / journal.py / ownership.py、hooks/ 下的
          stop_gate.py、tests/ 下的 test_state_v24.py /
@@ -98,7 +104,9 @@
          TERMINAL_STATUSES / detect_legacy_markers /
          LEGACY_STATE_GUIDANCE / DEFAULT_QUOTA_RESUME（v2.4 P4-A 起
          改锚遗留检测与 quota_resume 词汇，替代已退役的
-         record_verification / record_review / visual_evidence 锚），
+         record_verification / record_review / visual_evidence 锚；
+         v2.7.0 W1 起增 quota_resume 第五键 automation_kind，缺省
+         native 向后兼容），
          runtime/journal.py 必含 RECOMMENDED_EVENTS /
          events.jsonl，runtime/ownership.py 必含 classify_paths /
          git_touched_files，hooks/stop_gate.py 必含 COMPLETION_CHECKS /
@@ -214,7 +222,12 @@
             worker-model-pin'）及无 pin 严口径（'never select
             automatically, never treat a single candidate' +
             'as implicit authorization'）措辞，cli.py 保留
-            user-authorized-explicit-selection 提交契约 token 锚）。
+            user-authorized-explicit-selection 提交契约 token 锚）；
+         m) W1 唤醒载体 CLI 命令面锚缺失（v2.7.0 B4，规格 §3.3/§3.4：
+            os-carrier-install / os-carrier-remove / wake-carrier-probe
+            三个子命令须见于 runtime/cli.py USAGE——正锚随实现面同步，
+            任一缺失即 FAIL；troubleshooting 权威命令面双锚随 B7 文档批
+            并入 16i）。
 
     扫描范围说明：检查 5/6/7/8（及 8 内的旧名负向检查）的扫描范围是显式
     列表——plugins/ 全部文件 + marketplace.json + README.md +
@@ -379,6 +392,12 @@ HOOK_COMMAND = "python3"
 # PASS 明细沿用 rel_display 惯例展示解析后的插件内相对路径
 PERMISSION_REQUEST_SCRIPT_ARG = (
     "${ZCODE_PLUGIN_ROOT}/hooks/permission_request_workflow.py")
+# 13.5（v2.7.0 W1 SessionStart 会话见证）：SessionStart 正向锚的 args
+# 模板参数——W1 L1 OS 载体唤醒命令需要会话 id，由 SessionStart 钩子经
+# argv 落 .glm-conductor/session-witness.json（fail-open）。该参数为
+# 宿主模板变量而非插件内路径，不参与 13.3 的 ${ZCODE_PLUGIN_ROOT}/
+# 存在性校验，此处只锚声明存在（检查逻辑见 check_13 内 13.5）。
+SESSION_WITNESS_ARG = "${CLAUDE_SESSION_ID}"
 
 # —— 检查 14：runtime 状态层与技能契约标记 ——
 RUNTIME_DIR = os.path.join(REPO_ROOT, "plugins", "glm-conductor", "runtime")
@@ -428,7 +447,10 @@ COMMAND_REQUIRED_FILES = (QUOTA_COMMAND,)
 STATE_REQUIRED_MARKERS = (
     "TASK_ID_KEYS", "CONTINUITY_ID", "TERMINAL_STATUSES",
     "detect_legacy_markers", "LEGACY_STATE_GUIDANCE",
-    "DEFAULT_QUOTA_RESUME")
+    "DEFAULT_QUOTA_RESUME",
+    # v2.7.0 W1（B4）：quota_resume 五键的第五键 automation_kind（缺省
+    # native 向后兼容）——状态层 schema authority 正锚
+    "automation_kind")
 JOURNAL_REQUIRED_MARKERS = ("RECOMMENDED_EVENTS", "events.jsonl")
 OWNERSHIP_REQUIRED_MARKERS = ("classify_paths", "git_touched_files")
 # v2.4 Phase 4（P4-A）：完成门记账词（gate_blocked / gate_passed /
@@ -655,6 +677,13 @@ USER_AUTHORIZED_MODEL_MARKERS = (
       "never select automatically, never treat a single candidate",
       "as implicit authorization")),
 )
+# 16m：W1 唤醒载体 CLI 命令面锚（v2.7.0 B4，规格 §3.3/§3.4）——三个新
+# 子命令必须出现在 cli.py USAGE（正锚——子命令在 cli.py 出现，随实现面
+# 同步）；troubleshooting 权威命令面文档同步归 B7 文档批，届时并入 16i
+# 双面同锚，本组先锚实现面单侧（automation_kind 状态层概念锚 check_14
+# 的 STATE_REQUIRED_MARKERS）。
+WAKE_CARRIER_CLI_SUBCOMMANDS = (
+    "os-carrier-install", "os-carrier-remove", "wake-carrier-probe")
 
 
 def rel_display(path):
@@ -1419,6 +1448,49 @@ def check_13_hooks_manifest(results):
                 % PERMISSION_REQUEST_SCRIPT_ARG)
             ok = False
 
+    # 13.5 SessionStart 会话见证正锚（v2.7.0 W1 唤醒载体四级降级）：
+    # SessionStart 事件某 entry 的内层 hook args 数组必含
+    # ${CLAUDE_SESSION_ID} 模板参数（W1 L1 OS 载体唤醒命令的会话 id
+    # 唯一可靠来源；宿主模板展开语义与脚本侧 fail-open 兜底由实现
+    # 把关，此处只锚声明存在）。13.3 的逐 hook 校验只对以
+    # ${ZCODE_PLUGIN_ROOT}/ 开头的参数做存在性检查，模板变量参数
+    # 不在其列，正锚与既有校验不重复不冲突。
+    if "SessionStart" not in hooks:
+        details.append(
+            "FAIL: 缺少 `SessionStart` 事件键"
+            "（v2.7.0 W1 会话见证钩子未声明）")
+        ok = False
+    else:
+        ss_entries = hooks["SessionStart"]
+        if not isinstance(ss_entries, list):
+            ss_entries = []  # 非数组已由 13.3 FAIL，此处只做锚匹配
+        witness_ok = False
+        for entry in ss_entries:
+            if not isinstance(entry, dict):
+                continue
+            ss_inner_hooks = entry.get("hooks")
+            if not isinstance(ss_inner_hooks, list):
+                continue
+            for hook in ss_inner_hooks:
+                if not isinstance(hook, dict):
+                    continue
+                ss_args = hook.get("args")
+                if isinstance(ss_args, list) and SESSION_WITNESS_ARG in ss_args:
+                    witness_ok = True
+                    break
+            if witness_ok:
+                break
+        if witness_ok:
+            details.append(
+                "PASS: SessionStart 正向锚（会话见证）→ args 含 %s"
+                % SESSION_WITNESS_ARG)
+        else:
+            details.append(
+                "FAIL: SessionStart 事件未含会话见证锚（需某 entry 内层 "
+                "hook args 数组含 %s——W1 OS 载体唤醒命令的会话 id 来源）"
+                % SESSION_WITNESS_ARG)
+            ok = False
+
     results.append((13, title, ok, details))
 
 
@@ -1589,12 +1661,15 @@ def check_16_v241_protocol(results):
          绝不自动重 pin / 主模型继承宿主主会话 / model_policy 新值；
          v2.6.1 W3b 起实现面文案单源 messages.py——messages.py 必含
          有 pin 任务 --model 不得绕过与交互重授权及无 pin 严口径措辞
-         （cli.py 保留 model_policy token 锚）。
+         （cli.py 保留 model_policy token 锚）；
+      m) W1 唤醒载体 CLI 命令面（v2.7.0 B4）—— os-carrier-install /
+         os-carrier-remove / wake-carrier-probe 三子命令须见于 cli.py
+         USAGE（正锚随实现面同步；troubleshooting 双锚随 B7 并入 16i）。
     """
-    title = ("v2.4.1/v2.5/v2.5.2/v2.6.0 编排/连续性协议静态契约（模型选型硬闸 / "
+    title = ("v2.4.1/v2.5/v2.5.2/v2.6.0/v2.7.0 编排/连续性协议静态契约（模型选型硬闸 / "
              "用户授权显式选型 / arm-before-work / 建立动作优先 / 生产 runtime "
              "禁依赖 / 任务启动三问 / pin 失效即拒 / 双通道唤醒 / CLI 命令面 / "
-             "睡眠模板 / 单一观测口径）")
+             "睡眠模板 / 单一观测口径 / 唤醒载体 CLI 命令面）")
     details = []
     ok = True
 
@@ -1891,6 +1966,24 @@ def check_16_v241_protocol(results):
                     "FAIL: %s 缺少用户授权显式选型锚 `%s`（Flash 软推荐/默认 "
                     "max 推理档提示/单候选确认/pin 一致性/交互重授权措辞缺失）"
                     % (shown, marker))
+                ok = False
+
+    # —— 16m：W1 唤醒载体 CLI 命令面锚（v2.7.0 B4，规格 §3.3/§3.4） ——
+    # 三个新子命令必须出现在 cli.py USAGE（正锚——子命令在 cli.py 出现，
+    # 随实现面同步）；troubleshooting 权威命令面文档同步归 B7 文档批，
+    # 届时并入 16i 双面同锚，本组先锚实现面单侧。cli_text 已在 16g 读取。
+    if cli_text is None or not os.path.isfile(CLI_PY):
+        details.append("FAIL: %s 不存在或无法读取，无法执行 16m 检查" % cli_shown)
+        ok = False
+    else:
+        for marker in WAKE_CARRIER_CLI_SUBCOMMANDS:
+            if marker in cli_text:
+                details.append("PASS: %s 含唤醒载体 CLI 命令 `%s`"
+                               % (cli_shown, marker))
+            else:
+                details.append(
+                    "FAIL: %s 缺少唤醒载体 CLI 命令 `%s`（W1 载体安装/删除/"
+                    "探针子命令未入 USAGE——实现面漂移）" % (cli_shown, marker))
                 ok = False
 
     results.append((16, title, ok, details))

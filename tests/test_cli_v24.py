@@ -64,6 +64,21 @@ quota-automation-clear / quota-continuity-preflight）——规格 U6 测试
      缺省输出与落盘均无该键（未授权即无键）；旗标与 --dag 共存成功
      （两个旗标位置任意）；重复旗标 → 2（at most once 用法错）、
      旗标混入位置参数区间 / 旗标携带未知旗标等形状非法 → 2 且零落盘。
+  8. OS 唤醒载体三子命令（v2.7.0 W1，runtime.carrier 薄壳）：
+     wake-carrier-probe 恒四键 {platform, zcode_cli, scheduler,
+     recommendation}（纯本地零写——临时仓库零落盘、恒退出码 0）、
+     用法错 → 2；os-carrier-install 的 argv 构造面（执行面 fake
+     注入——绝不真建 schtasks 任务）：task_name=
+     glm-conductor-<task-id>、唤醒命令经 resolve_wake_argv（默认装位
+     cjs patch 钉到临时文件）+ render_command_line 渲染、stdout 回显
+     执行面精确 argv（/TR 整串单 argv 形态透传）、--session /
+     --interval / --prompt 显式与缺省三兜底（witness 文件 / 任务盘面
+     floor_interval_hours / carrier 内建紧约束 prompt 与缺省间隔
+     1）、OS 拒绝 ok=false → 1、CLI 皆缺 CarrierError → 1、参数值
+     非法与用法错 → 2 且执行面零触达；os-carrier-remove 的 argv
+     构造面与拒绝码（OS 删除真实有效无三态劣化）。测试进程内
+     carrier._run_argv 恒为哨兵——本组测试绝不真执行 schtasks /
+     crontab（R3 纪律）。
 
 调用方式：模仿 tests/test_cli_extensions.py 的真实子进程冒烟
 （subprocess.run([sys.executable, CLI_PATH, ...], encoding="utf-8")）——
@@ -83,6 +98,7 @@ journal 全落临时目录，绝不触碰本仓库真实账本）。仅 Python 3
 import io
 import json
 import os
+import platform
 import subprocess
 import sys
 import tempfile
@@ -98,7 +114,7 @@ CLI_PATH = (Path(__file__).resolve().parents[1] / "plugins" /
 # quota 生命周期 CLI 用例（进程内调用 + 假 resolver 注入）的模块引导
 # 与 runtime import（tests/test_quota_resume_v24.py 同款 sys.path 引导）
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "plugins" / "glm-conductor"))
-from runtime import cli, journal, messages, state, task  # noqa: E402
+from runtime import carrier, cli, journal, messages, state, task  # noqa: E402
 from runtime.workflow import compiler as workflow_compiler  # noqa: E402
 from runtime.quota import resolver as quota_resolver  # noqa: E402
 from runtime.workflow import adapter as workflow_adapter  # noqa: E402
@@ -683,9 +699,11 @@ class QuotaLifecycleCliTest(QuotaLifecycleCliFixture):
             "quota-resume-authorize", self.repo, self.TID, "3")
         self.assertEqual(code, 0)
         self.assertEqual(payload["task_id"], self.TID)
+        # v2.7.0 W1 五键：quota_resume 回显含 automation_kind 缺省 native
         self.assertEqual(payload["quota_resume"],
                          {"mode": "auto", "max_resumes": 3,
-                          "resume_count": 0, "automation_id": None})
+                          "resume_count": 0, "automation_id": None,
+                          "automation_kind": "native"})
         st = self.load()
         self.assertEqual(st["quota_resume"]["mode"], "auto")
         self.assertEqual(st["quota_resume"]["max_resumes"], 3)
@@ -1174,7 +1192,8 @@ class QuotaAutomationCliTest(QuotaLifecycleCliFixture):
             "reason": "auto continuity is not armed"})
         # 纯读：预检绝不改状态（仍 active）
         self.assertEqual(self.load()["status"], "active")
-        # 态三：bind 武装后 → ready=true，退出码 0
+        # 态三：bind 武装后 → ready=true，退出码 0（v2.7.0 W1 armed
+        # 分支恰增 kind 键，缺省 bind 即 native）
         self.run_cli("quota-automation-bind", self.repo, self.TID,
                      self.AUTO_ID)
         code, payload = self.run_cli_json(
@@ -1182,7 +1201,7 @@ class QuotaAutomationCliTest(QuotaLifecycleCliFixture):
         self.assertEqual(code, 0)
         self.assertEqual(payload["preflight"], {
             "ready": True, "mode": "auto",
-            "automation_id": self.AUTO_ID,
+            "automation_id": self.AUTO_ID, "kind": "native",
             "reason": "auto continuity armed"})
         self.assertEqual(self.load()["status"], "active")
 
@@ -1347,6 +1366,322 @@ class TaskCreateAutoApproveCliTest(CliV24Fixture):
         self.assertIn(
             messages.CLI_USAGE_TASK_CREATE_FLAG, payload["error"])
         self.assertIsNone(self.disk_state())
+
+
+# —— 9. OS 唤醒载体三子命令（v2.7.0 W1，carrier 薄壳） ——
+
+class WakeCarrierCliTest(CliV24Fixture):
+    """wake-carrier-probe / os-carrier-install / os-carrier-remove：
+    probe 四键形态、install/remove 的 argv 构造面与退出码映射。
+
+    纪律（spec §3.6）：绝不真执行 schtasks / crontab——install /
+    remove 一律 mock.patch.object(carrier, ...) 注入 fake 执行面，
+    且 setUp 里 carrier._run_argv 恒替换为哨兵（任何实现漂移到真实
+    执行面都炸测试而非真建任务）；probe 是纯本地零写零执行，直接
+    子进程跑真实现。机器态钉法：DEFAULT_ZCODE_CJS patch 到临时文件
+    （唤醒命令解析确定走 node+cjs 冻结形态，PATH 态零依赖）。"""
+
+    TID = "wake-carrier-9a4c2e"
+    SESSION = "sess_cli-wake-1"
+    PROMPT = "custom wake prompt"
+
+    def setUp(self):
+        super().setUp()
+        # 红线哨兵：执行面单步在测试进程内绝不允许真启动
+        sentinel = mock.patch.object(
+            carrier, "_run_argv",
+            side_effect=AssertionError(
+                "tests must never run the OS scheduler"))
+        sentinel.start()
+        self.addCleanup(sentinel.stop)
+        # 机器态钉住：默认装位 cjs → 临时文件（确定 node+cjs 冻结形态）
+        cjs = Path(self.repo) / "zcode.cjs"
+        cjs.write_bytes(b"// stub\n")
+        self.cjs = str(cjs)
+        cjs_patcher = mock.patch.object(carrier, "DEFAULT_ZCODE_CJS",
+                                        self.cjs)
+        cjs_patcher.start()
+        self.addCleanup(cjs_patcher.stop)
+
+    # —— 装置助手（进程内调用 + fake 执行面注入） ——
+
+    def run_main(self, *args):
+        """进程内调用 cli.main，返回 (退出码, stdout 原文)。"""
+        buffer = io.StringIO()
+        with redirect_stdout(buffer):
+            code = cli.main(list(args))
+        return code, buffer.getvalue()
+
+    def run_main_json(self, *args):
+        """进程内调用 cli.main 并把 stdout 单行 JSON 解析为 dict。"""
+        code, stdout = self.run_main(*args)
+        return code, json.loads(stdout)
+
+    def write_witness(self, session_id):
+        """SessionStart 钩子同款载荷写临时仓库见证文件（install 的
+        session 缺省兜底读取面）。"""
+        witness_dir = Path(self.repo) / ".glm-conductor"
+        witness_dir.mkdir(exist_ok=True)
+        (witness_dir / "session-witness.json").write_bytes(json.dumps(
+            {"session_id": session_id,
+             "updated_at": "2026-10-24T00:00:00+00:00"}).encode("utf-8"))
+
+    def fake_install(self, ok=True, returncode=0, stderr=""):
+        """os-carrier-install 的执行面 fake：记录入参、回显精确
+        install argv；绝不真执行。返回记录 dict 供断言。"""
+        calls = {}
+
+        def _fake(task_name, command_line, interval_hours):
+            calls.update(task_name=task_name, command_line=command_line,
+                         interval_hours=interval_hours)
+            return {"ok": ok,
+                    "argv": carrier.install_argv(task_name, command_line,
+                                                 interval_hours),
+                    "returncode": returncode, "stderr": stderr}
+
+        patcher = mock.patch.object(carrier, "install_carrier",
+                                    side_effect=_fake)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        return calls
+
+    def fake_remove(self, ok=True, returncode=0, stderr=""):
+        """os-carrier-remove 的执行面 fake：记录 task_name、回显精确
+        remove argv；绝不真执行。"""
+        calls = {}
+
+        def _fake(task_name):
+            calls["task_name"] = task_name
+            return {"ok": ok, "argv": carrier.remove_argv(task_name),
+                    "returncode": returncode, "stderr": stderr}
+
+        patcher = mock.patch.object(carrier, "remove_carrier",
+                                    side_effect=_fake)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        return calls
+
+    # —— wake-carrier-probe：四键形态（真实子进程，纯本地零写） ——
+
+    def test_wake_carrier_probe_four_key_payload_exit_0(self):
+        """probe 输出恰四键 {platform, zcode_cli, scheduler,
+        recommendation}、恒退出码 0、纯本地零写（临时仓库零落盘）。"""
+        code, stdout, stderr = self.run_cli("wake-carrier-probe",
+                                            self.repo)
+        self.assertEqual(code, 0, stderr)
+        self.assertEqual(stderr, "")
+        self.assertEqual(len(stdout.strip().splitlines()), 1)
+        report = json.loads(stdout)
+        self.assertEqual(
+            sorted(report),
+            ["platform", "recommendation", "scheduler", "zcode_cli"])
+        self.assertEqual(report["platform"], platform.system())
+        # recommendation 恒两态（本机形态决定取值，形状测试不锚机器态）
+        self.assertIn(report["recommendation"],
+                      ("os_timer", "sleep_only"))
+        self.assertEqual(
+            sorted(report["zcode_cli"]),
+            ["available", "cjs_path", "node_path", "via", "zcode_path"])
+        self.assertIsInstance(report["zcode_cli"]["available"], bool)
+        self.assertIn(report["zcode_cli"]["via"],
+                      ("path", "node_cjs", "none"))
+        self.assertEqual(sorted(report["scheduler"]),
+                         ["available", "path", "tool"])
+        self.assertIn(report["scheduler"]["tool"],
+                      ("schtasks", "crontab"))
+        # 纯本地零写：临时仓库根除 setUp 钉的 zcode.cjs 桩外零落盘
+        self.assertEqual(self.listdir(), ["zcode.cjs"])
+
+    def test_wake_carrier_probe_usage_errors_exit_2(self):
+        """probe 用法错（零参数 / 超参）→ 用法错退出码 2。"""
+        code, _stdout, _stderr = self.run_cli("wake-carrier-probe")
+        self.assertEqual(code, 2)
+        code, _stdout, _stderr = self.run_cli("wake-carrier-probe",
+                                              self.repo, "extra")
+        self.assertEqual(code, 2)
+
+    # —— os-carrier-install：argv 构造面（fake 执行面，绝不真建） ——
+
+    def test_os_carrier_install_argv_construction(self):
+        """显式三旗标安装：执行面收到 task_name=glm-conductor-<tid>、
+        渲染后的唤醒命令整串、interval=4；stdout 回显执行面精确 argv
+        （/TR 整串单 argv 形态透传）；wake 形态恒 --workflow-mode
+        alwaysOn。"""
+        calls = self.fake_install()
+        code, payload = self.run_main_json(
+            "os-carrier-install", self.repo, self.TID,
+            "--session", self.SESSION, "--interval", "4",
+            "--prompt", self.PROMPT)
+        self.assertEqual(code, 0)
+        self.assertEqual(
+            sorted(payload),
+            ["argv", "ok", "returncode", "stderr", "task_name"])
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["returncode"], 0)
+        self.assertEqual(payload["stderr"], "")
+        task_name = "glm-conductor-" + self.TID
+        self.assertEqual(payload["task_name"], task_name)
+        self.assertEqual(calls["task_name"], task_name)
+        self.assertEqual(calls["interval_hours"], 4)
+        expected_wake = carrier.wake_command(self.cjs, self.SESSION,
+                                             self.repo, self.PROMPT)
+        self.assertEqual(expected_wake[6:8],
+                         ["--workflow-mode", "alwaysOn"])
+        expected_cmd = carrier.render_command_line(expected_wake)
+        self.assertEqual(calls["command_line"], expected_cmd)
+        # stdout 回显的 argv 即执行面返回的精确 argv：/TR 值整串单元素
+        self.assertEqual(payload["argv"][5], expected_cmd)
+        self.assertEqual(payload["argv"][6], "/SC")
+
+    def test_os_carrier_install_session_defaults_to_witness(self):
+        """--session 缺省：读 SessionStart 见证文件兜底（唤醒命令
+        --resume 值即见证 session id）。"""
+        self.write_witness("sess_witness-9")
+        calls = self.fake_install()
+        code, _payload = self.run_main_json(
+            "os-carrier-install", self.repo, self.TID)
+        self.assertEqual(code, 0)
+        expected_cmd = carrier.render_command_line(carrier.wake_command(
+            self.cjs, "sess_witness-9", self.repo,
+            carrier.DEFAULT_WAKE_PROMPT))
+        self.assertEqual(calls["command_line"], expected_cmd)
+
+    def test_os_carrier_install_interval_defaults_and_precedence(self):
+        """interval 三级口径：盘面 floor_interval_hours 优先于缺省 1，
+        --interval 显式最优先；盘面无键任务 → 缺省 1。"""
+        st = task.create_task(self.repo, "carrier-interval-a",
+                              "carrier 间隔缺省测试目标", {"mode": "solo"})
+        st["floor_interval_hours"] = 6
+        state.save_state(self.repo, st)
+        calls = self.fake_install()
+        code, _payload = self.run_main_json(
+            "os-carrier-install", self.repo, "carrier-interval-a",
+            "--session", self.SESSION)
+        self.assertEqual(code, 0)
+        self.assertEqual(calls["interval_hours"], 6, "盘面键优先于缺省")
+        code, _payload = self.run_main_json(
+            "os-carrier-install", self.repo, "carrier-interval-a",
+            "--session", self.SESSION, "--interval", "2")
+        self.assertEqual(code, 0)
+        self.assertEqual(calls["interval_hours"], 2, "--interval 显式最优先")
+        # 盘面无键（schema 未引入该键的缺省任务）→ 落缺省 1
+        task.create_task(self.repo, "carrier-interval-b",
+                         "carrier 无键缺省测试目标", {"mode": "solo"})
+        code, _payload = self.run_main_json(
+            "os-carrier-install", self.repo, "carrier-interval-b",
+            "--session", self.SESSION)
+        self.assertEqual(code, 0)
+        self.assertEqual(calls["interval_hours"], 1)
+
+    def test_os_carrier_install_missing_session_exit_2(self):
+        """session 两处皆缺（无 --session 且见证文件缺失）→ 退出码 2，
+        错误指向见证路径；执行面绝未被触达。"""
+        calls = self.fake_install()
+        code, payload = self.run_main_json(
+            "os-carrier-install", self.repo, self.TID)
+        self.assertEqual(code, 2)
+        self.assertIn("session-witness.json", payload["error"])
+        self.assertEqual(calls, {}, "解析失败绝不触达执行面")
+
+    def test_os_carrier_install_param_rejections_exit_2(self):
+        """参数值非法与用法错 → 退出码 2 且执行面零触达：--session
+        空串 / --interval "0" / --interval "abc" / task_id 空串 /
+        参数个数不足或过多 / 未知旗标。"""
+        calls = self.fake_install()
+        for argv in (
+                ("os-carrier-install", self.repo, self.TID,
+                 "--session", ""),
+                ("os-carrier-install", self.repo, self.TID,
+                 "--session", self.SESSION, "--interval", "0"),
+                ("os-carrier-install", self.repo, self.TID,
+                 "--session", self.SESSION, "--interval", "abc"),
+                ("os-carrier-install", self.repo, "",
+                 "--session", self.SESSION),
+                ("os-carrier-install", self.repo),
+                ("os-carrier-install", self.repo, self.TID, "loose"),
+                ("os-carrier-install", self.repo, self.TID,
+                 "--bogus", "x"),
+                ("os-carrier-install", self.repo, self.TID,
+                 "--session", self.SESSION, "--session", self.SESSION),
+        ):
+            code, payload = self.run_main_json(*argv)
+            self.assertEqual(code, 2, argv)
+            self.assertIn("error", payload)
+        self.assertEqual(calls, {}, "拒绝路径绝不触达执行面")
+
+    def test_os_carrier_install_os_refusal_exit_1(self):
+        """OS 工具拒绝（ok=false）→ 退出码 1，returncode / stderr 尾部
+        透出作对账凭据。"""
+        self.fake_install(ok=False, returncode=1, stderr="ACCESS DENIED")
+        code, payload = self.run_main_json(
+            "os-carrier-install", self.repo, self.TID,
+            "--session", self.SESSION)
+        self.assertEqual(code, 1)
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["returncode"], 1)
+        self.assertEqual(payload["stderr"], "ACCESS DENIED")
+        self.assertEqual(payload["task_name"],
+                         "glm-conductor-" + self.TID)
+
+    def test_os_carrier_install_unresolvable_cli_exit_1(self):
+        """CLI 皆缺（无默认装位 cjs 亦无 PATH zcode）→ CarrierError →
+        退出码 1，错误指向 wake-carrier-probe 对账。"""
+        self.fake_install()
+        with mock.patch.object(carrier, "DEFAULT_ZCODE_CJS",
+                               "C:/nonexistent/zcode.cjs"), \
+                mock.patch.object(carrier.shutil, "which",
+                                  return_value=None):
+            code, payload = self.run_main_json(
+                "os-carrier-install", self.repo, self.TID,
+                "--session", self.SESSION)
+        self.assertEqual(code, 1)
+        self.assertIn("zcode CLI not found", payload["error"])
+        self.assertIn("wake-carrier-probe", payload["error"])
+
+    # —— os-carrier-remove：argv 构造面（fake 执行面，绝不真删） ——
+
+    def test_os_carrier_remove_argv_construction(self):
+        """remove 构造面：执行面收到 glm-conductor-<tid>；stdout 回显
+        精确 schtasks /Delete argv；ok=true 退出码 0。"""
+        calls = self.fake_remove()
+        code, payload = self.run_main_json(
+            "os-carrier-remove", self.repo, self.TID)
+        self.assertEqual(code, 0)
+        task_name = "glm-conductor-" + self.TID
+        self.assertEqual(calls["task_name"], task_name)
+        self.assertEqual(payload["task_name"], task_name)
+        self.assertTrue(payload["ok"])
+        self.assertEqual(
+            payload["argv"],
+            ["schtasks", "/Delete", "/TN", task_name, "/F"])
+        self.assertEqual(payload["returncode"], 0)
+
+    def test_os_carrier_remove_os_refusal_exit_1(self):
+        """OS 删除拒绝（如任务不存在）→ ok=false 如实退出码 1（无三态
+        劣化），task_name 与 stderr 尾部照常透出。"""
+        self.fake_remove(ok=False, returncode=1,
+                         stderr="ERROR: the scheduled task does not exist")
+        code, payload = self.run_main_json(
+            "os-carrier-remove", self.repo, self.TID)
+        self.assertEqual(code, 1)
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["returncode"], 1)
+        self.assertIn("does not exist", payload["stderr"])
+        self.assertEqual(payload["task_name"],
+                         "glm-conductor-" + self.TID)
+
+    def test_os_carrier_remove_rejections_exit_2(self):
+        """remove 参数值非法与用法错 → 退出码 2 且执行面零触达。"""
+        calls = self.fake_remove()
+        for argv in (
+                ("os-carrier-remove", self.repo, ""),
+                ("os-carrier-remove", self.repo),
+                ("os-carrier-remove", self.repo, self.TID, "extra"),
+        ):
+            code, payload = self.run_main_json(*argv)
+            self.assertEqual(code, 2, argv)
+            self.assertIn("error", payload)
+        self.assertEqual(calls, {}, "拒绝路径绝不触达执行面")
 
 
 if __name__ == "__main__":
