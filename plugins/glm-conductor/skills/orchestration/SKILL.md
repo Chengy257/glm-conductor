@@ -121,6 +121,19 @@ Authoring discipline:
 - The five-part implementation spec template (OBJECTIVE / FILES AND OWNERSHIP / INTERFACES / CONSTRAINTS / VERIFICATION) remains the thinking frame for node declarations and the delivery format of the visual channel; see references/role-contracts.md.
 - **Nodes map to deliverables, not implementation steps (authoring anti-pattern)**: an objective may only be phrased as "what gets delivered"; if no deliverable can be stated and only a step sequence (first / then / next) can be listed, it is a step-type node and must be merged upward; in-node implementation order is the worker's own decision.
 
+Granularity defaults to one node (v2.7.0 W4 judgment criteria — decomposition is a decision, not a reflex):
+
+- **Default whole-block**: a bounded task defaults to ONE node; split only when a too-large red flag is hit. After any split, every child node must independently pass the "one complete deliverable" test — a child that can only be described as part of a deliverable is still a fragment.
+- **Too-large red flags (must split)**: the objective strings multiple independent deliverables with "and"; ownership crosses two or more subsystem boundaries with no shared interface contract; local_check needs multiple heterogeneous verification stacks (e.g. Python unittest AND a compiled-language build); the five-part spec does not fit one prompt without summarizing.
+- **Too-fragmented red flags (must merge)**: two nodes' ownership overlaps heavily (plan_stages will serialize them anyway — the split bought nothing and killed parallelism); an objective can only be phrased as a step ("then wire it up") rather than a deliverable; the merged result is still one complete bounded goal.
+- **Dissolve at the routing layer first**: a task that is overall small should be judged Axis-A low or routed solo (no DAG at all); with the direct-dispatch channel ('Direct dispatch roles') the motive to split "just to get into a workflow" is zero.
+
+Parallelism by default (v2.7.0 W5 authoring principles — plan_stages itself is unchanged; parallelism is authored, not hoped for):
+
+1. **Minimize dependencies**: a depends_on entry must express a real order fact (an interface hand-off, a consumed artifact); a zero-dependency node must be genuinely zero-dependency — convenience ordering is theft from the schedule.
+2. **Ownership division is the parallelism knob**: two blocks of work you want in parallel must be authored with non-overlapping ownership (overlap = serialization by design, the write-exclusion declaration doing its job); split large cross-subsystem tasks along interface boundaries and they parallelize naturally.
+3. **The stages summary is a feedback loop**: v24-compile reports `{ok, stages, nodes, out}` — a long serial chain with no factual basis for its dependencies is a decomposition smell: rewrite the DAG and recompile instead of accepting the serial plan.
+
 ## Execution procedure for delegate/full
 
 A ZCode Native Workflow run remains the only implementation substrate for multi-node delegate/full; a single-node delegate with assurance standard may instead take the direct-dispatch lightweight channel ('Direct dispatch roles'), whose contract states the cost and the recovery semantics explicitly. The main session follows the fixed order below. Runtime calls always go through the runtime CLI named subcommands: `python3 plugins/glm-conductor/runtime/cli.py <subcommand>` — exit codes 0 = success / 2 = validation rejection (including a preflight ready=false block) / 1 = runtime rejection. The authoritative command list is the USAGE at the top of cli.py: never hunt for commands yourself, never invent `python3 -c` inline scripts, and never use command forms outside USAGE.

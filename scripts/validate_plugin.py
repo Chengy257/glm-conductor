@@ -506,7 +506,12 @@ SKILL_CONTRACT_MARKERS = (
       "GLM_CONDUCTOR_QUOTA_API_KEY")),
     (LONG_HORIZON, ("state.json", "events.jsonl")),
     (ORCHESTRATION_SKILL, ("state.json", "route_selected", "SELECTIVE ROUTE",
-     "v24-compile", "writer-acquire")),
+     "v24-compile", "writer-acquire",
+     # v2.7.0 W4/W5 拆解粒度与并行 authoring 锚（规格 §6/§7）
+     "Granularity defaults to one node", "Too-large red flags",
+     "Too-fragmented red flags",
+     "Ownership division is the parallelism knob",
+     "The stages summary is a feedback loop")),
     (ROLE_CONTRACTS, ("TASK CONTEXT PACK", "FILES AND OWNERSHIP")),
     (ENFORCEMENT_SKILL,
      ("ENFORCEMENT DEGRADED", "change_id", "writer_guard", "review-record")),
