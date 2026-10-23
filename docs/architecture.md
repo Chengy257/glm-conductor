@@ -370,7 +370,7 @@ No Clock code exists in the Conductor production picture (no clock / clock_store
 
 ```
 plugins/glm-conductor/
-├── agents/        # visual-implementer / glm-reviewer / visual-reviewer (no flash-implementer)
+├── agents/        # visual-implementer / glm-reviewer / visual-reviewer + the four direct-dispatch roles (see "Direct dispatch roles" below; no flash-implementer)
 ├── commands/      # quota.md (the /glm-conductor:quota command drives report.py read-only diagnostics)
 ├── hooks/         # hooks.json: SessionStart (resume injection) + Stop (completion guard) — only these two hooks
 ├── skills/        # the three skills orchestration / enforcement / continuity
@@ -389,6 +389,21 @@ plugins/glm-conductor/
     ├── cli.py          # the runtime CLI's single entry point (the table below)
     └── quota/          # 11 read-only observation modules (§17)
 ```
+
+**Direct dispatch roles (v2.7.0; design verdicts D9 / D10 / D11)**: the quartet `conductor-scout` / `conductor-runner` / `conductor-impl-flash` / `conductor-impl` joins `agents/` as native Custom Subagents the main session can dispatch directly, outside any compiled Workflow — D9 overturns the earlier "no custom scout agent" rule (cost motivation), D11 admits all four roles, and D10 revises "sole carrier = Native Workflow" by opening exactly one lightweight exception, the single-node standard-assurance `delegate`.
+
+| Role / agent | Model binding | Contract essentials |
+| --- | --- | --- |
+| scout — `conductor-scout` | GLM-5.3-Flash (frontmatter pin) | read-only investigation / fact collection; every conclusion cites `file:line` evidence; never fabricates; answers within a bounded scope |
+| runner — `conductor-runner` | GLM-5.3-Flash (frontmatter pin) | verbatim execution of entrusted commands; honest exit-code + output-tail reporting; never modifies repository files; never retries a destructive command; output carries no secrets |
+| impl-flash — `conductor-impl-flash` | GLM-5.3-Flash (frontmatter pin) | bounded mechanical implementation from the five-section spec (§3 node-declaration format); ownership discipline identical to the workflow worker persona; honest `local_check` |
+| impl — `conductor-impl` | inherited session model (no `model` key — the `glm-reviewer` precedent, §11) | complex bounded implementation needing main-model strength without a whole workflow |
+
+- **Any route, no task prerequisite**: scout (investigation) and runner (command / test execution) are read-only / non-mutating faces and may be dispatched on any route
+- **Writer roles are guard-bound**: impl-flash / impl are dispatched only in the context of an active task holding that repository's writer reservation (§7) — the guard's semantics are unchanged; the main session hands over the five-section spec, and their changes remain fully covered by the task-level completion guard (checks 2–4, §12)
+- **Single-node delegate lightweight channel (D10)**: when the DAG is exactly one node and assurance is standard, the main session may dispatch one impl role directly instead of a one-node workflow; the contract prices the costs explicitly — no structured `NodeResult`, no `ResumeWorkflowRun` recovery (recovery semantics = re-dispatch from repository facts) — while the validation / review / completion-gate chain is unchanged; multi-node `delegate` / `full` keeps Native Workflow as the sole carrier
+- **Model-selection gate boundary**: a direct-dispatch role's model strategy is declared statically in its frontmatter (pinned / inherited) and never enters the `workflow-model-select` pipeline (that gate governs run-level `subagent_model` only); the launch interview's model question is untouched
+- **No new journal events (D13)**: direct dispatch adds nothing to the ten-event task-level vocabulary; validation / review / completion bookkeeping continues as usual
 
 runtime CLI subcommands (exit code 0 success / 2 validation refusal / 1 runtime refusal; skill-layer runtime invocations always go through this CLI):
 

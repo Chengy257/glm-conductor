@@ -225,7 +225,7 @@ VISUAL ACCEPTANCE:
 
 ## IMPLEMENTATION REPORT template (subagent channel)
 
-Mandatory for the visual channel (visual-implementer) on return; the structured contract for ordinary implementation results is NodeResult in the next section:
+Mandatory for the subagent implementation channels (visual-implementer and the direct-dispatch impl roles conductor-impl-flash / conductor-impl) on return; the structured contract for native-Workflow node results is NodeResult in the next section:
 
 ```
 IMPLEMENTATION REPORT
@@ -323,6 +323,49 @@ The reviewer is chosen by task modality — text tasks use this role, visual tas
 
 - **Verdict invalidation rule**: after any fix the verdict is void and a fresh reviewer must re-review; verdicts are recorded through the CLI `review-record` (change_id-bound; validate first, review second)
 - **Isolation is judged by observation, not by request**: the reviewer's tools being a read-only whitelist counts as isolation enforced; if any write attempt or out-of-scope behavior is observed, terminate that channel
+
+## Direct-dispatch role contracts (scout / runner / impl-flash / impl)
+
+Four dispatchable subagent roles complement the workflow text worker (above) and the two visual roles: read-only investigation (scout) and command execution (runner) are available on any route with no task prerequisite, while write-type implementation (impl-flash / impl) is dispatched only inside an active task context holding the repository writer guard. The channel semantics (the delegate single-node lightweight channel, solo-route offload, model-gate compatibility, journal events) are stated in the SKILL.md section 'Direct dispatch roles'; this file states the per-role contracts. Each contract below is trigger / input / output / red lines, in the same format as the roles above.
+
+### conductor-scout contract (read-only investigation)
+
+- **Positioning**: a read-only investigation / fact-collection role for ROUTING PREFLIGHT and mid-task unknowns — closes bounded factual questions with evidence, never designs and never decides
+- **Model**: pinned in the frontmatter to `account:bigmodel-individual-coding-plan/GLM-5.3-Flash` (agents/conductor-scout.md is the binding authority; never attach model overrides at invocation time)
+- **Tools**: read-only whitelist — Read, Glob, Grep, LS, NotebookRead (the zero-write red line is enforced by the tool surface itself)
+- **Trigger**: an unknown item of ROUTING PREFLIGHT (root cause / implementation boundary / interface contracts / hidden coupling) that a bounded read-only pass can close — simple reconnaissance the scout carries for cost; deep reconnaissance still prefers the host Explore capability or the main session reading code itself ('ROUTING PREFLIGHT' in SKILL.md)
+- **Input**: investigation questions — a bounded question list, each phrased so it has an observable, file-grounded answer; a question without one is returned for rephrasing, never answered by guessing
+- **Output contract**: findings answering exactly the questions asked, every conclusion carrying a `file:line` evidence citation; anything not found is reported as not found; answers stay bounded to the asked scope
+- **Red lines**: zero writes (read-only whitelist); no conclusion without an evidence citation; no fabrication; no scope expansion beyond the asked questions; never substitutes for the main session's routing or architecture judgment
+- **Dispatch**: `subagent_type: glm-conductor:conductor-scout`
+
+### conductor-runner contract (command execution)
+
+- **Positioning**: a verbatim command-execution role — runs entrusted commands and tests and reports what actually happened; the main session's hands for probes and verification runs
+- **Model**: pinned in the frontmatter to `account:bigmodel-individual-coding-plan/GLM-5.3-Flash` (agents/conductor-runner.md is the binding authority; never attach model overrides at invocation time)
+- **Tools**: Bash, Read, Glob, TaskOutput, TaskStop — Bash exists to execute the entrusted commands, never to mutate repository files through redirection or file-mutating one-liners
+- **Trigger**: a command or test suite needs running with an honestly observed result — verification probes, environment checks, bug reproductions
+- **Input**: a single entrusted command given verbatim, or an explicitly bounded command list with a stated order; a free-form goal is handed back with a request for the exact command
+- **Output contract**: the actual exit code plus the output tail, honestly reported — a failure is reported as a failure, never summarized into plausibility
+- **Red lines**: zero repository writes (no redirection into repo files, no in-place edits through shell one-liners); never retries a destructive command — a failed destructive command is reported and stopped, not re-run; output kept free of secrets (credentials, keys and tokens are never echoed); no command invented beyond the entrusted list
+- **Dispatch**: `subagent_type: glm-conductor:conductor-runner`
+
+### conductor-impl-flash contract (Flash-pinned bounded implementation)
+
+- **Positioning**: the bounded mechanical implementation executor of the direct-dispatch channel — the direct-dispatch counterpart of the workflow text worker, with the same execution discipline
+- **Model**: pinned in the frontmatter to `account:bigmodel-individual-coding-plan/GLM-5.3-Flash` (agents/conductor-impl-flash.md is the binding authority; never attach model overrides at invocation time)
+- **Trigger**: a mechanical, specification-complete implementation block — the delegate single-node lightweight channel (the DAG is exactly one node and assurance is standard) or a solo-route mechanical offload (the main session stays the implementer of record)
+- **Input**: the five-part implementation spec in the same format as node declarations (above), optionally preceded by the TASK CONTEXT PACK; all five sections explicit before dispatch
+- **Output contract**: the IMPLEMENTATION REPORT template (above) — no structured NodeResult (that is the native Workflow run's contract); the report is a claim, and evidence still exists only in the diff and command output the main session personally inspects
+- **Red lines**: dispatched only in an active task context that holds this repository's writer guard ('Execution procedure for delegate/full'; guard semantics unchanged); ownership discipline identical to the workflow worker persona — modify only owned repo-relative paths, honor declared interfaces, never revert others' concurrent changes; honest local_check execution — run every item, record results and failures faithfully, invent none when empty, never fabricate output; substantive ambiguity or spec gaps return blocked with a reassessment request, never a unilateral decision
+- **Dispatch**: `subagent_type: glm-conductor:conductor-impl-flash`
+
+### conductor-impl contract (inherited-model bounded implementation)
+
+The conductor-impl-flash contract applies verbatim (trigger / input / output / red lines, including the writer-guard precondition and the ownership discipline), with one difference:
+
+- **Model**: no model key in the frontmatter — the model inherits the host/session (the glm-reviewer precedent); chosen when a bounded implementation block needs main-model strength but not a whole workflow
+- **Dispatch**: `subagent_type: glm-conductor:conductor-impl`
 
 ## Main-session (architect) contract
 

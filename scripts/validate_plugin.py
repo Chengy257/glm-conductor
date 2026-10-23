@@ -19,11 +19,25 @@
          结尾（v2.4 AF-02 起文本/视觉审查者绑定分治：视觉审查者必须
          多模态 Flash 绑定，继承文本主模型会启动成功但丧失读图契约
          能力，绑定不可用即 fail closed）；
+         v2.7.0 W6 起直派角色四件套入列：conductor-scout /
+         conductor-impl-flash / conductor-runner 必含
+         name / description / model / thoughtLevel / tools，model 与
+         visual-reviewer 同一形态（provider 全限定 account:<套餐>/
+         <模型> 且以 /GLM-5.3-Flash 结尾；精确套餐 pin
+         account:bigmodel-individual-coding-plan/GLM-5.3-Flash 由
+         tests/test_agent_model_binding.py 镜像锚定，此处不重复）；
+         conductor-impl（主模型直派实现角色）必含
+         name / description / thoughtLevel / tools 且不得含 model 字段
+         （无 model 键为合法继承形态，继承宿主/会话模型，同
+         glm-reviewer 先例）；
       3. Skill frontmatter：plugins/glm-conductor/skills/*/SKILL.md 必含
          name / description；
       4. 引用 agent 存在：plugins/ 内出现的 `glm-conductor:<agent>` 引用
          （visual-implementer / glm-reviewer /
-         visual-reviewer），对应 agents/<agent>.md 必须存在；`/glm-conductor:
+         visual-reviewer / conductor-scout / conductor-runner /
+         conductor-impl / conductor-impl-flash——v2.7.0 W6 起四直派
+         角色入 CANONICAL_AGENTS 正锚清单），对应 agents/<agent>.md
+         必须存在；`/glm-conductor:
          <name>` 斜杠命令引用形式不算 agent 引用。flash-implementer 已
          在 v2.4 Phase 2（W6）退役删除，其在 Phase 4（P4-C，R4）技能
          重写后的历史引用已清零，退役豁免同步移除——plugins/ 内任何
@@ -292,14 +306,33 @@ TEXT_REVIEWER_AGENTS = ("glm-reviewer",)
 VISUAL_REVIEWER_AGENTS = ("visual-reviewer",)
 VISUAL_REVIEWER_MODEL_RE = re.compile(r"^account:[^/\s]+/\S+$")
 VISUAL_REVIEWER_MODEL_SUFFIX = "/GLM-5.3-Flash"
+# v2.7.0 W6 直派角色四件套（主会话绕过 Workflow 直接 subagent 派遣）：
+#   - DIRECT_FLASH_AGENTS：显式 Flash 绑定——model 必填且为 provider
+#     全限定 account:<套餐>/<模型> 并以 /GLM-5.3-Flash 结尾，与
+#     visual-reviewer 共用同一形态正则/后缀（VISUAL_REVIEWER_MODEL_RE /
+#     VISUAL_REVIEWER_MODEL_SUFFIX，形态规则不重复定义）；精确套餐 pin
+#     account:bigmodel-individual-coding-plan/GLM-5.3-Flash 由
+#     tests/test_agent_model_binding.py 镜像锚定；
+#   - DIRECT_INHERIT_AGENTS：主模型直派实现角色，无 model 键为合法
+#     继承形态（继承宿主/会话模型，同 glm-reviewer 先例），model 行
+#     出现即 FAIL。
+DIRECT_FLASH_AGENTS = (
+    "conductor-scout", "conductor-impl-flash", "conductor-runner")
+DIRECT_INHERIT_AGENTS = ("conductor-impl",)
+# 继承形态必填集与文本审查者同一形态（name/description/thoughtLevel/tools）
+DIRECT_INHERIT_REQUIRED_KEYS = REVIEWER_REQUIRED_KEYS
 SKILL_REQUIRED_KEYS = ("name", "description")
 
 # 整改规范点名的契约 agent（v2.4 Phase 2 W6 起 flash-implementer 退役
 # 移除）；与 plugins/ 内实际引用取并集后逐一要求存在。
 # v2.4 Phase 4（P4-C，R4）：技能全面重写后历史引用清零，原 RETIRED_AGENTS
 # 豁免已移除——任何 flash-implementer 引用回到 plugins/ 即 FAIL（防回潮）。
+# v2.7.0 W6：四直派角色入正锚清单（role-contracts 派遣行引用与本清单
+# 双保险——角色文件被删/被改名即 FAIL，防漂移）。
 CANONICAL_AGENTS = (
-    "visual-implementer", "glm-reviewer", "visual-reviewer")
+    "visual-implementer", "glm-reviewer", "visual-reviewer",
+    "conductor-scout", "conductor-runner", "conductor-impl",
+    "conductor-impl-flash")
 
 # agent 引用；`/glm-conductor:<name>`（斜杠命令引用，如 /glm-conductor:quota）
 # 指向 commands/<name>.md 而非 agents/<name>.md，用负向后顾排除
@@ -790,6 +823,13 @@ def check_2_agent_frontmatter(results):
       - glm-reviewer：必填集不含 model，字段出现即 FAIL（继承宿主/会话模型）；
       - visual-reviewer：model 必填，须为 provider 全限定 account:<套餐>/<模型>
         且以 /GLM-5.3-Flash 结尾（多模态 Flash 绑定），否则 FAIL。
+
+    v2.7.0 W6 直派角色四件套：
+      - conductor-scout / conductor-impl-flash / conductor-runner：与
+        visual-reviewer 共用同一 Flash 绑定形态校验（provider 全限定 +
+        /GLM-5.3-Flash 后缀；精确套餐 pin 由单元测试镜像锚定，不重复）；
+      - conductor-impl：无 model 键为合法继承形态（主模型直派实现角色，
+        继承宿主/会话模型，同 glm-reviewer），model 行出现即 FAIL。
     """
     title = "Agent frontmatter 必填字段（agents/*.md）"
     details = []
@@ -823,8 +863,30 @@ def check_2_agent_frontmatter(results):
             else:
                 details.append("PASS: %s（name=%s）" % (shown, meta.get("name")))
             continue
-        # 其余角色（visual-implementer / visual-reviewer）共用必填集；
-        # visual-reviewer 另须通过多模态 Flash 绑定校验
+        # 直派主模型实现角色（v2.7.0 W6）：conductor-impl 无 model 键为
+        # 合法继承形态（继承宿主/会话模型），必填集形态同 glm-reviewer，
+        # model 行出现即 FAIL
+        if agent_name in DIRECT_INHERIT_AGENTS:
+            missing = [key for key in DIRECT_INHERIT_REQUIRED_KEYS
+                       if not meta.get(key)]
+            if missing:
+                details.append("FAIL: %s 缺少必填字段: %s" % (shown, ", ".join(missing)))
+                ok = False
+            elif "model" in meta:
+                details.append(
+                    "FAIL: %s 含 model 字段（值 %s）：主模型直派实现角色"
+                    "继承宿主/会话模型（无 model 键为合法继承形态，同 "
+                    "glm-reviewer 先例），model 行必须删除"
+                    % (shown, meta.get("model") or "（空）"))
+                ok = False
+            else:
+                details.append(
+                    "PASS: %s（name=%s，主模型继承形态）"
+                    % (shown, meta.get("name")))
+            continue
+        # 其余角色（visual-implementer / visual-reviewer / 直派 Flash
+        # 三角色）共用必填集；visual-reviewer 与直派 Flash 三角色另须
+        # 通过 provider 全限定 Flash 绑定校验
         missing = [key for key in AGENT_REQUIRED_KEYS if not meta.get(key)]
         if missing:
             details.append("FAIL: %s 缺少必填字段: %s" % (shown, ", ".join(missing)))
@@ -844,6 +906,20 @@ def check_2_agent_frontmatter(results):
         elif agent_name in VISUAL_REVIEWER_AGENTS:
             details.append(
                 "PASS: %s（name=%s，多模态 Flash 绑定 model=%s）"
+                % (shown, meta.get("name"), model_value))
+        elif agent_name in DIRECT_FLASH_AGENTS and not (
+                VISUAL_REVIEWER_MODEL_RE.match(model_value)
+                and model_value.endswith(VISUAL_REVIEWER_MODEL_SUFFIX)):
+            details.append(
+                "FAIL: %s model=%s：直派角色必须 provider 全限定 "
+                "GLM-5.3-Flash 绑定（account:<套餐>/<模型> 且以 %s 结尾，"
+                "裸 ID 会静默回退主会话模型；精确套餐 pin 由单元测试镜像"
+                "锚定）"
+                % (shown, model_value or "（缺失）", VISUAL_REVIEWER_MODEL_SUFFIX))
+            ok = False
+        elif agent_name in DIRECT_FLASH_AGENTS:
+            details.append(
+                "PASS: %s（name=%s，直派 Flash 绑定 model=%s）"
                 % (shown, meta.get("name"), model_value))
         else:
             details.append("PASS: %s（name=%s）" % (shown, meta.get("name")))
@@ -878,7 +954,14 @@ def check_3_skill_frontmatter(results):
 
 
 def check_4_agent_refs(results):
-    """检查 4：plugins/ 内 glm-conductor:<agent> 引用对应 agents/<agent>.md 存在。"""
+    """检查 4：plugins/ 内 glm-conductor:<agent> 引用对应 agents/<agent>.md 存在。
+
+    v2.7.0 W6：四直派角色（conductor-scout / conductor-runner /
+    conductor-impl / conductor-impl-flash）入 CANONICAL_AGENTS 正锚——
+    与 role-contracts/orchestration 派遣行引用取并集后逐一要求
+    agents/<agent>.md 存在（清单正锚保证引用清零后角色文件仍被要求，
+    防漂移）。
+    """
     title = "引用 agent 存在（glm-conductor:<agent> → agents/<agent>.md）"
     details = []
     ok = True

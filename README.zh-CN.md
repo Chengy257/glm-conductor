@@ -21,6 +21,7 @@ GLM Conductor 让强模型专注于架构规划、全局判断与最终验收，
 - **最大化强模型杠杆率：** 将主会话模型的推理算力聚焦于需求澄清、架构设计、路由仲裁、集成验证与最终验收（启动问答对这些环节软性建议强档模型，不阻塞其他已配置选择）；将边界明确的代码实现委托给经济快速的 Workflow 工作者。
 - **基于显式契约的委派：** 委派实施前先编译规范 DAG，在开工前明确定义节点目标、上下游依赖、文件所有权边界、接口规范与环境约束。
 - **确定性 Native Workflow 执行：** 静态 DAG 纯代码编译为确定性 TypeScript 原生工作流，由 ZCode 原生调度运行，零多余的在途运行状态镜像。
+- **直派角色通道（v2.7.0）：** 编译 Workflow 之外，主会话可直接派发四个专项 subagent——`conductor-scout`（只读调查）与 `conductor-runner`（命令/测试执行）任意路线皆可、无任务前提；写型角色 `conductor-impl-flash` / `conductor-impl` 必须在持有仓库写者守卫的活动任务上下文中派发；单节点 standard 保障的 `delegate` 可直派一名实施者替代单节点 workflow（代价显式：无结构化 NodeResult、无运行级恢复；完成闸/验证/审查链路不变）。
 - **用户授权显式选型：** 工作者必须是用户显式授权的 provider 全限定精确 id（展示宿主全部已配置候选；Flash 档为软推荐位，`workflow-model-select`，`model_policy: user-authorized-explicit-selection`）；`subagent_model` 绝不省略，从协议层根除静默继承主会话模型的隐患。
 - **最小确定性质量保障：**
   - **`change_id` 唯一新鲜度原语：** 基于 `git rev-parse HEAD` 与任务所有权范围内的实际改动文件生成 SHA-256 摘要（换行符 CRLF 规范化）；后续任何文件改动必使前置验证或审查自动失效。
@@ -95,6 +96,10 @@ GLM Conductor 让强模型专注于架构规划、全局判断与最终验收，
 | **视觉实施者** | **GLM-5.3-Flash（多模态，frontmatter 静态绑定）** | 有界前端/UI 代码实施（Custom Subagent 能力例外通道） |
 | **文本审查者** | **宿主/当前会话模型** | 全新上下文、只读终审（`glm-reviewer`） |
 | **视觉审查者** | **GLM-5.3-Flash（多模态，frontmatter 静态绑定）** | 全新上下文视觉读图终审（`visual-reviewer`，不可用即 fail closed） |
+| **Scout（侦察）** | **GLM-5.3-Flash（只读工具面，frontmatter 静态绑定）** | 只读调查与事实收集，结论必带 `file:line` 证据引用（`conductor-scout`；直派通道，任意路线可用） |
+| **Runner（执行）** | **GLM-5.3-Flash（frontmatter 静态绑定）** | 受托命令/测试逐字执行，诚实回报退出码与输出尾部，绝不改写仓库文件（`conductor-runner`；直派通道，任意路线可用） |
+| **Impl-Flash（闪档实施）** | **GLM-5.3-Flash（frontmatter 静态绑定）** | 五段规格的有界机械实施，ownership 纪律同 workflow 工作者（`conductor-impl-flash`；直派通道，须在持有写者守卫的活动任务下派发） |
+| **Impl（实施）** | **宿主/会话模型（继承——无 `model` 键，`glm-reviewer` 同款先例）** | 需主模型强度、无需整 workflow 的复杂有界实施（`conductor-impl`；直派通道，须在持有写者守卫的活动任务下派发） |
 
 ### 工作者模型 Pin 与用户授权显式选型
 Workflow 工作者绝不静默继承会话模型——`subagent_model` 始终是显式的 provider 全限定精确 id。宿主全部已配置模型入候选（不限 provider、不限 Flash）；启动问答列全清单，**单一候选也须用户显式确认**。选定模型**默认以 max 推理档运行（宿主默认思考档位）；档位不随 pin 存储**——pin 只存模型 id。Flash 档（版本无关 `-Flash` 后缀）是**软推荐位**（有界实施的成本/速度友好档）：

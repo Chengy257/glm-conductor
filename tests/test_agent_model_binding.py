@@ -24,6 +24,16 @@ provider 宿主上的 account-connection-unavailable 硬失败（W0 §13.1 实�
 
 W6（v2.4 Phase 2 P2-F）：flash-implementer 已随 v2.3 执行面退役删除，
 不再在本测试覆盖面内——标准实施路由由主会话经原生 Workflow 承担。
+
+v2.7.0 W6（直派角色四件套）：主会话绕过 Workflow 直接 subagent 派遣的
+四个角色入列——conductor-scout / conductor-runner / conductor-impl-flash
+显式 pin account:bigmodel-individual-coding-plan/GLM-5.3-Flash（直派
+通道同样遵守 worker 模型显式选型契约，缺省/裸 ID 会静默回退主会话
+模型）；conductor-impl（主模型直派实现角色）无 model 键为合法继承
+形态（继承宿主/会话模型，同 glm-reviewer 先例）；四角色 tools 白名单
+与各文件 frontmatter 声明逐字一致（漂移即回归）；impl 系两角色
+（conductor-impl / conductor-impl-flash）正文必须携带 writer guard
+纪律句锚——直派实现的写入与委托工作流共用同一仓储级写入保留契约。
 """
 
 import os
@@ -47,6 +57,32 @@ QUALIFIED_MODEL_RE = re.compile(r"^account:[^/\s]+/\S+$")
 # visual-reviewer 只读工具白名单的禁用工具（出现即视为只读契约回归）
 VISUAL_REVIEWER = "visual-reviewer"
 VISUAL_REVIEWER_FORBIDDEN_TOOLS = ("Write", "Edit", "Bash", "NotebookEdit")
+
+# —— v2.7.0 W6 直派角色四件套 ——
+# 显式 Flash pin 的直派角色（scout / runner / impl-flash 直派 Flash 实现 worker）
+DIRECT_FLASH_ROLES = ("conductor-scout", "conductor-runner", "conductor-impl-flash")
+# 主模型继承形态的直派实现角色（无 model 键，同 glm-reviewer 先例）
+DIRECT_INHERIT_ROLE = "conductor-impl"
+# 直派角色显式 pin 的 worker 模型（provider 全限定，与 runner/scout/
+# impl-flash 三文件 frontmatter 声明一致）
+DIRECT_FLASH_MODEL_PIN = (
+    "account:bigmodel-individual-coding-plan/GLM-5.3-Flash")
+# 四直派角色 tools 白名单（与各文件 frontmatter 声明逐字一致，含顺序）
+DIRECT_ROLE_TOOLS = {
+    "conductor-scout": ("Read", "Glob", "Grep", "LS", "NotebookRead"),
+    "conductor-runner": ("Bash", "Read", "Glob", "TaskOutput", "TaskStop"),
+    "conductor-impl-flash": (
+        "Read", "Write", "Edit", "Glob", "Grep", "Bash",
+        "NotebookRead", "NotebookEdit", "WebFetch", "TodoWrite"),
+    "conductor-impl": (
+        "Read", "Write", "Edit", "Glob", "Grep", "Bash",
+        "NotebookRead", "NotebookEdit", "WebFetch", "TodoWrite"),
+}
+# impl 系角色正文必含的 writer guard 纪律句锚（前置节标题 + 红线句）
+IMPL_WRITER_GUARD_MARKERS = (
+    "Writer-Guard Precondition",
+    "never bypass the writer guard and never suggest bypassing it",
+)
 
 
 def _parse_frontmatter_field(path, key):
@@ -135,6 +171,71 @@ class VisualRoleMultimodalBindingTest(unittest.TestCase):
             [], offenders,
             "%s 的工具白名单含写入/执行类工具 %s：视觉审查者必须保持"
             "只读白名单" % (VISUAL_REVIEWER, offenders))
+
+
+class DirectDispatchRoleBindingTest(unittest.TestCase):
+    """v2.7.0 W6 直派角色四件套：Flash pin / 继承形态 / 工具白名单 / writer guard。
+
+    主会话直派（不经 CreateWorkflow）同样遵守 worker 模型显式选型契约：
+    Flash 三角色显式 pin，主模型实现角色显式继承（无 model 键），不允许
+    第三种形态（缺省隐式回退）。
+    """
+
+    def test_direct_flash_roles_pin_flash_model(self):
+        """scout / runner / impl-flash 的 model 逐字等于直派 Flash pin。"""
+        for name in DIRECT_FLASH_ROLES:
+            path = os.path.join(AGENTS_DIR, "%s.md" % name)
+            self.assertTrue(os.path.isfile(path), "%s.md 缺失" % name)
+            value = _parse_frontmatter_field(path, "model")
+            self.assertIsNotNone(
+                value,
+                "%s 的 frontmatter 缺 model 字段：直派角色必须显式 pin "
+                "worker 模型，缺省即静默回退主会话模型" % name)
+            self.assertEqual(
+                value, DIRECT_FLASH_MODEL_PIN,
+                "%s 的 model=%s 偏离直派 Flash pin %s：worker 模型选型是"
+                "显式 pin 契约，不允许静默漂移"
+                % (name, value, DIRECT_FLASH_MODEL_PIN))
+
+    def test_conductor_impl_inherits_main_session_model(self):
+        """conductor-impl 无 model 键为合法继承形态（主模型直派）。"""
+        path = os.path.join(AGENTS_DIR, "%s.md" % DIRECT_INHERIT_ROLE)
+        self.assertTrue(os.path.isfile(path), "%s.md 缺失" % DIRECT_INHERIT_ROLE)
+        value = _parse_frontmatter_field(path, "model")
+        self.assertIsNone(
+            value,
+            "%s 的 frontmatter 含 model 字段（值 %s）：主模型直派实现角色"
+            "的既定契约是继承宿主/会话模型（无 model 键为合法继承形态，"
+            "同 glm-reviewer 先例）" % (path, value))
+
+    def test_direct_roles_tools_match_frontmatter_whitelist(self):
+        """四直派角色 tools 白名单与文件 frontmatter 声明逐字一致。"""
+        for name, expected in sorted(DIRECT_ROLE_TOOLS.items()):
+            path = os.path.join(AGENTS_DIR, "%s.md" % name)
+            self.assertTrue(os.path.isfile(path), "%s.md 缺失" % name)
+            raw = _parse_frontmatter_field(path, "tools")
+            self.assertIsNotNone(raw, "%s 缺少 tools 字段" % name)
+            actual = tuple(
+                token.strip() for token in raw.split(",") if token.strip())
+            self.assertEqual(
+                actual, expected,
+                "%s 的 tools 白名单 %s 偏离契约声明 %s：直派角色的能力"
+                "边界由 frontmatter 白名单钉死，漂移即回归"
+                % (name, actual, expected))
+
+    def test_impl_roles_body_carries_writer_guard_discipline(self):
+        """impl 系两角色正文必含 writer guard 纪律句锚（前置节 + 红线句）。"""
+        for name in (DIRECT_INHERIT_ROLE, "conductor-impl-flash"):
+            path = os.path.join(AGENTS_DIR, "%s.md" % name)
+            self.assertTrue(os.path.isfile(path), "%s.md 缺失" % name)
+            with open(path, "r", encoding="utf-8") as fh:
+                body = fh.read()
+            for marker in IMPL_WRITER_GUARD_MARKERS:
+                self.assertIn(
+                    marker, body,
+                    "%s 正文缺少 writer guard 纪律句锚 `%s`：直派实现角色"
+                    "与委托工作流共用同一写入保留契约，纪律句不可失锚"
+                    % (name, marker))
 
 
 if __name__ == "__main__":

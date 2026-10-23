@@ -37,7 +37,7 @@ PREFLIGHT is not routing — it is evidence preparation for routing: when key fa
 
 **Triggers** (any unknown item triggers it): root cause / implementation boundary / ownership set / interface contracts / verification plan / hidden coupling risk. Skip when the task is already explicit (all items known) — never reconnoiter for its own sake.
 
-**Method**: prefer ZCode's built-in read-only Explore capability; the main session reads code itself when needed. No custom reconnaissance agents are added. Reconnaissance is read-only and never modifies the repository.
+**Method**: prefer ZCode's built-in read-only Explore capability; the main session reads code itself when needed. Simple read-only reconnaissance is carried by the direct-dispatch scout role (references/role-contracts.md) where it is cheaper (decision D9); deep reconnaissance still prefers the host Explore capability / the main session's own reading. Reconnaissance is read-only and never modifies the repository.
 
 **Output** (after reconnaissance, before the SELECTIVE ROUTE declaration; template verbatim; every entry comes from actual observation — file/symbol/call-graph evidence, never speculative facts; an empty OPEN AMBIGUITY means no open ambiguity):
 
@@ -123,7 +123,7 @@ Authoring discipline:
 
 ## Execution procedure for delegate/full
 
-The only implementation substrate for delegate/full is a ZCode Native Workflow. The main session follows the fixed order below. Runtime calls always go through the runtime CLI named subcommands: `python3 plugins/glm-conductor/runtime/cli.py <subcommand>` — exit codes 0 = success / 2 = validation rejection (including a preflight ready=false block) / 1 = runtime rejection. The authoritative command list is the USAGE at the top of cli.py: never hunt for commands yourself, never invent `python3 -c` inline scripts, and never use command forms outside USAGE.
+A ZCode Native Workflow run remains the only implementation substrate for multi-node delegate/full; a single-node delegate with assurance standard may instead take the direct-dispatch lightweight channel ('Direct dispatch roles'), whose contract states the cost and the recovery semantics explicitly. The main session follows the fixed order below. Runtime calls always go through the runtime CLI named subcommands: `python3 plugins/glm-conductor/runtime/cli.py <subcommand>` — exit codes 0 = success / 2 = validation rejection (including a preflight ready=false block) / 1 = runtime rejection. The authoritative command list is the USAGE at the top of cli.py: never hunt for commands yourself, never invent `python3 -c` inline scripts, and never use command forms outside USAGE.
 
 ### Task launch interview
 
@@ -189,6 +189,17 @@ The complete runbook — both branches with every step, the arm-before-work (INV
 3. **Closure**: after acceptance passes, `cli.py task-complete <repo_root> <task_id>` (terminal transition + `task_completed` event + automatic writer-guard release); failure/cancellation go through `cli.py task-fail` / `cli.py task-cancel <repo_root> <task_id>` (both also release the guard).
 
 Interruption and recovery (workflow stall, quota wait, auto wake) live in the continuity skill; completion-guard semantics live in the enforcement skill.
+
+## Direct dispatch roles
+
+Four direct-dispatch subagent roles — conductor-scout / conductor-runner / conductor-impl-flash / conductor-impl — complement the workflow text worker. Full contracts (trigger / input / output / red lines) live in references/role-contracts.md; this section states the channel rules.
+
+- **Available on any route (no task prerequisite)**: scout (investigation) and runner (running commands and tests) never modify the repository surface — they are usable on solo/delegate/audit/full and on guard-free tasks alike, without a task state file.
+- **Write-type role discipline**: impl-flash / impl are dispatched only in an active task context that holds this repository's writer guard ('Execution procedure for delegate/full'; the guard semantics are unchanged), and the main session hands over the five-part implementation spec in the same format as node declarations — the workflow worker's ownership discipline and honest local_check execution apply verbatim.
+- **delegate single-node lightweight channel (D10 revision clause)**: when the DAG is exactly one node and assurance is standard, an impl role may be dispatched directly instead of compiling a 1-node workflow. The cost is explicit in the contract: no structured NodeResult and no ResumeWorkflowRun recovery (recovery semantics = re-dispatch from repository facts); the completion gate, main-session validation and review chain are unchanged. Multi-node delegate/full keeps the Native Workflow as its only implementation substrate.
+- **solo-route auxiliary positioning**: the main session remains the implementer of record; mechanical blocks may be offloaded to an impl role (bound by the write-type discipline above). The routing matrix's four modes are unchanged.
+- **Model-gate compatibility**: the direct-dispatch roles' model strategy is declared openly in their frontmatter (scout / runner / impl-flash pinned to GLM-5.3-Flash; impl carries no model key and inherits the host/session — the glm-reviewer precedent) and never enters the workflow-model-select pipeline — that gate selects the run-level `subagent_model` of CreateWorkflow submissions and its semantics are unchanged ('Worker model selection gate').
+- **Events**: direct dispatch adds no journal events (decision D13) — validation, review and the completion gate keep their usual accounting.
 
 ## Main-session validation
 
