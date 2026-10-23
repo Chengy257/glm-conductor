@@ -71,7 +71,7 @@ CLI_USAGE = (
     "quota-automation-clear <repo_root> <task_id> [automation_id] | "
     "quota-continuity-preflight <repo_root> <task_id> | "
     "task-create <repo_root> <task_id> <goal> <mode> <assurance> "
-    "[--dag <path>] | "
+    "[--dag <path>] [--auto-approve-workflow] | "
     "record-validation <repo_root> <task_id> <passed|failed> "
     "[--summary <s>] [--commands <s>] ... | "
     "task-complete <repo_root> <task_id> | "
@@ -164,8 +164,13 @@ CLI_USAGE_QUOTA_CONTINUITY_PREFLIGHT = (
     "two arguments.")
 CLI_USAGE_TASK_CREATE = (
     "task-create requires <repo_root> <task_id> <goal> <mode> "
-    "<assurance> [--dag <path>]: five or seven arguments.")
-CLI_USAGE_TASK_CREATE_FLAG = "task-create accepts only --dag <path> as an optional argument."
+    "<assurance> [--dag <path>] [--auto-approve-workflow]: five, six, "
+    "seven, or eight arguments.")
+CLI_USAGE_TASK_CREATE_FLAG = (
+    "task-create accepts only --dag <path> and "
+    "--auto-approve-workflow as optional arguments.")
+CLI_USAGE_TASK_CREATE_AUTO_APPROVE_ONCE = (
+    "task-create accepts --auto-approve-workflow at most once.")
 CLI_USAGE_RECORD_VALIDATION = (
     "record-validation requires <repo_root> <task_id> "
     "<passed|failed> [--summary <s>] [--commands <s>] ..."
@@ -541,6 +546,8 @@ STATE_QUOTA_RESUME_BUDGET_INVARIANT = (
 STATE_QUOTA_RESUME_AUTOMATION_ID_INVALID = (
     "quota_resume.automation_id must be a non-empty string or null")
 STATE_WORKER_MODEL_INVALID = "worker_model must be a non-empty string or null"
+STATE_AUTO_APPROVE_INVALID = (
+    "auto_approve_workflow must be a boolean (true or false)")
 STATE_NOT_OBJECT = "state must be a JSON object"
 STATE_MISSING_REQUIRED_KEY = "Missing required top-level key %s"
 STATE_TASK_ID_EMPTY = "task_id must be a non-empty string"

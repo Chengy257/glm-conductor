@@ -135,8 +135,9 @@ class HooksJsonVersionAgnosticTest(unittest.TestCase):
     def test_hook_event_surface_intact(self):
         hooks = self.config.get("hooks")
         self.assertIsInstance(hooks, dict)
-        self.assertEqual(set(hooks), {"SessionStart", "Stop"})
-        for event in ("SessionStart", "Stop"):
+        self.assertEqual(
+            set(hooks), {"SessionStart", "Stop", "PermissionRequest"})
+        for event in ("SessionStart", "Stop", "PermissionRequest"):
             entries = hooks[event]
             self.assertIsInstance(entries, list)
             self.assertTrue(entries, "%s 为空数组" % event)
@@ -145,7 +146,7 @@ class HooksJsonVersionAgnosticTest(unittest.TestCase):
 
     def test_hook_scripts_referenced_and_present(self):
         scripts = []
-        for event in ("SessionStart", "Stop"):
+        for event in ("SessionStart", "Stop", "PermissionRequest"):
             for entry in self.config["hooks"][event]:
                 for hook in entry["hooks"]:
                     self.assertEqual(hook["type"], "process")
@@ -156,8 +157,10 @@ class HooksJsonVersionAgnosticTest(unittest.TestCase):
         self.assertEqual(
             scripts,
             ["${ZCODE_PLUGIN_ROOT}/hooks/session_start.py",
-             "${ZCODE_PLUGIN_ROOT}/hooks/stop_gate.py"])
-        for name in ("session_start.py", "stop_gate.py"):
+             "${ZCODE_PLUGIN_ROOT}/hooks/stop_gate.py",
+             "${ZCODE_PLUGIN_ROOT}/hooks/permission_request_workflow.py"])
+        for name in ("session_start.py", "stop_gate.py",
+                     "permission_request_workflow.py"):
             self.assertTrue((PLUGIN_ROOT / "hooks" / name).exists(),
                             "钩子脚本缺失：%s" % name)
 

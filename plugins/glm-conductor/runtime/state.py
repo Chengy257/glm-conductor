@@ -56,6 +56,13 @@ v2.4 顶层概念（schema 权威清单）：
     存在才校验（null 或非空 str），缺省即不写键——未问答授权即无
     pin，旧任务加载零迁移；写入归 task.pin_worker_model，消费点
     每次对账当次宿主 configured 集合（失效即拒，绝不回退自动选型）。
+    v2.7.0 起另有可选顶层键 auto_approve_workflow（W2 interview Q4
+    任务级工作流提交免确认授权）：存在才校验（必须为 bool——
+    true/false 均为合法形状，语义按真值解释，消费点只认 is True），
+    缺省即不写键——未问答授权即无键（与 worker_model pin 同款
+    「未授权即无键」语义），旧任务加载零迁移；写入归 task-create
+    --auto-approve-workflow 旗标（经 task.create_task 透传，构造期
+    一次写入，问后独立写）。
 
 durable status 恰为七态：
     active / waiting_quota / waiting_user / blocked / completed /
@@ -173,9 +180,12 @@ TASK_ID_KEYS = ("task_id", "TASK_ID", "CONTINUITY_ID", "continuity_id")
 _TASK_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9-]*$")
 
 # 必填顶层键（缺一即非法；未知顶层键忽略，向前兼容）。可选顶层键：
-# phase（缺省即不写键——描述性标注无 null 空档）与 worker_model
+# phase（缺省即不写键——描述性标注无 null 空档）、worker_model
 # （v2.5 I1 任务级 worker 模型 pin；缺省即不写键——未问答授权即无
-# pin，存在才校验 null 或非空 str，旧任务加载零迁移）。
+# pin，存在才校验 null 或非空 str，旧任务加载零迁移）与
+# auto_approve_workflow（v2.7.0 W2 任务级工作流提交免确认授权；
+# 缺省即不写键——未问答授权即无键，存在才校验 bool，旧任务加载
+# 零迁移）。
 _REQUIRED_TOP_KEYS = ("task_id", "goal", "repository", "route", "dag",
                       "status", "workflow_run_id", "validation", "review",
                       "quota_resume")
@@ -538,6 +548,20 @@ def _validate_worker_model(model_id) -> "list[str]":
     return []
 
 
+def _validate_auto_approve(value) -> "list[str]":
+    """校验顶层 auto_approve_workflow 键（v2.7.0 W2 任务级工作流提交
+    免确认授权，interview Q4）。
+
+    存在才校验：值必须为 bool（True/False 均为合法形状——语义按
+    真值解释，消费点只认 is True；False 与缺省（键不写）同按未授权
+    解释）。本层只收形状；缺省即不写键——未问答授权即无键（与
+    worker_model pin 同款「未授权即无键」语义），旧任务加载零迁移。
+    """
+    if not isinstance(value, bool):
+        return [messages.STATE_AUTO_APPROVE_INVALID]
+    return []
+
+
 def validate_state(state) -> "list[str]":
     """校验 v2.4 状态 dict，返回错误消息列表（英文，含字段路径）。
 
@@ -545,8 +569,10 @@ def validate_state(state) -> "list[str]":
     object"]。
     必填顶层键（_REQUIRED_TOP_KEYS）：task_id / goal / repository /
     route / dag / status / workflow_run_id / validation / review /
-    quota_resume；phase 与 worker_model（v2.5 I1 任务级 worker 模型
-    pin）可选（缺省即不写键）。未知顶层键忽略（向前兼容），不报错。
+    quota_resume；phase、worker_model（v2.5 I1 任务级 worker 模型
+    pin）与 auto_approve_workflow（v2.7.0 W2 任务级工作流提交免
+    确认授权，bool）可选（缺省即不写键）。未知顶层键忽略（向前兼
+    容），不报错。
     带 v2.3 标记的遗留 state 在本函数无豁免：缺 v2.4 必填键照常报错
     （绝不自动迁移）——消费方应先经 is_legacy_state / detect_legacy_
     task 识别并按 LEGACY_STATE_GUIDANCE 报告为 v2.3 任务。
@@ -619,6 +645,12 @@ def validate_state(state) -> "list[str]":
     if "worker_model" in state:
         errors.extend(_validate_worker_model(state["worker_model"]))
 
+    # auto_approve_workflow（v2.7.0 W2：任务级工作流提交免确认授权，
+    # 可选键存在才校验；缺省即不写键，未知键忽略的向前兼容不变）
+    if "auto_approve_workflow" in state:
+        errors.extend(
+            _validate_auto_approve(state["auto_approve_workflow"]))
+
     return errors
 
 
@@ -626,7 +658,7 @@ def validate_state(state) -> "list[str]":
 
 def new_task_state(task_id, goal, route, *, repository_root, dag_nodes=(),
                    workflow_run_id=None, status="active",
-                   phase=None) -> dict:
+                   phase=None, auto_approve_workflow=False) -> dict:
     """构造带默认值的 v2.4 完整状态 dict。
 
     只做构造不做语义校验（调用方负责 validate_state）。
@@ -644,7 +676,11 @@ def new_task_state(task_id, goal, route, *, repository_root, dag_nodes=(),
         产物），浅拷贝为 list；非 list/tuple 抛 TypeError；
       - workflow_run_id：委派运行 id，缺省 None（启动前可空）；
       - status：缺省 "active"（v2.4 无 created 阶段态）；
-      - phase：可选描述性标注（None = 不写键——枚举无 null 空档）。
+      - phase：可选描述性标注（None = 不写键——枚举无 null 空档）；
+      - auto_approve_workflow（v2.7.0 W2，缺省 False）：interview Q4
+        的任务级工作流提交免确认授权——仅当 True 时写顶层键
+        auto_approve_workflow=True；缺省 False 即不写键（未授权即
+        无键，与 worker_model pin 同款语义，旧任务加载零迁移）。
 
     构造结果恒含 validation / review（全 null 未记录态）与
     quota_resume（default_quota_resume 占位块）三个任务级块。
@@ -689,6 +725,10 @@ def new_task_state(task_id, goal, route, *, repository_root, dag_nodes=(),
     }
     if phase is not None:
         st["phase"] = phase
+    # 仅当 True 时写键（缺省 False 即不写——未授权即无键，与
+    # worker_model pin 同款语义；键值恒为字面 True，消费点只认 is True）
+    if auto_approve_workflow is True:
+        st["auto_approve_workflow"] = True
     bind_repository_root(st, repository_root)
     return st
 

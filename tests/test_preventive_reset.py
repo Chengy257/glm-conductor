@@ -669,11 +669,12 @@ class TestRunbookContract(unittest.TestCase):
         # 锚随译文改为英文等价串）
         continuity_runbook = self.continuity[
             self.continuity.index(
-                "Interview (single round of three questions: "
+                "Interview (single round of four questions: "
                 "1 enable + bounded budget"):]
         orchestration_runbook = self.orchestration[
             self.orchestration.index(
-                "auto:    task-create -> quota-resume-authorize"):]
+                "auto:    task-create "
+                "[--auto-approve-workflow] -> quota-resume-authorize"):]
         for runbook in (continuity_runbook, orchestration_runbook):
             workflow_at = runbook.index("CreateWorkflow")
             self.assertLess(runbook.index("quota-automation-bind"),

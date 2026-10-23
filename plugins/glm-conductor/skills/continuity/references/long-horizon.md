@@ -6,7 +6,7 @@ This file is the mechanics reference of the continuity skill; SKILL.md points he
 
 ```
 Task start (orchestration declares SELECTIVE ROUTE, the 'Task launch interview'
-   single round of three questions, task-create lands state.json)
+   single round of four questions, task-create lands state.json)
    |
    v
 [Arm] (auto/until_done only; arm-before-work with establish-first:
@@ -260,8 +260,11 @@ user-authorized task-level default for any new workflow submission — a
 preference, not the task identity. Consume it via workflow-model-select
 --task-ref against the current host model list; if the pin is no longer
 on the list, the selection is rejected: block the submission and wait
-for the user. Never fall back to auto-selection, never switch models
-silently, and NEVER ask questions on an unattended wake/recovery turn.
+for the user. Workflow submission auto-approval (auto_approve_workflow
+in task state) is likewise a task-level authorization surface: when it
+is enabled, the wake round's path-type re-submissions are
+confirmation-free. Never fall back to auto-selection, never switch
+models silently, and NEVER ask questions on an unattended wake/recovery turn.
 
 Repository state is authoritative over checkpoint state.
 

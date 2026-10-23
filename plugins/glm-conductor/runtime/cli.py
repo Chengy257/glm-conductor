@@ -214,15 +214,21 @@ v2.4 Phase 3（P3-D/E）收口面：
         绑定存在，绝不宣称宿主侧激活仍存活。任务层拒绝（任务缺失 /
         v2.3 遗留）→ 退出码 1。输出单行 JSON {task_id, preflight}。
     task-create <repo_root> <task_id> <goal> <mode> <assurance>
-            [--dag <path>]
+            [--dag <path>] [--auto-approve-workflow]
         任务创建（v2.5.2 W2，task.create_task 薄壳）：CLI 侧先闸
         goal 非空 / mode ∈ ROUTE_MODES / assurance ∈
         ASSURANCE_LEVELS（违规 → 退出码 2）；--dag 读 DAG JSON 文件
         （顶层节点数组或 {nodes: [...]} 对象，兼容 v24-compile 同款
         格式；文件不可读 / 非法 JSON / 节点形状 / 依赖图错误聚合
-        报出 → 退出码 2）。runtime.task 拒绝（任务已存在等）→
-        退出码 1。成功输出 {task_id, status, route} 并落
-        route_selected 事件。
+        报出 → 退出码 2）。v2.7.0 起增无值旗标
+        --auto-approve-workflow（至多一次，出现位置任意但恒在五个
+        位置参数之后，与 --dag 可同时出现——解析先摘旗标再按既有
+        5/7 形状校验）：interview Q4 的任务级工作流提交免确认授权，
+        True 时透传 task.create_task 落 state 顶层
+        auto_approve_workflow=True 键（缺省不写键）。runtime.task
+        拒绝（任务已存在等）→ 退出码 1。成功输出 {task_id, status,
+        route}（旗标命中时增 auto_approve_workflow: true 键，缺省
+        不增）并落 route_selected 事件。
     record-validation <repo_root> <task_id> <passed|failed>
             [--summary <s>] [--commands <s>] ...
         任务级验证记录（v2.5.2 W2，task.record_validation 薄壳）：
@@ -1132,14 +1138,19 @@ def _load_dag_nodes(dag_path):
 
 
 def _task_create(repo_root, task_id, goal, mode, assurance,
-                 dag_path=None) -> int:
+                 dag_path=None, auto_approve_workflow=False) -> int:
     """task-create：创建并持久化 v2.4 任务（task.create_task 薄壳）。
 
     CLI 侧先闸（参数值非法 → 退出码 2）：goal 非空；mode ∈
     state.ROUTE_MODES；assurance ∈ state.ASSURANCE_LEVELS；--dag
     文件形状见 _load_dag_nodes。runtime.task 拒绝（任务已存在 /
-    状态非法聚合）→ _TaskRejected（退出码 1）。成功输出单行 JSON
-    {task_id, status, route} 并落 route_selected 事件。"""
+    状态非法聚合）→ _TaskRejected（退出码 1）。v2.7.0 W2 起
+    auto_approve_workflow（interview Q4 任务级工作流提交免确认授权）
+    原样透传 task.create_task——True 时 state 顶层落
+    auto_approve_workflow=True 键（缺省 False 不写键）。成功输出
+    单行 JSON {task_id, status, route}（旗标命中时增
+    auto_approve_workflow: true 键，缺省不增）并落 route_selected
+    事件。"""
     from runtime import task  # 函数内 import：monkeypatch 友好
     if not isinstance(goal, str) or goal == "":
         raise ValueError(
@@ -1156,13 +1167,17 @@ def _task_create(repo_root, task_id, goal, mode, assurance,
     try:
         st = task.create_task(
             repo_root, task_id, goal,
-            {"mode": mode, "assurance": assurance}, dag_nodes=dag_nodes)
+            {"mode": mode, "assurance": assurance}, dag_nodes=dag_nodes,
+            auto_approve_workflow=auto_approve_workflow)
     except ValueError as exc:
         if _is_structural_state_rejection(exc):
             raise  # 盘上 state 结构性拒绝 → 校验拒绝（退出码 2）
         raise _TaskRejected(str(exc)) from exc
-    _emit({"task_id": task_id, "status": st.get("status"),
-           "route": st.get("route")})
+    payload = {"task_id": task_id, "status": st.get("status"),
+               "route": st.get("route")}
+    if auto_approve_workflow:
+        payload["auto_approve_workflow"] = True
+    _emit(payload)
     return 0
 
 
@@ -1475,18 +1490,33 @@ def _dispatch(args) -> int:
         return _quota_continuity_preflight(rest[0], rest[1])
     if cmd == "task-create":
         # 位置参数 <repo_root> <task_id> <goal> <mode> <assurance> +
-        # 可选旗标对 --dag <path> → 五或七个参数
-        if len(rest) not in (5, 7):
-            raise _UsageError(
-                messages.CLI_USAGE_TASK_CREATE + USAGE)
+        # 可选旗标：--dag <path>（恒成对）与 --auto-approve-workflow
+        # （无值，至多一次，v2.7.0 W2）——旗标出现位置任意但恒在五
+        # 个位置参数之后，与 --dag 可同时出现：解析先摘无值旗标，再
+        # 按既有 5/7 形状校验余下参数（位置参数区间的同名词按位置
+        # 参数原样解释，不认旗标）
+        auto_approve = False
+        picked = []
+        for index, arg in enumerate(rest):
+            if index >= 5 and arg == "--auto-approve-workflow":
+                if auto_approve:
+                    raise _UsageError(
+                        messages.CLI_USAGE_TASK_CREATE_AUTO_APPROVE_ONCE
+                        + USAGE)
+                auto_approve = True
+            else:
+                picked.append(arg)
         dag_path = None
-        if len(rest) == 7:
-            if rest[5] != "--dag":
+        if len(picked) == 7:
+            if picked[5] != "--dag":
                 raise _UsageError(
                     messages.CLI_USAGE_TASK_CREATE_FLAG + USAGE)
-            dag_path = rest[6]
-        return _task_create(rest[0], rest[1], rest[2], rest[3], rest[4],
-                            dag_path=dag_path)
+            dag_path = picked[6]
+        elif len(picked) != 5:
+            raise _UsageError(messages.CLI_USAGE_TASK_CREATE + USAGE)
+        return _task_create(picked[0], picked[1], picked[2], picked[3],
+                            picked[4], dag_path=dag_path,
+                            auto_approve_workflow=auto_approve)
     if cmd == "record-validation":
         # 位置参数 <repo_root> <task_id> <passed|failed> + 旗标对
         # （--summary <s> 至多一次；--commands <s> 可重复，每次恰

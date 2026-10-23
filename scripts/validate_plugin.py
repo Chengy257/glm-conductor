@@ -84,7 +84,12 @@
          hook 对象 type 限于 process / command，type=process 时 command
          必须为 python3，timeoutMs 若存在必须为 >0 的整数，matcher 若存在
          必须为字符串，args 中以 ${ZCODE_PLUGIN_ROOT}/ 开头的路径替换为
-         插件根 plugins/glm-conductor 后必须实际存在；
+         插件根 plugins/glm-conductor 后必须实际存在；v2.7.0 W2 起 13.4
+         另设 PermissionRequest 正向锚：必须声明 PermissionRequest 事件，
+         且其某 entry 的 matcher 含 CreateWorkflow、内层 hook 为
+         type=process/command=python3、args 指向
+         ${ZCODE_PLUGIN_ROOT}/hooks/permission_request_workflow.py
+         （脚本真实存在由逐 hook args 存在性校验统一把关，缺失即 FAIL）；
      14. runtime 状态层与技能契约标记：plugins/glm-conductor/runtime/ 下的
          __init__.py / state.py / journal.py / ownership.py、hooks/ 下的
          stop_gate.py、tests/ 下的 test_state_v24.py /
@@ -159,7 +164,7 @@
          f) 任务启动问答节锚缺失（orchestration/SKILL.md 必含
             '### Task launch interview' 节标题、'The trigger point
             precedes create_task' 触发条件、'there is no exemption'
-            强制零判断、'Single round of three questions' 合并题形、
+            强制零判断、'Single round of four questions' 合并题形、
             'Floor carrier interval' 第三问与 'Wake turns / resume
             turns never interview' 无人值守边界措辞）；
          g) 任务 pin 失效即拒措辞缺失（v2.6.1 W3b 起 runtime 实现面
@@ -368,6 +373,12 @@ ALLOWED_HOOK_EVENTS = (
     "PostToolUseFailure", "PermissionRequest", "Stop")
 ALLOWED_HOOK_TYPES = ("process", "command")
 HOOK_COMMAND = "python3"
+# 13.4（v2.7.0 W2 CreateWorkflow 免确认）：PermissionRequest 正向锚的
+# 免确认工作流脚本 args——事件声明与 entry 形状要求见 check_13 内 13.4；
+# 脚本真实存在由 13.3 逐 hook args 校验统一把关（不重复校验），
+# PASS 明细沿用 rel_display 惯例展示解析后的插件内相对路径
+PERMISSION_REQUEST_SCRIPT_ARG = (
+    "${ZCODE_PLUGIN_ROOT}/hooks/permission_request_workflow.py")
 
 # —— 检查 14：runtime 状态层与技能契约标记 ——
 RUNTIME_DIR = os.path.join(REPO_ROOT, "plugins", "glm-conductor", "runtime")
@@ -532,13 +543,14 @@ GQC_RETIREMENT_WORDS = ("删除", "退役", "移除", "下架",
 # v2.5.2（精确唤醒与模型适配计划）将 f/g/h 三组锚随契约重写同步改锚，
 # 并追加 i（CLI 生命周期命令面）与 j（精度层睡眠模板）两组。
 # 16f：任务启动问答节锚（v2.5.2 D3/D4 文档面——问答节存在 + create_task
-# 之前触发 + 强制零判断（豁免删除）+ 单轮三问题形 + 第三问（地板间隔）+
+# 之前触发 + 强制零判断（豁免删除）+ 单轮四问题形（v2.7.0 W2 第四问
+# 工作流提交免确认）+ 第三问（地板间隔）+
 # 无人值守禁弹问边界；v2.6.1 W2 随 orchestration 英文化改英文锚）
 LAUNCH_INTERVIEW_MARKERS = (
     "### Task launch interview",
     "The trigger point precedes create_task",
     "there is no exemption",
-    "Single round of three questions",
+    "Single round of four questions",
     "Floor carrier interval",
     "Wake turns / resume turns never interview",
 )
@@ -1355,6 +1367,57 @@ def check_13_hooks_manifest(results):
                     details.append(
                         "PASS: %s → command=%s%s"
                         % (hook_where, hook.get("command"), exist_note))
+
+    # 13.4 PermissionRequest 正向锚（v2.7.0 W2 CreateWorkflow 免确认）：
+    # 必须声明 PermissionRequest 事件，且其某 entry 的 matcher 含
+    # CreateWorkflow、内层 hook 为 type=process/command=python3、args
+    # 指向免确认工作流脚本。脚本真实存在由 13.3 逐 hook args 校验统一
+    # 把关（同一路径缺失已在上方 FAIL，此处不重复校验），PASS 明细沿用
+    # rel_display 惯例展示解析后的插件内相对路径。
+    if "PermissionRequest" not in hooks:
+        details.append(
+            "FAIL: 缺少 `PermissionRequest` 事件键"
+            "（v2.7.0 W2 CreateWorkflow 免确认钩子未声明）")
+        ok = False
+    else:
+        pr_entries = hooks["PermissionRequest"]
+        if not isinstance(pr_entries, list):
+            pr_entries = []  # 非数组已由 13.3 FAIL，此处只做锚匹配
+        anchor_script = None
+        for entry in pr_entries:
+            if not isinstance(entry, dict):
+                continue
+            matcher = entry.get("matcher")
+            if not (isinstance(matcher, str) and "CreateWorkflow" in matcher):
+                continue
+            pr_inner_hooks = entry.get("hooks")
+            if not isinstance(pr_inner_hooks, list):
+                continue
+            for hook in pr_inner_hooks:
+                if not isinstance(hook, dict):
+                    continue
+                args = hook.get("args")
+                if (hook.get("type") == "process"
+                        and hook.get("command") == HOOK_COMMAND
+                        and isinstance(args, list)
+                        and PERMISSION_REQUEST_SCRIPT_ARG in args):
+                    anchor_script = "%s/%s" % (
+                        PLUGIN_ROOT_REL,
+                        PERMISSION_REQUEST_SCRIPT_ARG[len(PLUGIN_ROOT_PREFIX):])
+                    break
+            if anchor_script:
+                break
+        if anchor_script:
+            details.append(
+                "PASS: PermissionRequest 正向锚（CreateWorkflow 免确认）"
+                "→ command=python3，脚本: %s" % anchor_script)
+        else:
+            details.append(
+                "FAIL: PermissionRequest 事件未含 CreateWorkflow 免确认锚"
+                "（需某 entry matcher 含 CreateWorkflow、内层 hook "
+                "type=process/command=python3、args 指向 %s）"
+                % PERMISSION_REQUEST_SCRIPT_ARG)
+            ok = False
 
     results.append((13, title, ok, details))
 

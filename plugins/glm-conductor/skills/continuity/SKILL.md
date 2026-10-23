@@ -121,7 +121,7 @@ The establish-first master principle lives in 'arm-before-work' (establish/re-ar
 **manual continuity** (interview question 1 answered "not enable" — the interview is the shared mandatory entry of both branches; question 3 does not appear):
 
 ```
-Interview (single round of three questions, question 1 "not enable")
+Interview (single round of four questions, question 1 "not enable")
 -> task-create <repo_root> <task_id> <goal> <mode> <assurance> [--dag <path>]
 -> v24-compile <dag-json> [--task-ref <id>] [--out <path>]
 -> ListModels -> write the temporary JSON file
@@ -134,8 +134,9 @@ Interview (single round of three questions, question 1 "not enable")
 **auto continuity** (entry = the interview confirmed enable): question 1 "enable" lands the authorization first, and the budget is selected in the same interview; the user's statement is authorization intent, never an unbounded authorization. **Arm-before-work (INV-CONT-01) with establish-first**: the floor carrier and the first precision sleep are established in the same batch before CreateWorkflow:
 
 ```
-Interview (single round of three questions: 1 enable + bounded budget; 2 worker model,
-   all candidates + explicit confirmation; 3 floor interval, default 1h)
+Interview (single round of four questions: 1 enable + bounded budget; 2 worker model,
+   all candidates + explicit confirmation; 3 floor interval, default 1h; 4 workflow
+   submission auto-approval, delegate/full only — see orchestration 'Task launch interview')
 -> task-create <repo_root> <task_id> <goal> <mode> <assurance> [--dag <path>]
 -> quota-resume-authorize <repo_root> <task_id> <max_resumes> (the budget confirmed in question 1)
 -> immediately quota-resume-decision <repo_root> <task_id> --force-refresh to obtain the observed

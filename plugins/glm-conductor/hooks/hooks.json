@@ -1,5 +1,5 @@
 {
-  "description": "GLM Conductor hooks: SessionStart resume-context injection and Stop completion guard.",
+  "description": "GLM Conductor hooks: SessionStart resume-context injection, Stop completion guard, and PermissionRequest CreateWorkflow task-level auto-approve.",
   "hooks": {
     "SessionStart": [
       {
@@ -28,6 +28,22 @@
             ],
             "timeoutMs": 5000,
             "statusMessage": "glm-conductor: checking completion gate…"
+          }
+        ]
+      }
+    ],
+    "PermissionRequest": [
+      {
+        "matcher": "CreateWorkflow",
+        "hooks": [
+          {
+            "type": "process",
+            "command": "python3",
+            "args": [
+              "${ZCODE_PLUGIN_ROOT}/hooks/permission_request_workflow.py"
+            ],
+            "timeoutMs": 5000,
+            "statusMessage": "glm-conductor: checking workflow auto-approve…"
           }
         ]
       }

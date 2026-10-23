@@ -15,11 +15,15 @@
     receipt，不要求 stdout 捕获或 runner 身份，无逐单元证据面。
 
 接口：
-    create_task(repo_root, task_id, goal, route, dag_nodes=())
+    create_task(repo_root, task_id, goal, route, dag_nodes=(),
+                auto_approve_workflow=False)
         校验后持久化 v2.4 state（route 摘取 mode 与 assurance 两键，
         含 assurance 词汇 standard/high 时一并存入 route 块）；任务已
         存在即拒绝（绝不覆盖既有账本）；写者守卫关联发生在 Workflow
-        启动时，不在本函数（本函数不 acquire）。
+        启动时，不在本函数（本函数不 acquire）。auto_approve_workflow
+        （v2.7.0 W2 interview Q4，缺省 False = 不写键）原样透传
+        new_task_state——True 时顶层写 auto_approve_workflow=True
+        （任务级工作流提交免确认授权，落键语义同 worker_model）。
     load_task(repo_root, task_id)
         读取任务状态 → dict | None；v2.3 遗留任务经遗留检测透传为
         ValueError（带 LEGACY_STATE_GUIDANCE 处置指引），绝不静默当作
@@ -367,7 +371,8 @@ def _compute_change_id(st, repo_root) -> str:
 
 # —— 创建 / 读取 ——
 
-def create_task(repo_root, task_id, goal, route, dag_nodes=()) -> dict:
+def create_task(repo_root, task_id, goal, route, dag_nodes=(),
+                auto_approve_workflow=False) -> dict:
     """校验并持久化一个新 v2.4 任务，返回构造出的完整状态 dict。
 
     - 持久化前显式 validate_state（聚合英文错误，任一错误即拒绝且零
@@ -380,6 +385,12 @@ def create_task(repo_root, task_id, goal, route, dag_nodes=()) -> dict:
       TypeError（new_task_state 口径）；
     - dag_nodes：静态节点 dict 列表（runtime.work_unit.new_node 产物），
       逐节点 + 整图校验（错误带 dag[i] 路径）；空数组合法；
+    - auto_approve_workflow（v2.7.0 W2，可选，缺省 False）：interview
+      Q4 的任务级工作流提交免确认授权，原样透传 new_task_state——
+      仅当 True 时在构造期一次写入顶层 auto_approve_workflow=True
+      键；落键语义同 worker_model——问后独立写（缺省即不写键，未
+      授权即无键），bool 形状归 state.validate_state 收口；
+      route_selected 事件不带新字段（既有键/校验/事件一律不动）；
     - 任务已存在（盘上有 state.json，含损坏文件——load_state 抛
       ValueError）即拒绝：绝不静默覆盖既有任务账本；
     - 仓库根绑定（RB-2）：repository.root 记为 repo_root 的归一绝对
@@ -392,7 +403,8 @@ def create_task(repo_root, task_id, goal, route, dag_nodes=()) -> dict:
         raise ValueError(messages.TASK_CREATE_ALREADY_EXISTS % task_id)
     st = state.new_task_state(
         task_id, goal, route, repository_root=repo_root,
-        dag_nodes=dag_nodes)
+        dag_nodes=dag_nodes,
+        auto_approve_workflow=auto_approve_workflow)
     errors = state.validate_state(st)
     if errors:
         raise ValueError(

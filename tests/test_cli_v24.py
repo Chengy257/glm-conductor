@@ -58,6 +58,12 @@ quota-automation-clear / quota-continuity-preflight）——规格 U6 测试
      launch/resume 阻断）；任务缺失 exit 1；空 automation_id exit 1；
      auto 已授权未武装的 decision 经 CLI 仍 remain-waiting
      （continuity-unarmed，任务保持 waiting_quota、零预算消耗）。
+  7. task-create --auto-approve-workflow（v2.7.0 W2 interview Q4
+     免确认授权旗标）：旗标命中 → 输出 JSON 增
+     auto_approve_workflow: true 键且 state 顶层落键（is True）；
+     缺省输出与落盘均无该键（未授权即无键）；旗标与 --dag 共存成功
+     （两个旗标位置任意）；重复旗标 → 2（at most once 用法错）、
+     旗标混入位置参数区间 / 旗标携带未知旗标等形状非法 → 2 且零落盘。
 
 调用方式：模仿 tests/test_cli_extensions.py 的真实子进程冒烟
 （subprocess.run([sys.executable, CLI_PATH, ...], encoding="utf-8")）——
@@ -1224,6 +1230,123 @@ class QuotaAutomationCliTest(QuotaLifecycleCliFixture):
         code, _stdout = self.run_cli(
             "quota-continuity-preflight", self.repo, self.TID, "extra")
         self.assertEqual(code, 2)
+
+
+# —— 8. task-create --auto-approve-workflow（v2.7.0 W2，CLI 薄壳） ——
+
+class TaskCreateAutoApproveCliTest(CliV24Fixture):
+    """task-create --auto-approve-workflow 旗标面（v2.7.0 W2）：
+    落键回显 / 缺省无键 / --dag 共存 / 重复与形状非法 → 2。
+
+    沿用本文件真实子进程风格（run_cli / run_cli_json，cwd 与账本钉在
+    tempfile 临时仓库）；落盘断言经 runtime.state.load_state 读临时
+    仓库，绝不触碰本仓库真实账本。"""
+
+    TID = "v24-autoapprove-1a2b3c"
+    TID_SECOND = "v24-autoapprove-2b3c4d"
+
+    def create(self, task_id=TID, *extra):
+        """五位置参数基座 + 可选尾部旗标的 task-create 调用。"""
+        return self.run_cli_json(
+            "task-create", self.repo, task_id, "免确认授权冒烟测试目标",
+            "solo", "standard", *extra)
+
+    def disk_state(self, task_id=TID):
+        """临时仓库盘上任务 state（断言落键 / 无键 / 零落盘）。"""
+        return state.load_state(self.repo, task_id)
+
+    def test_flag_persists_key_and_reports_in_output(self):
+        """旗标命中：输出 JSON 含 auto_approve_workflow: true 且盘上
+        state 顶层落键（is True）。"""
+        code, payload, stderr = self.create(
+            self.TID, "--auto-approve-workflow")
+        self.assertEqual(code, 0, stderr)
+        self.assertEqual(stderr, "")
+        # 既有三键不动 + 旗标回显键（恰四键）
+        self.assertEqual(
+            sorted(payload.keys()),
+            ["auto_approve_workflow", "route", "status", "task_id"])
+        self.assertIs(payload["auto_approve_workflow"], True)
+        st = self.disk_state()
+        self.assertIsNotNone(st)
+        self.assertIs(st["auto_approve_workflow"], True)
+
+    def test_default_output_and_disk_have_no_key(self):
+        """缺省（无旗标）：输出与落盘均无 auto_approve_workflow 键
+        （未授权即无键语义，与 worker_model pin 同款）。"""
+        code, payload, stderr = self.create(self.TID)
+        self.assertEqual(code, 0, stderr)
+        self.assertNotIn("auto_approve_workflow", payload)
+        self.assertEqual(
+            sorted(payload.keys()), ["route", "status", "task_id"])
+        st = self.disk_state()
+        self.assertIsNotNone(st)
+        self.assertNotIn("auto_approve_workflow", st)
+
+    def test_flag_coexists_with_dag_both_orders(self):
+        """旗标与 --dag 共存成功：节点照常落盘 + 授权键落盘；两个
+        旗标出现位置任意（--dag 在前 / 旗标在前两序均成功）。"""
+        dag_path = self.write_dag({"nodes": [
+            {"id": "impl-a", "objective": "实现免确认授权的节点",
+             "depends_on": [], "ownership": ["src/a/**"]},
+            {"id": "impl-b", "objective": "实现下游依赖节点",
+             "depends_on": ["impl-a"], "ownership": ["src/b/**"]},
+        ]}, name="auto-dag.json")
+        # 序一：--dag 在前、旗标在后
+        code, payload, stderr = self.run_cli_json(
+            "task-create", self.repo, self.TID, "免确认授权冒烟测试目标",
+            "solo", "standard", "--dag", dag_path,
+            "--auto-approve-workflow")
+        self.assertEqual(code, 0, stderr)
+        self.assertIs(payload["auto_approve_workflow"], True)
+        st = self.disk_state(self.TID)
+        self.assertIs(st["auto_approve_workflow"], True)
+        self.assertEqual([n["id"] for n in st["dag"]],
+                         ["impl-a", "impl-b"])
+        # 序二：旗标在前、--dag 在后
+        code, payload, stderr = self.run_cli_json(
+            "task-create", self.repo, self.TID_SECOND,
+            "免确认授权冒烟测试目标", "solo", "standard",
+            "--auto-approve-workflow", "--dag", dag_path)
+        self.assertEqual(code, 0, stderr)
+        self.assertIs(payload["auto_approve_workflow"], True)
+        st = self.disk_state(self.TID_SECOND)
+        self.assertIs(st["auto_approve_workflow"], True)
+        self.assertEqual(len(st["dag"]), 2)
+
+    def test_duplicate_flag_exit_2(self):
+        """重复旗标 → 用法错退出码 2（at most once）且零落盘。"""
+        code, payload, _stderr = self.create(
+            self.TID, "--auto-approve-workflow", "--auto-approve-workflow")
+        self.assertEqual(code, 2)
+        self.assertIn("error", payload)
+        self.assertIn(
+            messages.CLI_USAGE_TASK_CREATE_AUTO_APPROVE_ONCE,
+            payload["error"])
+        self.assertIsNone(self.disk_state())
+
+    def test_misplaced_flag_exit_2(self):
+        """旗标混入位置参数区间 → 按位置参数原样解释 → 形状非法
+        （六参数）退出码 2 且零落盘。"""
+        code, payload, _stderr = self.run_cli_json(
+            "task-create", self.repo, "--auto-approve-workflow",
+            self.TID, "免确认授权冒烟测试目标", "solo", "standard")
+        self.assertEqual(code, 2)
+        self.assertIn("error", payload)
+        self.assertIn(
+            messages.CLI_USAGE_TASK_CREATE.split("[")[0],
+            payload["error"])
+        self.assertIsNone(self.disk_state())
+
+    def test_flag_with_unknown_flag_exit_2(self):
+        """旗标 + 未知旗标（形状非法）→ 退出码 2 且零落盘。"""
+        code, payload, _stderr = self.create(
+            self.TID, "--auto-approve-workflow", "--bogus", "x")
+        self.assertEqual(code, 2)
+        self.assertIn("error", payload)
+        self.assertIn(
+            messages.CLI_USAGE_TASK_CREATE_FLAG, payload["error"])
+        self.assertIsNone(self.disk_state())
 
 
 if __name__ == "__main__":
