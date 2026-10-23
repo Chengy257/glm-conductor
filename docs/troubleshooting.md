@@ -233,3 +233,11 @@ All of them live under the **repository-level** `.glm-conductor/` (prefer adding
 - The visual high-assurance route stops per the fail-closed discipline: report the binding as unavailable to the user honestly, **never fall back to a text model** (glm-reviewer or the main session) as the visual final review, and never infer from text that the interface is fine;
 - **Manual acceptance instead**: the acceptance of visual tasks is done by the user personally viewing the screenshots / the running result, or downgraded to assurance: standard (main-session text validation + the user's own visual check);
 - Once the host fixes that account connection, the visual-reviewer binding becomes usable again automatically (no agent-definition change is needed — the fix is on the host's connection face); agent definitions are snapshotted only at session start, so after the host fix you must **start a new session** before dispatching.
+
+## 12. SessionStart resume injection after an app restart / session resume (v2.7.0 W3)
+
+**Symptom** (pre-2.7.0): after the Desktop app reopens or a session is resumed, the `GLM CONDUCTOR RESUME CONTEXT` injection that fires on fresh session starts did not appear — unfinished tasks were not surfaced until the next fresh session.
+
+**Root cause**: the SessionStart hook matcher was `startup|clear|compact`, while the official matcher source vocabulary is `startup | resume | clear | compact` (zcode-guide diagnosing-hooks §1) — the `resume` source (emitted on app reopen / session resume) was never matched.
+
+**Fix shipped in v2.7.0**: the matcher is now `startup|resume|clear|compact` (pure widening; the hook consumes no source value from stdin). Nothing to configure; after installing 2.7.0 and refreshing the plugin cache, **start a new session** — hook faces are snapshotted at session start, so the widened matcher only reaches sessions launched after the refresh (the same snapshot semantics as §5's environment-sync table). The injection content itself is unchanged (one minimal line per unfinished task).

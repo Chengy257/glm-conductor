@@ -4,8 +4,11 @@
 
 职责：
     以 ZCode 插件钩子（hooks/hooks.json 声明，matcher
-    "startup|clear|compact"）挂在 SessionStart 事件上：新会话启动 /
-    compact / clear 时，查 runtime.recovery 的恢复发现（纯本地：
+    "startup|resume|clear|compact"——v2.7.0 W3 补 resume 源：官方
+    源值域 startup/resume/clear/compact，应用重开会话恢复（resume）
+    也触发恢复注入；改动为纯放宽（加法），stdin 源值本不消费）挂在
+    SessionStart 事件上：新会话启动 / resume / compact / clear 时，
+    查 runtime.recovery 的恢复发现（纯本地：
     state.json 只读；v2.4 P2-E 起为任务级最小恢复摘要——每任务仅
     task id / goal / repository / status / route / workflow run id /
     quota 等待态 / 下一安全动作，v2.3 遗留任务一行式，无任何单元级

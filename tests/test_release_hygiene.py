@@ -142,7 +142,7 @@ class HooksJsonVersionAgnosticTest(unittest.TestCase):
             self.assertIsInstance(entries, list)
             self.assertTrue(entries, "%s 为空数组" % event)
         self.assertEqual(hooks["SessionStart"][0].get("matcher"),
-                         "startup|clear|compact")
+                         "startup|resume|clear|compact")
 
     def test_hook_scripts_referenced_and_present(self):
         scripts = []
