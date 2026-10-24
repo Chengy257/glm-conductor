@@ -32,6 +32,20 @@ v2.7.0 W2（CreateWorkflow 任务级免确认，interview Q4 授权）测试面�
      task.create_task(auto_approve_workflow=True) 落盘键、缺省建任务
      盘上无键。
 
+v2.8.0 W-A1（诊断装备化）扩容面——stderr 原因码矩阵：
+
+  3. 弃权契约从「stderr 空」升级为「stderr 恰一行
+     PERMISSION_HOOK abstain: reason=<code> detail=…」（决策行为零
+     变更：stdout 空 + exit 0 不变）；放行契约增 stderr 恰一行
+     PERMISSION_HOOK allow: task=<id> path=<归一后> path_raw=<归一前>
+     repo_root=<root> repo_root_source=<源>。原因码恰六值对六类弃权
+     分支：bad_payload / bad_event / bad_tool / no_path /
+     path_outside / no_authorized_task；path_outside 与放行行的
+     detail 必含归一前/归一后 path、repo_root 及其来源（H2/H3 判别
+     装备），no_authorized_task 行含 repo_root 及来源（H4 判别）。
+     另增 cwd 回退口径用例（剥离 ZCODE_PROJECT_DIR 后 repo_root
+     取 cwd、来源标注 cwd——H2 口径复现面）。
+
 任务盘面 fixture 一律走 v2.4 状态层正门（new_task_state + save_state，
 test_session_start_advisory.save_task 同款）或直写损坏文件构造盘面；
 tempfile 隔离，绝不触碰真实仓库 .glm-conductor/。仅 Python 3 标准库。
@@ -109,16 +123,20 @@ class HookCase(unittest.TestCase):
         path.write_text("{not-json", encoding="utf-8")
         return str(path)
 
-    def run_hook(self, stdin_text):
+    def run_hook(self, stdin_text, with_project_dir=True):
         """子进程直调钩子（test_session_start_advisory.run_hook 同款
-        UTF-8 解码；ZCODE_PROJECT_DIR 指向临时仓库）。"""
+        UTF-8 解码；ZCODE_PROJECT_DIR 指向临时仓库；with_project_dir=
+        False 剥离 ZCODE_PROJECT_DIR——repo_root 回退 cwd 口径用例）。"""
+        env = dict(os.environ,
+                   GLM_CONDUCTOR_HOME=self.home)
+        if with_project_dir:
+            env["ZCODE_PROJECT_DIR"] = str(self.repo)
+        else:
+            env.pop("ZCODE_PROJECT_DIR", None)
         return subprocess.run(
             [sys.executable, str(HOOK_PATH)],
             input=stdin_text, text=True, capture_output=True,
-            encoding="utf-8", errors="replace",
-            env=dict(os.environ,
-                     ZCODE_PROJECT_DIR=str(self.repo),
-                     **{"GLM_CONDUCTOR_HOME": self.home}))
+            encoding="utf-8", errors="replace", env=env)
 
     def event(self, path=None, event_name="PermissionRequest",
               tool_name="CreateWorkflow"):
@@ -137,19 +155,31 @@ class HookCase(unittest.TestCase):
         """许可目录二：仓库 .zcode/workflow-drafts/ 之下的脚本路径。"""
         return os.path.join(self.repo, ".zcode", "workflow-drafts", name)
 
-    def assert_silent(self, result):
-        """弃权契约：exit 0 且 stdout / stderr 均空（默认人工确认
-        行为不变；fail-open 契约下弃权也绝不降级报错）。"""
+    def assert_abstain(self, result, reason, detail_parts=()):
+        """弃权契约（v2.8.0 W-A1 升级面）：exit 0 + stdout 空 +
+        stderr 恰一行 `PERMISSION_HOOK abstain: reason=<code>
+        detail=…`——决策行为不变（默认人工确认），观测面必报原因码；
+        detail_parts 为 detail 必含的子串（H2/H3/H4 判别装备锚）。"""
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout, "")
-        self.assertEqual(result.stderr, "")
+        self.assertEqual(
+            result.stderr.count("\n"), 1,
+            "弃权 stderr 应恰一行: %r" % (result.stderr,))
+        self.assertTrue(
+            result.stderr.startswith(
+                "PERMISSION_HOOK abstain: reason=%s detail=" % (reason,)),
+            "reason 码不符: %r" % (result.stderr,))
+        for part in detail_parts:
+            self.assertIn(part, result.stderr)
 
-    def assert_allow(self, result):
-        """放行契约：exit 0 + stderr 空 + stdout 恰为接口定义的单行
-        JSON——先逐字节比对黄金串（含尾随换行），再 json.loads 断言
-        三层键形状闭合且无 permissionUpdates 等多余键。"""
+    def assert_allow(self, result, task_id=TID, raw_path=None):
+        """放行契约：exit 0 + stdout 恰为接口定义的单行 JSON——先逐字节
+        比对黄金串（含尾随换行），再 json.loads 断言三层键形状闭合且无
+        permissionUpdates 等多余键；v2.8.0 W-A1 起 stderr 另恰一行
+        `PERMISSION_HOOK allow: task=<id> path=<归一后> path_raw=<归一前>
+        repo_root=<root> repo_root_source=<源>`（观测面四元组，H2/H3
+        判别装备锚）。"""
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(result.stderr, "")
         # 逐字节：单行紧凑 JSON + 尾随换行（实现漂移即红）
         self.assertEqual(result.stdout, ALLOW_GOLDEN + "\n")
         payload = json.loads(result.stdout)
@@ -168,61 +198,119 @@ class HookCase(unittest.TestCase):
         decision = block["decision"]
         self.assertEqual(sorted(decision.keys()), ["behavior", "message"])
         self.assertEqual(decision["behavior"], "allow")
+        # 观测行（恰一行 allow：task / 归一后 path / 归一前 path /
+        # repo_root / repo_root_source 四元组齐备）
+        self.assertEqual(result.stderr.count("\n"), 1,
+                         "放行 stderr 应恰一行: %r" % (result.stderr,))
+        expected_parts = ["PERMISSION_HOOK allow: ",
+                          "task=%s" % (task_id,),
+                          "path=%s" % (os.path.abspath(raw_path),),
+                          "path_raw=%s" % (raw_path,),
+                          "repo_root=%s" % (self.repo,),
+                          "repo_root_source=ZCODE_PROJECT_DIR"]
+        for part in expected_parts:
+            self.assertIn(part, result.stderr)
         return payload
 
 
 class HookDecisionChainTest(HookCase):
-    """判定链五步逐闸锚定：任一不过即弃权，全过才放行。"""
+    """判定链五步逐闸锚定：任一不过即弃权（stderr 原因码矩阵，v2.8.0
+    W-A1），全过才放行（stderr allow 观测行）。"""
 
     # —— 判定链 (5) 缺省弃权：无授权任务 ——
 
     def test_no_task_at_all_abstains(self):
-        # 无任何任务盘面（无 .glm-conductor/tasks/）→ 弃权
-        self.assert_silent(self.run_hook(self.event(self.gen_path())))
+        # 无任何任务盘面（无 .glm-conductor/tasks/）→ 弃权 no_authorized_task
+        self.assert_abstain(
+            self.run_hook(self.event(self.gen_path())),
+            "no_authorized_task")
 
     def test_task_without_flag_abstains(self):
-        # 任务在盘但未落授权键（缺省建任务）→ 弃权
+        # 任务在盘但未落授权键（缺省建任务）→ 弃权 no_authorized_task
         self.save_task(TID_UNFLAGGED)
-        self.assert_silent(self.run_hook(self.event(self.gen_path())))
+        self.assert_abstain(
+            self.run_hook(self.event(self.gen_path())),
+            "no_authorized_task")
 
     def test_task_with_explicit_false_abstains(self):
-        # auto_approve_workflow=False（显式未授权）→ 弃权
+        # auto_approve_workflow=False（显式未授权）→ 弃权 no_authorized_task
         self.save_task(TID_FALSE, auto_approve=False)
-        self.assert_silent(self.run_hook(self.event(self.gen_path())))
+        self.assert_abstain(
+            self.run_hook(self.event(self.gen_path())),
+            "no_authorized_task")
 
     # —— 判定链 (5) 放行：非终态授权任务 + 许可目录 path ——
 
     def test_authorized_task_gen_path_allows_byte_exact(self):
-        # active 授权任务 + gen/ path → 放行（逐字节黄金串 + 形状闭合）
+        # active 授权任务 + gen/ path → 放行（逐字节黄金串 + 形状闭合
+        # + stderr allow 观测行四元组）
         self.save_task(TID, auto_approve=True)
-        self.assert_allow(self.run_hook(self.event(self.gen_path())))
+        self.assert_allow(
+            self.run_hook(self.event(self.gen_path())),
+            task_id=TID, raw_path=self.gen_path())
 
     def test_authorized_task_drafts_path_allows(self):
         # .zcode/workflow-drafts/ 是第二个许可目录 → 同样放行
         self.save_task(TID, auto_approve=True)
-        self.assert_allow(self.run_hook(self.event(self.drafts_path())))
+        self.assert_allow(
+            self.run_hook(self.event(self.drafts_path())),
+            task_id=TID, raw_path=self.drafts_path())
 
     # —— 判定链 (3) inline 无 path 弃权 ——
 
     def test_inline_without_path_abstains(self):
-        # 授权任务在盘但 toolInput 无 path（inline 提交）→ 弃权
+        # 授权任务在盘但 toolInput 无 path（inline 提交）→ 弃权 no_path
         self.save_task(TID, auto_approve=True)
-        self.assert_silent(self.run_hook(self.event(path=None)))
+        self.assert_abstain(
+            self.run_hook(self.event(path=None)), "no_path")
 
-    # —— 判定链 (4) 越界路径弃权 ——
+    # —— 判定链 (4) 越界路径弃权（detail 四元组 = H2/H3 判别装备）——
 
     def test_path_outside_temp_repo_abstains(self):
-        # temp 仓库之外（父目录下兄弟路径）→ 弃权
+        # temp 仓库之外（父目录下兄弟路径）→ 弃权 path_outside；detail
+        # 必含归一前 path / 归一后 path / repo_root / 来源标注
         self.save_task(TID, auto_approve=True)
         outside = os.path.join(os.path.dirname(self.repo),
                                "elsewhere", "compiled.mjs")
-        self.assert_silent(self.run_hook(self.event(outside)))
+        self.assert_abstain(
+            self.run_hook(self.event(outside)), "path_outside",
+            detail_parts=("path_raw=%r" % (outside,),
+                          "path_norm=%r" % (os.path.abspath(outside),),
+                          "repo_root=%r" % (self.repo,),
+                          "repo_root_source=ZCODE_PROJECT_DIR"))
 
     def test_path_inside_repo_outside_permitted_dirs_abstains(self):
         # 仓库之内但不在 gen/ 或 .zcode/workflow-drafts/ 之下 → 弃权
         self.save_task(TID, auto_approve=True)
-        self.assert_silent(self.run_hook(
-            self.event(os.path.join(self.repo, "src", "compiled.mjs"))))
+        inside = os.path.join(self.repo, "src", "compiled.mjs")
+        self.assert_abstain(
+            self.run_hook(self.event(inside)), "path_outside",
+            detail_parts=("path_norm=%r" % (inside,),
+                          "repo_root=%r" % (self.repo,)))
+
+    def test_relative_path_normalizes_against_hook_cwd(self):
+        # 相对 path 按 hook 进程 cwd 归一（ZCODE_PROJECT_DIR 之外的
+        # 基）→ 与注入 repo_root 不一致即弃权——H3 相对 path 归一基
+        # 口径的复现面（detail 同时报归一前相对形与归一后绝对形）
+        self.save_task(TID, auto_approve=True)
+        relative = "gen" + os.sep + "compiled.mjs"
+        self.assert_abstain(
+            self.run_hook(self.event(relative)),
+            "path_outside",
+            detail_parts=("path_raw=%r" % (relative,),
+                          "path_norm=%r" % (os.path.abspath(relative),),
+                          "repo_root=%r" % (self.repo,),
+                          "repo_root_source=ZCODE_PROJECT_DIR"))
+
+    def test_cwd_fallback_source_is_reported(self):
+        # 剥离 ZCODE_PROJECT_DIR → repo_root 回退 cwd 且来源标注 cwd
+        #（H2 口径失配的复现面：root 取 cwd 时授权盘面扫不到）
+        self.save_task(TID, auto_approve=True)
+        self.assert_abstain(
+            self.run_hook(self.event(self.gen_path()),
+                          with_project_dir=False),
+            "path_outside",
+            detail_parts=("repo_root_source=cwd",))
 
     # —— 判定链 (5) 终态任务自然失权 ——
 
@@ -233,42 +321,52 @@ class HookDecisionChainTest(HookCase):
         self.save_task(TID_CANCELLED, status="cancelled",
                        auto_approve=True)
         self.save_task(TID_FAILED, status="failed", auto_approve=True)
-        self.assert_silent(self.run_hook(self.event(self.gen_path())))
+        self.assert_abstain(
+            self.run_hook(self.event(self.gen_path())),
+            "no_authorized_task",
+            detail_parts=("repo_root=%r" % (self.repo,),))
 
     # —— 判定链 (5) 状态文件损坏跳过 ——
 
     def test_corrupt_state_skipped_authorized_still_allows(self):
         # 一个损坏 state.json + 一个授权任务共存 → 损坏跳过、仍放行
+        #（观测行报告的是真正命中授权的任务 id）
         self.write_corrupt_task()
         self.save_task(TID_AUTHORIZED, auto_approve=True)
-        self.assert_allow(self.run_hook(self.event(self.gen_path())))
+        self.assert_allow(
+            self.run_hook(self.event(self.gen_path())),
+            task_id=TID_AUTHORIZED, raw_path=self.gen_path())
 
     # —— 判定链 (1) 非法 stdin ——
 
     def test_invalid_stdin_abstains(self):
-        # 空串 / 非 JSON / 合法 JSON 但非 dict → 一律弃权 exit 0
+        # 空串 / 非 JSON / 合法 JSON 但非 dict → 一律弃权 bad_payload
         self.save_task(TID, auto_approve=True)
         for raw in ("", "not-json{", "[1, 2]"):
-            self.assert_silent(self.run_hook(raw))
+            self.assert_abstain(self.run_hook(raw), "bad_payload")
 
     # —— 判定链 (2) 事件形状不符 ——
 
     def test_event_name_mismatch_abstains(self):
-        # hookEventName 非 PermissionRequest（matcher 外事件）→ 弃权
+        # hookEventName 非 PermissionRequest（matcher 外事件）→ bad_event
         self.save_task(TID, auto_approve=True)
-        self.assert_silent(self.run_hook(
-            self.event(self.gen_path(), event_name="PreToolUse")))
+        self.assert_abstain(
+            self.run_hook(
+                self.event(self.gen_path(), event_name="PreToolUse")),
+            "bad_event")
 
     def test_tool_name_mismatch_abstains(self):
-        # toolName 非 CreateWorkflow → 弃权
+        # toolName 非 CreateWorkflow → bad_tool
         self.save_task(TID, auto_approve=True)
-        self.assert_silent(self.run_hook(
-            self.event(self.gen_path(), tool_name="Bash")))
+        self.assert_abstain(
+            self.run_hook(
+                self.event(self.gen_path(), tool_name="Bash")),
+            "bad_tool")
 
     def test_empty_payload_abstains(self):
-        # 空事件 dict（键全缺）→ 弃权
+        # 空事件 dict（键全缺）→ 弃权（首闸是 hookEventName 形状）
         self.save_task(TID, auto_approve=True)
-        self.assert_silent(self.run_hook("{}"))
+        self.assert_abstain(self.run_hook("{}"), "bad_event")
 
 
 class AutoApproveStateKeyTest(unittest.TestCase):

@@ -1,4 +1,4 @@
-# GLM Conductor Troubleshooting (v2.7.0)
+# GLM Conductor Troubleshooting (v2.8.0)
 
 > A user-facing troubleshooting manual: organized as "symptom → verdict → disposition", stating only conclusive behavioral facts; every fact cites the implementing module path for verification. For the full architecture see [architecture.md](architecture.md); for the concept primer see [core-concepts.md](core-concepts.md).
 >
@@ -269,3 +269,14 @@ Output is a single-line JSON `{platform, zcode_cli, scheduler, recommendation}` 
 - **L3 — fail closed**: when neither an L0 host CronCreate tool, nor the L1 face, nor a background sleep channel is available, auto continuity stays unarmed — the resume decision's mirror gate returns `remain-waiting` with reason `continuity-unarmed` (zero state writes, zero budget consumed) and the launch/resume is blocked honestly. Never fabricate a carrier, never weaken the arm-before-work invariant; hand the task back to the user (manual continuity) instead.
 
 **Terminal cleanup of an L1 task**: at terminal closure the L1 carrier delete attempt is replaced by `os-carrier-remove <repo_root> <task_id>` — OS deletion is really effective and carries no three-state degradation (Windows `schtasks /Delete /F` reports a missing task honestly as `ok=false`, POSIX crontab with no matching marker block is a zero-write `ok=true` no-op; the OS tool's real exit code is the only truth), after which `quota-automation-clear` reconciles the witness as usual.
+
+## 14. Confirmation-free workflow submission not taking effect after a plugin cache refresh (v2.8.0 W-A3)
+
+**Symptom**: after a plugin cache refresh (or a version upgrade), a path-type `CreateWorkflow` submission still surfaces the manual confirmation card even though the task on disk carries the launch-interview authorization (`auto_approve_workflow: true`, non-terminal).
+
+**Verdict — host fact, not a hook bug**: a session's hook registration face (the event matchers) is a **snapshot taken at session startup**. A session started before the refresh never had the `PermissionRequest` / `CreateWorkflow` matcher registered (`plugins/glm-conductor/hooks/hooks.json`), and the fact that hook script bodies are executed from disk per event cannot help a matcher that was never registered for that session — so in such a session every submission falls back to the default manual card.
+
+**Disposition**:
+
+1. Verify in a session **started after the refresh** (restarting the Desktop app or opening a new session both work). The v2.8.0 dual-arm live diagnosis confirmed both directions on a fresh session: an authorized task's path-type submission runs card-free (the hook wins the ask-layer race), and an unflagged task's identical submission surfaces the manual card (see `docs/reviews/V280_W21_DESKTOP_CONFIRMATION_DIAGNOSIS.md`).
+2. If a **fresh** session still shows the card with a live authorized task on disk, the reason-code observation face of the hook applies (v2.8.0 W-A1): each abstain/allow decision writes one `PERMISSION_HOOK abstain: reason=<code> detail=…` / `PERMISSION_HOOK allow: …` stderr line (`reason` ∈ `bad_payload / bad_event / bad_tool / no_path / path_outside / no_authorized_task`; the `path_outside` / allow lines carry the pre/post-normalization path plus the resolved repo_root and its source) — use it to distinguish a repo-root caliber mismatch, a relative-path base error, or a missing/expired authorization. Implementation: `plugins/glm-conductor/hooks/permission_request_workflow.py`.
