@@ -1,5 +1,43 @@
 # Changelog
 
+## 2.7.0
+
+Minor feature release: four-level wake-carrier degradation for Cron-less sessions, task-level confirmation-free workflow submission, session-resume recovery injection, direct-dispatch agent quartet, and decomposition/parallelism authoring guides. Owner rulings D1–D13 locked in `docs/roadmap/V2_7_0_IMPLEMENTATION_SPEC.md`; B0 spike evidence in `docs/reviews/V270_B0_SPIKE_RESULTS.md`.
+
+### Wake carrier — four-level degradation matrix (W1)
+
+- `quota_resume` grows a fifth key `automation_kind` (`native / os_timer / sleep_only`, default `native`, legacy four-key states load with zero migration and read as native); `quota-automation-bind` takes a `kind` (same id + same kind is idempotent, same id + different kind is refused — rebinds go through an explicit clear → bind), `clear` resets the kind, `quota-continuity-preflight` reports the kind when armed.
+- New `runtime/carrier.py`: pure exact-argv construction for `schtasks` (Windows) and `crontab` (POSIX) — install/remove execution face and the headless wake command, zero shell assembly. New CLI subcommands `os-carrier-install` (session id falls back to the `.glm-conductor/session-witness.json` written by the SessionStart hook via the new `${CLAUDE_SESSION_ID}` template arg, fail-open), `os-carrier-remove` (OS deletion really works — no three-state degradation; replaces the native delete attempt in terminal cleanup for L1 tasks), and `wake-carrier-probe` (pure local, zero writes: PATH `zcode` → default install location → `node`+cjs ladder × scheduler executability → recommendation `os_timer`/`sleep_only`).
+- The selection order is fixed in the runbook (zero model judgment): CronCreate present → L0; otherwise `wake-carrier-probe` → L1 (`os-carrier-install`, witness `os:schtasks:glm-conductor-<task-id>`, survives app restarts, floor-on-OS label) or L2 (sleep-only witness `sleep-only`, precision sleep only, honest degraded label); neither → L3 fail-closed unchanged. Host facts baked in from live probing: headless wake turns must pass `--workflow-mode alwaysOn` (onDemand does not register workflow tools in `-p` mode), and headless permission asks auto-resolve (wake turns are friction-free; the tightly scoped wake prompt is the guardrail).
+
+### Workflow submission auto-approval (W2)
+
+- The launch interview grows a fourth question (single round, four questions total): enable confirmation-free workflow submission for this task — soft-recommended enable, asked only for delegate/full tasks with CreateWorkflow submissions, independent of the wake question. The answer lands via `task-create --auto-approve-workflow` as the optional state key `auto_approve_workflow: true` (absent = false, same "no authorization, no key" semantics as the worker-model pin).
+- New `hooks/permission_request_workflow.py` (PermissionRequest event, matcher `CreateWorkflow`): when a non-terminal authorized task exists and the submission is path-type (script under `gen/` or `.zcode/workflow-drafts/`), it answers the permission request with `decision:{behavior:"allow"}` — decision-only, never `permissionUpdates` (hook-supplied updates persist to the session/project store and would over-grant beyond task authorization; every request is re-checked live, zero persistence). Inline `script:` submissions always keep manual confirmation. Fail-open throughout: abstain or allow, never deny. Mechanism archaeology: the PreToolUse `permissionDecision:"allow"` path is dead for CreateWorkflow — `applyPreToolPermissionDecision` requires `!alwaysAsk` and the tool declares `alwaysAsk:true`; the PermissionRequest layer answers the ask in a race against the UI card (`racePermissionResponders`), which alwaysAsk does not guard. This also removes the unattended-wake re-submission deadlock for authorized tasks. Path-only submission is now the runbook rule (single pass criterion for the hook + closes the heredoc-escaping minefield).
+- Desktop two-arm live acceptance (authorized path-type no-card / inline still asks) is assigned to the first session after the 2.7.0 cache refresh — hook faces are session-start snapshots (headless differential testing is inconclusive because headless auto-allows asks).
+
+### SessionStart resume source (W3)
+
+- Matcher widened `startup|clear|compact` → `startup|resume|clear|compact` (official source vocabulary per zcode-guide diagnosing-hooks): an app reopen / session resume now re-injects `GLM CONDUCTOR RESUME CONTEXT` too. Pure widening; the hook consumes no source value.
+
+### Direct-dispatch agent quartet (W6)
+
+- Four new agent definitions: `conductor-scout` (read-only investigation, file:line evidence discipline) and `conductor-runner` (verbatim command execution, honest exit codes, no repo writes, no destructive retries) — usable on any route with no task precondition; `conductor-impl-flash` (Flash-pinned) and `conductor-impl` (no model key — inherits the main-session model, glm-reviewer precedent) for bounded five-part-spec implementation — write roles are dispatched only inside an active task holding the repository writer guard (guard semantics unchanged).
+- Orchestration gains a 'Direct dispatch roles' section (contracts in `references/role-contracts.md`): the "only implementation substrate" rule is revised per D10 — multi-node delegate/full still compiles to a Native Workflow; a single-node delegate with assurance standard may take the direct-dispatch lightweight channel, whose contract states the cost explicitly (no structured NodeResult, no ResumeWorkflowRun — recovery means re-dispatch from repository facts); the routing matrix's four modes are unchanged and direct dispatch adds no journal events (D13).
+
+### Decomposition granularity & parallelism guides (W4/W5)
+
+- Orchestration authoring discipline gains two sections: granularity defaults to one node with explicit too-large red flags (multi-deliverable objectives, cross-subsystem ownership, heterogeneous verification stacks, spec overflow) and too-fragmented red flags (overlapping ownership that plan_stages serializes anyway, step-only objectives, mergeable fragments), plus routing-layer dissolution (small tasks go solo or Axis-A low — with direct dispatch there is no reason to split "just to get into a workflow"); and parallelism-by-default principles (dependencies express real order facts only, ownership division is the parallelism knob, the v24-compile stages summary is a feedback loop). The plan_stages algorithm is untouched.
+
+### Model admission re-verification (W7)
+
+- Verified end-to-end on the live 2.6.2 surface: bridge-provider ids such as `opencode-go-responses/deepseek-v4.1-flash` pass `worker-model-pin` and `workflow-model-select --task-ref` (exit 0, `user-authorized-explicit-selection`). The pre-2.6.2 "account:-only" rejection is an environment artifact; `docs/troubleshooting.md` §5 gains a three-cause disposition table (stale plugin cache + session-start snapshot semantics, session older than the refresh, remote workspace on an old version).
+
+### Tests, validator, docs
+
+- New suites `tests/test_auto_approve_workflow.py` (21) and `tests/test_wake_carrier.py` (49); existing shape anchors updated for the five-key block and four-question interview; validator gains check_13.4 (PermissionRequest hook positive anchor), check_16 16n (wake-carrier doc anchors), 16i wake-carrier CLI double anchors and 16m cli.py anchors (still 16 checks total); the interview anchor re-anchored to the four-question form.
+- Full doc face synchronized: continuity SKILL (matrix, kind-aware runbook, terminal-cleanup L1 branch, failure-handling matrix), long-horizon (lifecycle kind line, headless wake command), orchestration (Q4, path-only rule, kind-aware auto sequence, direct-dispatch section, granularity/parallelism guides), core-concepts / architecture / troubleshooting, README bilingual (two new feature bullets, seven-role roster).
+
 ## 2.6.2
 
 Hotfix release with a single behavioral change: the worker model admission rule no longer requires the `account:` scheme prefix — the shape contract is now any provider-qualified two-segment id `<provider>/<model>`. The `account:<account>/<model>` namespace and non-`account` provider ids (e.g. host-bridged providers such as `opencode-go-responses/deepseek-v4.1-flash`) are equally selectable, fixing the misclassification of configured bridge-provider models as "bare aliases" (previously rejected with exit 2 by both `worker-model-pin` and `workflow-model-select`). Owner ruling 2026-10-19. **Breaking: none for previously legal ids** — every id accepted by v2.6.1 stays accepted.
