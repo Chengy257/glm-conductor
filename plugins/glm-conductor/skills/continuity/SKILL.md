@@ -36,12 +36,13 @@ An active task (delegate/full, audit, and any long task needing completion-guard
 - Repository files remain the source of truth for code state; state.json is only runtime task state
 - Atomic writes; writes go through the runtime.task lifecycle APIs, and the skill layer always uses runtime CLI named subcommands (`task-create` / `record-validation` / `review-record` / `quota-*` / `exit-waiting` / `task-complete` / `task-fail` / `task-cancel` — the authoritative command list is the USAGE in `runtime/cli.py`); never hand-build JSON write-backs and never use `python3 -c` inline scripts
 
-**events.jsonl**: the append-only execution log. The task-level event vocabulary is exactly ten names (`runtime.task.TASK_JOURNAL_EVENTS`):
+**events.jsonl**: the append-only execution log. The task-level event vocabulary is exactly eleven names (`runtime.task.TASK_JOURNAL_EVENTS`):
 
 | Event | When |
 | --- | --- |
 | route_selected | create_task creates the task (with mode / assurance) |
 | workflow_started | record_workflow_run records a delegated run association |
+| chain_block_delegated | chain-block-record ledgers a direct-dispatch chain block delegation (v2.8.0 D-C; block id / role / ownership summary; duplicate block ids are refused) |
 | workflow_reassessed | after a route reassessment (recorded when the main session declares ROUTE REASSESSMENT) |
 | validation_recorded | record_validation persists the main validation record |
 | review_recorded | review-record persists a review verdict |
@@ -63,7 +64,8 @@ Recovery procedure (new session or after a wake):
 2. **Reconcile**: first look at the repository's real state (git diff / worktree), then at state.json and the checkpoint — **repository > checkpoint > session memory**. Legacy tasks are reported per the injected one-line guidance (LEGACY_STATE_GUIDANCE: close out under it or explicitly abandon); never migrate them and never fabricate completion evidence.
 3. **Resume**: if the task has a `workflow_run_id` and is not terminal → resume the Workflow through the host under the **same run id** (the host owns the execution state and resumes its own run); after recovery, wait for the structured result → main-session validation → closure as usual. The auto-wake path (mode=auto) adds two hard gates: decision `resume-authorized` **and** `quota-continuity-preflight` ready before a resume is allowed (see 'Unified wake protocol'); the writer guard is still held by this task (no expiry logic) — that is the same-run resume credential, and no re-acquire is needed.
 4. **Workflow dead and unresumable** (the host reports the run missing / unrecoverable): rebuild understanding from the repository's current state — recompile and resubmit the parts of the DAG not yet implemented (reconcile and release the writer guard first, then the launch procedure of orchestration 'Execution procedure for delegate/full'); **never blindly replay completed node results**.
-5. **Route recovery**: before resuming execution, output the SELECTIVE ROUTE declaration again (same route, or reassessed on new evidence); if the evidence shows the dual-axis judgment changed, do ROUTE REASSESSMENT first.
+5. **Chain-position rebuild (direct-dispatch chain tasks, v2.8.0)**: a task running as a direct-dispatch chain recovers its position from the chain ledger, not from subagent state (there is none — block recovery semantics are re-dispatch from repository facts): tail-read the journal's `chain_block_delegated` events → load the task state (mode / assurance / non-terminal check) → reconcile against git/repository facts to determine which blocks actually landed → re-dispatch the next block per the chain doctrine (orchestration 'Direct-dispatch chain (low-delegability long tasks)'). This step composes with, and never bypasses, the quota decision gates: a chained task crossing a quota window still walks the same waiting_quota / quota-resume decision sequence first ('Unified wake protocol'); only after the decision authorizes continuation does the chain-position rebuild run.
+6. **Route recovery**: before resuming execution, output the SELECTIVE ROUTE declaration again (same route, or reassessed on new evidence); if the evidence shows the dual-axis judgment changed, do ROUTE REASSESSMENT first.
 
 ## waiting_quota
 

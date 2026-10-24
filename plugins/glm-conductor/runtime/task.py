@@ -37,6 +37,15 @@
         CWD 无关 + workflow_started 事件）成功后把 run id 幂等补挂进
         守卫记录（同任务 acquire 重入更新语义；补挂冲突宁可拒绝注册）。
         solo/audit 不持有写 Workflow，无此前置。
+    record_chain_block(repo_root, task_id, block_id, role,
+                       ownership=None)
+        直派链块委派记录（v2.8.0 W-B3，journal-only）：追加恰一条
+        chain_block_delegated 事件（payload 恒含 block_id / role，
+        ownership 仅在给出时附键）——主会话的语义性分解决策、
+        workflow_started 的直派对位物；绝不写 state.json、绝不触碰
+        写者守卫。block_id 非空 str；role ∈ impl/impl-flash；
+        ownership 可选非空 str（None = 无摘要）；终态冻结；同
+        block_id 重复记录拒绝（重复 = 调度错误信号）。
     record_validation(repo_root, task_id, status, summary=None, commands=None)
         任务级验证记录（status ∈ passed/failed）；change_id 经
         runtime.change_id.compute_change_id 现算现存（相关改动文件集 =
@@ -135,7 +144,7 @@
         失效即拒）。
         非终态任务才可写（终态冻结）；同值幂等成功（零写盘）；异值
         显式覆盖（返回值带 prev 与 new）；绝不新增 journal 事件名
-        （十名冻结维持——审计由 CLI 输出与 state 落盘承载）。
+        （十一名冻结维持——审计由 CLI 输出与 state 落盘承载）。
     complete(repo_root, task_id) / fail(...) / cancel(...)
         终态收尾：迁移到 completed / failed / cancelled + 任务级
         journal 事件（task_completed / task_failed / task_cancelled）
@@ -145,14 +154,17 @@
         释放仍落在绑定仓库根——FR-01）。同终态重放放行（事件与
         释放幂等），跨终态迁移一律拒绝。
 
-journal 词汇（TASK_JOURNAL_EVENTS，恰十名，绝不多不少）：
-    route_selected / workflow_started / workflow_reassessed /
-    validation_recorded / review_recorded / waiting_quota /
-    quota_resume_confirmed / task_completed / task_failed /
-    task_cancelled。
+journal 词汇（TASK_JOURNAL_EVENTS，恰十一名，绝不多不少）：
+    route_selected / workflow_started / chain_block_delegated /
+    workflow_reassessed / validation_recorded / review_recorded /
+    waiting_quota / quota_resume_confirmed / task_completed /
+    task_failed / task_cancelled。
     workflow_reassessed 是声明的词汇名（路由重估由主会话记录），
     本模块 API 面无生产者。quota_resume_confirmed 是 P3-C 唯一新增
-    名（暂存恢复计数落账 + 转回 active 的事实记录）。本模块追加的
+    名（暂存恢复计数落账 + 转回 active 的事实记录）。
+    chain_block_delegated 是 v2.8.0 D-C 新增名（直派链块委派的主
+    会话语义性分解决策记录，record_chain_block；journal-only）。
+    本模块追加的
     事件名绝不出此表；也绝不经由 state.transition_task_status 迁移
     状态（其 status_changed 事件不在任务级词汇内）——状态门用
     state.TASK_TRANSITIONS 自己走，落盘一律经 state.update_task_state
@@ -224,17 +236,25 @@ from runtime import change_id, journal, messages, ownership, state, writer_guard
 from runtime.workflow import adapter as workflow_adapter
 from runtime.workflow import submission as workflow_submission
 
-# —— 任务级 journal 事件词汇（恰十名；本模块追加的事件名绝不出此表） ——
+# —— 任务级 journal 事件词汇（恰十一名；本模块追加的事件名绝不出此表） ——
 
-# 词汇精确口径（W3 规格 + P3-C 恰一新增）：route_selected /
-# workflow_started / workflow_reassessed / validation_recorded /
+# 词汇恰十一名（v2.8.0 D-C +chain_block_delegated，序位在
+# workflow_started 之后）：route_selected / workflow_started /
+# chain_block_delegated / workflow_reassessed / validation_recorded /
 # review_recorded / waiting_quota / quota_resume_confirmed /
 # task_completed / task_failed / task_cancelled。
-# 无宿主子代理生命周期词汇（implementation_started / dispatch_* /
-# lease_* / reviewer_invoked 等一律不入表）。
+# 冻结禁令的类别是「宿主子代理生命周期镜像」（Conductor never
+# mirrors host execution state）。chain_block_delegated 记录的不是
+# 子代理状态，而是主会话的语义性分解决策——它是 workflow_started
+# （delegate/full 实施基质启动记录）的直派对位物：直派链就是低
+# delegability 长任务的实施基质，链块委派 = 该基质的进度语义；因此
+# 入表不违反 never-mirrors 原则。宿主生命周期词（implementation_started /
+# lease_* / reviewer_invoked）仍禁；dispatch_ 前缀词仍在禁词表、
+# 新事件名不带该前缀。
 TASK_JOURNAL_EVENTS = (
     "route_selected",
     "workflow_started",
+    "chain_block_delegated",
     "workflow_reassessed",
     "validation_recorded",
     "review_recorded",
@@ -543,6 +563,65 @@ def record_workflow_run(repo_root, task_id, workflow_run_id) -> dict:
                 % (conflict.get("task_id"),
                    conflict.get("workflow_run_id")))
     return new_state
+
+
+# —— 直派链块委派记录（v2.8.0 W-B3，journal-only） ——
+
+# record_chain_block 的 role 封闭词汇（恰两值）：直派链块的两个实施
+# 基质执行角色（机械块默认 impl-flash）。
+CHAIN_BLOCK_ROLES = ("impl", "impl-flash")
+
+
+def record_chain_block(repo_root, task_id, block_id, role,
+                       ownership=None) -> dict:
+    """记录主会话直派链的单个链块委派决策，返回任务状态 dict。
+
+    v2.8.0 D-C（W-B3）：chain_block_delegated 是 workflow_started
+    （delegate/full 实施基质启动记录）的直派对位物——直派链就是低
+    delegability 长任务的实施基质，链块委派 = 该基质的进度语义；
+    记录的是主会话的语义性分解决策，不是子代理执行状态（冻结禁令
+    的类别是宿主子代理生命周期镜像，本事件不属该类）。
+
+    - **journal-only**：只追加恰一条 chain_block_delegated 事件，
+      绝不写 state.json、绝不触碰写者守卫（守卫是任务级单持有，
+      链内并行块同守卫之下——零新守卫面）；
+    - payload：{"block_id", "role"} 恒两键；"ownership" 仅在
+      ownership 非 None 时附加（块 ownership 摘要，可选非空 str）；
+    - block_id 非空 str；role ∈ CHAIN_BLOCK_ROLES（恰两值）；
+      ownership 给出时必须非空 str（None = 无 ownership 摘要）；
+    - 终态冻结：终态任务不得再有新事实落账（_ensure_not_terminal，
+      与 record_workflow_run 同 pattern；任务缺失 / v2.3 遗留先拒）；
+    - **同 block_id 重复记录拒绝**（重复 = 调度错误信号）：追加前
+      读任务 journal，既有 chain_block_delegated 事件 payload 已
+      携带同一 block_id 即 ValueError（块 id 在任务内唯一）。
+
+    任务缺失 / v2.3 遗留 / 终态冻结 / 形状非法 / 重复 block_id →
+    ValueError；事件仅在全部闸通过后追加；本函数不迁移状态、不落
+    state（返回载入的现有状态 dict，与同层记录入口同型）。
+    """
+    if not isinstance(block_id, str) or block_id == "":
+        raise ValueError(messages.TASK_CHAIN_BLOCK_ID_EMPTY % (block_id,))
+    if role not in CHAIN_BLOCK_ROLES:
+        raise ValueError(
+            messages.TASK_CHAIN_BLOCK_ROLE_INVALID
+            % (role, ", ".join(CHAIN_BLOCK_ROLES)))
+    if ownership is not None and (not isinstance(ownership, str)
+                                  or ownership == ""):
+        raise ValueError(
+            messages.TASK_CHAIN_BLOCK_OWNERSHIP_INVALID % (ownership,))
+    st = _load_v24_state(repo_root, task_id)
+    _ensure_not_terminal(st, "record_chain_block")
+    for item in journal.read_events(repo_root, task_id):
+        if (item.get("event") == "chain_block_delegated"
+                and item.get("block_id") == block_id):
+            raise ValueError(
+                messages.TASK_CHAIN_BLOCK_DUPLICATE % (task_id, block_id))
+    payload = {"event": "chain_block_delegated",
+               "block_id": block_id, "role": role}
+    if ownership is not None:
+        payload["ownership"] = ownership
+    journal.append_event(repo_root, task_id, payload)
+    return st
 
 
 # —— 任务级最小验证 / 审查记录（P2-C） ——
@@ -1281,7 +1360,7 @@ def pin_worker_model(repo_root, task_id, model_id) -> dict:
       二次把关——worker_model 键形状由 state._validate_worker_model
       收口；pin 在锁内对新鲜 state 施加，终态冻结锁内复核；同值
       幂等在取锁前零写盘返回现状）；
-    - 绝不新增 journal 事件名（TASK_JOURNAL_EVENTS 十名冻结维持
+    - 绝不新增 journal 事件名（TASK_JOURNAL_EVENTS 十一名冻结维持
       ——pin 审计由 CLI 输出与 state 落盘承载）；绝不持久化秘密 /
       prompt（本键只是宿主已配置 worker 模型的 id 见证）。
     """

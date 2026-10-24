@@ -78,7 +78,9 @@ CLI_USAGE = (
     "task-fail <repo_root> <task_id> | "
     "task-cancel <repo_root> <task_id> | "
     "exit-waiting <repo_root> <task_id> | "
-    "task-record-workflow-run <repo_root> <task_id> <run-id>")
+    "task-record-workflow-run <repo_root> <task_id> <run-id> | "
+    "chain-block-record <repo_root> <task_id> <block_id> "
+    "<impl|impl-flash> [--ownership <s>]")
 
 # —— 用法错误（_dispatch；调用点统一 + CLI_USAGE）——
 
@@ -186,6 +188,12 @@ CLI_USAGE_EXIT_WAITING = "exit-waiting requires <repo_root> <task_id>: two argum
 CLI_USAGE_TASK_RECORD_WORKFLOW_RUN = (
     "task-record-workflow-run requires <repo_root> <task_id> "
     "<run-id>: three arguments.")
+CLI_USAGE_CHAIN_BLOCK_RECORD = (
+    "chain-block-record requires <repo_root> <task_id> <block_id> "
+    "<impl|impl-flash> [--ownership <s>]: four or six arguments.")
+CLI_USAGE_CHAIN_BLOCK_RECORD_FLAG = (
+    "chain-block-record accepts only --ownership <s> as an optional "
+    "argument.")
 CLI_USAGE_UNKNOWN_SUBCOMMAND = "Unknown subcommand %r."
 
 # —— review-record / quota 生命周期薄壳 ——
@@ -298,6 +306,13 @@ CLI_TASK_REJECTED_WRAP = "%s: %s"
 CLI_TASK_RECORD_WORKFLOW_RUN_RUN_ID_EMPTY = (
     "task-record-workflow-run: run-id must be a non-empty "
     "string, got %r")
+CLI_CHAIN_BLOCK_RECORD_BLOCK_ID_EMPTY = (
+    "chain-block-record: block_id must be a non-empty string, got %r")
+CLI_CHAIN_BLOCK_RECORD_ROLE_INVALID = (
+    "chain-block-record: role %r is not in the allowed values (%s)")
+CLI_CHAIN_BLOCK_RECORD_OWNERSHIP_EMPTY = (
+    "chain-block-record: ownership must be a non-empty string "
+    "(omit the flag for None)")
 CLI_UNEXPECTED_ERROR = "%s: %s"
 
 # ============================================================
@@ -353,6 +368,20 @@ TASK_RECORD_RUN_GUARD_RACE = (
     "repository's writer guard became held by another task "
     "(task_id=%r, workflow_run_id=%r); refusing "
     "this registration")
+
+# —— 直派链块委派（v2.8.0 W-B3，journal-only） ——
+
+TASK_CHAIN_BLOCK_ID_EMPTY = (
+    "record_chain_block: block_id must be a non-empty string, got %r")
+TASK_CHAIN_BLOCK_ROLE_INVALID = (
+    "record_chain_block: role %r is not in the allowed values (%s)")
+TASK_CHAIN_BLOCK_OWNERSHIP_INVALID = (
+    "record_chain_block: ownership must be a non-empty string or "
+    "None, got %r")
+TASK_CHAIN_BLOCK_DUPLICATE = (
+    "record_chain_block: task %s already has a chain_block_delegated "
+    "event for block_id %r; a repeated block id is a scheduling-error "
+    "signal, refusing to append a duplicate event")
 
 # —— 任务级验证 / 审查 ——
 

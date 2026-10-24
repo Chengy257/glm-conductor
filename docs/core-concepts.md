@@ -28,16 +28,19 @@ The four routing modes (the `route.mode` vocabulary, looked up on Delegability �
 
 | Delegability | Assurance | mode | Implementation | Independent review |
 | --- | --- | --- | --- | --- |
-| low | standard | `solo` | GLM-5.3 main session | no |
+| low | standard | `solo` | main session directly (small) / direct-dispatch chain (long) | no |
 | high | standard | `delegate` | Native Workflow | no |
-| low | high | `audit` | GLM-5.3 main session | yes |
+| low | high | `audit` | main session directly (small) / direct-dispatch chain (long) | yes |
 | high | high | `full` | Native Workflow | yes |
 
-events.jsonl illustration (one event per line; the task-level vocabulary is exactly ten names):
+Since v2.8.0 `delegability: low` means "cannot be pre-delegated as one static DAG", not "nothing may be delegated": the implementation shape of a low-delegability task is split by task length — small tasks run directly in the main session (green light), long tasks run as a direct-dispatch chain of bounded blocks (the main session stays the orchestrator of record, chaining blocks to conductor-impl-flash / conductor-impl; one `chain_block_delegated` journal event per block).
+
+events.jsonl illustration (one event per line; the task-level vocabulary is exactly eleven names):
 
 ```
 {"event": "route_selected", "mode": "full", "assurance": "high"}
 {"event": "workflow_started", "workflow_run_id": "<run id>"}
+{"event": "chain_block_delegated", "block_id": "<block>", "role": "impl-flash"}
 {"event": "validation_recorded", "status": "passed", "change_id": "sha256:…"}
 ```
 

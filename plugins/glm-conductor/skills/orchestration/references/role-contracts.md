@@ -31,7 +31,7 @@ Typical tasks: function implementation with a settled interface, test/fixture ad
 - sensitive decisions unresolved
 - the design may change frequently during implementation
 
-At delegability: low the main session implements (the main model inherits the host main session and is not programmatically switchable).
+At delegability: low the task **cannot be pre-delegated wholesale as one static DAG** — that is not a claim that no implementation may be delegated at all (v2.8.0 semantics correction). The main session is the **orchestrator of record**: it implements directly only when the whole task is small (green light), and chains bounded blocks to impl roles otherwise (the direct-dispatch chain — SKILL.md section 'Direct-dispatch chain (low-delegability long tasks)'; the main model inherits the host main session and is not programmatically switchable). Task length / context footprint is the third criterion that decides between the two shapes.
 
 ### Axis B — Assurance
 
@@ -55,15 +55,16 @@ The judgment question: after implementation passes main-session validation, does
 
 | Delegability | Assurance | Route | Implementation | Independent review |
 | --- | --- | --- | --- | --- |
-| low | standard | solo | main session (host model) | no |
+| low | standard | solo | main session directly (small) / direct-dispatch chain (long) | no |
 | high | standard | delegate | native Workflow (text worker) | no |
-| low | high | audit | main session (host model) | yes |
+| low | high | audit | main session directly (small) / direct-dispatch chain (long) | yes |
 | high | high | full | native Workflow (text worker) | yes |
 
 Semantic points:
 
 - delegate is not a risk escalation of solo: solo = main-session implementation (the main model inherits the host main session), delegate = native-Workflow text-worker implementation; delegate only states "this implementation is bounded enough"
-- audit = main-session implementation + reviewer final review (judgment-dense, sensitive, architecture-heavy work)
+- at low delegability the implementation shape is decided by task length (v2.8.0): a small task is implemented directly by the main session (green light); a long task runs as a direct-dispatch chain — the main session stays the orchestrator of record and chains bounded blocks to impl roles (one `chain_block_delegated` journal event per block)
+- audit = low-delegability implementation (directly or chained) + reviewer final review (judgment-dense, sensitive, architecture-heavy work)
 - full = delegated implementation + reviewer final review (large but bounded: mechanical API migrations, UI revamps with clear specs, repetitive multi-file conversions)
 - visual/interactive tasks are a capability choice of implementation modality (the visual-implementer subagent channel), not a fifth route
 
@@ -331,7 +332,7 @@ Four dispatchable subagent roles complement the workflow text worker (above) and
 ### conductor-scout contract (read-only investigation)
 
 - **Positioning**: a read-only investigation / fact-collection role for ROUTING PREFLIGHT and mid-task unknowns — closes bounded factual questions with evidence, never designs and never decides
-- **Model**: pinned in the frontmatter to `account:bigmodel-individual-coding-plan/GLM-5.3-Flash` (agents/conductor-scout.md is the binding authority; never attach model overrides at invocation time)
+- **Model**: pinned in the frontmatter to `account:bigmodel-start-plan/GLM-5.3-Flash` (v2.8.0: rebound to the start-plan Flash series by owner instruction — individual-series quota died mid-campaign; the frontmatter stays the binding authority) (agents/conductor-scout.md is the binding authority; never attach model overrides at invocation time)
 - **Tools**: read-only whitelist — Read, Glob, Grep, LS, NotebookRead (the zero-write red line is enforced by the tool surface itself)
 - **Trigger**: an unknown item of ROUTING PREFLIGHT (root cause / implementation boundary / interface contracts / hidden coupling) that a bounded read-only pass can close — simple reconnaissance the scout carries for cost; deep reconnaissance still prefers the host Explore capability or the main session reading code itself ('ROUTING PREFLIGHT' in SKILL.md)
 - **Input**: investigation questions — a bounded question list, each phrased so it has an observable, file-grounded answer; a question without one is returned for rephrasing, never answered by guessing
@@ -342,7 +343,7 @@ Four dispatchable subagent roles complement the workflow text worker (above) and
 ### conductor-runner contract (command execution)
 
 - **Positioning**: a verbatim command-execution role — runs entrusted commands and tests and reports what actually happened; the main session's hands for probes and verification runs
-- **Model**: pinned in the frontmatter to `account:bigmodel-individual-coding-plan/GLM-5.3-Flash` (agents/conductor-runner.md is the binding authority; never attach model overrides at invocation time)
+- **Model**: pinned in the frontmatter to `account:bigmodel-start-plan/GLM-5.3-Flash` (v2.8.0: rebound to the start-plan Flash series by owner instruction — individual-series quota died mid-campaign; the frontmatter stays the binding authority) (agents/conductor-runner.md is the binding authority; never attach model overrides at invocation time)
 - **Tools**: Bash, Read, Glob, TaskOutput, TaskStop — Bash exists to execute the entrusted commands, never to mutate repository files through redirection or file-mutating one-liners
 - **Trigger**: a command or test suite needs running with an honestly observed result — verification probes, environment checks, bug reproductions
 - **Input**: a single entrusted command given verbatim, or an explicitly bounded command list with a stated order; a free-form goal is handed back with a request for the exact command
@@ -353,8 +354,8 @@ Four dispatchable subagent roles complement the workflow text worker (above) and
 ### conductor-impl-flash contract (Flash-pinned bounded implementation)
 
 - **Positioning**: the bounded mechanical implementation executor of the direct-dispatch channel — the direct-dispatch counterpart of the workflow text worker, with the same execution discipline
-- **Model**: pinned in the frontmatter to `account:bigmodel-individual-coding-plan/GLM-5.3-Flash` (agents/conductor-impl-flash.md is the binding authority; never attach model overrides at invocation time)
-- **Trigger**: a mechanical, specification-complete implementation block — the delegate single-node lightweight channel (the DAG is exactly one node and assurance is standard) or a solo-route mechanical offload (the main session stays the implementer of record)
+- **Model**: pinned in the frontmatter to `account:bigmodel-start-plan/GLM-5.3-Flash` (v2.8.0: rebound to the start-plan Flash series by owner instruction — individual-series quota died mid-campaign; the frontmatter stays the binding authority) (agents/conductor-impl-flash.md is the binding authority; never attach model overrides at invocation time)
+- **Trigger**: a mechanical, specification-complete implementation block — the delegate single-node lightweight channel (the DAG is exactly one node and assurance is standard), a solo-route mechanical offload (the main session stays the implementer of record), or a **direct-dispatch chain block** (v2.8.0: the chain is the standard substrate of low-delegability long tasks — mechanical blocks route here; one `chain_block_delegated` journal event per block via `chain-block-record`)
 - **Input**: the five-part implementation spec in the same format as node declarations (above), optionally preceded by the TASK CONTEXT PACK; all five sections explicit before dispatch
 - **Output contract**: the IMPLEMENTATION REPORT template (above) — no structured NodeResult (that is the native Workflow run's contract); the report is a claim, and evidence still exists only in the diff and command output the main session personally inspects
 - **Red lines**: dispatched only in an active task context that holds this repository's writer guard ('Execution procedure for delegate/full'; guard semantics unchanged); ownership discipline identical to the workflow worker persona — modify only owned repo-relative paths, honor declared interfaces, never revert others' concurrent changes; honest local_check execution — run every item, record results and failures faithfully, invent none when empty, never fabricate output; substantive ambiguity or spec gaps return blocked with a reassessment request, never a unilateral decision
@@ -364,7 +365,7 @@ Four dispatchable subagent roles complement the workflow text worker (above) and
 
 The conductor-impl-flash contract applies verbatim (trigger / input / output / red lines, including the writer-guard precondition and the ownership discipline), with one difference:
 
-- **Model**: no model key in the frontmatter — the model inherits the host/session (the glm-reviewer precedent); chosen when a bounded implementation block needs main-model strength but not a whole workflow
+- **Model**: no model key in the frontmatter — the model inherits the host/session (the glm-reviewer precedent); chosen when a bounded implementation block needs main-model strength but not a whole workflow. **The direct-dispatch chain is one of its main trigger scenarios** (v2.8.0): judgment-dense blocks of a low-delegability long task chain here — same price as the main session, the win is context isolation, not money (the honesty note of the chain doctrine)
 - **Dispatch**: `subagent_type: glm-conductor:conductor-impl`
 
 ## Main-session (architect) contract
@@ -379,5 +380,15 @@ The main session retains the following duties (the main model inherits the host 
 - acceptance and the completion declaration
 
 Auxiliary work substitutes for, and never repeats, the main session's work: after delegating implementation the main session does not write the implementation again — it validates and accepts.
+
+**Chain master duties (v2.8.0)** — when a task runs as a direct-dispatch chain (SKILL.md 'Direct-dispatch chain (low-delegability long tasks)'), the main session additionally owns, per chain:
+
+- writing the per-block five-part implementation spec (block granularity judged with the W4 criteria, single source)
+- per-block acceptance: the diff scope ⊆ the block's ownership, plus re-running the block's local_check commands
+- the parallel-partition responsibility (ownership strictly non-overlapping + zero dependency; batch cap 3; fall back to serial on any observed write conflict) — chains have no plan_stages compile-time check, so the partition judgment is entirely the main session's
+- chain event accounting: one `chain-block-record` call per dispatched block
+- chain recovery rebuild (wake/resume turns): journal tail-read of `chain_block_delegated` → state reconciliation → repository-facts check → re-dispatch of the next block (no subagent process-level resume)
+
+These chain-master duties strengthen, and never weaken, the never-delegated list above — the chain is exactly the architect's decomposition work distributed over time.
 
 **Capability boundary**: the main model inherits the host main session, and Conductor never asserts its strength or modality capability from a model name or version alone. In the visual chain the main session drives and captures (launching apps, driving the browser / desktop, saving screenshots) and must never claim it made visual judgments; visual judgment is made by the explicitly bound multimodal visual roles (visual-implementer / visual-reviewer).

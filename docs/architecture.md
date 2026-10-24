@@ -25,7 +25,7 @@ v2.4 is explicitly **not**: a second task runtime, a Workflow engine, a permissi
 
 ## 2. Routing matrix
 
-Routing keeps two independent axes: answer each first, then consult the matrix; `executor` is no longer a separate routing dimension for ordinary text work — `solo/audit` means main-session implementation, `delegate/full` means Native Workflow implementation (the visual exception is §13).
+Routing keeps two independent axes: answer each first, then consult the matrix; `executor` is no longer a separate routing dimension for ordinary text work — `solo/audit` means main-session-carried implementation (v2.8.0: split by task length — small tasks directly in the main session, long low-delegability tasks as a direct-dispatch chain of bounded blocks to conductor-impl-flash / conductor-impl, one `chain_block_delegated` journal event per block), `delegate/full` means Native Workflow implementation (the visual exception is §13).
 
 - **Delegability**: is the remaining implementation sufficiently bounded and the spec sufficiently complete? objective / file boundaries / interfaces / constraints / verification all explicit and the architecture settled → high; unsettled architecture, unknown root cause, substantive ambiguity, judgment-heavy → low
 - **Assurance**: after main-session validation, does a fresh-context independent final review add substantive value? limited blast radius, contained regression risk → standard; wide blast radius, high regression risk, destructive behavior, large user-visible change → high

@@ -27,7 +27,7 @@ W6（v2.4 Phase 2 P2-F）：flash-implementer 已随 v2.3 执行面退役删除�
 
 v2.7.0 W6（直派角色四件套）：主会话绕过 Workflow 直接 subagent 派遣的
 四个角色入列——conductor-scout / conductor-runner / conductor-impl-flash
-显式 pin account:bigmodel-individual-coding-plan/GLM-5.3-Flash（直派
+显式 pin account:bigmodel-start-plan/GLM-5.3-Flash（v2.8.0 起直派
 通道同样遵守 worker 模型显式选型契约，缺省/裸 ID 会静默回退主会话
 模型）；conductor-impl（主模型直派实现角色）无 model 键为合法继承
 形态（继承宿主/会话模型，同 glm-reviewer 先例）；四角色 tools 白名单
@@ -65,8 +65,12 @@ DIRECT_FLASH_ROLES = ("conductor-scout", "conductor-runner", "conductor-impl-fla
 DIRECT_INHERIT_ROLE = "conductor-impl"
 # 直派角色显式 pin 的 worker 模型（provider 全限定，与 runner/scout/
 # impl-flash 三文件 frontmatter 声明一致）
+# v2.8.0：owner 指令改绑——三个文本 flash 直派角色（scout / runner /
+# impl-flash）从 individual 系列（额度窗口中途耗尽）改绑 start-plan
+# 系列 flash；visual 双角色维持 2026-10-14 静态绑定裁定（individual
+# 前缀），不在本锚管辖内。
 DIRECT_FLASH_MODEL_PIN = (
-    "account:bigmodel-individual-coding-plan/GLM-5.3-Flash")
+    "account:bigmodel-start-plan/GLM-5.3-Flash")
 # 四直派角色 tools 白名单（与各文件 frontmatter 声明逐字一致，含顺序）
 DIRECT_ROLE_TOOLS = {
     "conductor-scout": ("Read", "Glob", "Grep", "LS", "NotebookRead"),

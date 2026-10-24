@@ -510,7 +510,9 @@ STOP_GATE_REQUIRED_MARKERS = (
 SKILL_CONTRACT_MARKERS = (
     (CONTINUITY_SKILL,
      ("state.json", "events.jsonl", "waiting_quota", "quota_resume",
-      "GLM_CONDUCTOR_QUOTA_API_KEY")),
+      "GLM_CONDUCTOR_QUOTA_API_KEY",
+      # v2.8.0 W-B4 链位重建锚（词汇行 + 恢复步）
+      "chain_block_delegated", "Chain-position rebuild")),
     (LONG_HORIZON, ("state.json", "events.jsonl")),
     (ORCHESTRATION_SKILL, ("state.json", "route_selected", "SELECTIVE ROUTE",
      "v24-compile", "writer-acquire",
@@ -518,8 +520,14 @@ SKILL_CONTRACT_MARKERS = (
      "Granularity defaults to one node", "Too-large red flags",
      "Too-fragmented red flags",
      "Ownership division is the parallelism knob",
-     "The stages summary is a feedback loop")),
-    (ROLE_CONTRACTS, ("TASK CONTEXT PACK", "FILES AND OWNERSHIP")),
+     "The stages summary is a feedback loop",
+     # v2.8.0 W-B1 直派链教义锚（W-B5，规格 §3）：新节名/链事件 CLI/
+     # orchestrator-of-record 定位句
+     "Direct-dispatch chain (low-delegability long tasks)",
+     "chain-block-record", "orchestrator of record")),
+    (ROLE_CONTRACTS, ("TASK CONTEXT PACK", "FILES AND OWNERSHIP",
+     # v2.8.0 W-B2 链主契约锚
+     "Chain master duties")),
     (ENFORCEMENT_SKILL,
      ("ENFORCEMENT DEGRADED", "change_id", "writer_guard", "review-record")),
 )
@@ -743,6 +751,12 @@ WAKE_CARRIER_DOC_MARKERS = (
     (LONG_HORIZON,
      ("alwaysOn",)),
 )
+
+# 16o：v2.8.0 直派链 CLI 实现面锚（W-B5，规格 §3 W-B1/W-B3）——
+# chain-block-record 子命令必须出现在 cli.py（正锚——子命令在 cli.py
+# 出现，随实现面同步）；教义文档面锚（新节名/链主契约/链位重建/
+# orchestrator-of-record）在 check_14 的 SKILL_CONTRACT_MARKERS。
+V280_CHAIN_CLI_SUBCOMMANDS = ("chain-block-record",)
 
 
 def rel_display(path):
@@ -2117,6 +2131,25 @@ def check_16_v241_protocol(results):
                     "FAIL: %s 缺少四级矩阵文档面锚 `%s`（W1 载体探针/安装/"
                     "sleep-only/automation_kind/alwaysOn 措辞缺失）"
                     % (shown, marker))
+                ok = False
+
+    # —— 16o：v2.8.0 直派链 CLI 实现面锚（W-B5，规格 §3 W-B3） ——
+    # chain-block-record 子命令必须出现在 cli.py（正锚，随实现面同步）；
+    # 教义文档面锚（新节名/链主契约/链位重建）在 check_14 的
+    # SKILL_CONTRACT_MARKERS。cli_text 已在 16g 读取。
+    if cli_text is None or not os.path.isfile(CLI_PY):
+        details.append("FAIL: %s 不存在或无法读取，无法执行 16o 检查" % cli_shown)
+        ok = False
+    else:
+        for marker in V280_CHAIN_CLI_SUBCOMMANDS:
+            if marker in cli_text:
+                details.append("PASS: %s 含直派链 CLI 命令 `%s`"
+                               % (cli_shown, marker))
+            else:
+                details.append(
+                    "FAIL: %s 缺少直派链 CLI 命令 `%s`（v2.8.0 W-B3 链块"
+                    "入账子命令未入 USAGE——实现面漂移）"
+                    % (cli_shown, marker))
                 ok = False
 
     results.append((16, title, ok, details))

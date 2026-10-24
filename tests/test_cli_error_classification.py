@@ -376,6 +376,7 @@ class UsageDocstringConsistencyTest(unittest.TestCase):
         ("_task_terminal", "_TaskRejected"),
         ("_exit_waiting", "_TaskRejected"),
         ("_task_record_workflow_run", "_TaskRejected"),
+        ("_chain_block_record", "_TaskRejected"),
         ("_quota_automation_bind", "_AutomationRejected"),
         ("_quota_automation_clear", "_AutomationRejected"),
         ("_quota_continuity_preflight", "_AutomationRejected"),
@@ -394,8 +395,10 @@ class UsageDocstringConsistencyTest(unittest.TestCase):
         self.assertTrue(cli.USAGE.startswith(prefix),
                         "USAGE 前缀漂移：%r" % cli.USAGE[:60])
         body = cli.USAGE[len(prefix):]
-        # <passed|failed> 占位符内含竖线，先中性化再切分
+        # 占位符内含竖线（<passed|failed> / v2.8.0 chain-block-record 的
+        # <impl|impl-flash>），先中性化再切分
         body = body.replace("<passed|failed>", "<passed-or-failed>")
+        body = body.replace("<impl|impl-flash>", "<impl-or-impl-flash>")
         commands = []
         for segment in body.split("|"):
             segment = segment.strip()

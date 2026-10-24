@@ -31,6 +31,8 @@ Do not compress all situation state into a single risk level. Answer two questio
 
 The two axes are judged independently; neither derives from the other. The full criteria table lives in references/role-contracts.md.
 
+**Axis A semantics correction (v2.8.0)**: `delegability: low` means the task **cannot be pre-delegated wholesale as one static DAG** — it does NOT mean that no implementation may be delegated at all. A third criterion enters the routing narrative alongside the two axes: **task length / context footprint**. A long low-delegability task (judgment-dense doctrine work, diagnosis-gated fixes, multi-phase campaigns) has a third implementation shape — the **direct-dispatch chain** ('Direct-dispatch chain (low-delegability long tasks)'): the main session stays the implementer of record for judgment and chains bounded blocks to impl roles. A small task stays green-light direct work in the main session; the green/red light judgment lives in that section.
+
 ## ROUTING PREFLIGHT
 
 PREFLIGHT is not routing — it is evidence preparation for routing: when key facts are unknown before the dual-axis judgment, close them with read-only reconnaissance first; never fix the route early on weak evidence.
@@ -158,6 +160,8 @@ A ZCode Native Workflow run remains the only implementation substrate for multi-
 
 **Interaction-turn boundary**: the interview happens only in interactive turns; **wake turns / resume turns never interview** — an unattended turn that hits a blocker only an interview could clear (e.g. a stale pin) fails closed: block the submission and hand over to waiting-for-user; never create a deadlock by asking.
 
+**Chain-block roles are statically bound (v2.8.0, stated-as-is behavior)**: a task running as a direct-dispatch chain ('Direct-dispatch chain (low-delegability long tasks)') selects its block roles impl / impl-flash by frontmatter static binding (mechanical → impl-flash, judgment-dense → impl); chain blocks never enter the worker-model question or the pin surface — question 2 and `worker-model-pin` serve CreateWorkflow submissions only, and a chain task that never submits a workflow has no pin.
+
 ### Worker model selection gate
 
 INV-MODEL-01, user-authorized explicit selection: before every CreateWorkflow submission, a user-authorized explicit worker model selection must be complete. This is a mandatory sequence, not optional advice — a failed step stops, and the next step is never entered in an impaired state. The Flash tier is a **soft recommendation**, not an admission gate: a configured non-Flash exact id authorized by the user (interview confirmation, task pin, or an explicit `--model` value) is equally legal.
@@ -210,9 +214,31 @@ Four direct-dispatch subagent roles — conductor-scout / conductor-runner / con
 - **Available on any route (no task prerequisite)**: scout (investigation) and runner (running commands and tests) never modify the repository surface — they are usable on solo/delegate/audit/full and on guard-free tasks alike, without a task state file.
 - **Write-type role discipline**: impl-flash / impl are dispatched only in an active task context that holds this repository's writer guard ('Execution procedure for delegate/full'; the guard semantics are unchanged), and the main session hands over the five-part implementation spec in the same format as node declarations — the workflow worker's ownership discipline and honest local_check execution apply verbatim.
 - **delegate single-node lightweight channel (D10 revision clause)**: when the DAG is exactly one node and assurance is standard, an impl role may be dispatched directly instead of compiling a 1-node workflow. The cost is explicit in the contract: no structured NodeResult and no ResumeWorkflowRun recovery (recovery semantics = re-dispatch from repository facts); the completion gate, main-session validation and review chain are unchanged. Multi-node delegate/full keeps the Native Workflow as its only implementation substrate.
-- **solo-route auxiliary positioning**: the main session remains the implementer of record; mechanical blocks may be offloaded to an impl role (bound by the write-type discipline above). The routing matrix's four modes are unchanged.
-- **Model-gate compatibility**: the direct-dispatch roles' model strategy is declared openly in their frontmatter (scout / runner / impl-flash pinned to GLM-5.3-Flash; impl carries no model key and inherits the host/session — the glm-reviewer precedent) and never enters the workflow-model-select pipeline — that gate selects the run-level `subagent_model` of CreateWorkflow submissions and its semantics are unchanged ('Worker model selection gate').
-- **Events**: direct dispatch adds no journal events (decision D13) — validation, review and the completion gate keep their usual accounting.
+- **Orchestrator-of-record positioning (v2.8.0)**: the main session is the **orchestrator of record**; it implements directly only when the whole task is small (green light, 'Direct-dispatch chain (low-delegability long tasks)'), and chains bounded blocks otherwise. On any route mechanical blocks may be offloaded to an impl role (bound by the write-type discipline above). The routing matrix's four modes are unchanged.
+- **Model-gate compatibility**: the direct-dispatch roles' model strategy is declared openly in their frontmatter (scout / runner / impl-flash pinned to GLM-5.3-Flash; impl carries no model key and inherits the host/session — the glm-reviewer precedent) and never enters the workflow-model-select pipeline — that gate selects the run-level `subagent_model` of CreateWorkflow submissions and its semantics is unchanged ('Worker model selection gate').
+- **Events**: a chain-block delegation inside a direct-dispatch chain records exactly one `chain_block_delegated` journal event per block via `chain-block-record` (decision D-C; 'Direct-dispatch chain'); every other direct dispatch — scout, runner, and single-shot mechanical offload — adds zero journal events (decision D13 as revised). Validation, review and the completion gate keep their usual accounting.
+
+## Direct-dispatch chain (low-delegability long tasks)
+
+The third implementation shape: for a task that is **low-delegability × long** the main session does not implement everything itself and does not compile a static DAG either — it stays the implementer of record for judgment and **chains bounded blocks** to impl roles, one block at a time (or a few in parallel under the chain parallel rules). The chain is the implementation substrate of low-delegability long tasks, the direct-dispatch counterpart of `workflow_started`'s delegate/full substrate.
+
+**Trigger**: low delegability (cannot be pre-delegated wholesale as one static DAG) × long task (red light below). High-delegability work keeps the existing shapes (native Workflow for delegate/full); a green-light task stays direct main-session work.
+
+**Small-task green/red light (judgment-based, no mechanical proxy metric)**:
+
+- **Green light (implement directly in the main session)**: the whole task is expected to touch ≤1-2 files, verification is a single command, no long exploration is needed, it completes within a few tool rounds — or the change is so small that dispatch overhead (spec + report + acceptance) exceeds the implementation itself (the dispatch-overhead floor; the first green condition is the inverted-overhead guard).
+- **Red light (the task must run as a chain)**: multiple files / multiple steps are expected; large chunks of file content must be read into the main context; verification is a long test run with large output (a runner can carry it); the expected tool-round count clearly exceeds the small-task shape.
+- **Mid-course tripwire**: while implementing directly, if the actually observed shape outgrows the prediction (repeatedly self-reading large files, the round count overshooting), trigger ROUTE REASSESSMENT (the evidence = the observed growth) and move the remaining work to a chain — never keep grinding a green-light call against red-light facts.
+
+**Block criteria**: block granularity is judged with the W4 granularity criteria of 'Task state and static DAG authoring' (default whole-block / too-large red flags / too-fragmented red flags) — **single-source reference, no second copy of the criteria text here**. A chain block is the direct-dispatch form of one bounded node: one complete deliverable, non-empty ownership, the five-part spec handed verbatim.
+
+**Model selection per block**: mechanical blocks → `conductor-impl-flash` (cost + speed); judgment-dense blocks → `conductor-impl` (inherits the main-session model; **honesty note**: same price as the main session — the win is context isolation, not money). Both roles are statically bound in their frontmatter and never enter workflow-model-select.
+
+**Parallel rules (decision D-E)**: blocks in the same batch may run in parallel only when their ownership **strictly does not overlap** and they are **mutually zero-dependency**; there is no plan_stages compile-time check for chains, so the partition responsibility sits with the main session; the same-batch parallel cap is the conservative **3** (doctrinal default; ROUTE REASSESSMENT may adjust it on evidence). On any observed write conflict, fall back to serial immediately and record it.
+
+**Chain events**: every block delegation is recorded through the CLI as a `chain_block_delegated` journal event (`chain-block-record <repo_root> <task_id> <block_id> <impl|impl-flash> [--ownership <s>]`; duplicate block_id is refused — a repeated id is a scheduling-error signal). scout / runner / single-shot mechanical offload outside a chain keep zero events.
+
+**Recovery**: a wake/resume turn rebuilds the chain position by journal tail-read of `chain_block_delegated` → task state (mode / assurance / non-terminal) → reconcile against repository facts (which blocks already landed) → re-dispatch the next block. Block recovery semantics = the D10 clause: re-dispatch from repository facts; there is no subagent process-level resume (the continuity skill carries the recovery runbook).
 
 ## Main-session validation
 

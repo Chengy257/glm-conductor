@@ -265,6 +265,23 @@ v2.4 Phase 3（P3-D/E）收口面：
         workflow_started。run-id 结构非法（空串）→ 退出码 2；任务层
         拒绝（任务缺失 / v2.3 遗留 / 终态冻结 / 守卫前置失配）→
         退出码 1。输出单行 JSON {task_id, workflow_run_id, status}。
+    chain-block-record <repo_root> <task_id> <block_id>
+            <impl|impl-flash> [--ownership <s>]
+        Direct-dispatch chain block delegation record (v2.8.0 W-B3,
+        task.record_chain_block thin shell; journal-only): appends
+        exactly one chain_block_delegated event (payload block_id /
+        role, plus an ownership summary key only when --ownership is
+        given) — the main session's semantic decomposition decision
+        and the direct-dispatch counterpart of workflow_started;
+        never writes state.json, never touches the writer guard.
+        Duplicate block_id (already recorded for this task) → exit 1
+        (a repeated block id is a scheduling-error signal); missing
+        task / v2.3 legacy / terminal frozen / task-layer role or
+        ownership rejection → exit 1. Usage/value problems (wrong arg
+        count, unknown flags, empty block_id, role outside
+        impl|impl-flash, empty --ownership value) → exit 2. On
+        success outputs single-line JSON {task_id, block_id, role,
+        status}.
     os-carrier-install <repo_root> <task_id> [--session <id>]
             [--interval <hours>] [--prompt <s>]
         L1 OS 唤醒载体安装（v2.7.0 W1，runtime.carrier 薄壳；D4/D6
@@ -329,6 +346,8 @@ v2.4 Phase 3（P3-D/E）收口面：
           record-validation / task-complete / task-fail /
           task-cancel / exit-waiting）与 v2.6.0 规范 run 注册
           task-record-workflow-run（含 AF-04 守卫前置失配）被
+          runtime.task 拒绝 / v2.8.0 起直派链块委派记录
+          chain-block-record（含同 block_id 重复拒绝）被
           runtime.task 拒绝——任务生命周期拒绝（含状态迁移矩阵外
           来源 / 终态冻结）恒归本档，与退出码 2 的盘面结构性拒绝
           互斥
@@ -426,9 +445,11 @@ class _PinTaskRejected(Exception):
 class _TaskRejected(Exception):
     """任务生命周期操作面（task-create / record-validation /
     task-complete / task-fail / task-cancel / exit-waiting /
-    task-record-workflow-run）被 runtime.task 拒绝（任务已存在 /
+    task-record-workflow-run / chain-block-record）被 runtime.task
+    拒绝（任务已存在 /
     任务缺失 / v2.3 遗留任务 / 终态冻结 / 状态迁移矩阵外来源 /
-    AF-04 写者守卫前置失配等 ValueError 口径）——运行期拒绝，退出码
+    AF-04 写者守卫前置失配 / 同 block_id 重复记录等 ValueError
+    口径）——运行期拒绝，退出码
     1（与 _QuotaRejected / _AutomationRejected 同口径；参数值非法在
     CLI 侧先闸走退出码 2，见各子命令实现；盘上 state 结构性拒绝
     亦不经本类——经 _is_structural_state_rejection 分类后按
@@ -1341,6 +1362,52 @@ def _task_record_workflow_run(repo_root, task_id, run_id) -> int:
     return 0
 
 
+# —— v2.8.0 W-B3：直派链块委派记录 CLI 面 ——
+#
+# chain-block-record 是 task.record_chain_block 的薄壳（journal-only，
+# 零 state 写盘、零守卫交互——守卫是任务级单持有，链内并行块同守卫
+# 之下，无新守卫面）：CLI 只做 --ownership 旗标解析与取值先闸（参数
+# 值非法口径 → 退出码 2，与 task-record-workflow-run 的 run-id 先闸 /
+# record-validation 的词汇先闸同款）与 _TaskRejected 映射（退出码 1；
+# 盘上 state 结构性拒绝照旧经 _is_structural_state_rejection 分类
+# 透传为校验拒绝，退出码 2）。
+
+def _chain_block_record(repo_root, task_id, block_id, role,
+                        ownership=None) -> int:
+    """chain-block-record：直派链块委派记录（task.record_chain_block
+    薄壳，v2.8.0 W-B3，journal-only）。
+
+    追加恰一条 chain_block_delegated 事件（payload 恒含 block_id /
+    role，--ownership 给出时另附 ownership 摘要键）——主会话的语义
+    性分解决策、workflow_started 的直派对位物；绝不写 state.json、
+    绝不触碰写者守卫。CLI 侧先闸（参数值非法口径 → 退出码 2）：
+    block_id 非空；role ∈ task.CHAIN_BLOCK_ROLES（impl / impl-flash）；
+    --ownership 给出时非空。任务层 ValueError（任务缺失 / v2.3
+    遗留 / 终态冻结 / 同 block_id 重复 / 形状非法）→ _TaskRejected
+    （退出码 1）。成功输出单行 JSON {task_id, block_id, role,
+    status}。"""
+    from runtime import task  # 函数内 import：monkeypatch 友好
+    if not isinstance(block_id, str) or block_id == "":
+        raise ValueError(
+            messages.CLI_CHAIN_BLOCK_RECORD_BLOCK_ID_EMPTY % (block_id,))
+    if role not in task.CHAIN_BLOCK_ROLES:
+        raise ValueError(
+            messages.CLI_CHAIN_BLOCK_RECORD_ROLE_INVALID
+            % (role, ", ".join(task.CHAIN_BLOCK_ROLES)))
+    if ownership is not None and ownership == "":
+        raise ValueError(messages.CLI_CHAIN_BLOCK_RECORD_OWNERSHIP_EMPTY)
+    try:
+        st = task.record_chain_block(repo_root, task_id, block_id, role,
+                                     ownership=ownership)
+    except ValueError as exc:
+        if _is_structural_state_rejection(exc):
+            raise  # 盘上 state 结构性拒绝 → 校验拒绝（退出码 2）
+        raise _TaskRejected(str(exc)) from exc
+    _emit({"task_id": task_id, "block_id": block_id, "role": role,
+           "status": st.get("status")})
+    return 0
+
+
 # —— v2.7.0 W1（B4）：OS 唤醒载体三子命令 CLI 面 ——
 #
 # 本节是 runtime.carrier（纯构造 + 执行 + 探针）的薄壳：argv 解析、
@@ -1758,6 +1825,22 @@ def _dispatch(args) -> int:
             raise _UsageError(
                 messages.CLI_USAGE_TASK_RECORD_WORKFLOW_RUN + USAGE)
         return _task_record_workflow_run(rest[0], rest[1], rest[2])
+    if cmd == "chain-block-record":
+        # 位置参数 <repo_root> <task_id> <block_id> <impl|impl-flash>
+        # + 可选旗标 --ownership <s>（至多一次，恒成对出现在位置参数
+        # 之后）→ 四或六个参数（writer-acquire 的 2+2 同款形状）
+        if len(rest) not in (4, 6):
+            raise _UsageError(
+                messages.CLI_USAGE_CHAIN_BLOCK_RECORD + USAGE)
+        ownership = None
+        if len(rest) == 6:
+            if rest[4] != "--ownership":
+                raise _UsageError(
+                    messages.CLI_USAGE_CHAIN_BLOCK_RECORD_FLAG
+                    + USAGE)
+            ownership = rest[5]
+        return _chain_block_record(rest[0], rest[1], rest[2], rest[3],
+                                   ownership=ownership)
     if cmd == "os-carrier-install":
         # 位置参数 <repo_root> <task_id> + 旗标对（--session <id> /
         # --interval <hours> / --prompt <s>，各至多一次、顺序不限）
@@ -1814,7 +1897,9 @@ def main(argv=None) -> int:
     （worker-model-pin 写入被 runtime.task 拒绝）/ _PinTaskRejected
     （workflow-model-select --task-ref 消费面被任务层拒绝）/
     _TaskRejected（v2.5.2 起任务生命周期操作面与 v2.6.0 规范 run
-    注册 task-record-workflow-run 被 runtime.task 拒绝）/
+    注册 task-record-workflow-run 被 runtime.task 拒绝；v2.8.0 起
+    直派链块委派记录 chain-block-record 同档——含同 block_id 重复
+    拒绝）/
     _CarrierRejected（v2.7.0 W1 起 os-carrier-install 的机器级
     唤醒命令解析失败——无默认装位 cjs 亦无 PATH zcode）
     → 1；

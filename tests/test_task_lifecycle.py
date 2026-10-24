@@ -21,7 +21,8 @@
     - complete 释放写者守卫：complete / fail / cancel 三终态均释放
       （writer_guard.inspect 归 None）；他任务持有的守卫绝不误删；
       无守卫幂等；同终态重放安全；
-    - journal 词汇精确：TASK_JOURNAL_EVENTS 恰十名（Phase 3 Q1 恰增
+    - journal 词汇精确：TASK_JOURNAL_EVENTS 恰十一名（v2.8.0 D-C 恰增
+      chain_block_delegated；Phase 3 Q1 曾恰增
       quota_resume_confirmed）；全生命周期事件名
       逐条不多不少落在词汇内，无宿主子代理生命周期词汇；
     - record_workflow_run：delegate/full 写者守卫前置（预约缺失 /
@@ -762,13 +763,19 @@ class TestTerminalTwoRootRelease(LifecycleCase):
 class TestJournalVocabulary(LifecycleCase):
 
     def test_vocabulary_constant_exact(self):
-        """TASK_JOURNAL_EVENTS 恰十名，不多不少、无宿主子代理词汇。"""
+        """TASK_JOURNAL_EVENTS 恰十一名，不多不少、无宿主子代理词汇。
+
+        v2.8.0 D-C：+chain_block_delegated（序位在 workflow_started
+        之后）——主会话语义性分解决策记录、workflow_started 的直派
+        对位物，非子代理状态镜像，入表不违 never-mirrors 冻结禁令。
+        """
         self.assertEqual(task.TASK_JOURNAL_EVENTS, (
-            "route_selected", "workflow_started", "workflow_reassessed",
+            "route_selected", "workflow_started", "chain_block_delegated",
+            "workflow_reassessed",
             "validation_recorded", "review_recorded", "waiting_quota",
             "quota_resume_confirmed",
             "task_completed", "task_failed", "task_cancelled"))
-        self.assertEqual(len(set(task.TASK_JOURNAL_EVENTS)), 10)
+        self.assertEqual(len(set(task.TASK_JOURNAL_EVENTS)), 11)
         for term in _HOST_CHILD_TERMS:
             self.assertNotIn(term, task.TASK_JOURNAL_EVENTS)
 
