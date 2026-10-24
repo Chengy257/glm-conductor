@@ -22,6 +22,7 @@ GLM Conductor keeps the strong model focused on planning, architecture, and fina
 - **Explicit Delegation Contracts:** Delegated work is compiled from a canonical DAG defining node objectives, dependencies, owned files, interfaces, and constraints before implementation begins.
 - **Deterministic Native Workflow Execution:** Compiles static DAGs directly into deterministic TypeScript workflows executed natively by ZCode with zero runtime state duplication.
 - **Direct Dispatch Roles (v2.7.0):** Beyond compiled workflows, the main session can dispatch four specialized subagents directly — `conductor-scout` (read-only investigation) and `conductor-runner` (command/test execution) on any route with no task prerequisite, while the writing roles `conductor-impl-flash` / `conductor-impl` are dispatched only under an active task holding the repository writer guard; a single-node, standard-assurance `delegate` may dispatch one implementer directly instead of a one-node workflow (explicit costs: no structured NodeResult, no run-level resume; the completion gate / validation / review chain is unchanged).
+- **Direct-Dispatch Chain for Low-Delegability Long Tasks (v2.8.0):** `delegability: low` means a task cannot be pre-delegated as one static DAG — not that nothing may be delegated. Implementation now has three shapes: the main session directly (small tasks, green light), a **direct-dispatch chain** (low-delegability long tasks: the main session stays the orchestrator of record and chains bounded blocks to `conductor-impl-flash` / `conductor-impl`, one `chain_block_delegated` journal event per block via `chain-block-record`, blocks parallelizable under a strict ownership partition with the same-batch cap 3), and the native Workflow (delegate/full). Block recovery = re-dispatch from repository facts.
 - **User-Authorized Model Selection:** Workers are user-authorized, provider-qualified exact model IDs (all configured host candidates are shown; Flash tier is a soft recommendation, `workflow-model-select`, `model_policy: user-authorized-explicit-selection`); `subagent_model` is never omitted, preventing silent inheritance of the main-session model.
 - **Task-Level Workflow Submission Auto-Approval (v2.7.0):** Launch-interview question 4 can authorize confirmation-free CreateWorkflow submissions for a task (`task-create --auto-approve-workflow`, consumed per-request by a decision-only PermissionRequest hook for **path-type submissions** — inline `script:` submissions always keep manual confirmation), so an unattended wake/resume re-submission is no longer blocked on the confirmation ask.
 - **Minimal Deterministic Assurance:**
@@ -80,10 +81,12 @@ Before delegating any work, the main session assesses two orthogonal dimensions:
 
 | Delegability | Assurance | Route | Implementation Substrate | Independent Review |
 |:---:|:---:|:---:|:---:|:---:|
-| **Low** | Standard | `solo` | Main Session (host model) | None |
+| **Low** | Standard | `solo` | Main Session directly (small) / direct-dispatch chain (long) | None |
 | **High** | Standard | `delegate` | ZCode Native Workflow | None |
-| **Low** | High | `audit` | Main Session (host model) | Read-Only Reviewer (`glm-reviewer` / `visual-reviewer`) |
+| **Low** | High | `audit` | Main Session directly (small) / direct-dispatch chain (long) | Read-Only Reviewer (`glm-reviewer` / `visual-reviewer`) |
 | **High** | High | `full` | ZCode Native Workflow | Read-Only Reviewer (`glm-reviewer` / `visual-reviewer`) |
+
+Since v2.8.0 the Low-delegability substrate is split by task length: a small task (green light) is implemented directly in the main session; a long task runs as a direct-dispatch chain of bounded blocks with the main session as the orchestrator of record (see Key Highlights).
 
 Routes are declared upfront via a standardized `SELECTIVE ROUTE` block. When new evidence emerges during implementation, routes can be reassessed in either direction via `ROUTE REASSESSMENT`.
 
@@ -302,7 +305,7 @@ glm-conductor/
 Contributions are welcome! Before opening a pull request, verify all automated quality gates:
 
 ```bash
-# 1. Run full unit test suite (1090 tests, shipped in this repository)
+# 1. Run full unit test suite (1102 tests, shipped in this repository)
 python -m unittest discover -s tests -p "test_*.py"
 # Windows note: if plain `python` is an unregistered launcher or collection hits
 # encoding errors, run `PYTHONUTF8=1 python3 -m unittest discover -s tests -p "test_*.py"`

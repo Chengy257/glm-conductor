@@ -1,6 +1,6 @@
 {
   "name": "glm-conductor",
-  "version": "2.7.0",
+  "version": "2.8.0",
   "description": "Selective routing orchestration for GLM coding agents on ZCode Native Workflows. The main session (host model) stays the single architect: it declares solo/delegate/audit/full routes on two axes (Delegability x Assurance), compiles delegated work from a canonical static DAG into a ZCode Native Workflow, and owns task-level validation and acceptance. Minimal deterministic guarantees are built in - task-level change_id freshness, ownership scope, a one-active-write-Workflow-per-repo writer guard, and a four-check Stop-hook completion guard - plus optional user-authorized bounded quota resume with a four-level wake-carrier degradation matrix (native Scheduled Task / OS scheduled task via schtasks-crontab / sleep-only / fail-closed) and task-level confirmation-free path-type workflow submission (interview-authorized). Fresh-context read-only reviewers (glm-reviewer / visual-reviewer) cover high-assurance routes; visual-implementer remains the multimodal exception; a direct-dispatch quartet (conductor-scout / runner / impl-flash / impl) serves bounded read-only and write tasks outside full workflows.",
   "license": "MIT",
   "author": {

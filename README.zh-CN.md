@@ -22,6 +22,7 @@ GLM Conductor 让强模型专注于架构规划、全局判断与最终验收，
 - **基于显式契约的委派：** 委派实施前先编译规范 DAG，在开工前明确定义节点目标、上下游依赖、文件所有权边界、接口规范与环境约束。
 - **确定性 Native Workflow 执行：** 静态 DAG 纯代码编译为确定性 TypeScript 原生工作流，由 ZCode 原生调度运行，零多余的在途运行状态镜像。
 - **直派角色通道（v2.7.0）：** 编译 Workflow 之外，主会话可直接派发四个专项 subagent——`conductor-scout`（只读调查）与 `conductor-runner`（命令/测试执行）任意路线皆可、无任务前提；写型角色 `conductor-impl-flash` / `conductor-impl` 必须在持有仓库写者守卫的活动任务上下文中派发；单节点 standard 保障的 `delegate` 可直派一名实施者替代单节点 workflow（代价显式：无结构化 NodeResult、无运行级恢复；完成闸/验证/审查链路不变）。
+- **低委派长任务的直派链（v2.8.0）：** `delegability: low` 指任务无法作为单一静态 DAG 一次性预先委派——并非不可委派任何实施。实施形态自此三分：主会话直接实施（小任务，绿灯）、**直派链**（低委派长任务：主会话仍是记录在案的编排者，将有界块逐块委派给 `conductor-impl-flash` / `conductor-impl`，每块经 `chain-block-record` 落一条 `chain_block_delegated` journal 事件，块间可在严格 ownership 划分下并行、同批上限 3）、原生 Workflow（delegate/full）。块恢复语义 = 从仓库事实重派。
 - **用户授权显式选型：** 工作者必须是用户显式授权的 provider 全限定精确 id（展示宿主全部已配置候选；Flash 档为软推荐位，`workflow-model-select`，`model_policy: user-authorized-explicit-selection`）；`subagent_model` 绝不省略，从协议层根除静默继承主会话模型的隐患。
 - **任务级工作流提交免确认（v2.7.0）：** 启动问答第 4 问可对本任务授权 CreateWorkflow 提交免确认（`task-create --auto-approve-workflow`，由 decision-only 的 PermissionRequest 钩子逐请求消费，仅限 **path 型提交**——inline `script:` 提交恒保留人工确认），无人值守唤醒/恢复轮的重提交不再卡在确认问答上。
 - **最小确定性质量保障：**
@@ -80,10 +81,12 @@ GLM Conductor 让强模型专注于架构规划、全局判断与最终验收，
 
 | 可委派性 | 保障等级 | 路由模式 | 实施主体 | 独立审查 |
 |:---:|:---:|:---:|:---:|:---:|
-| **Low** | Standard | `solo` | 主会话（宿主模型） | 无 |
+| **Low** | Standard | `solo` | 主会话直接实施（小任务）/ 直派链（长任务） | 无 |
 | **High** | Standard | `delegate` | ZCode 原生 Workflow | 无 |
-| **Low** | High | `audit` | 主会话（宿主模型） | 只读审查者（`glm-reviewer` / `visual-reviewer`） |
+| **Low** | High | `audit` | 主会话直接实施（小任务）/ 直派链（长任务） | 只读审查者（`glm-reviewer` / `visual-reviewer`） |
 | **High** | High | `full` | ZCode 原生 Workflow | 只读审查者（`glm-reviewer` / `visual-reviewer`） |
+
+自 v2.8.0 起，Low 可委派性的实施主体按任务长度二分：小任务（绿灯）由主会话直接实施；长任务走有界块直派链，主会话仍是记录在案的编排者（见上方核心特性亮点）。
 
 主会话在动作前输出规范的 `SELECTIVE ROUTE` 声明块；实施过程中若出现新证据改变了任务边界，可双向进行 `ROUTE REASSESSMENT` 重估。
 
@@ -301,7 +304,7 @@ glm-conductor/
 欢迎提交 Issue 与 Pull Request！在提交代码前，请确保通过全套质量门禁：
 
 ```bash
-# 1. 运行全部单元测试 (1090 测试)
+# 1. 运行全部单元测试 (1102 测试)
 python -m unittest discover -s tests -p "test_*.py"
 
 # 2. 运行静态契约校验 (16/16 检查)
