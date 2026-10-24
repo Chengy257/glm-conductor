@@ -300,15 +300,20 @@ OPERATIONS = os.path.join(
     SKILLS_DIR, "orchestration", "references", "operations.md")
 
 AGENT_REQUIRED_KEYS = ("name", "description", "model", "thoughtLevel", "tools")
-# v2.4 P1-A / AF-02：reviewer 模型绑定文本/视觉分治——
-#   glm-reviewer（文本审查者）删除 frontmatter model 行（继承宿主/会话模型，
-#   规避 account-connection-unavailable 硬失败），必填集不含 model 且字段
-#   出现即 FAIL；
+# v2.4 P1-A / AF-02 → v2.8.0 owner 指令修订：reviewer 模型绑定文本/视觉分治——
+#   glm-reviewer（文本审查者）自 v2.8.0 起显式绑定 start-plan 主模型
+#   （owner 指令：值与继承宿主/会话等价，显式 pin 消除静默路由歧义；
+#   注意 provider 全限定绑定在未配置该 provider 的宿主上会
+#   account-connection-unavailable 硬失败，换宿主时随 owner 裁定回退）；
+#   早期「删除 model 行（继承宿主/会话）」契约由本修订取代；
 #   visual-reviewer（视觉审查者）必须多模态 GLM-5.3-Flash 绑定：model 必填
 #   且须通过 VISUAL_REVIEWER_MODEL_RE + VISUAL_REVIEWER_MODEL_SUFFIX 校验，
 #   缺失/裸 ID/非 Flash 后缀均 FAIL（继承文本主模型会启动成功但丧失读图
 #   契约能力）——与 tests/test_agent_model_binding.py 的断言互为镜像
 REVIEWER_REQUIRED_KEYS = ("name", "description", "thoughtLevel", "tools")
+# v2.8.0 owner 指令：glm-reviewer 必填集含 model 且逐字等于 start-plan 主模型 pin
+TEXT_REVIEWER_REQUIRED_KEYS = ("name", "description", "model", "thoughtLevel", "tools")
+TEXT_REVIEWER_MODEL = "account:bigmodel-start-plan/GLM-5.3"
 TEXT_REVIEWER_AGENTS = ("glm-reviewer",)
 VISUAL_REVIEWER_AGENTS = ("visual-reviewer",)
 VISUAL_REVIEWER_MODEL_RE = re.compile(r"^account:[^/\s]+/\S+$")
@@ -889,22 +894,24 @@ def check_2_agent_frontmatter(results):
             continue
         agent_name = os.path.splitext(os.path.basename(path))[0]
         if agent_name in TEXT_REVIEWER_AGENTS:
-            missing = [key for key in REVIEWER_REQUIRED_KEYS
+            missing = [key for key in TEXT_REVIEWER_REQUIRED_KEYS
                        if not meta.get(key)]
             if missing:
                 details.append("FAIL: %s 缺少必填字段: %s" % (shown, ", ".join(missing)))
                 ok = False
-            elif "model" in meta:
+            elif (meta.get("model") or "").strip('"').strip("'")                     != TEXT_REVIEWER_MODEL:
                 details.append(
-                    "FAIL: %s 含 model 字段（值 %s）：文本审查者继承宿主/会话"
-                    "模型，model 行必须删除"
-                    % (shown, meta.get("model") or "（空）"))
+                    "FAIL: %s 的 model 字段（值 %s）必须逐字等于 %s"
+                    "（v2.8.0 owner 指令显式绑定：值与继承宿主/会话等价，"
+                    "消除静默路由歧义）"
+                    % (shown, meta.get("model") or "（空）",
+                       TEXT_REVIEWER_MODEL))
                 ok = False
             else:
                 details.append("PASS: %s（name=%s）" % (shown, meta.get("name")))
             continue
         # 直派主模型实现角色（v2.7.0 W6）：conductor-impl 无 model 键为
-        # 合法继承形态（继承宿主/会话模型），必填集形态同 glm-reviewer，
+        # 合法继承形态（继承宿主/会话模型），必填集不含 model，
         # model 行出现即 FAIL
         if agent_name in DIRECT_INHERIT_AGENTS:
             missing = [key for key in DIRECT_INHERIT_REQUIRED_KEYS

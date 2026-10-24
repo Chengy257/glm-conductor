@@ -21,7 +21,7 @@ Minor feature release: the direct-dispatch chain as the third implementation sha
 ### Release face
 
 - `plugin.json` / `marketplace.json` 2.8.0; README test-count refreshed to the measured number (1102); validator 16/16.
-- The three text flash direct-dispatch roles (conductor-scout / conductor-runner / conductor-impl-flash) are rebound by owner instruction to the `account:bigmodel-start-plan/GLM-5.3-Flash` series (frontmatter stays the binding authority; the visual pair keeps its separate 2026-10-14 static-binding ruling untouched).
+- The three text flash direct-dispatch roles (conductor-scout / conductor-runner / conductor-impl-flash) are rebound by owner instruction to the `account:bigmodel-start-plan/GLM-5.3-Flash` series (frontmatter stays the binding authority; the visual pair keeps its separate 2026-10-14 static-binding ruling untouched); glm-reviewer is likewise explicitly bound to `account:bigmodel-start-plan/GLM-5.3` (owner instruction; value-identical to the inherited host/session model).
 
 ## 2.7.0
 

@@ -302,7 +302,7 @@ delegate/full text implementation is executed by the text worker of a native Wor
 
 The reviewer is chosen by task modality — text tasks use this role, visual tasks use visual-reviewer (above).
 
-- **Positioning**: a fresh-context, implementation-isolated read-only reviewer — no cross-model independence is claimed; the model inherits the host/session (no model field in the frontmatter), thinking tier max (fixed)
+- **Positioning**: a fresh-context, implementation-isolated read-only reviewer — no cross-model independence is claimed; the model is explicitly bound in the frontmatter to `account:bigmodel-start-plan/GLM-5.3` (v2.8.0 owner instruction; value-identical to the inherited host/session model — the explicit pin removes silent-routing ambiguity; on a host without this provider configured the binding fails hard and must be re-ruled), thinking tier max (fixed)
 - **Use**: text-task audit/full routes only, invoked only after main-session validation; fresh context = fresh reviewer
 - **Five input elements** (provided by the main session):
   - ROLE: declares this a read-only review
@@ -365,7 +365,7 @@ Four dispatchable subagent roles complement the workflow text worker (above) and
 
 The conductor-impl-flash contract applies verbatim (trigger / input / output / red lines, including the writer-guard precondition and the ownership discipline), with one difference:
 
-- **Model**: no model key in the frontmatter — the model inherits the host/session (the glm-reviewer precedent); chosen when a bounded implementation block needs main-model strength but not a whole workflow. **The direct-dispatch chain is one of its main trigger scenarios** (v2.8.0): judgment-dense blocks of a low-delegability long task chain here — same price as the main session, the win is context isolation, not money (the honesty note of the chain doctrine)
+- **Model**: no model key in the frontmatter — the model inherits the host/session; chosen when a bounded implementation block needs main-model strength but not a whole workflow. **The direct-dispatch chain is one of its main trigger scenarios** (v2.8.0): judgment-dense blocks of a low-delegability long task chain here — same price as the main session, the win is context isolation, not money (the honesty note of the chain doctrine)
 - **Dispatch**: `subagent_type: glm-conductor:conductor-impl`
 
 ## Main-session (architect) contract

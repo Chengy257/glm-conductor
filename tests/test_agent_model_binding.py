@@ -45,7 +45,8 @@ AGENTS_DIR = os.path.join(
     "plugins", "glm-conductor", "agents",
 )
 
-# 文本审查者：继承宿主/会话模型（frontmatter 无 model 字段）
+# 文本审查者：v2.8.0 owner 指令显式绑定 start-plan 主模型
+TEXT_REVIEWER_MODEL = "account:bigmodel-start-plan/GLM-5.3"
 TEXT_REVIEWERS = ("glm-reviewer",)
 # 视觉角色：必须多模态 GLM-5.3-Flash 绑定（两角色不得再共用继承规则）
 VISUAL_ROLES = ("visual-implementer", "visual-reviewer")
@@ -113,19 +114,22 @@ def _parse_frontmatter_field(path, key):
 
 
 class TextReviewerModelBindingTest(unittest.TestCase):
-    """glm-reviewer：继承宿主/会话模型是文本审查的既定契约。"""
+    """glm-reviewer：v2.8.0 owner 指令显式绑定 start-plan 主模型（值
+    与继承宿主/会话等价，显式 pin 消除静默路由歧义）。"""
 
     def test_text_reviewer_inherits_session_model(self):
         for name in TEXT_REVIEWERS:
             path = os.path.join(AGENTS_DIR, "%s.md" % name)
             self.assertTrue(os.path.isfile(path), "%s.md 缺失" % name)
             value = _parse_frontmatter_field(path, "model")
-            self.assertIsNone(
-                value,
-                "%s 的 frontmatter 含 model 字段（值 %s）：文本审查者的既定"
-                "契约是继承宿主/会话模型（模型身份不是持久任务状态轴）；"
-                "provider 全限定绑定在未配置该 provider 的宿主上会 "
-                "account-connection-unavailable 硬失败" % (path, value))
+            self.assertEqual(
+                value, "account:bigmodel-start-plan/GLM-5.3",
+                "%s 的 frontmatter model 字段（值 %s）应显式等于 "
+                "account:bigmodel-start-plan/GLM-5.3（v2.8.0 owner 指令"
+                "改绑：值与继承宿主/会话等价，显式 pin 消除静默路由"
+                "歧义；注意 provider 全限定绑定在未配置该 provider 的"
+                "宿主上会 account-connection-unavailable 硬失败——换宿主"
+                "时随 owner 裁定回退）" % (path, value))
 
 
 class VisualRoleMultimodalBindingTest(unittest.TestCase):
