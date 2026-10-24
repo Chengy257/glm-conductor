@@ -207,7 +207,9 @@
          i) CLI 生命周期命令面锚缺失（v2.5.2 W2/D1：task-create /
             record-validation / task-complete / task-fail / task-cancel /
             exit-waiting 六个子命令须同时见于 runtime/cli.py 与
-            docs/troubleshooting.md 权威命令面）；
+            docs/troubleshooting.md 权威命令面——v2.7.0 B7 W1 起
+            B4-n5 移交的 os-carrier-install / os-carrier-remove /
+            wake-carrier-probe 三个 carrier 子命令并入本组双面同锚）；
          j) 精度层睡眠模板锚缺失（v2.5.2 W1：long-horizon.md 必含
             '## Precision sleep template' 节、run_in_background 后台
             形态与 date -u -d bash 动态计算标记——模型零算术契约的
@@ -240,8 +242,13 @@
          m) W1 唤醒载体 CLI 命令面锚缺失（v2.7.0 B4，规格 §3.3/§3.4：
             os-carrier-install / os-carrier-remove / wake-carrier-probe
             三个子命令须见于 runtime/cli.py USAGE——正锚随实现面同步，
-            任一缺失即 FAIL；troubleshooting 权威命令面双锚随 B7 文档批
-            并入 16i）。
+            任一缺失即 FAIL；troubleshooting 权威命令面双锚已随 B7 文档批
+            并入 16i）；
+         n) W1 四级矩阵文档面锚缺失（v2.7.0 B7 W1：continuity SKILL 必含
+            'wake-carrier-probe' / 'os-carrier-install' / 'sleep-only' /
+            'automation_kind' 四锚，long-horizon.md 必含 'alwaysOn'
+            （headless 唤醒命令形态锚）——文档面锚，与 16m 的 cli.py
+            实现面不重复）。
 
     扫描范围说明：检查 5/6/7/8（及 8 内的旧名负向检查）的扫描范围是显式
     列表——plugins/ 全部文件 + marketplace.json + README.md +
@@ -641,10 +648,13 @@ DUAL_CHANNEL_MARKERS = (
     "rolling re-arm",
 )
 # 16i：CLI 生命周期命令面锚（v2.5.2 W2/D1——六个新子命令必须同时
-# 出现在 cli.py USAGE 与 troubleshooting 权威命令面，防三处漂移）
+# 出现在 cli.py USAGE 与 troubleshooting 权威命令面，防三处漂移；
+# v2.7.0 B7 W1 起 B4-n5 移交的三个 carrier 子命令并入本组双面同锚，
+# troubleshooting 权威命令面（§13）文档同步由 B7 文档批落地）
 CLI_LIFECYCLE_SUBCOMMANDS = (
     "task-create", "record-validation", "task-complete",
-    "task-fail", "task-cancel", "exit-waiting")
+    "task-fail", "task-cancel", "exit-waiting",
+    "os-carrier-install", "os-carrier-remove", "wake-carrier-probe")
 TROUBLESHOOTING_DOC = os.path.join(REPO_ROOT, "docs", "troubleshooting.md")
 # 16j：精度层睡眠模板锚（v2.5.2 W1——long-horizon 模板节存在 +
 # bash 动态计算（模型零算术）+ 后台运行形态；v2.6.1 W2 节标题改英文锚）
@@ -717,11 +727,22 @@ USER_AUTHORIZED_MODEL_MARKERS = (
 )
 # 16m：W1 唤醒载体 CLI 命令面锚（v2.7.0 B4，规格 §3.3/§3.4）——三个新
 # 子命令必须出现在 cli.py USAGE（正锚——子命令在 cli.py 出现，随实现面
-# 同步）；troubleshooting 权威命令面文档同步归 B7 文档批，届时并入 16i
-# 双面同锚，本组先锚实现面单侧（automation_kind 状态层概念锚 check_14
+# 同步）；troubleshooting 权威命令面双锚已随 B7 文档批并入 16i 双面同锚，
+# 本组保持 cli.py 实现面单侧（automation_kind 状态层概念锚在 check_14
 # 的 STATE_REQUIRED_MARKERS）。
 WAKE_CARRIER_CLI_SUBCOMMANDS = (
     "os-carrier-install", "os-carrier-remove", "wake-carrier-probe")
+# 16n：W1 四级矩阵文档面锚（v2.7.0 B7 W1）——与 16m（cli.py 实现面）
+# 不重复，本组锚文档面：continuity SKILL 必含唤醒载体探针/安装命令名
+# 与 sleep-only 载体形态及 automation_kind 状态层键；long-horizon 必含
+# alwaysOn（headless 唤醒命令形态锚）。
+WAKE_CARRIER_DOC_MARKERS = (
+    (CONTINUITY_SKILL,
+     ("wake-carrier-probe", "os-carrier-install", "sleep-only",
+      "automation_kind")),
+    (LONG_HORIZON,
+     ("alwaysOn",)),
+)
 
 
 def rel_display(path):
@@ -1752,12 +1773,16 @@ def check_16_v241_protocol(results):
          （cli.py 保留 model_policy token 锚）；
       m) W1 唤醒载体 CLI 命令面（v2.7.0 B4）—— os-carrier-install /
          os-carrier-remove / wake-carrier-probe 三子命令须见于 cli.py
-         USAGE（正锚随实现面同步；troubleshooting 双锚随 B7 并入 16i）。
+         USAGE（正锚随实现面同步；troubleshooting 双锚已随 B7 并入 16i）；
+      n) W1 四级矩阵文档面锚（v2.7.0 B7 W1）—— continuity 必含
+         wake-carrier-probe / os-carrier-install / sleep-only /
+         automation_kind 四锚，long-horizon 必含 alwaysOn（headless
+         唤醒命令形态锚；文档面锚，与 16m cli.py 实现面不重复）。
     """
     title = ("v2.4.1/v2.5/v2.5.2/v2.6.0/v2.7.0 编排/连续性协议静态契约（模型选型硬闸 / "
              "用户授权显式选型 / arm-before-work / 建立动作优先 / 生产 runtime "
              "禁依赖 / 任务启动三问 / pin 失效即拒 / 双通道唤醒 / CLI 命令面 / "
-             "睡眠模板 / 单一观测口径 / 唤醒载体 CLI 命令面）")
+             "睡眠模板 / 单一观测口径 / 唤醒载体 CLI 命令面 / 四级矩阵文档面）")
     details = []
     ok = True
 
@@ -2058,8 +2083,8 @@ def check_16_v241_protocol(results):
 
     # —— 16m：W1 唤醒载体 CLI 命令面锚（v2.7.0 B4，规格 §3.3/§3.4） ——
     # 三个新子命令必须出现在 cli.py USAGE（正锚——子命令在 cli.py 出现，
-    # 随实现面同步）；troubleshooting 权威命令面文档同步归 B7 文档批，
-    # 届时并入 16i 双面同锚，本组先锚实现面单侧。cli_text 已在 16g 读取。
+    # 随实现面同步）；troubleshooting 权威命令面双锚已随 B7 文档批并入
+    # 16i，本组保持 cli.py 实现面单侧。cli_text 已在 16g 读取。
     if cli_text is None or not os.path.isfile(CLI_PY):
         details.append("FAIL: %s 不存在或无法读取，无法执行 16m 检查" % cli_shown)
         ok = False
@@ -2072,6 +2097,26 @@ def check_16_v241_protocol(results):
                 details.append(
                     "FAIL: %s 缺少唤醒载体 CLI 命令 `%s`（W1 载体安装/删除/"
                     "探针子命令未入 USAGE——实现面漂移）" % (cli_shown, marker))
+                ok = False
+
+    # —— 16n：W1 四级矩阵文档面锚（v2.7.0 B7 W1） ——
+    # 与 16m（cli.py 实现面单侧）不重复：本组锚文档面（continuity /
+    # long-horizon），文本在循环内按路径独立读取（16k/16l 同款）。
+    for path, markers in WAKE_CARRIER_DOC_MARKERS:
+        shown = rel_display(path)
+        text = read_text(path)
+        if text is None or not os.path.isfile(path):
+            details.append("FAIL: %s 不存在或无法读取，无法执行 16n 检查" % shown)
+            ok = False
+            continue
+        for marker in markers:
+            if marker in text:
+                details.append("PASS: %s 含四级矩阵文档面锚 `%s`" % (shown, marker))
+            else:
+                details.append(
+                    "FAIL: %s 缺少四级矩阵文档面锚 `%s`（W1 载体探针/安装/"
+                    "sleep-only/automation_kind/alwaysOn 措辞缺失）"
+                    % (shown, marker))
                 ok = False
 
     results.append((16, title, ok, details))

@@ -16,9 +16,14 @@ Task start (orchestration declares SELECTIVE ROUTE, the 'Task launch interview'
    observed reset_at (observable in any quota status; single observation
    rule: the earliest valid future observed reset among the identified
    windows, regardless of quota status — the active/no-op branches pass
-   it through the same way) -> host CronCreate floor carrier
-   (intervalUnit=hourly, interval=<value confirmed in interview question 3,
-   default 1>, recurring=true, never changed for its lifetime)
+   it through the same way) -> the floor carrier, kind-aware per the
+   wake-carrier four-level matrix (fixed decision order, the model makes
+   zero judgment): L0 host CronCreate floor carrier (intervalUnit=hourly,
+   interval=<value confirmed in interview question 3, default 1>,
+   recurring=true, never changed for its lifetime) / L1 an OS-scheduler
+   task installed by os-carrier-install (the same interview question-3
+   interval; its trigger is a headless CLI resume turn) / L2 no floor at
+   all (the sleep-only witness — the floor's absence is declared as-is)
    -> quota-automation-bind
    -> quota-continuity-preflight PASS -> when a valid future reset exists,
    issue the first precision sleep to observed reset_at+300s (sleep
@@ -44,10 +49,12 @@ Task start (orchestration declares SELECTIVE ROUTE, the 'Task launch interview'
    v
 Eight-step recovery check (repository > checkpoint > session memory)
    |
-   +-- goal complete -> terminal cleanup (the delete attempt is expected to
-   |     fail per the three-state regularity -> report the automation id
-   |     honestly -> the user deletes it manually -> clear the binding only
-   |     after confirmation, then delete this task's directory)
+   +-- goal complete -> terminal cleanup (the delete attempt is kind-aware:
+   |     L0 expected to fail per the three-state regularity / L1
+   |     os-carrier-remove genuinely effective -> report the automation id
+   |     or OS task name honestly -> the user deletes it manually when the
+   |     attempt failed -> clear the binding only after confirmation, then
+   |     delete this task's directory)
    +-- resumable -> same run id resume (quota available + authorized +
    |     budget remaining + auto armed/preflight ready)
    +-- not resumable (quota exhausted / run dead) -> park and wait, or
@@ -165,7 +172,7 @@ state.json field overview (authoritative schema: plugin `runtime/state.py`):
 | workflow_run_id | the delegated run association (landed by record_workflow_run at launch; recovery resumes the same run id) |
 | validation | the task-level validation record (status passed/failed + change_id) |
 | review | the task-level review record (reviewer + verdict + change_id) |
-| quota_resume | the resume-authorization block (mode / max_resumes / resume_count / automation_id [+ diagnostic last_observation]); automation_id is the witness of the currently associated future native Scheduled Task — in mode=auto it must be non-empty to count as armed (a preflight precondition), and its existence alone never proves the host-side activation is still alive |
+| quota_resume | the resume-authorization block (five keys: mode / max_resumes / resume_count / automation_id / automation_kind [+ diagnostic last_observation]); automation_id is the witness of the currently associated future Scheduled Task, kind-labeled by automation_kind (`native` / `os_timer` / `sleep_only`; an absent key reads as `native`) — in mode=auto it must be non-empty to count as armed (a preflight precondition), and its existence alone never proves the host-side activation is still alive |
 
 Status only moves forward, never backward (enforced by the `state.TASK_TRANSITIONS` matrix); a terminal state is never silently reopened (explicit reopen goes through `state.reopen_task`); the repository remains the source of truth for code state — state.json is runtime task state only.
 
@@ -290,15 +297,15 @@ Template discipline:
 - **reset_at null / missing** (no valid future observation) -> do not issue the sleep; report the floor-only downgrade honestly (only the floor is armed) and wait for the floor rhythm — never fabricate a target
 - **Delta <= 0** (target already past) -> do not issue the sleep (no negative sleeps, no busy spin — never spin on a stale or past target); handle this round per the decision (when quota has recovered, take the resume path)
 - **Duplicate sleeps are harmless**: a launch arm and a parking re-issue coexisting is absorbed by decision idempotence (waking early -> new observation -> new decision)
-- **Does not survive application restarts**: when a restart kills the sleeps, the floor is the fallback and the first floor wake's close-out re-arms — self-healing, not a fault
+- **Does not survive application restarts**: when a restart kills the sleeps, the floor is the fallback (at L0/L1) and the first floor wake's close-out re-arms — self-healing, not a fault; at L2 there is no floor, so a restart leaves no wake at all — recovery is a new session's SessionStart injection
 
 ## Scheduled triggers (dual-channel: floor carrier + precision sleep)
 
 Unattended recovery is carried by two orthogonal channels (host facts and live evidence: `docs/reviews/WAKE_TOPOLOGY_PROBE_RESULTS.md`):
 
-- **Floor carrier**: the recurring native Scheduled Task created at launch — the interval is confirmed by interview question 3 (default 1h; it must not equal the 5h window length — that races the reset at second granularity); it survives application restarts and is **never changed after creation, for its whole lifetime** (no delete, no change, no rebuild — INV-CONT-03); during the working period each trigger is usually a small no-op wake (absorbed by decision idempotence)
-- **Precision sleep**: the background sleep from the template above — it sleeps until the observed reset_at + 300s (the earliest valid future observed reset instant, regardless of quota status; with no valid future observation the precision layer is absent — disclose the floor-only downgrade honestly) and wakes the session on exit; fully orthogonal to the automation state machine (zero Cron interaction); does not survive restarts (the floor covers that)
-- **Trigger content** = the structured resume prompt above (TASK_ID, REPOSITORY ROOT and the path placeholders replaced; action first, never enumerate the tool inventory)
+- **Floor carrier**: the recurring Scheduled Task created at launch, **kind-aware** (L0 the host's native CronCreate automation / L1 an OS-scheduler task installed by `os-carrier-install` / L2 none at all — the sleep-only witness; the fixed decision order lives in the SKILL.md wake-carrier matrix) — the interval is confirmed by interview question 3 (default 1h; it must not equal the 5h window length — that races the reset at second granularity); it survives application restarts and is **never changed after creation, for its whole lifetime** (no delete, no change, no rebuild — INV-CONT-03, at L0 and L1 alike); during the working period each trigger is usually a small no-op wake (absorbed by decision idempotence). The **L1 trigger form is a headless CLI resume turn**: `node <zcode.cjs> --resume <sess_id> --cwd <repo> --workflow-mode alwaysOn -p "<unified wake protocol>"` — `alwaysOn` is the B0-proven form (onDemand does not register workflow tools in headless mode); the headless ask layer auto-allows the turn, so the guardrail is the wake prompt's tight constraints; the session id comes from `.glm-conductor/session-witness.json` (landed by the SessionStart hook), read internally by `os-carrier-install`
+- **Precision sleep**: the background sleep from the template above — it sleeps until the observed reset_at + 300s (the earliest valid future observed reset instant, regardless of quota status; with no valid future observation the precision layer is absent — disclose the floor-only downgrade honestly) and wakes the session on exit; fully orthogonal to the automation state machine (zero Cron interaction); does not survive restarts (the floor covers that at L0/L1; at L2 a restart leaves no wake at all — recovery is a new session's SessionStart injection)
+- **Trigger content** = the structured resume prompt above (TASK_ID, REPOSITORY ROOT and the path placeholders replaced; action first, never enumerate the tool inventory — at L1 the same prompt rides the headless CLI resume command's `-p` argument)
 - **Rolling re-arm**: every wake-turn close-out (whenever non-terminal and still authorized for auto) must check the armed sleep — with none in flight, or a past/stale target, issue the next precision sleep to the **current observation's** reset_at+300s (the earliest valid future observation; wake, re-observe, re-arm, iterate to convergence) — establishing / re-arming the wake machinery always precedes work advancement; if quota dies between turns (silent exhaustion), the armed sleep exactly covers the next window boundary
 - **The next window is never hardcoded**: rely only on provider reset evidence (the observed reset_at — the single observation rule: the earliest valid future observed reset, regardless of quota status); never derive the next wake as "plus 5 hours"
 - **Each wake's workload stays small**: one round of checking, then one stretch of recovered work — never cram all remaining work into a single wake
@@ -317,8 +324,8 @@ A recovered session must re-output the SELECTIVE ROUTE declaration before execut
 
 The action list after the goal is complete and accepted (acting only on this task; the order is fixed — **delete before clear; the deletion is expected to fail**):
 
-1. Make the host-side delete attempt for this task's bound automation (located by the automation_id recorded in state) — **one single session-side attempt** (never retried; no retry storm); **the expected result is failure**: once a carrier has triggered, that session's Cron delete launches silently degrade (the three-state regularity, live-tested) and the model side cannot complete the deletion. A failed deletion is not an error: **report the automation id and title honestly** — the user deleting it manually in the Automations page is **the expected operation**
-2. **Only after the user confirms the manual deletion**, clear the bound id with `quota-automation-clear`; until then the bound id is retained for reconciliation — never pretend it is already clean
+1. Make the host-side delete attempt for this task's bound automation (located by the automation_id recorded in state), **branched by carrier kind** — L0 (native): **one single session-side attempt** (never retried; no retry storm); **the expected result is failure**: once a carrier has triggered, that session's Cron delete launches silently degrade (the three-state regularity, live-tested) and the model side cannot complete the deletion; a failed deletion is not an error: **report the automation id and title honestly** — the user deleting it manually in the Automations page is **the expected operation**. L1 (os_timer): the attempt is `os-carrier-remove <repo_root> <task_id>` — **genuinely effective, no three-state degradation** (the OS tool's real exit code is the only fact); on success proceed to the clear step; on failure report the OS task name `glm-conductor-<task-id>` honestly for the user's manual disposition
+2. **Only after the deletion is confirmed** (L1: `os-carrier-remove` returned ok=true) **or the user confirms the manual deletion** (L0), clear the bound id with `quota-automation-clear`; until then the bound id is retained for reconciliation — never pretend it is already clean
 3. **Never delete another task's automation**: only this task's single bound one; deleting the global scheduling surface or another task's automation is a forbidden operation
 4. Delete this task's directory `.glm-conductor/tasks/<task-id>/` (only this directory; never touch other tasks' state); when the existing cleanup flow deletes the task directory, its order must never erase the automation_id before the host-side delete attempt
 5. Report the final state to the user (including the automation id awaiting manual deletion)
@@ -327,8 +334,8 @@ Host scheduling actions (creating / deleting scheduled tasks, issuing background
 
 ## Failure cases
 
-- **Scheduling capability unavailable**: auto continuity stays unarmed (`quota-continuity-preflight` ready=false) — never claim continuity was enabled, never bind a fake id, never promise continuation under auto/until_done; keep this task's checkpoint directory and report "manually recoverable" to the user with the recovery method — in a new session, enter "read .glm-conductor/tasks/<task-id>/checkpoint.md and continue with the eight-step recovery procedure" (the SessionStart resume injection will prompt automatically)
-- **Wake finds auto unarmed** (binding lost / host activation gone): one single rebuild attempt (host CronCreate floor -> bind -> preflight PASS); creation rejected by session ownership (a live carrier actually still exists under the session — only the ledger witness is missing) -> report the situation as-is and rely on the host rhythm, never a retry storm; never fabricate an activation, never resume unarmed
+- **Scheduling capability degraded or unavailable (matrix caliber)**: the native CronCreate surface missing is **not** "scheduling capability unavailable" — degrade by the fixed decision order of the SKILL.md wake-carrier matrix (the probe's `recommendation` `os_timer` -> arm L1 via `os-carrier-install`; `sleep_only` -> arm L2, the sleep-only witness, the precision layer unchanged, the floor's absence declared as-is); only **L3** — no carrier surface at all — keeps the fail-closed sentence: auto continuity stays unarmed (`quota-continuity-preflight` ready=false) — never claim continuity was enabled, never bind a fake id, never promise continuation under auto/until_done; keep this task's checkpoint directory and report "manually recoverable" to the user with the recovery method — in a new session, enter "read .glm-conductor/tasks/<task-id>/checkpoint.md and continue with the eight-step recovery procedure" (the SessionStart resume injection will prompt automatically)
+- **Wake finds auto unarmed** (binding lost / host activation gone): one single kind-aware rebuild attempt (L0: host CronCreate floor -> bind -> preflight PASS; L1: `os-carrier-remove` -> `os-carrier-install` -> bind -> preflight PASS — the OS delete/install round is genuinely effective, no three-state degradation); creation rejected by session ownership (an L0 live carrier actually still exists under the session — only the ledger witness is missing) -> report the situation as-is and rely on the host rhythm, never a retry storm; never fabricate an activation, never resume unarmed
 - **Precision sleep not armed** (after an application restart / session rebuild): any wake-turn close-out re-arms per the template — self-healing, not a fault
 - **Wake finds the task terminal**: go to terminal cleanup (the delete attempt is expected to fail -> report the automation id for the user to delete manually); never reopen implementation
 - **Implementation channel missing** (e.g. visual-implementer unavailable): fail closed — never auto-switch to another executor; hand back to the user

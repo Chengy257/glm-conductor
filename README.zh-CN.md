@@ -23,11 +23,13 @@ GLM Conductor 让强模型专注于架构规划、全局判断与最终验收，
 - **确定性 Native Workflow 执行：** 静态 DAG 纯代码编译为确定性 TypeScript 原生工作流，由 ZCode 原生调度运行，零多余的在途运行状态镜像。
 - **直派角色通道（v2.7.0）：** 编译 Workflow 之外，主会话可直接派发四个专项 subagent——`conductor-scout`（只读调查）与 `conductor-runner`（命令/测试执行）任意路线皆可、无任务前提；写型角色 `conductor-impl-flash` / `conductor-impl` 必须在持有仓库写者守卫的活动任务上下文中派发；单节点 standard 保障的 `delegate` 可直派一名实施者替代单节点 workflow（代价显式：无结构化 NodeResult、无运行级恢复；完成闸/验证/审查链路不变）。
 - **用户授权显式选型：** 工作者必须是用户显式授权的 provider 全限定精确 id（展示宿主全部已配置候选；Flash 档为软推荐位，`workflow-model-select`，`model_policy: user-authorized-explicit-selection`）；`subagent_model` 绝不省略，从协议层根除静默继承主会话模型的隐患。
+- **任务级工作流提交免确认（v2.7.0）：** 启动问答第 4 问可对本任务授权 CreateWorkflow 提交免确认（`task-create --auto-approve-workflow`，由 decision-only 的 PermissionRequest 钩子逐请求消费，仅限 **path 型提交**——inline `script:` 提交恒保留人工确认），无人值守唤醒/恢复轮的重提交不再卡在确认问答上。
 - **最小确定性质量保障：**
   - **`change_id` 唯一新鲜度原语：** 基于 `git rev-parse HEAD` 与任务所有权范围内的实际改动文件生成 SHA-256 摘要（换行符 CRLF 规范化）；后续任何文件改动必使前置验证或审查自动失效。
   - **粗粒度仓库写者守卫：** 保证一个 Git 仓库同一时刻至多一个活跃 Conductor 写工作流，无脆弱的按时间自动过期（无 TTL），仅在收尾或人工运维时释放。
   - **Stop 钩子完成守卫四查：** 严密拦截越界改动、无写预约、验证缺失/过期或高保障审查未达标等完成尝试。
 - **有界可恢复的额度连续性：** 任务遭遇额度耗尽时安全停靠在 `waiting_quota`，通过原生 Scheduled Task 在有界授权预算（`max_resumes`）内自动恢复。
+- **四级唤醒载体降级（v2.7.0）：** 宿主 CronCreate 工具缺席时，自动连续性不再硬失败——地板载体按可用性矩阵逐级降级（L0 原生 CronCreate；否则 `wake-carrier-probe` 探测后 L1 OS 计划任务 `os-carrier-install` 兜底、跨应用重启；L2 sleep-only 绑定；L3 诚实 fail-closed），武装级别落盘为 `quota_resume.automation_kind` 见证。
 - **零外部三方依赖：** 100% 纯 Python 3.8+ 标准库实现，深度适配 Windows 与 POSIX 文件系统与进程特性。
 
 ---
@@ -266,7 +268,7 @@ glm-conductor/
 ├── marketplace.json                # 插件市场 catalog 描述清单
 ├── plugins/glm-conductor/
 │   ├── .zcode-plugin/              # 插件 manifest（plugin.json）与元数据
-│   ├── agents/                     # 原生 Subagent 定义 (glm-reviewer, visual-*)
+│   ├── agents/                     # 原生 Subagent 定义 (视觉双角色 visual-* / glm-reviewer / 直派四件 conductor-*)
 │   ├── commands/                   # 斜杠命令定义 (/glm-conductor:quota)
 │   ├── hooks/                      # ZCode 钩子实现 (session_start.py, stop_gate.py)
 │   ├── skills/                     # 领域技能 (orchestration, continuity, enforcement)

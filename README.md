@@ -23,11 +23,13 @@ GLM Conductor keeps the strong model focused on planning, architecture, and fina
 - **Deterministic Native Workflow Execution:** Compiles static DAGs directly into deterministic TypeScript workflows executed natively by ZCode with zero runtime state duplication.
 - **Direct Dispatch Roles (v2.7.0):** Beyond compiled workflows, the main session can dispatch four specialized subagents directly — `conductor-scout` (read-only investigation) and `conductor-runner` (command/test execution) on any route with no task prerequisite, while the writing roles `conductor-impl-flash` / `conductor-impl` are dispatched only under an active task holding the repository writer guard; a single-node, standard-assurance `delegate` may dispatch one implementer directly instead of a one-node workflow (explicit costs: no structured NodeResult, no run-level resume; the completion gate / validation / review chain is unchanged).
 - **User-Authorized Model Selection:** Workers are user-authorized, provider-qualified exact model IDs (all configured host candidates are shown; Flash tier is a soft recommendation, `workflow-model-select`, `model_policy: user-authorized-explicit-selection`); `subagent_model` is never omitted, preventing silent inheritance of the main-session model.
+- **Task-Level Workflow Submission Auto-Approval (v2.7.0):** Launch-interview question 4 can authorize confirmation-free CreateWorkflow submissions for a task (`task-create --auto-approve-workflow`, consumed per-request by a decision-only PermissionRequest hook for **path-type submissions** — inline `script:` submissions always keep manual confirmation), so an unattended wake/resume re-submission is no longer blocked on the confirmation ask.
 - **Minimal Deterministic Assurance:**
   - **`change_id` Freshness:** Cryptographically ties validation and reviews to exact file modifications (`git rev-parse HEAD` + normalized file content hash); any subsequent edit invalidates previous approvals.
   - **Coarse Repository Writer Guard:** Guarantees at most one active write workflow per repository without arbitrary TTL expirations.
   - **Four-Check Completion Guard:** A Stop-hook verifies repository writer reservations, strict ownership boundaries, fresh validation, and required high-assurance reviews.
 - **Bounded Quota Continuity:** Tasks awaiting provider quota enter `waiting_quota` and recover via native ZCode Scheduled Tasks under an explicit, bounded user-authorized budget.
+- **Four-Level Wake-Carrier Degradation (v2.7.0):** Auto continuity no longer hard-fails when the host CronCreate tool is absent — the floor carrier degrades along an availability matrix (L0 native CronCreate; otherwise `wake-carrier-probe` → L1 OS scheduled task via `os-carrier-install`, surviving app restarts; L2 sleep-only binding; L3 honest fail-closed), with the armed level recorded in the `quota_resume.automation_kind` witness.
 - **Zero Third-Party Dependencies:** 100% standard library Python 3.8+ runtime, thoroughly hardened for Windows and POSIX environments.
 
 ---
@@ -267,7 +269,7 @@ glm-conductor/
 ├── marketplace.json                # Marketplace catalog manifest
 ├── plugins/glm-conductor/
 │   ├── .zcode-plugin/              # Plugin manifest (plugin.json) and metadata
-│   ├── agents/                     # Specialized subagents (glm-reviewer, visual-*)
+│   ├── agents/                     # Specialized subagents (visual-implementer / glm-reviewer / visual-reviewer + the four direct-dispatch conductor-* roles)
 │   ├── commands/                   # Slash command definitions (/glm-conductor:quota)
 │   ├── hooks/                      # ZCode hooks (session_start.py, stop_gate.py)
 │   ├── skills/                     # Domain skills (orchestration, continuity, enforcement)

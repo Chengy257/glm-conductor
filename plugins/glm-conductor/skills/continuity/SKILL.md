@@ -14,7 +14,7 @@ Continuity is built from four mechanisms, all centered on task state (state.json
 1. **Workflow recovery** — an interrupted delegated run resumes under the same run id.
 2. **waiting_quota** — a deterministic parking point when quota is exhausted.
 3. **manual / auto bounded resume** — resuming is a budgeted action under user authorization, never a model improvisation.
-4. **arm-before-work native scheduling arming** — auto continuity arms before work: authorize → create a native future Scheduled Task → bind → preflight PASS means armed; only then CreateWorkflow and any automatic resume.
+4. **arm-before-work native scheduling arming** — auto continuity arms before work: authorize → establish the floor carrier (kind-aware per the wake-carrier four-level matrix — L0 host CronCreate / L1 OS timer / L2 sleep-only witness) → bind → preflight PASS means armed; only then CreateWorkflow and any automatic resume.
 
 Wake authorization, the worker model and the floor interval are decided by the mandatory launch interview contracted in the orchestration skill section 'Task launch interview'; the complete wake runbook lives in 'Launch sequence (runbook, arm-before-work)' below.
 
@@ -76,7 +76,7 @@ The four-state quota observation (AVAILABLE / PRESSURE / EXHAUSTED / UNKNOWN) co
 
 ## manual / auto bounded resume
 
-Resume authorization lives in the state top-level `quota_resume` block (exactly four keys: `mode / max_resumes / resume_count / automation_id`; defaults `manual / 0 / 0 / null` — unauthorized, zero budget):
+Resume authorization lives in the state top-level `quota_resume` block (exactly five keys: `mode / max_resumes / resume_count / automation_id / automation_kind`; defaults `manual / 0 / 0 / null / native` — unauthorized, zero budget; `automation_kind` labels the wake-carrier form of the bound witness — `native / os_timer / sleep_only`, and a legacy four-key block without the key reads as `native`):
 
 | mode | Authorization | Behavior |
 | --- | --- | --- |
@@ -95,22 +95,38 @@ Authorization and arming are two independent facts: **authorize is user permissi
 
 **Establish-first (the master principle behind arm-before-work, INV-CONT-01)**: once the launch interview (orchestration 'Task launch interview') confirms enable, establishing or re-arming the wake machinery always precedes current work: right after the authorization, observe reset_at (`quota-resume-decision --force-refresh`, any quota status; reset_at semantics in 'Quota observation surface'), the floor carrier is established in the same batch before CreateWorkflow, and when a valid future reset exists the first precision sleep is issued in the same batch — with no valid future observation no first sleep is issued, the floor-only downgrade is reported honestly, and the precision layer is never claimed as armed (the full runbook is in 'Launch sequence (runbook, arm-before-work)'). No work starts before arming PASS. A parking round only checks, re-issues and corrects — it never creates the first sleep ('Parking round'). The budget stays bounded: the max_resumes bounded semantics are unchanged; on exhaustion the task moves to `waiting_user` for the user to re-authorize — never infinite automatic revival.
 
-**Wake finds unarmed** (empty automation_id in state): make one single rebuild attempt (host CronCreate floor → `quota-automation-bind` → preflight PASS). Handle both outcomes honestly: creation rejected by session ownership (a live carrier actually still exists under the session; only the ledger witness is missing) → report the situation as-is and keep relying on the host rhythm, never a retry storm; creation succeeds → bind + preflight, then continue. A failed rebuild is reported as remain-waiting and the turn closes — never ask, never resume unarmed.
+**Wake finds unarmed** (empty automation_id in state): make one single rebuild attempt, **branched by carrier kind per the same fixed decision order** (the session has CronCreate → L0; otherwise the probe's recommendation decides) — **L0** (native): host CronCreate floor → `quota-automation-bind` → preflight PASS (current behavior unchanged); **L1** (os_timer): `os-carrier-remove <repo_root> <task_id>` → `os-carrier-install <repo_root> <task_id>` → bind → preflight PASS (the OS delete/install round is genuinely effective — OS tools report real exit codes, none of the native three-state degradation, so remove-then-reinstall is the honest idempotent rebuild). Handle both outcomes honestly: creation rejected by session ownership (an L0 live carrier actually still exists under the session; only the ledger witness is missing) → report the situation as-is and keep relying on the host rhythm, never a retry storm; creation succeeds → bind + preflight, then continue. A failed rebuild is reported as remain-waiting and the turn closes — never ask, never resume unarmed.
 
 The arming surface is three commands:
 
-- `quota-automation-bind <repo_root> <task_id> <automation_id>` (underlying `task.bind_quota_automation`): binds the future Scheduled Task witness id into quota_resume.automation_id; the same id is an idempotent success, a different id is rejected — never a silent replacement; a replacement must be an explicit clear → bind sequence after a host-side lifecycle reconciliation; only the active / waiting_quota / waiting_user states are allowed.
-- `quota-automation-clear <repo_root> <task_id> [automation_id]` (underlying `task.clear_quota_automation`): expected only **after** a host-side deletion confirmation or an explicit operator reconciliation; a given id mismatching the stored one is rejected, stored None is an idempotent success; it clears automation_id only and never touches mode / max_resumes / resume_count; terminal tasks may be cleaned.
-- `quota-continuity-preflight <repo_root> <task_id>` (underlying `task.quota_continuity_preflight`, pure read, changes no state): manual → ready=true; auto + non-empty binding → ready=true (armed); auto + empty → ready=false (exit code 2, mechanically treated by the main session as a launch/resume block). It proves only that a persisted binding exists and **never proves the host-side activation is still alive** — wake boundaries still require the host-side check.
+- `quota-automation-bind <repo_root> <task_id> <automation_id>` (underlying `task.bind_quota_automation`): binds the future Scheduled Task witness id — together with its carrier-kind label into `quota_resume.automation_id / automation_kind` (L0: the real returned host automation id, kind `native`; L1: the `os:schtasks:glm-conductor-<task-id>` form witness, kind `os_timer`; L2: the synthetic `sleep-only` witness, kind `sleep_only`); the same (id, kind) pair is an idempotent success, a different id — or the same id with a different kind — is rejected — never a silent replacement; a replacement must be an explicit clear → bind sequence after a host-side lifecycle reconciliation; only the active / waiting_quota / waiting_user states are allowed.
+- `quota-automation-clear <repo_root> <task_id> [automation_id]` (underlying `task.clear_quota_automation`): expected only **after** a host-side deletion confirmation or an explicit operator reconciliation; a given id mismatching the stored one is rejected, stored None is an idempotent success; it clears automation_id (and resets `automation_kind` to `native`) only and never touches mode / max_resumes / resume_count; terminal tasks may be cleaned.
+- `quota-continuity-preflight <repo_root> <task_id>` (underlying `task.quota_continuity_preflight`, pure read, changes no state): manual → ready=true; auto + non-empty binding → ready=true (armed — the armed report carries the witness's `kind`, absent key read as `native`; ready semantics are never widened by kind: at L2 the sleep-only witness is a ready=true armed fact, and arming there means the precision layer only); auto + empty → ready=false (exit code 2, mechanically treated by the main session as a launch/resume block). It proves only that a persisted binding exists and **never proves the host-side activation is still alive** — wake boundaries still require the host-side check.
 
 The decision-layer mechanical mirror (defense in depth): `scheduled_activation_decision` with auto + an empty automation_id refuses to return resume-authorized and returns remain-waiting with a reason containing `continuity-unarmed` — zero state writes and zero budget consumption (a missing arm is an operational liveness fault, not an exhausted authorization).
 
 ## Dual-channel wake: floor carrier + precision sleep
 
-Unattended recovery is carried by **two orthogonal channels** (host facts and live evidence: `docs/reviews/WAKE_TOPOLOGY_PROBE_RESULTS.md`):
+Unattended recovery is carried by **two orthogonal channels** (host facts and live evidence: `docs/reviews/WAKE_TOPOLOGY_PROBE_RESULTS.md`). Since v2.7.0 the floor's carrier form follows the **wake-carrier four-level degradation matrix** — the precision layer is identical at every level that has it:
 
-- **Floor**: a recurring native Scheduled Task created at launch — **the interval is confirmed by interview question 3 (default 1h)** and after creation it is **never touched again for its lifetime** (no delete, no change, no rebuild — INV-CONT-03). Its duty is the liveness fallback: it survives application restarts (the host promises automations survive restarts) and, when the precision layer is lost, catches recovery within at most one interval.
-- **Precision sleep**: a background Bash sleep task — sleeps until **the observed reset_at + 300s grace** and wakes the session automatically on exit (measured second-precise + 8-11s wake latency). reset_at semantics in 'Quota observation surface'; with no valid future observation the precision layer is absent and the floor-only downgrade is reported honestly. It is fully orthogonal to the automation state machine (zero Cron interaction) and does not survive application restarts (the floor covers that). **When a valid future reset exists, the first sleep is armed at authorization confirmation, before CreateWorkflow** — silent exhaustion (quota dying between turns) is naturally covered by the armed sleep.
+| Level | `automation_kind` | Floor carrier | Precision | Survives app restart | Downgrade label |
+| --- | --- | --- | --- | --- | --- |
+| L0 | `native` (default) | host `CronCreate` (INV-CONT-03 unchanged) | background sleep | yes | none |
+| L1 | `os_timer` | schtasks/crontab task installed by `os-carrier-install` — its trigger is a headless CLI resume turn | background sleep | yes | floor-on-OS |
+| L2 | `sleep_only` | none — the precision sleep only | background sleep | no (recovery = a new session's SessionStart injection) | sleep-only |
+| L3 | — (no binding; the state stays unarmed) | none | none | — | current fail-closed |
+
+**Carrier selection is a fixed decision order (the model makes zero judgment)**:
+
+1. the session has `CronCreate` → **L0** (current behavior unchanged, INV-CONT-03);
+2. otherwise run the runtime CLI `wake-carrier-probe <repo_root>` (pure local, never creates a probe task) and read `recommendation`: `os_timer` → **L1**;
+3. `recommendation` `sleep_only` → **L2** — the honest sleep-only downgrade label: the precision layer proceeds exactly as usual, and the floor's absence is declared as-is. L2's only absence is the floor fallback: after an application restart nothing wakes the session at all, and recovery is a new session's SessionStart injection;
+4. the scheduler and the zcode CLI are both unavailable (`zcode_cli.available=false` **and** `scheduler.available=false` in the probe output — no carrier surface left at all) → **L3**: the current fail-closed discipline unchanged.
+
+INV-CONT-03's lifetime-immutable semantics hold at both L0 and L1: the L1 OS task is likewise never touched after creation (no schtasks change, no crontab edit, no rebuild — deletion happens only in 'Terminal cleanup').
+
+- **Floor**: a recurring Scheduled Task created at launch — **the interval is confirmed by interview question 3 (default 1h)** and after creation it is **never touched again for its lifetime** (no delete, no change, no rebuild — INV-CONT-03). The carrier form follows the matrix: L0 the host's native CronCreate automation; L1 an OS-scheduler task whose trigger resumes the session through a headless CLI turn. Its duty is the liveness fallback: it survives application restarts (L0: the host keeps automations across restarts; L1: the OS scheduler runs independently of the app) and, when the precision layer is lost, catches recovery within at most one interval.
+- **Precision sleep**: a background Bash sleep task — sleeps until **the observed reset_at + 300s grace** and wakes the session automatically on exit (measured second-precise + 8-11s wake latency). reset_at semantics in 'Quota observation surface'; with no valid future observation the precision layer is absent and the floor-only downgrade is reported honestly. It is fully orthogonal to the automation state machine (zero Cron interaction) and does not survive application restarts (the floor covers that at L0/L1; at L2 a restart leaves no wake at all — recovery is a new session's SessionStart injection). **When a valid future reset exists, the first sleep is armed at authorization confirmation, before CreateWorkflow** — silent exhaustion (quota dying between turns) is naturally covered by the armed sleep.
 
 Design basis (host facts, all live-tested): one automation per session; after a carrier's first trigger, every Cron change (create/change/delete) from that session silently degrades (the three-state regularity); **when quota is exhausted the model turn cannot execute** — waiting-period continuity can only be carried by host-side rhythm (automation triggers or background processes), and any mechanism depending on "wake up and then do scheduling actions" fails exactly where it is needed most; the observation surface passes reset_at through **unconditionally** (the single observation rule: any quota status — AVAILABLE/PRESSURE/EXHAUSTED/UNKNOWN — passes through the earliest valid future observed reset; quota status governs whether one may continue or resume, not whether a time may be passed through), so exhaustion decides only "is there work after waking", never "when to wake".
 
@@ -131,7 +147,7 @@ Interview (single round of four questions, question 1 "not enable")
 -> task-record-workflow-run <repo_root> <task_id> <run-id>
 ```
 
-**auto continuity** (entry = the interview confirmed enable): question 1 "enable" lands the authorization first, and the budget is selected in the same interview; the user's statement is authorization intent, never an unbounded authorization. **Arm-before-work (INV-CONT-01) with establish-first**: the floor carrier and the first precision sleep are established in the same batch before CreateWorkflow:
+**auto continuity** (entry = the interview confirmed enable): question 1 "enable" lands the authorization first, and the budget is selected in the same interview; the user's statement is authorization intent, never an unbounded authorization. **Arm-before-work (INV-CONT-01) with establish-first**: the floor carrier (branched by the wake-carrier four-level matrix — fixed decision order, the model makes zero judgment) and the first precision sleep are established in the same batch before CreateWorkflow:
 
 ```
 Interview (single round of four questions: 1 enable + bounded budget; 2 worker model,
@@ -143,14 +159,33 @@ Interview (single round of four questions: 1 enable + bounded budget; 2 worker m
    reset_at (observable in any quota status — single observation rule: the earliest valid future
    observed reset, regardless of quota status; the active/no-op branches pass reset_at through the
    same way, and the task is not required to be in waiting_quota)
--> host CronCreate floor carrier: intervalUnit=hourly, interval=<value confirmed in question 3,
-   default 1>, recurring=true, prompt=the unified wake protocol (action first, never enumerate
-   tool lists; template in references/long-horizon.md)
--> quota-automation-bind <repo_root> <task_id> <the real returned automation id>
--> quota-continuity-preflight <repo_root> <task_id> must PASS (ready=false blocks the launch)
+-> establish the floor carrier, branched by the four-level matrix (fixed decision order,
+   model zero judgment — see 'Dual-channel wake'):
+     L0 (the session has CronCreate — current behavior unchanged, INV-CONT-03):
+        host CronCreate floor carrier: intervalUnit=hourly, interval=<value confirmed
+        in question 3, default 1>, recurring=true, prompt=the unified wake protocol
+        (action first, never enumerate tool lists; template in
+        references/long-horizon.md)
+     L1 (otherwise run wake-carrier-probe <repo_root>, recommendation=os_timer):
+        os-carrier-install <repo_root> <task_id> --interval <value confirmed in
+        question 3, default 1> --prompt <the unified wake protocol> (the command reads
+        .glm-conductor/session-witness.json internally as the session-id fallback; the
+        installed wake command is the frozen headless form node <zcode.cjs> --resume
+        <sess_id> --cwd <repo> --workflow-mode alwaysOn -p "<unified wake protocol>";
+        template in references/long-horizon.md)
+     L2 (probe recommendation=sleep_only): no floor establishment at all (the honest
+        sleep-only downgrade — the floor's absence is declared as-is; the precision
+        layer below proceeds unchanged)
+-> quota-automation-bind <repo_root> <task_id> <witness id per level> (L0: the real
+   returned automation id; L1: the os:schtasks:glm-conductor-<task-id> form witness,
+   kind os_timer; L2: the synthetic sleep-only witness, kind sleep_only)
+-> quota-continuity-preflight <repo_root> <task_id> must PASS (ready=false blocks the
+   launch; at L2 the sleep-only witness is a ready=true armed fact — armed means the
+   precision layer, the floor fallback is honestly absent)
 -> issue the first precision sleep: a background sleep until (observed reset_at + 300s) — issued
    only when this observation contains a valid future reset; when reset_at is null do not issue,
-   report the floor-only downgrade honestly (only the floor is armed), never claim the precision
+   report the floor-only downgrade honestly (only the floor is armed; at L2, which has no floor,
+   nothing is armed — say so in the same honest breath), never claim the precision
    layer is armed — copy the command template verbatim from the precision sleep template in
    references/long-horizon.md (bash computes the seconds dynamically; the model does zero
    arithmetic; the host accepting the background process is the record)
@@ -162,7 +197,7 @@ Interview (single round of four questions: 1 enable + bounded budget; 2 worker m
 -> CreateWorkflow (subagent_model=selection result) -> task-record-workflow-run <repo_root> <task_id> <run-id>
 ```
 
-**Three-part success statement**: a successful auto launch must report three independent facts separately — (a) **the auto authorization landed** (mode=auto + bounded budget); (b) **the floor carrier is bound** (a real automation id in state + preflight PASS); (c) **the precision sleep was actually issued** (the host accepted the background process). If any is missing, state the gap honestly: missing (c) is the **visible floor-only downgrade** (only the floor fallback is armed), never "the precision layer is armed"; missing (b) is an auto block (preflight ready=false, no work starts).
+**Three-part success statement**: a successful auto launch must report three independent facts separately — (a) **the auto authorization landed** (mode=auto + bounded budget); (b) **the floor carrier is bound** (a real automation id in state + preflight PASS); (c) **the precision sleep was actually issued** (the host accepted the background process). If any is missing, state the gap honestly: missing (c) is the **visible floor-only downgrade** (only the floor fallback is armed), never "the precision layer is armed"; missing (b) is an auto block (preflight ready=false, no work starts). Matrix forms: at **L1** both (b) and (c) read true in their own shapes — (b) is the OS-timer floor (the `os:schtasks:glm-conductor-<task-id>` witness, kind `os_timer`, preflight PASS) and (c) is the background sleep exactly as at L0; at **L2** only (c) is true and (b) is the sleep-only witness binding (the synthetic `sleep-only` id, kind `sleep_only`, preflight ready=true on that witness) — the report names the sleep-only downgrade explicitly: armed means the precision layer only, and the floor fallback is absent (after an application restart nothing wakes; recovery is a new session's SessionStart injection).
 
 The three prohibitions on floor-carrier creation failure are unchanged: **never claim auto continuity was enabled**, **never bind a fake id**, **never promise continuation under auto** (this turn degrades to manual continuity only, or hand over to the operator).
 
@@ -246,7 +281,7 @@ One automation per session ⇒ the main session runs at most one auto task at a 
 
 ### Carrier lifetime (INV-CONT-03)
 
-After creation the carrier takes **no change actions ever**: no CronUpdate, no CronDelete, no rebuild — the floor lives at the interview-confirmed interval until 'Terminal cleanup'; precision is carried entirely by the orthogonal sleep channel (zero dependence on the Cron surface). The three-state regularity (post-trigger changes fail) therefore can never bite: the design contains no post-trigger changes.
+After creation the carrier takes **no change actions ever** — INV-CONT-03 holds at both L0 and L1: L0 means no CronUpdate, no CronDelete, no rebuild; L1 means no schtasks change, no crontab edit, no `os-carrier-install` re-run, no rebuild. The floor lives at the interview-confirmed interval until 'Terminal cleanup' (deletion happens only there); precision is carried entirely by the orthogonal sleep channel (zero dependence on the carrier surface). The three-state regularity (post-trigger changes fail) therefore can never bite: the design contains no post-trigger changes.
 
 ## Checkpoint (navigation state)
 
@@ -260,8 +295,10 @@ After substantial milestones (not after every tool call) a long task writes the 
 
 After a task reaches a terminal state (completed / cancelled / failed) and acceptance, the cleanup order is fixed (acting only on this task):
 
-1. **Delete before clear, order fixed; deletion is expected to fail (three-state regularity)**: make one **single** host-side delete attempt for this task's bound automation (located by the automation_id recorded in state) — **the expected result is failure**: once a carrier has triggered, that session's Cron delete launches silently degrade (the three-state regularity, live-tested) and the model side cannot complete the deletion. A failed deletion is not an error: **report the automation id honestly** (with its title); **the user manually deleting it in the Automations page is the expected operation**.
-2. **Clear the binding only after the user confirms the manual deletion**: after confirmation, `quota-automation-clear <repo_root> <task_id> [automation_id]` clears the bound id; before confirmation the bound id is retained for reconciliation — never pretend it is already clean.
+1. **Delete before clear, order fixed; the host-side delete attempt is branched by carrier kind**:
+   - **L0 (native)**: make one **single** host-side delete attempt for this task's bound automation (located by the automation_id recorded in state) — **the expected result is failure**: once a carrier has triggered, that session's Cron delete launches silently degrade (the three-state regularity, live-tested) and the model side cannot complete the deletion. A failed deletion is not an error: **report the automation id honestly** (with its title); **the user manually deleting it in the Automations page is the expected operation**.
+   - **L1 (os_timer)**: the host-side delete attempt is `os-carrier-remove <repo_root> <task_id>` instead of a native Cron delete attempt — **genuinely effective, no three-state degradation** (the OS tool's real exit code is the only fact). On success (`ok=true`) proceed straight to the clear step; on failure (`ok=false` — e.g. the task is already gone or the OS refuses) **report the OS task name `glm-conductor-<task-id>` honestly** for the user's manual disposition (schtasks / crontab), then clear on the user's confirmation — never a retry storm.
+2. **Clear the binding only after the deletion is confirmed** (L1: `os-carrier-remove` returned ok=true) **or the user confirms the manual deletion** (L0): after confirmation, `quota-automation-clear <repo_root> <task_id> [automation_id]` clears the bound id; before confirmation the bound id is retained for reconciliation — never pretend it is already clean.
 3. No retry storms: the delete attempt happens once and is never repeated; repeated wakes / repeated closures that meet an already-cleaned state skip idempotently.
 4. **Never delete another task's automation**: only this task's single bound one; deleting the global scheduling surface or another task's automation is a forbidden operation.
 5. Delete this task's directory `.glm-conductor/tasks/<task-id>/` (only this directory; never touch other tasks' state or visual evidence); when the existing cleanup flow deletes the task directory, its order must never erase the automation_id before the host-side delete attempt.
@@ -279,8 +316,8 @@ After a task reaches a terminal state (completed / cancelled / failed) and accep
 
 ## Failure Handling
 
-- **Scheduling capability unavailable**: auto continuity stays unarmed (preflight ready=false) — never claim continuity was enabled, never bind a fake id, never promise continuation under auto; keep the checkpoint and state, and report "manually recoverable" to the user with the recovery method (a new session gets the SessionStart resume injection).
-- **Wake finds auto unarmed** (binding lost / host activation gone): the single rebuild sequence of 'arm-before-work' applies (CronCreate → bind → preflight; on a session-ownership rejection, report honestly and rely on the host's existing rhythm); never fabricate an activation and never resume unarmed.
+- **Scheduling capability degraded or unavailable (matrix caliber)**: the native CronCreate surface missing is **not** "scheduling capability unavailable" — run the fixed decision order of 'Dual-channel wake' and degrade by matrix: the probe's `recommendation` `os_timer` → arm **L1** (the `os-carrier-install` OS-timer floor); `recommendation` `sleep_only` → arm **L2** (the sleep-only witness; the precision layer proceeds exactly as usual; the floor's absence is declared as-is). Only **L3** — no carrier surface at all — keeps the fail-closed sentence unchanged: auto continuity stays unarmed (preflight ready=false) — never claim continuity was enabled, never bind a fake id, never promise continuation under auto; keep the checkpoint and state, and report "manually recoverable" to the user with the recovery method (a new session gets the SessionStart resume injection).
+- **Wake finds auto unarmed** (binding lost / host activation gone): the single kind-aware rebuild sequence of 'arm-before-work' applies (L0: CronCreate → bind → preflight; L1: `os-carrier-remove` → `os-carrier-install` → bind → preflight; on an L0 session-ownership rejection, report honestly and rely on the host's existing rhythm); never fabricate an activation and never resume unarmed.
 - **Precision sleep not armed** (after an application restart / session rebuild): any wake turn (including floor-triggered) re-arms per the unified protocol at turn end — self-healing, not a fault.
 - **Workflow unresumable**: rebuild from the repository's current state per step 4 of 'Workflow recovery (same run id resume)', never replaying completed work.
 - **Authorization budget exhausted**: the task stays in waiting_user — wait for the user to re-authorize (`quota-resume-authorize`) or to close out explicitly; the model never raises the budget itself.
