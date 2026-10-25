@@ -31,8 +31,9 @@ docs/roadmap/V2_6_0_IMPLEMENTATION_PLAN.md §4（WP-M1 测试面），
   ⑧ 全仓无残留硬依赖：插件树（runtime/skills/agents/hooks/commands）
      零 "explicit-flash-required" 残留；runtime 与 orchestration/
      continuity 技能面零「必须 GLM-5.3」类硬门措辞；静态 agent 模型
-     绑定恰限于视觉双角色（frontmatter provider 全限定，owner 裁决
-     维持），glm-reviewer 无绑定。清单展示面的文案锚（max 推理档提示
+     绑定恰限于六个白名单角色（视觉双角色 + 直派三剑客 + glm-reviewer
+     显式绑定 start-plan 主模型，v2.8.0 owner 指令；frontmatter
+     provider 全限定）；conductor-impl 无绑定（继承宿主/会话模型）。清单展示面的文案锚（max 推理档提示
      / 单一候选也确认）归 scripts/validate_plugin.py 锚组，不在本套
      重复。
   ⑨ resume 遇 legacy 任务无 pin 不隐式授权（runtime 层）：v2.3 遗留
@@ -596,7 +597,7 @@ class PolicyAndNoHardGateScanTest(unittest.TestCase):
             "conductor-scout.md", "conductor-runner.md",
             "conductor-impl-flash.md", "glm-reviewer.md")
         self.assertEqual(sorted(bound), sorted(allow),
-                         "静态模型绑定应恰限于白名单五角色，实际：%r"
+                         "静态模型绑定应恰限于白名单六角色，实际：%r"
                          % (sorted(bound),))
         for name in allow:
             line = bound[name]

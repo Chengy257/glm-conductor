@@ -104,7 +104,7 @@ GLM Conductor 让强模型专注于架构规划、全局判断与最终验收，
 | **Scout（侦察）** | **GLM-5.3-Flash（只读工具面，frontmatter 静态绑定）** | 只读调查与事实收集，结论必带 `file:line` 证据引用（`conductor-scout`；直派通道，任意路线可用） |
 | **Runner（执行）** | **GLM-5.3-Flash（frontmatter 静态绑定）** | 受托命令/测试逐字执行，诚实回报退出码与输出尾部，绝不改写仓库文件（`conductor-runner`；直派通道，任意路线可用） |
 | **Impl-Flash（闪档实施）** | **GLM-5.3-Flash（frontmatter 静态绑定）** | 五段规格的有界机械实施，ownership 纪律同 workflow 工作者（`conductor-impl-flash`；直派通道，须在持有写者守卫的活动任务下派发） |
-| **Impl（实施）** | **宿主/会话模型（继承——无 `model` 键，`glm-reviewer` 同款先例）** | 需主模型强度、无需整 workflow 的复杂有界实施（`conductor-impl`；直派通道，须在持有写者守卫的活动任务下派发） |
+| **Impl（实施）** | **宿主/会话模型（继承——无 `model` 键）** | 需主模型强度、无需整 workflow 的复杂有界实施（`conductor-impl`；直派通道，须在持有写者守卫的活动任务下派发） |
 
 ### 工作者模型 Pin 与用户授权显式选型
 Workflow 工作者绝不静默继承会话模型——`subagent_model` 始终是显式的 provider 全限定精确 id。宿主全部已配置模型入候选（不限 provider、不限 Flash）；启动问答列全清单，**单一候选也须用户显式确认**。选定模型**默认以 max 推理档运行（宿主默认思考档位）；档位不随 pin 存储**——pin 只存模型 id。Flash 档（版本无关 `-Flash` 后缀）是**软推荐位**（有界实施的成本/速度友好档）：

@@ -30,7 +30,7 @@ v2.7.0 W6（直派角色四件套）：主会话绕过 Workflow 直接 subagent 
 显式 pin account:bigmodel-start-plan/GLM-5.3-Flash（v2.8.0 起直派
 通道同样遵守 worker 模型显式选型契约，缺省/裸 ID 会静默回退主会话
 模型）；conductor-impl（主模型直派实现角色）无 model 键为合法继承
-形态（继承宿主/会话模型，同 glm-reviewer 先例）；四角色 tools 白名单
+形态（继承宿主/会话模型）；四角色 tools 白名单
 与各文件 frontmatter 声明逐字一致（漂移即回归）；impl 系两角色
 （conductor-impl / conductor-impl-flash）正文必须携带 writer guard
 纪律句锚——直派实现的写入与委托工作流共用同一仓储级写入保留契约。
@@ -62,7 +62,7 @@ VISUAL_REVIEWER_FORBIDDEN_TOOLS = ("Write", "Edit", "Bash", "NotebookEdit")
 # —— v2.7.0 W6 直派角色四件套 ——
 # 显式 Flash pin 的直派角色（scout / runner / impl-flash 直派 Flash 实现 worker）
 DIRECT_FLASH_ROLES = ("conductor-scout", "conductor-runner", "conductor-impl-flash")
-# 主模型继承形态的直派实现角色（无 model 键，同 glm-reviewer 先例）
+# 主模型继承形态的直派实现角色（无 model 键，继承宿主/会话模型）
 DIRECT_INHERIT_ROLE = "conductor-impl"
 # 直派角色显式 pin 的 worker 模型（provider 全限定，与 runner/scout/
 # impl-flash 三文件 frontmatter 声明一致）
@@ -213,8 +213,8 @@ class DirectDispatchRoleBindingTest(unittest.TestCase):
         self.assertIsNone(
             value,
             "%s 的 frontmatter 含 model 字段（值 %s）：主模型直派实现角色"
-            "的既定契约是继承宿主/会话模型（无 model 键为合法继承形态，"
-            "同 glm-reviewer 先例）" % (path, value))
+            "的既定契约是继承宿主/会话模型（无 model 键为合法继承形态）"
+            % (path, value))
 
     def test_direct_roles_tools_match_frontmatter_whitelist(self):
         """四直派角色 tools 白名单与文件 frontmatter 声明逐字一致。"""

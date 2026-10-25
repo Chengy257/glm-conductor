@@ -11,8 +11,11 @@
          角色区分——visual-implementer 必含
          name / description / model / thoughtLevel / tools；
          glm-reviewer（文本审查者）必含
-         name / description / thoughtLevel / tools 且不得含 model 字段
-         （继承宿主/会话模型，v2.4 P1-A 起）；
+         name / description / model / thoughtLevel / tools 且 model
+         必须逐字等于 account:bigmodel-start-plan/GLM-5.3（v2.8.0
+         owner 指令显式绑定：值与继承宿主/会话等价）——v2.4 P1-A 至
+         v2.7.0 的「不得含 model 字段（继承宿主/会话模型）」旧规则
+         已由该指令取代；
          visual-reviewer（视觉审查者）必含
          name / description / model / thoughtLevel / tools，model 必须
          匹配 provider 全限定 account:<套餐>/<模型> 且以 /GLM-5.3-Flash
@@ -326,8 +329,7 @@ VISUAL_REVIEWER_MODEL_SUFFIX = "/GLM-5.3-Flash"
 #     account:bigmodel-start-plan/GLM-5.3-Flash（v2.8.0 owner 指令
 #     改绑）由 tests/test_agent_model_binding.py 镜像锚定；
 #   - DIRECT_INHERIT_AGENTS：主模型直派实现角色，无 model 键为合法
-#     继承形态（继承宿主/会话模型，同 glm-reviewer 先例），model 行
-#     出现即 FAIL。
+#     继承形态（继承宿主/会话模型），model 行出现即 FAIL。
 DIRECT_FLASH_AGENTS = (
     "conductor-scout", "conductor-impl-flash", "conductor-runner")
 DIRECT_INHERIT_AGENTS = ("conductor-impl",)
@@ -864,8 +866,9 @@ def check_1_json(results):
 def check_2_agent_frontmatter(results):
     """检查 2：agents/*.md frontmatter 必填字段（按角色区分必填集与 model 规则）。
 
-    文本/视觉审查者绑定分治（v2.4 P1-A / AF-02）：
-      - glm-reviewer：必填集不含 model，字段出现即 FAIL（继承宿主/会话模型）；
+    文本/视觉审查者绑定分治（v2.4 P1-A / AF-02 → v2.8.0 owner 指令修订）：
+      - glm-reviewer：model 必填且逐字等于 account:bigmodel-start-plan/GLM-5.3
+        （值与继承宿主/会话等价；旧「继承宿主/会话、不得含 model」规则已取代）；
       - visual-reviewer：model 必填，须为 provider 全限定 account:<套餐>/<模型>
         且以 /GLM-5.3-Flash 结尾（多模态 Flash 绑定），否则 FAIL。
 
@@ -922,8 +925,8 @@ def check_2_agent_frontmatter(results):
             elif "model" in meta:
                 details.append(
                     "FAIL: %s 含 model 字段（值 %s）：主模型直派实现角色"
-                    "继承宿主/会话模型（无 model 键为合法继承形态，同 "
-                    "glm-reviewer 先例），model 行必须删除"
+                    "继承宿主/会话模型（无 model 键为合法继承形态），"
+                    "model 行必须删除"
                     % (shown, meta.get("model") or "（空）"))
                 ok = False
             else:
