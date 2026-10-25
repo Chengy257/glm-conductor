@@ -323,8 +323,8 @@ VISUAL_REVIEWER_MODEL_SUFFIX = "/GLM-5.3-Flash"
 #     全限定 account:<套餐>/<模型> 并以 /GLM-5.3-Flash 结尾，与
 #     visual-reviewer 共用同一形态正则/后缀（VISUAL_REVIEWER_MODEL_RE /
 #     VISUAL_REVIEWER_MODEL_SUFFIX，形态规则不重复定义）；精确套餐 pin
-#     account:bigmodel-individual-coding-plan/GLM-5.3-Flash 由
-#     tests/test_agent_model_binding.py 镜像锚定；
+#     account:bigmodel-start-plan/GLM-5.3-Flash（v2.8.0 owner 指令
+#     改绑）由 tests/test_agent_model_binding.py 镜像锚定；
 #   - DIRECT_INHERIT_AGENTS：主模型直派实现角色，无 model 键为合法
 #     继承形态（继承宿主/会话模型，同 glm-reviewer 先例），model 行
 #     出现即 FAIL。

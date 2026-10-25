@@ -42,7 +42,8 @@ JOURNAL_FILENAME = "events.jsonl"
 
 # 推荐事件名词汇表（文档性常量；append_event 不强制成员资格——
 # 未来阶段会新增事件名，保持开放式）。v2.4 Phase 2（W6）起收缩为
-# 任务级集：与 runtime/task.py 的 TASK_JOURNAL_EVENTS 恰十名一致，
+# 任务级集：与 runtime/task.py 的 TASK_JOURNAL_EVENTS 恰十一名一致
+# （v2.8.0 D-C +chain_block_delegated），
 # v2.3 宿主子代理生命周期镜像词（implementation_started /
 # dispatch_* / lease_recovered / unit_finished / reviewer_invoked 等）
 # 与完成门记账词（gate_blocked 等）随 v2.3 执行面退役一并移除；
@@ -51,6 +52,7 @@ JOURNAL_FILENAME = "events.jsonl"
 RECOMMENDED_EVENTS = (
     "route_selected",       # SELECTIVE ROUTE 声明（runtime.task.create_task）
     "workflow_started",     # 委派 Workflow run 关联（record_workflow_run）
+    "chain_block_delegated",  # 直派链块委派（v2.8.0 D-C，record_chain_block）
     "workflow_reassessed",  # 路由重估（声明的词汇名，主会话记录）
     "validation_recorded",  # 任务级验证记录（record_validation）
     "review_recorded",      # 任务级审查记录（record_review）

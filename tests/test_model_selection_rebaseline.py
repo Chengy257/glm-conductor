@@ -578,11 +578,11 @@ class PolicyAndNoHardGateScanTest(unittest.TestCase):
             "活跃政策面出现主模型硬门措辞：%r" % (hits,))
 
     def test_static_agent_bindings_scoped_to_visual_roles(self):
-        """静态 agent 模型绑定恰限于五个白名单角色（v2.7.0 W6 D11 扩容：
-        视觉双角色 + 直派三剑客 scout/runner/impl-flash——frontmatter
-        provider 全限定 account: 前缀，裸 ID 静默回退坑）；glm-reviewer
-        与 conductor-impl 无绑定（继承宿主/会话模型）。owner 裁决维持
-        的例外恰此五个。"""
+        """静态 agent 模型绑定恰限于六个白名单角色（v2.7.0 W6 D11 扩容
+        视觉双角色 + 直派三剑客；v2.8.0 owner 指令追加 glm-reviewer
+        显式绑定 start-plan 主模型——值与继承宿主/会话等价，frontmatter
+        provider 全限定 account: 前缀，裸 ID 静默回退坑）；conductor-impl
+        仍无绑定（继承宿主/会话模型）。owner 裁决维持的例外恰此六个。"""
         agents_dir = PLUGIN_ROOT / "agents"
         bound = {}
         for path in sorted(agents_dir.glob("*.md")):
@@ -594,7 +594,7 @@ class PolicyAndNoHardGateScanTest(unittest.TestCase):
                         break
         allow = VISUAL_AGENTS + (
             "conductor-scout.md", "conductor-runner.md",
-            "conductor-impl-flash.md")
+            "conductor-impl-flash.md", "glm-reviewer.md")
         self.assertEqual(sorted(bound), sorted(allow),
                          "静态模型绑定应恰限于白名单五角色，实际：%r"
                          % (sorted(bound),))

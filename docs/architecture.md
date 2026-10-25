@@ -271,7 +271,7 @@ The host contract for the block decision is single-line JSON on stdout (ZCode us
 {"decision": "block", "reason": "Completion blocked: the validation record is stale — task-relevant files changed again after validation (task redesign-settings-page-7f3a2c).\n- Recorded change_id: sha256:…\n- Current change_id: sha256:…\nRe-validate and refresh the record via runtime.task.record_validation, then request completion."}
 ```
 
-The task-level journal event vocabulary (exactly ten names, `TASK_JOURNAL_EVENTS` / `journal.RECOMMENDED_EVENTS` aligned): `route_selected` (create_task) / `workflow_started` (record_workflow_run) / `workflow_reassessed` (the declared vocabulary name; the main session records a route reassessment) / `validation_recorded` / `review_recorded` / `waiting_quota` (enter / exit) / `quota_resume_confirmed` (the resume count committed) / `task_completed` / `task_failed` / `task_cancelled`. Event names outside this vocabulary do not exist.
+The task-level journal event vocabulary (exactly eleven names, `TASK_JOURNAL_EVENTS` / `journal.RECOMMENDED_EVENTS` aligned): `route_selected` (create_task) / `workflow_started` (record_workflow_run) / `chain_block_delegated` (record_chain_block — a direct-dispatch chain block delegation, the main session's semantic decomposition decision, v2.8.0) / `workflow_reassessed` (the declared vocabulary name; the main session records a route reassessment) / `validation_recorded` / `review_recorded` / `waiting_quota` (enter / exit) / `quota_resume_confirmed` (the resume count committed) / `task_completed` / `task_failed` / `task_cancelled`. Event names outside this vocabulary do not exist.
 
 ## 13. Visual exception
 

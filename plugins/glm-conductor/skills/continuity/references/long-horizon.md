@@ -176,7 +176,7 @@ state.json field overview (authoritative schema: plugin `runtime/state.py`):
 
 Status only moves forward, never backward (enforced by the `state.TASK_TRANSITIONS` matrix); a terminal state is never silently reopened (explicit reopen goes through `state.reopen_task`); the repository remains the source of truth for code state — state.json is runtime task state only.
 
-The events.jsonl task-level event vocabulary is exactly ten names (`runtime.task.TASK_JOURNAL_EVENTS`): route_selected / workflow_started / workflow_reassessed / validation_recorded / review_recorded / waiting_quota / quota_resume_confirmed / task_completed / task_failed / task_cancelled — per-event timing in the SKILL.md section 'Task state and runtime files'; appends always go through `runtime/journal.py` (the module manages the timestamp; callers never supply their own).
+The events.jsonl task-level event vocabulary is exactly eleven names (`runtime.task.TASK_JOURNAL_EVENTS`): route_selected / workflow_started / chain_block_delegated / workflow_reassessed / validation_recorded / review_recorded / waiting_quota / quota_resume_confirmed / task_completed / task_failed / task_cancelled — per-event timing in the SKILL.md section 'Task state and runtime files'; appends always go through `runtime/journal.py` (the module manages the timestamp; callers never supply their own).
 
 ### Read order on recovery
 
