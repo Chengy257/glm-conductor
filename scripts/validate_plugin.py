@@ -788,6 +788,13 @@ V280_STALE_MODEL_FACE_TOKENS = (
     "恰十名",
     "白名单五角色",
     "恰限于视觉双角色",
+    # 计数声明变体（终审四轮补：ten-event 形态曾全部漏网）
+    "ten-event",
+    "ten event",
+    "ten-name",
+    "ten names",
+    "十个事件",
+    "十名",
 )
 V280_STALE_FACE_SCAN_FILES = (
     README, README_ZH, ARCH_DOC, CORE_CONCEPTS_DOC,
@@ -2208,6 +2215,7 @@ def check_16_v241_protocol(results):
                 for lineno, line in enumerate(text.splitlines(), 1)
                 if token in line]
             if hit_lines:
+                ok = False
                 for lineno, snippet in hit_lines:
                     stale_hits += 1
                     details.append(
@@ -2219,6 +2227,7 @@ def check_16_v241_protocol(results):
                 text.replace("`", "").split())
             if token in normalized:
                 stale_hits += 1
+                ok = False
                 details.append(
                     "FAIL: %s 归一化文本命中陈旧措辞 `%s`（跨行拆分或"
                     "反引号变体——模型面/词汇面镜像残留）"

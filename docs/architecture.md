@@ -383,7 +383,7 @@ plugins/glm-conductor/
     ├── dependency.py   # pure DAG validation and deterministic ordering
     ├── workflow/       # persona + compiler + adapter + submission (§4 / §5 / submission model selection)
     ├── writer_guard.py # repository writer guard (§7)
-    ├── journal.py      # events.jsonl append-only (the ten-event task-level vocabulary)
+    ├── journal.py      # events.jsonl append-only (the eleven-event task-level vocabulary)
     ├── durable_io.py   # shared atomic-write / exclusive-lock primitives (imports nothing from inside the runtime package)
     ├── recovery.py     # SessionStart resume summary (purely local, §18)
     ├── carrier.py      # OS wake-carrier face (v2.7.0 W1, §14): exact-argv pure construction (schtasks/crontab) + install/remove execution + wake command — argv lists only, shell=False, zero shell assembly
@@ -404,7 +404,7 @@ plugins/glm-conductor/
 - **Writer roles are guard-bound**: impl-flash / impl are dispatched only in the context of an active task holding that repository's writer reservation (§7) — the guard's semantics are unchanged; the main session hands over the five-section spec, and their changes remain fully covered by the task-level completion guard (checks 2–4, §12)
 - **Single-node delegate lightweight channel (D10)**: when the DAG is exactly one node and assurance is standard, the main session may dispatch one impl role directly instead of a one-node workflow; the contract prices the costs explicitly — no structured `NodeResult`, no `ResumeWorkflowRun` recovery (recovery semantics = re-dispatch from repository facts) — while the validation / review / completion-gate chain is unchanged; multi-node `delegate` / `full` keeps Native Workflow as the sole carrier
 - **Model-selection gate boundary**: a direct-dispatch role's model strategy is declared statically in its frontmatter (pinned / inherited) and never enters the `workflow-model-select` pipeline (that gate governs run-level `subagent_model` only); the launch interview's model question is untouched
-- **No new journal events (D13)**: direct dispatch adds nothing to the ten-event task-level vocabulary; validation / review / completion bookkeeping continues as usual
+- **Journal events (D13 as revised by D-C, v2.8.0)**: a direct-dispatch chain block records exactly one `chain_block_delegated` event per block (the main session's semantic decomposition decision); every other direct dispatch — scout, runner, single-shot mechanical offload — adds nothing to the eleven-event task-level vocabulary; validation / review / completion bookkeeping continues as usual
 
 runtime CLI subcommands (exit code 0 success / 2 validation refusal / 1 runtime refusal; skill-layer runtime invocations always go through this CLI):
 
@@ -515,6 +515,6 @@ Frozen boundaries (changes require an explicit design verdict and synchronizatio
 - The seven-state vocabulary and `TASK_TRANSITIONS`; the completion guard's four-check order and block-message contract
 - The change_id derivation basis and the "recording / guard sides call the same implementation" red line
 - The writer_guard record's four fields and the "never auto-expires" semantics; the quota_resume five-key shape (the v2.7.0 W1 fifth key `automation_kind`, defaulting to `native`) and budget invariant
-- The runtime CLI's public subcommand surface and exit-code semantics; the journal's ten-event task-level vocabulary
+- The runtime CLI's public subcommand surface and exit-code semantics; the journal's eleven-event task-level vocabulary
 
 Evolution discipline: unless actual usage exposes a concrete capability gap, no new routing dimensions or roles; the runtime performs deterministic enforcement only for high-confidence invariants (ownership out-of-scope, stale evidence, a second writer, unauthorized resume) and no semantic-interpretation interception; an execution fact the host already owns is never modeled again.

@@ -162,7 +162,7 @@ python <cli> workflow-model-select '<JSON array or file path>' [--model <exact-i
 | State | Location | Notes |
 | --- | --- | --- |
 | task status | `<repo>/.glm-conductor/tasks/<task-id>/state.json` | the seven-state schema source of truth (`runtime/state.py`) |
-| task events | `<repo>/.glm-conductor/tasks/<task-id>/events.jsonl` | append-only; the task-level ten-event vocabulary (`runtime/journal.py`) |
+| task events | `<repo>/.glm-conductor/tasks/<task-id>/events.jsonl` | append-only; the task-level eleven-event vocabulary (`runtime/journal.py`) |
 | writer guard | `<repo>/.glm-conductor/writer_guard.json` | the single repository-level reservation (§3) |
 | run association | `<repo>/.glm-conductor/workflow-runs/run-<percent-encoded task_ref>.json` | the id association of task ↔ Workflow run (`runtime/workflow/adapter.py`) |
 | quota cache | `<repo>/.glm-conductor/quota-cache.json` | a normalized snapshot, bound to the provider identity fingerprint, containing no credentials (`runtime/quota/resolver.py`) |
