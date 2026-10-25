@@ -795,6 +795,10 @@ V280_STALE_MODEL_FACE_TOKENS = (
     "ten names",
     "十个事件",
     "十名",
+    # 审查者绑定句变体（终审五轮补;conductor-impl 的合法继承句
+    # 不含 glm-reviewer 主语,不受影响）
+    "glm-reviewer inherits the host/session",
+    "glm-reviewer 继承宿主/会话",
 )
 V280_STALE_FACE_SCAN_FILES = (
     README, README_ZH, ARCH_DOC, CORE_CONCEPTS_DOC,

@@ -251,7 +251,7 @@ The third implementation shape: for a task that is **low-delegability × long** 
 
 Choose a fresh-context read-only reviewer by task modality:
 
-- Text tasks → `glm-reviewer` (read-only whitelist; the model inherits the host/session — no cross-model independence is claimed; independence comes from the fresh context and read-only isolation)
+- Text tasks → `glm-reviewer` (read-only whitelist; explicitly bound in the frontmatter to `account:bigmodel-start-plan/GLM-5.3` — value-identical to the host/session model, no cross-model independence claimed; independence comes from the fresh context and read-only isolation)
 - Visual tasks → `visual-reviewer` (multimodal read-only, GLM-5.3-Flash frontmatter binding, primary duty independent visual acceptance: personally read the screenshots against VISUAL ACCEPTANCE and check user-visible regressions; the diff is context only). When that binding is unavailable on the host (startup errors such as account-connection-unavailable), the visual high-assurance route fails closed: report the binding as unavailable to the user and never fall back to a text model (glm-reviewer or the main session) as the visual final review.
 
 Discipline:

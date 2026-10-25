@@ -18,7 +18,7 @@ SPEC.md §5.3（v2.6.0：角色中性形状校验、有 pin 任务普通 --model
      命名空间与非 account provider（2026-10-19 owner 裁定）同合法
      / 无空白——非 Flash 已配置精确 id 合法，不含 '/' 的裸别名 / 空
      值 / 缺段仍拒）拒绝且盘面零改动；
-     缺失任务 / v2.3 遗留任务拒绝；journal 十名冻结零新增事件名。
+     缺失任务 / v2.3 遗留任务拒绝；journal 十一名冻结零新增事件名。
   3. CLI worker-model-pin：成功 / 幂等 / 覆盖（stdout 单行 JSON
      {task_id, prev, new}）；id 形状非法 → 退出码 2；任务缺失 /
      终态冻结 → 退出码 1；用法错 → 退出码 2。
@@ -293,7 +293,7 @@ class PinWorkerModelApiTest(unittest.TestCase):
         self.assertIn(state.LEGACY_STATE_GUIDANCE, str(ctx.exception))
 
     def test_pin_never_adds_journal_events(self):
-        """journal 十名冻结：pin 全程零新增事件名（state 落盘承载）。"""
+        """journal 十一名冻结（v2.8.0 D-C 起恰十一名）：pin 全程零新增事件名（state 落盘承载）。"""
         self.make_task()
         task.pin_worker_model(self.repo, TID, FLASH_A)
         task.pin_worker_model(self.repo, TID, FLASH_B)  # 覆盖路径同零事件

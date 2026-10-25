@@ -11,7 +11,7 @@ This file is the run-details reference of the glm-conductor orchestration system
   - assurance:high (visual tasks) needs `glm-conductor:visual-reviewer`
 - solo and assurance:standard need no subagent preflight at all
 - Fail closed when a role is missing: stop that channel and tell the user to check the plugin installation (Settings → Plugin Management) — never silently substitute another subagent type
-- Never attach model / thinking-tier overrides at invocation: each role's definition is fixed (visual-implementer and visual-reviewer are both explicit GLM-5.3-Flash multimodal bindings, tiers high / max respectively; glm-reviewer inherits the host/session model, tier max) — any runtime override breaks the system's dual-axis assumptions
+- Never attach model / thinking-tier overrides at invocation: each role's definition is fixed (visual-implementer and visual-reviewer are both explicit GLM-5.3-Flash multimodal bindings, tiers high / max respectively; glm-reviewer is explicitly bound to account:bigmodel-start-plan/GLM-5.3 — value-identical to the host/session model, tier max) — any runtime override breaks the system's dual-axis assumptions
 
 ## Dual-axis judgment discipline
 
