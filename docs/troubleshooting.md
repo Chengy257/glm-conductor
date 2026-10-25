@@ -97,7 +97,7 @@ python <cli> writer-release <repo_root> <holder_task_id> --force
 
 ## 4. The reviewer model-binding split: which model a reviewer runs on
 
-**Background fact** (text/visual split since v2.4 AF-02): the frontmatter of `agents/glm-reviewer.md` has **no `model` field** — host testing showed that an unresolvable fixed model id on a single-model host makes the reviewer deterministically unable to start (the plain Agent face hard-fails outright); without the model field the text reviewer **inherits the host / current session model**, which satisfies the text review contract (`scripts/validate_plugin.py` check 2 mechanically anchors this: glm-reviewer carrying a model field is a FAIL). `agents/visual-reviewer.md` is the opposite: the visual review contract requires reading images directly, and inheriting a text-only main-session model would mean "starting successfully but losing the contract capability" — its frontmatter **must** be a provider-qualified multimodal Flash binding (`account:…/GLM-5.3-Flash`, the same as visual-implementer; validate check 2 anchors it in sync: a missing model, a bare id, or a non-Flash suffix is a FAIL).
+**Background fact** (text/visual split since v2.4 AF-02; v2.8.0 revision): the frontmatter of `agents/glm-reviewer.md` carries an **explicit pin** `model: "account:bigmodel-start-plan/GLM-5.3"` (owner instruction, v2.8.0) — value-identical to the host/session model the reviewer used to inherit, so the text review contract is unchanged while silent routing ambiguity is removed (`scripts/validate_plugin.py` check 2 mechanically anchors this: a missing model field or any value other than the exact pin is a FAIL). Historical note: the v2.4 design deliberately had no model field because an unresolvable fixed model id on a host without that provider hard-fails the Agent outright — that residual risk stays attached to any explicit pin and is why the pin names the same plan the session runs on. `agents/visual-reviewer.md` is the opposite: the visual review contract requires reading images directly, and inheriting a text-only main-session model would mean "starting successfully but losing the contract capability" — its frontmatter **must** be a provider-qualified multimodal Flash binding (`account:…/GLM-5.3-Flash`, the same as visual-implementer; validate check 2 anchors it in sync: a missing model, a bare id, or a non-Flash suffix is a FAIL).
 
 **Meaning and troubleshooting**:
 
@@ -108,7 +108,7 @@ python <cli> writer-release <repo_root> <holder_task_id> --force
 
 | agent | model field | actual model | channel |
 | --- | --- | --- | --- |
-| glm-reviewer | none | inherits the host / session model | native Custom Subagent |
+| glm-reviewer | `account:bigmodel-start-plan/GLM-5.3` (explicit pin) | start-plan GLM-5.3 — value-identical to the session model | native Custom Subagent |
 | visual-reviewer | `account:…/GLM-5.3-Flash` (fully qualified) | fixed Flash multimodal (fail closed when unavailable) | native Custom Subagent |
 | visual-implementer | `account:…/GLM-5.3-Flash` (fully qualified) | fixed Flash multimodal | native Custom Subagent (the visual exception) |
 | text worker (delegate/full) | no agent definition | the persona is embedded into the generated source | Native Workflow |

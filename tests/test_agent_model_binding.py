@@ -10,9 +10,11 @@ provider 宿主上的 account-connection-unavailable 硬失败（W0 §13.1 实�
 ——继承会「启动成功但丧失契约能力」。统一删除规则已废止，代之以
 文本/视觉分治：
 
-  - glm-reviewer（文本审查）：frontmatter 无 model 字段，继承宿主/会话
-    模型以保证任何宿主可启动；模型身份不是持久任务状态轴——出现
-    model 字段即回归，报文件与字段值；
+  - glm-reviewer（文本审查）：v2.8.0 owner 指令起 frontmatter 显式
+    绑定 account:bigmodel-start-plan/GLM-5.3（值与继承宿主/会话等价；
+    旧「无 model 字段保证任何宿主可启动」设计由该指令取代——pin 与
+    会话同 plan，provider 缺位硬失败风险随注）；模型身份不是持久
+    任务状态轴——绑定值漂移即回归，报文件与字段值；
   - visual-reviewer / visual-implementer（视觉角色）：frontmatter 必须
     是 provider 全限定 account:<套餐标识>/<模型> 且以 /GLM-5.3-Flash
     结尾（主会话已验证的多模态 Flash 绑定，与 visual-implementer 现有
@@ -95,8 +97,9 @@ def _parse_frontmatter_field(path, key):
 
     不引入 YAML 依赖：frontmatter 由 `---` 包裹、字段为单行
     `key: value`，与 scripts/validate_plugin.py 的解析假设一致。
-    字段缺失时返回 None——对 glm-reviewer 的 model 字段这是合法态
-    （继承宿主/会话模型），是否合法由调用方按角色断言。
+    字段缺失时返回 None——是否合法由调用方按角色断言
+    （conductor-impl 无 model 键为合法继承；glm-reviewer 缺 model
+    字段即非法，v2.8.0 起显式必填）。
     """
     with open(path, "r", encoding="utf-8") as fh:
         lines = fh.read().splitlines()
@@ -117,7 +120,7 @@ class TextReviewerModelBindingTest(unittest.TestCase):
     """glm-reviewer：v2.8.0 owner 指令显式绑定 start-plan 主模型（值
     与继承宿主/会话等价，显式 pin 消除静默路由歧义）。"""
 
-    def test_text_reviewer_inherits_session_model(self):
+    def test_text_reviewer_explicitly_bound_to_start_plan(self):
         for name in TEXT_REVIEWERS:
             path = os.path.join(AGENTS_DIR, "%s.md" % name)
             self.assertTrue(os.path.isfile(path), "%s.md 缺失" % name)

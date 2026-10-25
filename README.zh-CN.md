@@ -99,7 +99,7 @@ GLM Conductor 让强模型专注于架构规划、全局判断与最终验收，
 | **主会话** | **宿主/会话模型（继承，不可编程切换）** | 架构决策、路由选择、DAG 编制、代码验证、最终验收 |
 | **Workflow 工作者** | **用户授权精确 id（Flash 软推荐）** | 原生 Workflow 内的有界文本代码实施 |
 | **视觉实施者** | **GLM-5.3-Flash（多模态，frontmatter 静态绑定）** | 有界前端/UI 代码实施（Custom Subagent 能力例外通道） |
-| **文本审查者** | **宿主/当前会话模型** | 全新上下文、只读终审（`glm-reviewer`） |
+| **文本审查者** | **GLM-5.3（start-plan；frontmatter 显式绑定，与当前会话模型同值）** | 全新上下文、只读终审（`glm-reviewer`） |
 | **视觉审查者** | **GLM-5.3-Flash（多模态，frontmatter 静态绑定）** | 全新上下文视觉读图终审（`visual-reviewer`，不可用即 fail closed） |
 | **Scout（侦察）** | **GLM-5.3-Flash（只读工具面，frontmatter 静态绑定）** | 只读调查与事实收集，结论必带 `file:line` 证据引用（`conductor-scout`；直派通道，任意路线可用） |
 | **Runner（执行）** | **GLM-5.3-Flash（frontmatter 静态绑定）** | 受托命令/测试逐字执行，诚实回报退出码与输出尾部，绝不改写仓库文件（`conductor-runner`；直派通道，任意路线可用） |

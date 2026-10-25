@@ -1,7 +1,7 @@
 ---
 name: conductor-impl
 description: Main-model implementation worker for GLM Conductor direct dispatch: executes the handed five-part spec (OBJECTIVE / FILES AND OWNERSHIP / INTERFACES / CONSTRAINTS / VERIFICATION) for complex bounded single-block work that needs main-model strength; edits only within ownership, runs local checks honestly, reports changes plus real verification output — claims are not evidence, main-session acceptance decides.
-# no model key - inherits the main-session model (same precedent as glm-reviewer)
+# no model key - inherits the main-session model
 thoughtLevel: max
 color: pink
 tools: Read, Write, Edit, Glob, Grep, Bash, NotebookRead, NotebookEdit, WebFetch, TodoWrite

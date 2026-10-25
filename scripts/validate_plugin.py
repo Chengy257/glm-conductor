@@ -27,12 +27,12 @@
          name / description / model / thoughtLevel / tools，model 与
          visual-reviewer 同一形态（provider 全限定 account:<套餐>/
          <模型> 且以 /GLM-5.3-Flash 结尾；精确套餐 pin
-         account:bigmodel-individual-coding-plan/GLM-5.3-Flash 由
-         tests/test_agent_model_binding.py 镜像锚定，此处不重复）；
+         account:bigmodel-start-plan/GLM-5.3-Flash（v2.8.0 owner
+         指令改绑）由 tests/test_agent_model_binding.py 镜像锚定，
+         此处不重复）；
          conductor-impl（主模型直派实现角色）必含
          name / description / thoughtLevel / tools 且不得含 model 字段
-         （无 model 键为合法继承形态，继承宿主/会话模型，同
-         glm-reviewer 先例）；
+         （无 model 键为合法继承形态，继承宿主/会话模型）；
       3. Skill frontmatter：plugins/glm-conductor/skills/*/SKILL.md 必含
          name / description；
       4. 引用 agent 存在：plugins/ 内出现的 `glm-conductor:<agent>` 引用
@@ -164,8 +164,8 @@
             必含（v2.6.1 W2 随技能英文化改英文锚），
             v2.6.0 WP-M1 起旧「绝不替换主会话」主模型硬门锚随 Flash
             准入硬门退役同步移除；继承/省略措辞仅在含否定词的行
-            允许（中英 token 并行）——glm-reviewer 继承宿主/会话模型是
-            另一合法事实，不在 token 集内）；
+            允许（中英 token 并行）——glm-reviewer 显式绑定与主会话
+            同值模型是另一合法事实，不在 token 集内）；
          b) auto/until_done 启动序列未把 scheduling/bind/preflight 置于
             CreateWorkflow 之前（authorize→bind→preflight→CreateWorkflow
             顺序链在 orchestration 与 continuity 两技能文档均须成立）；
@@ -555,7 +555,8 @@ MODEL_GATE_MARKERS = (
     "Selection failure never",
 )
 # 16a：delegate/full worker 模型继承/省略措辞只在否定行允许。glm-reviewer
-# 继承宿主/会话模型（§8）是另一合法事实，措辞不同，不落在本 token 集内。
+# 的显式绑定（§8，v2.8.0 起 pin 与主会话同值模型）是另一合法事实，
+# 措辞不同，不落在本 token 集内。
 # v2.6.1 W2：orchestration 英文化后补英文等价 token（中文原锚保留给
 # 仍中文的文档面，防回潮）。
 MODEL_INHERIT_TOKENS = (
@@ -671,6 +672,8 @@ CLI_LIFECYCLE_SUBCOMMANDS = (
     "task-fail", "task-cancel", "exit-waiting",
     "os-carrier-install", "os-carrier-remove", "wake-carrier-probe")
 TROUBLESHOOTING_DOC = os.path.join(REPO_ROOT, "docs", "troubleshooting.md")
+README_ZH = os.path.join(REPO_ROOT, "README.zh-CN.md")
+CORE_CONCEPTS_DOC = os.path.join(REPO_ROOT, "docs", "core-concepts.md")
 # 16j：精度层睡眠模板锚（v2.5.2 W1——long-horizon 模板节存在 +
 # bash 动态计算（模型零算术）+ 后台运行形态；v2.6.1 W2 节标题改英文锚）
 SLEEP_TEMPLATE_MARKERS = (
@@ -764,6 +767,31 @@ WAKE_CARRIER_DOC_MARKERS = (
 # 出现，随实现面同步）；教义文档面锚（新节名/链主契约/链位重建/
 # orchestrator-of-record）在 check_14 的 SKILL_CONTRACT_MARKERS。
 V280_CHAIN_CLI_SUBCOMMANDS = ("chain-block-record",)
+
+# 16p：v2.8.0 模型面/词汇面文档镜像负面词锚（终审三轮打地鼠教训）——
+# 两类陈旧措辞在 doc 面零容忍：①被 owner 指令取代的 glm-reviewer 旧
+# 继承规则及其「先例」类比对句；②D-C 十一名之前的旧词汇计数。扫描用
+# 归一化文本（去反引号 + 折叠空白），抓跨行拆分与反引号变体；先逐行
+# 原文扫描（报行号），归一化整文扫描兜底（报「跨行/变形命中」）。
+# 边界（如实注明）：validate_plugin.py 自身（负面词定义所在，免自
+# 扫）与 tests/（各自锚与审查看护）不入扫；CHANGELOG/roadmap/reviews
+# 是历史记录，天然不在范围。
+V280_STALE_MODEL_FACE_TOKENS = (
+    "same precedent as glm-reviewer",
+    "glm-reviewer precedent",
+    "同 glm-reviewer 先例",
+    "同款先例",
+    "不得含 model 字段",
+    "glm-reviewer carrying a model field is a FAIL",
+    "glm-reviewer | none",
+    "exactly ten",
+    "恰十名",
+    "白名单五角色",
+    "恰限于视觉双角色",
+)
+V280_STALE_FACE_SCAN_FILES = (
+    README, README_ZH, ARCH_DOC, CORE_CONCEPTS_DOC,
+    TROUBLESHOOTING_DOC)
 
 
 def rel_display(path):
@@ -877,7 +905,7 @@ def check_2_agent_frontmatter(results):
         visual-reviewer 共用同一 Flash 绑定形态校验（provider 全限定 +
         /GLM-5.3-Flash 后缀；精确套餐 pin 由单元测试镜像锚定，不重复）；
       - conductor-impl：无 model 键为合法继承形态（主模型直派实现角色，
-        继承宿主/会话模型，同 glm-reviewer），model 行出现即 FAIL。
+        继承宿主/会话模型），model 行出现即 FAIL。
     """
     title = "Agent frontmatter 必填字段（agents/*.md）"
     details = []
@@ -2161,6 +2189,57 @@ def check_16_v241_protocol(results):
                     "入账子命令未入 USAGE——实现面漂移）"
                     % (cli_shown, marker))
                 ok = False
+
+    # —— 16p：v2.8.0 模型面/词汇面文档镜像负面词（终审三轮打地鼠
+    #    教训——doc 面两类陈旧措辞零容忍，机械锚补位人工审查） ——
+    #    两遍扫描：①逐行原文（报行号）；②归一化整文（去反引号 +
+    #    折叠空白，抓跨行/变形；只报文件不报行）。
+    stale_hits = 0
+    for path in V280_STALE_FACE_SCAN_FILES:
+        shown = rel_display(path)
+        text = read_text(path)
+        if text is None or not os.path.isfile(path):
+            details.append("FAIL: %s 不存在或无法读取，无法执行 16p 检查" % shown)
+            ok = False
+            continue
+        for token in V280_STALE_MODEL_FACE_TOKENS:
+            hit_lines = [
+                (lineno, line.strip())
+                for lineno, line in enumerate(text.splitlines(), 1)
+                if token in line]
+            if hit_lines:
+                for lineno, snippet in hit_lines:
+                    stale_hits += 1
+                    details.append(
+                        "FAIL: %s:%d 陈旧措辞 `%s`（已被 v2.8.0 规则取代"
+                        "的模型面/词汇面镜像残留）: %s"
+                        % (shown, lineno, token, snippet[:60]))
+                continue
+            normalized = " ".join(
+                text.replace("`", "").split())
+            if token in normalized:
+                stale_hits += 1
+                details.append(
+                    "FAIL: %s 归一化文本命中陈旧措辞 `%s`（跨行拆分或"
+                    "反引号变体——模型面/词汇面镜像残留）"
+                    % (shown, token))
+    for path in iter_plugins_files():
+        shown = rel_display(path)
+        text = read_text(path)
+        if not text:
+            continue
+        normalized = " ".join(text.replace("`", "").split())
+        for token in V280_STALE_MODEL_FACE_TOKENS:
+            if token in normalized:
+                stale_hits += 1
+                details.append(
+                    "FAIL: %s 命中陈旧措辞 `%s`（v2.8.0 已取代的模型面/"
+                    "词汇面镜像残留）" % (shown, token))
+                ok = False
+    if stale_hits == 0:
+        details.append(
+            "PASS: doc 面（README 双语/core 三档/插件树）无 v2.8.0 已取代"
+            "的模型面/词汇面陈旧措辞（16p 负面词锚）")
 
     results.append((16, title, ok, details))
 
