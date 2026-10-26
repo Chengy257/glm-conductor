@@ -99,7 +99,7 @@ Routes are declared upfront via a standardized `SELECTIVE ROUTE` block. When new
 | **Main Session** | **Host/Session model (inherited, not programmatically switchable)** | Architecture, routing, DAG authoring, validation, final acceptance |
 | **Workflow Workers** | **User-authorized exact ID (Flash soft-recommended)** | Bounded text implementation inside compiled Native Workflows |
 | **Visual Implementer** | **GLM-5.3-Flash (multimodal, static frontmatter binding)** | Bounded visual implementation (Custom Subagent capability exception) |
-| **Text Reviewer** | **GLM-5.3 (start-plan; explicit frontmatter binding, value-identical to the session model)** | Fresh-context, read-only final review (`glm-reviewer`) |
+| **Text Reviewer** | **GLM-5.3 (no frontmatter pin — follows the session model, any-host launchable)** | Fresh-context, read-only final review (`glm-reviewer`) |
 | **Visual Reviewer** | **GLM-5.3-Flash (multimodal, static frontmatter binding)** | Fresh-context visual review (`visual-reviewer`; fails closed if unavailable) |
 | **Scout** | **GLM-5.3-Flash (read-only tools, static frontmatter binding)** | Read-only investigation and fact collection; every conclusion cites `file:line` evidence (`conductor-scout`; direct dispatch, any route) |
 | **Runner** | **GLM-5.3-Flash (static frontmatter binding)** | Verbatim execution of entrusted commands/tests with honest exit-code and output reporting; never modifies the repository (`conductor-runner`; direct dispatch, any route) |

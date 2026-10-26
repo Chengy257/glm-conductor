@@ -11,28 +11,29 @@
          角色区分——visual-implementer 必含
          name / description / model / thoughtLevel / tools；
          glm-reviewer（文本审查者）必含
-         name / description / model / thoughtLevel / tools 且 model
-         必须逐字等于 account:bigmodel-start-plan/GLM-5.3（v2.8.0
-         owner 指令显式绑定：值与继承宿主/会话等价）——v2.4 P1-A 至
-         v2.7.0 的「不得含 model 字段（继承宿主/会话模型）」旧规则
-         已由该指令取代；
+         name / description / thoughtLevel / tools 且不得含 model 键
+         （2026-10-26 owner 裁定回退无 model 键形态：随会话模型、任意
+         宿主可启动；v2.8.0 的套餐字面量 pin 在其 provider 离开宿主
+         模型列表后腐烂——2026-10-26 实测角色仍可启动但路由不可验证，
+         字面量 pin 形态整体退役）；
          visual-reviewer（视觉审查者）必含
          name / description / model / thoughtLevel / tools，model 必须
-         匹配 provider 全限定 account:<套餐>/<模型> 且以 /GLM-5.3-Flash
+         匹配 provider 全限定 <provider>/<模型> 且以 /GLM-5.3-Flash
          结尾（v2.4 AF-02 起文本/视觉审查者绑定分治：视觉审查者必须
          多模态 Flash 绑定，继承文本主模型会启动成功但丧失读图契约
          能力，绑定不可用即 fail closed）；
          v2.7.0 W6 起直派角色四件套入列：conductor-scout /
          conductor-impl-flash / conductor-runner 必含
          name / description / model / thoughtLevel / tools，model 与
-         visual-reviewer 同一形态（provider 全限定 account:<套餐>/
-         <模型> 且以 /GLM-5.3-Flash 结尾；精确套餐 pin
-         account:bigmodel-start-plan/GLM-5.3-Flash（v2.8.0 owner
-         指令改绑）由 tests/test_agent_model_binding.py 镜像锚定，
-         此处不重复）；
+         visual-reviewer 同一形态（provider 全限定 <provider>/
+         <模型> 且以 /GLM-5.3-Flash 结尾；2026-10-26 owner 裁定：
+         套餐/provider 段是 owner 维护的默认值，改绑只需形态合规，
+         不设逐字锚——绑定权威在 frontmatter，改绑程序见
+         docs/troubleshooting.md §4）；
          conductor-impl（主模型直派实现角色）必含
          name / description / thoughtLevel / tools 且不得含 model 字段
-         （无 model 键为合法继承形态，继承宿主/会话模型）；
+         （无 model 键为合法继承形态，随会话模型——与 glm-reviewer
+         同一形态）；
       3. Skill frontmatter：plugins/glm-conductor/skills/*/SKILL.md 必含
          name / description；
       4. 引用 agent 存在：plugins/ 内出现的 `glm-conductor:<agent>` 引用
@@ -164,8 +165,8 @@
             必含（v2.6.1 W2 随技能英文化改英文锚），
             v2.6.0 WP-M1 起旧「绝不替换主会话」主模型硬门锚随 Flash
             准入硬门退役同步移除；继承/省略措辞仅在含否定词的行
-            允许（中英 token 并行）——glm-reviewer 显式绑定与主会话
-            同值模型是另一合法事实，不在 token 集内）；
+            允许（中英 token 并行）——glm-reviewer / conductor-impl 的
+            无 model 键继承是直派角色面的合法事实，措辞不含这些 token）；
          b) auto/until_done 启动序列未把 scheduling/bind/preflight 置于
             CreateWorkflow 之前（authorize→bind→preflight→CreateWorkflow
             顺序链在 orchestration 与 continuity 两技能文档均须成立）；
@@ -303,38 +304,37 @@ OPERATIONS = os.path.join(
     SKILLS_DIR, "orchestration", "references", "operations.md")
 
 AGENT_REQUIRED_KEYS = ("name", "description", "model", "thoughtLevel", "tools")
-# v2.4 P1-A / AF-02 → v2.8.0 owner 指令修订：reviewer 模型绑定文本/视觉分治——
-#   glm-reviewer（文本审查者）自 v2.8.0 起显式绑定 start-plan 主模型
-#   （owner 指令：值与继承宿主/会话等价，显式 pin 消除静默路由歧义；
-#   注意 provider 全限定绑定在未配置该 provider 的宿主上会
-#   account-connection-unavailable 硬失败，换宿主时随 owner 裁定回退）；
-#   早期「删除 model 行（继承宿主/会话）」契约由本修订取代；
-#   visual-reviewer（视觉审查者）必须多模态 GLM-5.3-Flash 绑定：model 必填
-#   且须通过 VISUAL_REVIEWER_MODEL_RE + VISUAL_REVIEWER_MODEL_SUFFIX 校验，
-#   缺失/裸 ID/非 Flash 后缀均 FAIL（继承文本主模型会启动成功但丧失读图
-#   契约能力）——与 tests/test_agent_model_binding.py 的断言互为镜像
+# v2.4 P1-A / AF-02 → v2.8.0 → 2026-10-26 owner 裁定：文本/视觉绑定
+#   分治维持，套餐字面量 pin 退役——
+#   glm-reviewer（文本审查者）无 model 键（随会话模型、任意宿主可启动；
+#   v2.8.0 套餐字面量 pin 在其 provider 离开宿主列表后腐烂，2026-10-26
+#   实测仍可启动但路由不可验证——字面量形态整体退役，与 conductor-impl
+#   同一无键继承形态）；
+#   visual-reviewer（视觉审查者）必须多模态 GLM-5.3-Flash 绑定：model
+#   必填且须通过 PINNED_FLASH_MODEL_RE + PINNED_FLASH_MODEL_SUFFIX 形态
+#   校验，缺失/裸 ID/非 Flash 后缀均 FAIL（继承文本主模型会启动成功但
+#   丧失读图契约能力）——与 tests/test_agent_model_binding.py 的断言
+#   互为镜像
 REVIEWER_REQUIRED_KEYS = ("name", "description", "thoughtLevel", "tools")
-# v2.8.0 owner 指令：glm-reviewer 必填集含 model 且逐字等于 start-plan 主模型 pin
-TEXT_REVIEWER_REQUIRED_KEYS = ("name", "description", "model", "thoughtLevel", "tools")
-TEXT_REVIEWER_MODEL = "account:bigmodel-start-plan/GLM-5.3"
-TEXT_REVIEWER_AGENTS = ("glm-reviewer",)
+# 2026-10-26 owner 裁定：glm-reviewer 与 conductor-impl 同走无 model 键
+# 继承形态（逐字 pin 常量随字面量形态一并退役）
+INHERIT_FORM_AGENTS = ("glm-reviewer", "conductor-impl")
+INHERIT_FORM_REQUIRED_KEYS = REVIEWER_REQUIRED_KEYS
 VISUAL_REVIEWER_AGENTS = ("visual-reviewer",)
-VISUAL_REVIEWER_MODEL_RE = re.compile(r"^account:[^/\s]+/\S+$")
-VISUAL_REVIEWER_MODEL_SUFFIX = "/GLM-5.3-Flash"
+# Flash 绑定形态规则（2026-10-19 前缀放宽 + 2026-10-26 值不定死）：
+# provider 全限定 <provider>/<model> 复合 id（account: 命名空间或其他
+# provider 均可）且以 /GLM-5.3-Flash 结尾；provider 段是 owner 维护的
+# 默认值，改绑只需形态合规（rebind 程序见 docs/troubleshooting.md §4）
+PINNED_FLASH_MODEL_RE = re.compile(r"^[^/\s]+/\S+$")
+PINNED_FLASH_MODEL_SUFFIX = "/GLM-5.3-Flash"
 # v2.7.0 W6 直派角色四件套（主会话绕过 Workflow 直接 subagent 派遣）：
-#   - DIRECT_FLASH_AGENTS：显式 Flash 绑定——model 必填且为 provider
-#     全限定 account:<套餐>/<模型> 并以 /GLM-5.3-Flash 结尾，与
-#     visual-reviewer 共用同一形态正则/后缀（VISUAL_REVIEWER_MODEL_RE /
-#     VISUAL_REVIEWER_MODEL_SUFFIX，形态规则不重复定义）；精确套餐 pin
-#     account:bigmodel-start-plan/GLM-5.3-Flash（v2.8.0 owner 指令
-#     改绑）由 tests/test_agent_model_binding.py 镜像锚定；
-#   - DIRECT_INHERIT_AGENTS：主模型直派实现角色，无 model 键为合法
-#     继承形态（继承宿主/会话模型），model 行出现即 FAIL。
+#   - DIRECT_FLASH_AGENTS：显式 Flash 绑定——model 必填且通过
+#     PINNED_FLASH_MODEL_RE + PINNED_FLASH_MODEL_SUFFIX 形态校验（provider
+#     段 owner 可改绑，无逐字锚）；
+#   - INHERIT_FORM_AGENTS：无 model 键为合法继承形态（随会话模型），
+#     model 行出现即 FAIL。
 DIRECT_FLASH_AGENTS = (
     "conductor-scout", "conductor-impl-flash", "conductor-runner")
-DIRECT_INHERIT_AGENTS = ("conductor-impl",)
-# 继承形态必填集与文本审查者同一形态（name/description/thoughtLevel/tools）
-DIRECT_INHERIT_REQUIRED_KEYS = REVIEWER_REQUIRED_KEYS
 SKILL_REQUIRED_KEYS = ("name", "description")
 
 # 整改规范点名的契约 agent（v2.4 Phase 2 W6 起 flash-implementer 退役
@@ -555,8 +555,8 @@ MODEL_GATE_MARKERS = (
     "Selection failure never",
 )
 # 16a：delegate/full worker 模型继承/省略措辞只在否定行允许。glm-reviewer
-# 的显式绑定（§8，v2.8.0 起 pin 与主会话同值模型）是另一合法事实，
-# 措辞不同，不落在本 token 集内。
+# 与 conductor-impl 的无 model 键继承是直派角色面的合法事实（措辞不含
+# 本 token 集；2026-10-26 起审查者同走无键形态）。
 # v2.6.1 W2：orchestration 英文化后补英文等价 token（中文原锚保留给
 # 仍中文的文档面，防回潮）。
 MODEL_INHERIT_TOKENS = (
@@ -768,11 +768,17 @@ WAKE_CARRIER_DOC_MARKERS = (
 # orchestrator-of-record）在 check_14 的 SKILL_CONTRACT_MARKERS。
 V280_CHAIN_CLI_SUBCOMMANDS = ("chain-block-record",)
 
-# 16p：v2.8.0 模型面/词汇面文档镜像负面词锚（终审三轮打地鼠教训）——
-# 两类陈旧措辞在 doc 面零容忍：①被 owner 指令取代的 glm-reviewer 旧
-# 继承规则及其「先例」类比对句；②D-C 十一名之前的旧词汇计数。扫描用
-# 归一化文本（去反引号 + 折叠空白），抓跨行拆分与反引号变体；先逐行
-# 原文扫描（报行号），归一化整文扫描兜底（报「跨行/变形命中」）。
+# 16p：模型面/词汇面文档镜像负面词锚（终审三轮打地鼠教训；2026-10-26
+# 裁定后换血）——doc 面零容忍三类陈旧措辞：①被取代的 glm-reviewer
+# 绑定句旧形态（「先例」类比句族 + v2.8.0 套餐字面量 pin 句族——字面量
+# 随 provider 离开宿主而腐烂，「与主会话同值」类声明同步失真）；②D-C
+# 十一名之前的旧词汇计数。扫描用归一化文本（去反引号 + 折叠空白），
+# 抓跨行拆分与反引号变体；先逐行原文扫描（报行号），归一化整文扫描
+# 兜底（报「跨行/变形命中」）。
+# 2026-10-26 换血明细：退役三条与「回退无 model 键」新裁定相抵触的
+# 旧禁（不得含 model 字段 / carrying a model field is a FAIL /
+# glm-reviewer | none——新形态下这些说法重新为真）；新增烂字面量类
+# （account:bigmodel-start-plan 与「同值」声明家族）。
 # 边界（如实注明）：validate_plugin.py 自身（负面词定义所在，免自
 # 扫）与 tests/（各自锚与审查看护）不入扫；CHANGELOG/roadmap/reviews
 # 是历史记录，天然不在范围。
@@ -781,9 +787,12 @@ V280_STALE_MODEL_FACE_TOKENS = (
     "glm-reviewer precedent",
     "同 glm-reviewer 先例",
     "同款先例",
-    "不得含 model 字段",
-    "glm-reviewer carrying a model field is a FAIL",
-    "glm-reviewer | none",
+    # 烂字面量类（2026-10-26 新增：v2.8.0 套餐字面量 pin 及其同值声明）
+    "account:bigmodel-start-plan",
+    "value-identical",
+    "与当前会话模型同值",
+    "与会话模型同值",
+    "与主会话同值",
     "exactly ten",
     "恰十名",
     "白名单五角色",
@@ -905,18 +914,20 @@ def check_1_json(results):
 def check_2_agent_frontmatter(results):
     """检查 2：agents/*.md frontmatter 必填字段（按角色区分必填集与 model 规则）。
 
-    文本/视觉审查者绑定分治（v2.4 P1-A / AF-02 → v2.8.0 owner 指令修订）：
-      - glm-reviewer：model 必填且逐字等于 account:bigmodel-start-plan/GLM-5.3
-        （值与继承宿主/会话等价；旧「继承宿主/会话、不得含 model」规则已取代）；
-      - visual-reviewer：model 必填，须为 provider 全限定 account:<套餐>/<模型>
-        且以 /GLM-5.3-Flash 结尾（多模态 Flash 绑定），否则 FAIL。
+    文本/视觉绑定分治维持（v2.4 AF-02；2026-10-26 owner 裁定字面量退役）：
+      - glm-reviewer：不得含 model 键（无键继承形态，随会话模型、任意
+        宿主可启动——v2.8.0 套餐字面量 pin 已随 provider 离开宿主而
+        退役），model 行出现即 FAIL；
+      - visual-reviewer：model 必填，须为 provider 全限定 <provider>/
+        <模型> 且以 /GLM-5.3-Flash 结尾（多模态 Flash 绑定），否则 FAIL。
 
     v2.7.0 W6 直派角色四件套：
       - conductor-scout / conductor-impl-flash / conductor-runner：与
         visual-reviewer 共用同一 Flash 绑定形态校验（provider 全限定 +
-        /GLM-5.3-Flash 后缀；精确套餐 pin 由单元测试镜像锚定，不重复）；
-      - conductor-impl：无 model 键为合法继承形态（主模型直派实现角色，
-        继承宿主/会话模型），model 行出现即 FAIL。
+        /GLM-5.3-Flash 后缀；provider 段为 owner 维护默认值，改绑只需
+        形态合规，无逐字锚）；
+      - conductor-impl：无 model 键为合法继承形态（主模型直派实现
+        角色，随会话模型），model 行出现即 FAIL（与 glm-reviewer 同组）。
     """
     title = "Agent frontmatter 必填字段（agents/*.md）"
     details = []
@@ -935,42 +946,26 @@ def check_2_agent_frontmatter(results):
             ok = False
             continue
         agent_name = os.path.splitext(os.path.basename(path))[0]
-        if agent_name in TEXT_REVIEWER_AGENTS:
-            missing = [key for key in TEXT_REVIEWER_REQUIRED_KEYS
-                       if not meta.get(key)]
-            if missing:
-                details.append("FAIL: %s 缺少必填字段: %s" % (shown, ", ".join(missing)))
-                ok = False
-            elif (meta.get("model") or "").strip('"').strip("'")                     != TEXT_REVIEWER_MODEL:
-                details.append(
-                    "FAIL: %s 的 model 字段（值 %s）必须逐字等于 %s"
-                    "（v2.8.0 owner 指令显式绑定：值与继承宿主/会话等价，"
-                    "消除静默路由歧义）"
-                    % (shown, meta.get("model") or "（空）",
-                       TEXT_REVIEWER_MODEL))
-                ok = False
-            else:
-                details.append("PASS: %s（name=%s）" % (shown, meta.get("name")))
-            continue
-        # 直派主模型实现角色（v2.7.0 W6）：conductor-impl 无 model 键为
-        # 合法继承形态（继承宿主/会话模型），必填集不含 model，
-        # model 行出现即 FAIL
-        if agent_name in DIRECT_INHERIT_AGENTS:
-            missing = [key for key in DIRECT_INHERIT_REQUIRED_KEYS
+        # 无 model 键继承形态组（2026-10-26 owner 裁定）：glm-reviewer
+        # （文本审查者）与 conductor-impl（主模型直派实现角色）同组——
+        # 随会话模型、任意宿主可启动，model 行出现即 FAIL
+        if agent_name in INHERIT_FORM_AGENTS:
+            missing = [key for key in INHERIT_FORM_REQUIRED_KEYS
                        if not meta.get(key)]
             if missing:
                 details.append("FAIL: %s 缺少必填字段: %s" % (shown, ", ".join(missing)))
                 ok = False
             elif "model" in meta:
                 details.append(
-                    "FAIL: %s 含 model 字段（值 %s）：主模型直派实现角色"
-                    "继承宿主/会话模型（无 model 键为合法继承形态），"
+                    "FAIL: %s 含 model 字段（值 %s）：该角色为无 model 键"
+                    "继承形态（随会话模型、任意宿主可启动——2026-10-26 "
+                    "owner 裁定，套餐字面量 pin 形态已退役），"
                     "model 行必须删除"
                     % (shown, meta.get("model") or "（空）"))
                 ok = False
             else:
                 details.append(
-                    "PASS: %s（name=%s，主模型继承形态）"
+                    "PASS: %s（name=%s，无 model 键继承形态）"
                     % (shown, meta.get("name")))
             continue
         # 其余角色（visual-implementer / visual-reviewer / 直派 Flash
@@ -983,28 +978,28 @@ def check_2_agent_frontmatter(results):
             continue
         model_value = (meta.get("model") or "").strip().strip('"').strip("'")
         if agent_name in VISUAL_REVIEWER_AGENTS and not (
-                VISUAL_REVIEWER_MODEL_RE.match(model_value)
-                and model_value.endswith(VISUAL_REVIEWER_MODEL_SUFFIX)):
+                PINNED_FLASH_MODEL_RE.match(model_value)
+                and model_value.endswith(PINNED_FLASH_MODEL_SUFFIX)):
             details.append(
                 "FAIL: %s model=%s：视觉审查者必须多模态 GLM-5.3-Flash 绑定"
-                "（provider 全限定 account:<套餐>/<模型> 且以 %s 结尾）——"
+                "（provider 全限定 <provider>/<模型> 且以 %s 结尾）——"
                 "继承文本主模型会启动成功但丧失读图契约能力，绑定不可用即 "
                 "fail closed"
-                % (shown, model_value or "（缺失）", VISUAL_REVIEWER_MODEL_SUFFIX))
+                % (shown, model_value or "（缺失）", PINNED_FLASH_MODEL_SUFFIX))
             ok = False
         elif agent_name in VISUAL_REVIEWER_AGENTS:
             details.append(
                 "PASS: %s（name=%s，多模态 Flash 绑定 model=%s）"
                 % (shown, meta.get("name"), model_value))
         elif agent_name in DIRECT_FLASH_AGENTS and not (
-                VISUAL_REVIEWER_MODEL_RE.match(model_value)
-                and model_value.endswith(VISUAL_REVIEWER_MODEL_SUFFIX)):
+                PINNED_FLASH_MODEL_RE.match(model_value)
+                and model_value.endswith(PINNED_FLASH_MODEL_SUFFIX)):
             details.append(
                 "FAIL: %s model=%s：直派角色必须 provider 全限定 "
-                "GLM-5.3-Flash 绑定（account:<套餐>/<模型> 且以 %s 结尾，"
-                "裸 ID 会静默回退主会话模型；精确套餐 pin 由单元测试镜像"
-                "锚定）"
-                % (shown, model_value or "（缺失）", VISUAL_REVIEWER_MODEL_SUFFIX))
+                "GLM-5.3-Flash 绑定（<provider>/<模型> 且以 %s 结尾，"
+                "裸 ID 会静默回退主会话模型；provider 段为 owner 维护"
+                "默认值，改绑只需形态合规——docs/troubleshooting.md §4）"
+                % (shown, model_value or "（缺失）", PINNED_FLASH_MODEL_SUFFIX))
             ok = False
         elif agent_name in DIRECT_FLASH_AGENTS:
             details.append(

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""agents/*.md 模型绑定能力意图测试（unit v232-agent-model-binding，v2.4 AF-02 修订）。
+"""agents/*.md 模型绑定能力意图测试（unit v232-agent-model-binding，v2.4 AF-02 修订；
+2026-10-26 owner 裁定：套餐字面量 pin 退役，锚面形态化）。
 
 背景（v2.4 AF-02，merge blocker）：v2.4 P1-A 曾把「reviewer 一律删除
 frontmatter model 行、继承宿主/会话模型」作为统一规则，以规避未配置
@@ -10,15 +11,16 @@ provider 宿主上的 account-connection-unavailable 硬失败（W0 §13.1 实�
 ——继承会「启动成功但丧失契约能力」。统一删除规则已废止，代之以
 文本/视觉分治：
 
-  - glm-reviewer（文本审查）：v2.8.0 owner 指令起 frontmatter 显式
-    绑定 account:bigmodel-start-plan/GLM-5.3（值与继承宿主/会话等价；
-    旧「无 model 字段保证任何宿主可启动」设计由该指令取代——pin 与
-    会话同 plan，provider 缺位硬失败风险随注）；模型身份不是持久
-    任务状态轴——绑定值漂移即回归，报文件与字段值；
+  - glm-reviewer（文本审查）：2026-10-26 owner 裁定回退无 model 键
+    形态（与 conductor-impl 同组）——随会话模型、任意宿主可启动。
+    v2.8.0 的套餐字面量 pin 在其 provider 离开宿主模型列表后腐烂
+    （2026-10-26 实测：角色仍可启动，但路由不可从会话面验证——
+    静默歧义回归且叠加死字面量），字面量形态整体退役；
   - visual-reviewer / visual-implementer（视觉角色）：frontmatter 必须
-    是 provider 全限定 account:<套餐标识>/<模型> 且以 /GLM-5.3-Flash
-    结尾（主会话已验证的多模态 Flash 绑定，与 visual-implementer 现有
-    绑定一致）；绑定不可用的宿主上视觉高保障路线 fail closed（向用户
+    是 provider 全限定 <provider>/<模型> 且以 /GLM-5.3-Flash 结尾
+    （主会话已验证的多模态 Flash 绑定，与 visual-implementer 现有
+    绑定一致；2026-10-19 裁定：account: 命名空间与非 account provider
+    均合法）；绑定不可用的宿主上视觉高保障路线 fail closed（向用户
     报告绑定不可用），绝不静默退回纯文本模型——裸 ID（ZCode 3.12.3+
     会静默回退主会话模型）或以纯文本主模型 /GLM-5.3 结尾均视为回归；
   - visual-reviewer 工具白名单保持只读（fresh-context + 只读隔离仍是
@@ -29,13 +31,14 @@ W6（v2.4 Phase 2 P2-F）：flash-implementer 已随 v2.3 执行面退役删除�
 
 v2.7.0 W6（直派角色四件套）：主会话绕过 Workflow 直接 subagent 派遣的
 四个角色入列——conductor-scout / conductor-runner / conductor-impl-flash
-显式 pin account:bigmodel-start-plan/GLM-5.3-Flash（v2.8.0 起直派
-通道同样遵守 worker 模型显式选型契约，缺省/裸 ID 会静默回退主会话
-模型）；conductor-impl（主模型直派实现角色）无 model 键为合法继承
-形态（继承宿主/会话模型）；四角色 tools 白名单
-与各文件 frontmatter 声明逐字一致（漂移即回归）；impl 系两角色
-（conductor-impl / conductor-impl-flash）正文必须携带 writer guard
-纪律句锚——直派实现的写入与委托工作流共用同一仓储级写入保留契约。
+显式 Flash 绑定（provider 全限定 + /GLM-5.3-Flash 后缀；2026-10-26 起
+套餐段为 owner 维护默认值，本锚只锁形态不锁字面量——改绑不churn本
+测试，缺省/裸 ID 会静默回退主会话模型仍是回归）；conductor-impl（主
+模型直派实现角色）与 glm-reviewer 同走无 model 键合法继承形态（随会话
+模型）；四角色 tools 白名单与各文件 frontmatter 声明逐字一致（漂移即
+回归）；impl 系两角色（conductor-impl / conductor-impl-flash）正文必须
+携带 writer guard 纪律句锚——直派实现的写入与委托工作流共用同一仓储级
+写入保留契约。
 """
 
 import os
@@ -47,33 +50,27 @@ AGENTS_DIR = os.path.join(
     "plugins", "glm-conductor", "agents",
 )
 
-# 文本审查者：v2.8.0 owner 指令显式绑定 start-plan 主模型
-TEXT_REVIEWER_MODEL = "account:bigmodel-start-plan/GLM-5.3"
-TEXT_REVIEWERS = ("glm-reviewer",)
+# 无 model 键继承形态角色（2026-10-26 owner 裁定：glm-reviewer 回退与
+# conductor-impl 同组的无键形态；套餐字面量 pin 常量随形态退役删除）
+INHERIT_FORM_ROLES = ("glm-reviewer", "conductor-impl")
 # 视觉角色：必须多模态 GLM-5.3-Flash 绑定（两角色不得再共用继承规则）
 VISUAL_ROLES = ("visual-implementer", "visual-reviewer")
 FLASH_MODEL_SUFFIX = "/GLM-5.3-Flash"
 TEXT_MAIN_MODEL_SUFFIX = "/GLM-5.3"
 
-QUALIFIED_MODEL_RE = re.compile(r"^account:[^/\s]+/\S+$")
+# provider 全限定复合 id 形态（2026-10-19 裁定：account: 命名空间与
+# 非 account provider 均合法；不含 '/' 的裸别名仍拒）
+QUALIFIED_MODEL_RE = re.compile(r"^[^/\s]+/\S+$")
 
 # visual-reviewer 只读工具白名单的禁用工具（出现即视为只读契约回归）
 VISUAL_REVIEWER = "visual-reviewer"
 VISUAL_REVIEWER_FORBIDDEN_TOOLS = ("Write", "Edit", "Bash", "NotebookEdit")
 
 # —— v2.7.0 W6 直派角色四件套 ——
-# 显式 Flash pin 的直派角色（scout / runner / impl-flash 直派 Flash 实现 worker）
+# 显式 Flash 绑定的直派角色（scout / runner / impl-flash 直派 Flash 实现 worker）
 DIRECT_FLASH_ROLES = ("conductor-scout", "conductor-runner", "conductor-impl-flash")
-# 主模型继承形态的直派实现角色（无 model 键，继承宿主/会话模型）
+# 主模型继承形态的直派实现角色（无 model 键，随会话模型）
 DIRECT_INHERIT_ROLE = "conductor-impl"
-# 直派角色显式 pin 的 worker 模型（provider 全限定，与 runner/scout/
-# impl-flash 三文件 frontmatter 声明一致）
-# v2.8.0：owner 指令改绑——三个文本 flash 直派角色（scout / runner /
-# impl-flash）从 individual 系列（额度窗口中途耗尽）改绑 start-plan
-# 系列 flash；visual 双角色维持 2026-10-14 静态绑定裁定（individual
-# 前缀），不在本锚管辖内。
-DIRECT_FLASH_MODEL_PIN = (
-    "account:bigmodel-start-plan/GLM-5.3-Flash")
 # 四直派角色 tools 白名单（与各文件 frontmatter 声明逐字一致，含顺序）
 DIRECT_ROLE_TOOLS = {
     "conductor-scout": ("Read", "Glob", "Grep", "LS", "NotebookRead"),
@@ -98,8 +95,8 @@ def _parse_frontmatter_field(path, key):
     不引入 YAML 依赖：frontmatter 由 `---` 包裹、字段为单行
     `key: value`，与 scripts/validate_plugin.py 的解析假设一致。
     字段缺失时返回 None——是否合法由调用方按角色断言
-    （conductor-impl 无 model 键为合法继承；glm-reviewer 缺 model
-    字段即非法，v2.8.0 起显式必填）。
+    （glm-reviewer / conductor-impl 无 model 键为合法继承形态，
+    2026-10-26 起两角色同组；出现 model 行即回归）。
     """
     with open(path, "r", encoding="utf-8") as fh:
         lines = fh.read().splitlines()
@@ -116,23 +113,23 @@ def _parse_frontmatter_field(path, key):
     return None
 
 
-class TextReviewerModelBindingTest(unittest.TestCase):
-    """glm-reviewer：v2.8.0 owner 指令显式绑定 start-plan 主模型（值
-    与继承宿主/会话等价，显式 pin 消除静默路由歧义）。"""
+class TextReviewerInheritsSessionModelTest(unittest.TestCase):
+    """glm-reviewer：无 model 键继承形态（2026-10-26 owner 裁定回退——
+    随会话模型、任意宿主可启动；v2.8.0 套餐字面量 pin 随 provider 离开
+    宿主而腐烂，字面量形态退役）。"""
 
-    def test_text_reviewer_explicitly_bound_to_start_plan(self):
-        for name in TEXT_REVIEWERS:
+    def test_text_reviewer_has_no_model_key(self):
+        for name in ("glm-reviewer",):
             path = os.path.join(AGENTS_DIR, "%s.md" % name)
             self.assertTrue(os.path.isfile(path), "%s.md 缺失" % name)
             value = _parse_frontmatter_field(path, "model")
-            self.assertEqual(
-                value, "account:bigmodel-start-plan/GLM-5.3",
-                "%s 的 frontmatter model 字段（值 %s）应显式等于 "
-                "account:bigmodel-start-plan/GLM-5.3（v2.8.0 owner 指令"
-                "改绑：值与继承宿主/会话等价，显式 pin 消除静默路由"
-                "歧义；注意 provider 全限定绑定在未配置该 provider 的"
-                "宿主上会 account-connection-unavailable 硬失败——换宿主"
-                "时随 owner 裁定回退）" % (path, value))
+            self.assertIsNone(
+                value,
+                "%s 的 frontmatter 含 model 字段（值 %s）：文本审查者的"
+                "既定契约是无 model 键继承形态（随会话模型、任意宿主可"
+                "启动——2026-10-26 owner 裁定；套餐字面量 pin 已随其"
+                "provider 离开宿主列表而退役），model 行必须删除"
+                % (path, value))
 
 
 class VisualRoleMultimodalBindingTest(unittest.TestCase):
@@ -150,7 +147,7 @@ class VisualRoleMultimodalBindingTest(unittest.TestCase):
                 "读图契约能力" % name)
             self.assertRegex(
                 value, QUALIFIED_MODEL_RE,
-                "%s 的 model 必须是 provider 全限定 account:<套餐>/<模型>；"
+                "%s 的 model 必须是 provider 全限定 <provider>/<模型>；"
                 "裸 ID 在 ZCode 3.12.3+ 会静默回退主会话模型" % name)
             self.assertTrue(
                 value.endswith(FLASH_MODEL_SUFFIX),
@@ -163,7 +160,7 @@ class VisualRoleMultimodalBindingTest(unittest.TestCase):
             self.assertTrue(os.path.isfile(path), "%s.md 缺失" % name)
             value = _parse_frontmatter_field(path, "model") or ""
             self.assertTrue(
-                value.startswith("account:"),
+                "/" in value.strip(),
                 "%s 的 model=%s 不是 provider 全限定绑定：裸 ID 会静默解析"
                 "为纯文本主会话模型" % (name, value or "（缺失）"))
             self.assertFalse(
@@ -185,28 +182,34 @@ class VisualRoleMultimodalBindingTest(unittest.TestCase):
 
 
 class DirectDispatchRoleBindingTest(unittest.TestCase):
-    """v2.7.0 W6 直派角色四件套：Flash pin / 继承形态 / 工具白名单 / writer guard。
+    """v2.7.0 W6 直派角色四件套：Flash 绑定形态 / 继承形态 / 工具白名单 / writer guard。
 
-    主会话直派（不经 CreateWorkflow）同样遵守 worker 模型显式选型契约：
-    Flash 三角色显式 pin，主模型实现角色显式继承（无 model 键），不允许
-    第三种形态（缺省隐式回退）。
+    主会话直派（不经 CreateWorkflow）同样遵守 worker 模型显式契约：
+    Flash 三角色显式绑定（形态锚：provider 全限定 + /GLM-5.3-Flash 后缀，
+    2026-10-26 起套餐段为 owner 维护默认值、不锁字面量——改绑只改
+    frontmatter 即过，缺省/裸 ID 仍是回归），主模型实现角色与文本审查者
+    显式走无 model 键继承形态，不允许第三种形态（缺省隐式回退）。
     """
 
     def test_direct_flash_roles_pin_flash_model(self):
-        """scout / runner / impl-flash 的 model 逐字等于直派 Flash pin。"""
+        """scout / runner / impl-flash 的 model 为 provider 全限定 Flash 绑定形态。"""
         for name in DIRECT_FLASH_ROLES:
             path = os.path.join(AGENTS_DIR, "%s.md" % name)
             self.assertTrue(os.path.isfile(path), "%s.md 缺失" % name)
             value = _parse_frontmatter_field(path, "model")
             self.assertIsNotNone(
                 value,
-                "%s 的 frontmatter 缺 model 字段：直派角色必须显式 pin "
-                "worker 模型，缺省即静默回退主会话模型" % name)
-            self.assertEqual(
-                value, DIRECT_FLASH_MODEL_PIN,
-                "%s 的 model=%s 偏离直派 Flash pin %s：worker 模型选型是"
-                "显式 pin 契约，不允许静默漂移"
-                % (name, value, DIRECT_FLASH_MODEL_PIN))
+                "%s 的 frontmatter 缺 model 字段：直派角色必须显式绑定"
+                "Flash worker 模型，缺省即静默回退主会话模型" % name)
+            self.assertRegex(
+                value, QUALIFIED_MODEL_RE,
+                "%s 的 model=%s 不是 provider 全限定复合 id：裸 ID 会静默"
+                "回退主会话模型" % (name, value))
+            self.assertTrue(
+                value.endswith(FLASH_MODEL_SUFFIX),
+                "%s 的 model=%s 偏离直派 Flash 绑定形态（应以 %s 结尾；"
+                "provider 段为 owner 维护默认值，形态漂移即回归）"
+                % (name, value, FLASH_MODEL_SUFFIX))
 
     def test_conductor_impl_inherits_main_session_model(self):
         """conductor-impl 无 model 键为合法继承形态（主模型直派）。"""
@@ -216,7 +219,7 @@ class DirectDispatchRoleBindingTest(unittest.TestCase):
         self.assertIsNone(
             value,
             "%s 的 frontmatter 含 model 字段（值 %s）：主模型直派实现角色"
-            "的既定契约是继承宿主/会话模型（无 model 键为合法继承形态）"
+            "的既定契约是无 model 键继承形态（随会话模型）"
             % (path, value))
 
     def test_direct_roles_tools_match_frontmatter_whitelist(self):

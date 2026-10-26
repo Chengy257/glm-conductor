@@ -1,7 +1,7 @@
 ---
 name: conductor-impl-flash
 description: GLM-5.3-Flash implementation worker for GLM Conductor direct dispatch: executes the handed five-part spec (OBJECTIVE / FILES AND OWNERSHIP / INTERFACES / CONSTRAINTS / VERIFICATION) as bounded mechanical implementation; edits only within ownership, runs local checks honestly, reports changes plus real verification output — claims are not evidence, main-session acceptance decides.
-model: "account:bigmodel-start-plan/GLM-5.3-Flash"
+model: "account:bigmodel-individual-coding-plan/GLM-5.3-Flash"
 thoughtLevel: high
 color: orange
 tools: Read, Write, Edit, Glob, Grep, Bash, NotebookRead, NotebookEdit, WebFetch, TodoWrite

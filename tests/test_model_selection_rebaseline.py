@@ -31,9 +31,10 @@ docs/roadmap/V2_6_0_IMPLEMENTATION_PLAN.md §4（WP-M1 测试面），
   ⑧ 全仓无残留硬依赖：插件树（runtime/skills/agents/hooks/commands）
      零 "explicit-flash-required" 残留；runtime 与 orchestration/
      continuity 技能面零「必须 GLM-5.3」类硬门措辞；静态 agent 模型
-     绑定恰限于六个白名单角色（视觉双角色 + 直派三剑客 + glm-reviewer
-     显式绑定 start-plan 主模型，v2.8.0 owner 指令；frontmatter
-     provider 全限定）；conductor-impl 无绑定（继承宿主/会话模型）。清单展示面的文案锚（max 推理档提示
+     绑定恰限于五个 pin 角色（视觉双角色 + 直派三剑客，frontmatter
+     provider 全限定；2026-10-26 owner 裁定：套餐段为 owner 维护默认
+     值，不锁字面量）；glm-reviewer 与 conductor-impl 无绑定（无
+     model 键继承形态，随会话模型）。清单展示面的文案锚（max 推理档提示
      / 单一候选也确认）归 scripts/validate_plugin.py 锚组，不在本套
      重复。
   ⑨ resume 遇 legacy 任务无 pin 不隐式授权（runtime 层）：v2.3 遗留
@@ -531,7 +532,8 @@ class ResumeNeverAutoAuthorizesTest(M1CliFixture):
 class PolicyAndNoHardGateScanTest(unittest.TestCase):
     """⑦ model_policy 值锚；⑧ 插件树零 explicit-flash-required 残留、
     runtime/技能面零「必须 GLM-5.3」类硬门措辞、静态 agent 绑定恰限
-    视觉双角色（owner 裁决维持的例外）。"""
+    五个 pin 角色（视觉双角色 + 直派三剑客；2026-10-26 起套餐段不锁
+    字面量，glm-reviewer/conductor-impl 走无 model 键继承形态）。"""
 
     def test_contract_policy_value_anchored(self):
         """提交契约恒为 user-authorized-explicit-selection（恰两键）；
@@ -578,12 +580,13 @@ class PolicyAndNoHardGateScanTest(unittest.TestCase):
             hits, [],
             "活跃政策面出现主模型硬门措辞：%r" % (hits,))
 
-    def test_static_agent_bindings_scoped_to_visual_roles(self):
-        """静态 agent 模型绑定恰限于六个白名单角色（v2.7.0 W6 D11 扩容
-        视觉双角色 + 直派三剑客；v2.8.0 owner 指令追加 glm-reviewer
-        显式绑定 start-plan 主模型——值与继承宿主/会话等价，frontmatter
-        provider 全限定 account: 前缀，裸 ID 静默回退坑）；conductor-impl
-        仍无绑定（继承宿主/会话模型）。owner 裁决维持的例外恰此六个。"""
+    def test_static_agent_bindings_scoped_to_pinned_roles(self):
+        """静态 agent 模型绑定恰限于五个 pin 角色（视觉双角色 + 直派
+        三剑客，frontmatter provider 全限定，裸 ID 静默回退坑；2026-10-26
+        owner 裁定：套餐段为 owner 维护默认值、不锁字面量）；glm-reviewer
+        与 conductor-impl 均无绑定（无 model 键继承形态，随会话模型——
+        v2.8.0 给 glm-reviewer 的套餐字面量 pin 已随其 provider 离开
+        宿主列表而退役）。owner 裁决维持的例外恰此五个。"""
         agents_dir = PLUGIN_ROOT / "agents"
         bound = {}
         for path in sorted(agents_dir.glob("*.md")):
@@ -595,17 +598,17 @@ class PolicyAndNoHardGateScanTest(unittest.TestCase):
                         break
         allow = VISUAL_AGENTS + (
             "conductor-scout.md", "conductor-runner.md",
-            "conductor-impl-flash.md", "glm-reviewer.md")
+            "conductor-impl-flash.md")
         self.assertEqual(sorted(bound), sorted(allow),
-                         "静态模型绑定应恰限于白名单六角色，实际：%r"
+                         "静态模型绑定应恰限于五个 pin 角色，实际：%r"
                          % (sorted(bound),))
         for name in allow:
             line = bound[name]
             value = line.partition(":")[2].strip().strip('"')
             self.assertTrue(
-                value.startswith("account:"),
-                "%s 的 frontmatter 绑定必须 provider 全限定（裸 ID 会"
-                "静默回退宿主默认）：%r" % (name, value))
+                "/" in value,
+                "%s 的 frontmatter 绑定必须 provider 全限定复合 id（裸 ID"
+                " 会静默回退宿主默认）：%r" % (name, value))
 
 
 if __name__ == "__main__":

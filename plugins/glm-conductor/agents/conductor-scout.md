@@ -1,7 +1,7 @@
 ---
 name: conductor-scout
 description: Read-only GLM-5.3-Flash investigation scout for GLM Conductor, dispatched directly for fact-finding: answers the bounded question handed to it with file:line evidence citations; never fabricates (says "no evidence" when there is none); zero file writes, zero command execution.
-model: "account:bigmodel-start-plan/GLM-5.3-Flash"
+model: "account:bigmodel-individual-coding-plan/GLM-5.3-Flash"
 thoughtLevel: high
 color: green
 tools: Read, Glob, Grep, LS, NotebookRead

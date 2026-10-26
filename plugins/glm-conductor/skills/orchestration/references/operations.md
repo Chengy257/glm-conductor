@@ -11,7 +11,7 @@ This file is the run-details reference of the glm-conductor orchestration system
   - assurance:high (visual tasks) needs `glm-conductor:visual-reviewer`
 - solo and assurance:standard need no subagent preflight at all
 - Fail closed when a role is missing: stop that channel and tell the user to check the plugin installation (Settings → Plugin Management) — never silently substitute another subagent type
-- Never attach model / thinking-tier overrides at invocation: each role's definition is fixed (visual-implementer and visual-reviewer are both explicit GLM-5.3-Flash multimodal bindings, tiers high / max respectively; glm-reviewer is explicitly bound to account:bigmodel-start-plan/GLM-5.3 — value-identical to the host/session model, tier max) — any runtime override breaks the system's dual-axis assumptions
+- Never attach model / thinking-tier overrides at invocation: each role's definition carries its binding as an owner-maintained default (visual-implementer and visual-reviewer are both explicit GLM-5.3-Flash multimodal bindings, tiers high / max respectively; glm-reviewer carries no model key and follows the session's own model, tier max) — any runtime override breaks the system's dual-axis assumptions. Model considerations never change the delegation channel either: CreateWorkflow stays reserved for user-requested workflow runs, and a role whose pinned provider is absent from the host list stops that route for an owner rebind (troubleshooting §4) rather than being rerouted.
 
 ## Dual-axis judgment discipline
 

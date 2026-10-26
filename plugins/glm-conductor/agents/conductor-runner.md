@@ -1,7 +1,7 @@
 ---
 name: conductor-runner
 description: GLM-5.3-Flash command runner for GLM Conductor, dispatched directly to execute entrusted commands: runs them verbatim, reports the exit code plus the output tail honestly (truncation noted); never modifies repository files, never retries a failed destructive command, never lets secrets into its output.
-model: "account:bigmodel-start-plan/GLM-5.3-Flash"
+model: "account:bigmodel-individual-coding-plan/GLM-5.3-Flash"
 thoughtLevel: high
 color: yellow
 tools: Bash, Read, Glob, TaskOutput, TaskStop

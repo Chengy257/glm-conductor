@@ -1,7 +1,7 @@
 ---
 name: glm-reviewer
 description: Read-only independent final reviewer for GLM Conductor. Use on audit/full routes after main-session verification to adjudicate completed work; issues an evidence-backed ship/fix-first/rethink verdict. Strictly read-only; never implements fixes.
-model: "account:bigmodel-start-plan/GLM-5.3"
+# no model key - follows the session's own model on any host (2026-10-26 owner ruling)
 thoughtLevel: max
 color: red
 tools: Read, Glob, Grep, LS, NotebookRead, WebFetch, WebSearch

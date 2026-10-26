@@ -302,7 +302,7 @@ delegate/full text implementation is executed by the text worker of a native Wor
 
 The reviewer is chosen by task modality — text tasks use this role, visual tasks use visual-reviewer (above).
 
-- **Positioning**: a fresh-context, implementation-isolated read-only reviewer — no cross-model independence is claimed; the model is explicitly bound in the frontmatter to `account:bigmodel-start-plan/GLM-5.3` (v2.8.0 owner instruction; value-identical to the inherited host/session model — the explicit pin removes silent-routing ambiguity; on a host without this provider configured the binding fails hard and must be re-ruled), thinking tier max (fixed)
+- **Positioning**: a fresh-context, implementation-isolated read-only reviewer — no cross-model independence is claimed; the frontmatter carries no model key, so the role follows whatever model the session itself runs on, on any host (2026-10-26 owner ruling; the intervening plan-tier literal pin rotted when its provider left the host model list — launch survived only through unverifiable silent routing, and the literal form was retired), thinking tier max (fixed)
 - **Use**: text-task audit/full routes only, invoked only after main-session validation; fresh context = fresh reviewer
 - **Five input elements** (provided by the main session):
   - ROLE: declares this a read-only review
@@ -332,7 +332,7 @@ Four dispatchable subagent roles complement the workflow text worker (above) and
 ### conductor-scout contract (read-only investigation)
 
 - **Positioning**: a read-only investigation / fact-collection role for ROUTING PREFLIGHT and mid-task unknowns — closes bounded factual questions with evidence, never designs and never decides
-- **Model**: pinned in the frontmatter to `account:bigmodel-start-plan/GLM-5.3-Flash` (v2.8.0: rebound to the start-plan Flash series by owner instruction — individual-series quota died mid-campaign; the frontmatter stays the binding authority) (agents/conductor-scout.md is the binding authority; never attach model overrides at invocation time)
+- **Model**: pinned in the frontmatter to a provider-qualified `/GLM-5.3-Flash` default (currently the individual-coding-plan series, rebound 2026-10-26 after the v2.8.0 plan-tier literal rotted with its provider; the frontmatter is the binding authority and any shape-compliant value passes validation — rebinding is a standing owner maintenance action per troubleshooting §4) (agents/conductor-scout.md is the binding authority; never attach model overrides at invocation time)
 - **Tools**: read-only whitelist — Read, Glob, Grep, LS, NotebookRead (the zero-write red line is enforced by the tool surface itself)
 - **Trigger**: an unknown item of ROUTING PREFLIGHT (root cause / implementation boundary / interface contracts / hidden coupling) that a bounded read-only pass can close — simple reconnaissance the scout carries for cost; deep reconnaissance still prefers the host Explore capability or the main session reading code itself ('ROUTING PREFLIGHT' in SKILL.md)
 - **Input**: investigation questions — a bounded question list, each phrased so it has an observable, file-grounded answer; a question without one is returned for rephrasing, never answered by guessing
@@ -343,7 +343,7 @@ Four dispatchable subagent roles complement the workflow text worker (above) and
 ### conductor-runner contract (command execution)
 
 - **Positioning**: a verbatim command-execution role — runs entrusted commands and tests and reports what actually happened; the main session's hands for probes and verification runs
-- **Model**: pinned in the frontmatter to `account:bigmodel-start-plan/GLM-5.3-Flash` (v2.8.0: rebound to the start-plan Flash series by owner instruction — individual-series quota died mid-campaign; the frontmatter stays the binding authority) (agents/conductor-runner.md is the binding authority; never attach model overrides at invocation time)
+- **Model**: pinned in the frontmatter to a provider-qualified `/GLM-5.3-Flash` default (currently the individual-coding-plan series, rebound 2026-10-26 after the v2.8.0 plan-tier literal rotted with its provider; the frontmatter is the binding authority and any shape-compliant value passes validation — rebinding is a standing owner maintenance action per troubleshooting §4) (agents/conductor-runner.md is the binding authority; never attach model overrides at invocation time)
 - **Tools**: Bash, Read, Glob, TaskOutput, TaskStop — Bash exists to execute the entrusted commands, never to mutate repository files through redirection or file-mutating one-liners
 - **Trigger**: a command or test suite needs running with an honestly observed result — verification probes, environment checks, bug reproductions
 - **Input**: a single entrusted command given verbatim, or an explicitly bounded command list with a stated order; a free-form goal is handed back with a request for the exact command
@@ -354,7 +354,7 @@ Four dispatchable subagent roles complement the workflow text worker (above) and
 ### conductor-impl-flash contract (Flash-pinned bounded implementation)
 
 - **Positioning**: the bounded mechanical implementation executor of the direct-dispatch channel — the direct-dispatch counterpart of the workflow text worker, with the same execution discipline
-- **Model**: pinned in the frontmatter to `account:bigmodel-start-plan/GLM-5.3-Flash` (v2.8.0: rebound to the start-plan Flash series by owner instruction — individual-series quota died mid-campaign; the frontmatter stays the binding authority) (agents/conductor-impl-flash.md is the binding authority; never attach model overrides at invocation time)
+- **Model**: pinned in the frontmatter to a provider-qualified `/GLM-5.3-Flash` default (currently the individual-coding-plan series, rebound 2026-10-26 after the v2.8.0 plan-tier literal rotted with its provider; the frontmatter is the binding authority and any shape-compliant value passes validation — rebinding is a standing owner maintenance action per troubleshooting §4) (agents/conductor-impl-flash.md is the binding authority; never attach model overrides at invocation time)
 - **Trigger**: a mechanical, specification-complete implementation block — the delegate single-node lightweight channel (the DAG is exactly one node and assurance is standard), a solo-route mechanical offload (the main session stays the implementer of record), or a **direct-dispatch chain block** (v2.8.0: the chain is the standard substrate of low-delegability long tasks — mechanical blocks route here; one `chain_block_delegated` journal event per block via `chain-block-record`)
 - **Input**: the five-part implementation spec in the same format as node declarations (above), optionally preceded by the TASK CONTEXT PACK; all five sections explicit before dispatch
 - **Output contract**: the IMPLEMENTATION REPORT template (above) — no structured NodeResult (that is the native Workflow run's contract); the report is a claim, and evidence still exists only in the diff and command output the main session personally inspects
