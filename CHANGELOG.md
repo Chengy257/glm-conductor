@@ -1,5 +1,19 @@
 # Changelog
 
+## 2.8.1
+
+Patch hotfix: model bindings become owner-maintained defaults instead of dead literals (owner ruling 2026-10-26 after live-use reports; spec: `docs/roadmap/POST_V2_8_0_MODEL_BINDING_ROTTED_PIN_HOTFIX.md`).
+
+### Model-binding rot retired
+
+- **Root cause**: every v2.8.0 plan-tier literal pin (glm-reviewer + conductor-scout / conductor-runner / conductor-impl-flash) targeted a provider that has since left the host model list; a 2026-10-26 live probe showed the pinned roles still launched — through silent routing whose target cannot be verified from the session (on other hosts an unresolvable pin has been observed to hard-fail) — so the pin's stated premise ("value-identical to the session model, removes silent-routing ambiguity") rotted within days. Validator check 2's verbatim-equal anchor and the 16p negative-wording anchor mechanically welded the rot in place.
+- **glm-reviewer returns to the no-model-key inherit form** (same as conductor-impl): it follows whatever model the session runs on, on any host — never pinned to a subscription tier; independence remains fresh context + read-only whitelist (no cross-model independence claimed).
+- The three text Flash roles keep an explicit Flash pin, but enforcement is now **shape-only** (a provider-qualified id ending in `/GLM-5.3-Flash`; the `account:`-only prefix restriction is lifted per the 2026-10-19 ruling). Current default rebound to `account:bigmodel-individual-coding-plan/GLM-5.3-Flash`; any future rebind is a one-file frontmatter edit — neither validator nor tests anchors a literal anymore.
+- **New channel-discipline doctrine** (orchestration SKILL / operations / troubleshooting §4): CreateWorkflow stays reserved for user-requested workflow runs; a model-choice need, a missing role, or a binding whose provider is absent from the host list is never by itself a reason to reroute direct-dispatch work — or a fresh-context review — into a workflow submission. Sanctioned response: stop the route, surface to the owner, rebind.
+- **Troubleshooting §4** retitled "Model bindings, pinned-role rebinding, and channel discipline"; it now carries the rebind procedure (edit frontmatter → validate → new session → cache refresh at release) and the 2026-10-26 soft-routing observation.
+- Validation/tests: validator check 2 reshaped (inherit group for glm-reviewer + conductor-impl; `PINNED_FLASH_MODEL_RE` widened), 16p token list re-blooded (three bans contradicting the restored inherit form retired; a rotted-literal class added — the retired provider literal and the value-identical claim family), tests reshaped shape-only (static-binding whitelist six → five roles; method counts unchanged). Full suite 1102/1102, validator 16/16, glm-reviewer ship.
+- Untouched: the visual pair's multimodal Flash bindings and fail-closed contract, the workflow-model-select gate doctrine, the journal vocabulary.
+
 ## 2.8.0
 
 Minor feature release: the direct-dispatch chain as the third implementation shape for low-delegability long tasks, plus the Desktop confirmation-free diagnosis closed with live dual-arm evidence. Owner rulings D-A–D-F locked in `docs/roadmap/V2_8_0_DISPATCH_CHAIN_AND_DESKTOP_CONFIRMATION_IMPLEMENTATION_SPEC.md`; live diagnosis in `docs/reviews/V280_W21_DESKTOP_CONFIRMATION_DIAGNOSIS.md`.
